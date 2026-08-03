@@ -412,15 +412,75 @@ fn merge_opt_string(a: Option<String>, b: Option<String>) -> Option<String> {
     }
 }
 
-fn truncate_utf8(s: &mut String, max: usize) {
+/// Truncate to at most `max` **bytes** on a UTF-8 char boundary (never panics).
+pub fn truncate_utf8(s: &mut String, max: usize) {
     if s.len() <= max {
         return;
     }
-    let mut end = max;
+    let mut end = max.min(s.len());
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
     s.truncate(end);
+}
+
+/// Structured errors when decoding guest↔host string memory.
+///
+/// Host code must not panic on malicious ptr/len/UTF-8; callers map these to
+/// trap-free rejections (skip the write, return a failed call result, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum GuestStringError {
+    /// `ptr` or `len` was negative.
+    #[error("guest string pointer or length is negative")]
+    Negative,
+    /// Guest `len` exceeds the host policy maximum (rejected before any slice).
+    #[error("guest string length exceeds host maximum")]
+    TooLong,
+    /// Slice would read past linear memory (or pointer arithmetic overflow).
+    #[error("guest string pointer/length is out of bounds")]
+    OutOfBounds,
+    /// Bytes are not valid UTF-8 (strict; no lossy substitution).
+    #[error("guest string is not valid UTF-8")]
+    InvalidUtf8,
+}
+
+/// Decode a guest-provided byte slice as strict UTF-8.
+///
+/// Never panics. Invalid sequences return [`GuestStringError::InvalidUtf8`].
+pub fn decode_guest_utf8(bytes: &[u8]) -> Result<String, GuestStringError> {
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| GuestStringError::InvalidUtf8)
+}
+
+/// Read a UTF-8 string from a linear-memory-like buffer with guest `ptr`/`len`.
+///
+/// - Rejects negative `ptr`/`len` without wrapping.
+/// - Rejects `len > max_len` with [`GuestStringError::TooLong`] **before**
+///   any memory slice or UTF-8 decode (never silently accepts a prefix).
+/// - Bounds-checks with checked arithmetic (no panic on OOB).
+/// - Requires **strict** UTF-8 (no `from_utf8_lossy`).
+pub fn read_guest_utf8_from_memory(
+    memory: &[u8],
+    ptr: i32,
+    len: i32,
+    max_len: usize,
+) -> Result<String, GuestStringError> {
+    if ptr < 0 || len < 0 {
+        return Err(GuestStringError::Negative);
+    }
+    let len = len as usize;
+    if len > max_len {
+        return Err(GuestStringError::TooLong);
+    }
+    let start = ptr as usize;
+    let end = start
+        .checked_add(len)
+        .ok_or(GuestStringError::OutOfBounds)?;
+    let slice = memory
+        .get(start..end)
+        .ok_or(GuestStringError::OutOfBounds)?;
+    decode_guest_utf8(slice)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -566,6 +626,71 @@ mod tests {
         }
         .truncated();
         assert!(t.inject_context.unwrap().len() <= MAX_INJECT_BYTES);
+    }
+
+    #[test]
+    fn guest_utf8_rejects_invalid_and_oob_without_panic() {
+        // Valid ASCII.
+        assert_eq!(decode_guest_utf8(b"hello").as_deref(), Ok("hello"));
+        // Multibyte OK.
+        assert_eq!(decode_guest_utf8("é".as_bytes()).as_deref(), Ok("é"));
+        // Malicious / truncated multi-byte sequence.
+        assert_eq!(
+            decode_guest_utf8(&[0xE2, 0x82]), // incomplete €
+            Err(GuestStringError::InvalidUtf8)
+        );
+        assert_eq!(
+            decode_guest_utf8(&[0xFF, 0xFE]),
+            Err(GuestStringError::InvalidUtf8)
+        );
+
+        let mem = b"hello-world";
+        assert_eq!(
+            read_guest_utf8_from_memory(mem, 0, 5, 1024).as_deref(),
+            Ok("hello")
+        );
+        // OOB past end.
+        assert_eq!(
+            read_guest_utf8_from_memory(mem, 8, 16, 1024),
+            Err(GuestStringError::OutOfBounds)
+        );
+        // Negative ptr/len.
+        assert_eq!(
+            read_guest_utf8_from_memory(mem, -1, 2, 1024),
+            Err(GuestStringError::Negative)
+        );
+        assert_eq!(
+            read_guest_utf8_from_memory(mem, 0, -3, 1024),
+            Err(GuestStringError::Negative)
+        );
+        // TooLong: reject before slicing — never silently accept a prefix.
+        let big = vec![b'a'; 64];
+        assert_eq!(
+            read_guest_utf8_from_memory(&big, 0, 10_000, 8),
+            Err(GuestStringError::TooLong)
+        );
+        // Exact max is allowed when memory is large enough.
+        assert_eq!(
+            read_guest_utf8_from_memory(&big, 0, 8, 8).as_deref(),
+            Ok("aaaaaaaa")
+        );
+        // Invalid UTF-8 inside bounds.
+        let bad = [b'a', 0xFF, b'b'];
+        assert_eq!(
+            read_guest_utf8_from_memory(&bad, 0, 3, 1024),
+            Err(GuestStringError::InvalidUtf8)
+        );
+    }
+
+    #[test]
+    fn truncate_utf8_never_splits_codepoint() {
+        // "é" is 2 bytes; max=1 must not panic and must yield empty or prior chars.
+        let mut s = "aé".to_string();
+        truncate_utf8(&mut s, 2); // 'a' + first byte of é → back up to "a"
+        assert_eq!(s, "a");
+        let mut s = "é".to_string();
+        truncate_utf8(&mut s, 1);
+        assert_eq!(s, "");
     }
 
     #[test]

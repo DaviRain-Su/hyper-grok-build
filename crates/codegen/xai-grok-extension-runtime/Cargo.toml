@@ -13,7 +13,7 @@ wasm = ["dep:wasmtime"]
 [dependencies]
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 tracing = { workspace = true }
 xai-grok-extension-api = { path = "../xai-grok-extension-api" }
 wasmtime = { version = "31", optional = true, default-features = true }

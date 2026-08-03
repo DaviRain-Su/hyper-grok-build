@@ -51,6 +51,66 @@ const RESPONSES_AUXILIARY_EVENT_TYPES: [&str; 2] = ["keepalive", "response.metad
 const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 const CODEX_TURN_STATE_CACHE_CAPACITY: usize = 256;
 
+/// True for xAI / SpaceXAI first-party sampling endpoints that may receive
+/// product/session `x-grok-*` headers.
+///
+/// Requirements:
+/// - Scheme must be **`https`** (cleartext never gets product metadata).
+/// - Host is an allowlisted first-party suffix (`*.x.ai`, `*.spacexai.com`,
+///   `cli-chat-proxy.grok.com`). Matching is suffix-safe
+///   (`evil-x.ai.example` is rejected).
+///
+/// Third-party base URLs (OpenAI-compatible proxies, Azure, localhost mocks,
+/// attacker-controlled hosts) must **not** receive session ids, deployment
+/// ids, client identifiers, or other product metadata. Authorization and
+/// other non-`x-grok-*` headers are unaffected.
+///
+/// Cross-origin redirect safety is enforced separately: the shared sampling
+/// HTTP clients follow only **HTTPS same-origin** redirects (custom policy),
+/// so `x-grok-*` cannot be forwarded to a third-party Location target.
+pub fn is_first_party_grok_endpoint(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    if url.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    // x.ai apex + subdomains (api.x.ai, …).
+    if host == "x.ai" || host.ends_with(".x.ai") {
+        return true;
+    }
+    // SpaceXAI branding / possible future product hosts.
+    if host == "spacexai.com" || host.ends_with(".spacexai.com") {
+        return true;
+    }
+    // Production cli-chat-proxy (and nested subdomains if any).
+    if host == "cli-chat-proxy.grok.com" || host.ends_with(".cli-chat-proxy.grok.com") {
+        return true;
+    }
+    false
+}
+
+/// Remove every `x-grok-*` header. Used when the configured base URL is not a
+/// first-party endpoint so product/session identity cannot leak to third parties
+/// via `extra_headers`, env headers, or late injectors.
+fn strip_x_grok_headers(headers: &mut HeaderMap) {
+    let keys: Vec<HeaderName> = headers
+        .keys()
+        .filter(|name| {
+            let s = name.as_str();
+            s.len() >= 7 && s.as_bytes()[..7].eq_ignore_ascii_case(b"x-grok-")
+        })
+        .cloned()
+        .collect();
+    for key in keys {
+        headers.remove(key);
+    }
+}
+
 /// `(provider route, session id, turn id)`. The provider route is deliberately
 /// query-free so credentials embedded in query parameters never enter the
 /// process-wide cache.
@@ -350,6 +410,10 @@ fn is_responses_auxiliary_event(event_name: &str, data: &str) -> bool {
 }
 
 /// Per-request `x-grok-*` headers. Optional fields are skipped when empty/`None`.
+///
+/// Only applied for first-party xAI/SpaceXAI endpoints (see
+/// [`is_first_party_grok_endpoint`]); third-party base URLs get an unchanged
+/// builder so session/product identity never leaves first-party hosts.
 struct GrokRequestHeaders<'a> {
     conv_id: &'a str,
     req_id: &'a str,
@@ -362,7 +426,14 @@ struct GrokRequestHeaders<'a> {
 }
 
 impl GrokRequestHeaders<'_> {
-    fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn apply(
+        &self,
+        builder: reqwest::RequestBuilder,
+        first_party: bool,
+    ) -> reqwest::RequestBuilder {
+        if !first_party {
+            return builder;
+        }
         let mut b = builder
             .header("x-grok-conv-id", self.conv_id)
             .header("x-grok-req-id", self.req_id)
@@ -1683,42 +1754,51 @@ impl SamplingClient {
         };
         normalize_auth_headers(&mut headers, config.auth_scheme, desired_auth);
 
-        // Add x-grok-client-version header for version gating at the proxy.
-        if let Some(client_version) = config.client_version.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(client_version)
-        {
-            headers.insert(
-                HeaderName::from_static("x-grok-client-version"),
-                header_value,
-            );
-        }
-
-        if let Some(deployment_id) = config.deployment_id.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(deployment_id)
-        {
-            headers.insert(
-                HeaderName::from_static("x-grok-deployment-id"),
-                header_value,
-            );
-        }
-
-        if let Some(user_id) = config.user_id.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(user_id)
-        {
-            headers.insert(HeaderName::from_static("x-grok-user-id"), header_value);
-        }
-
-        {
-            let client_id = config
-                .client_identifier
-                .clone()
-                .unwrap_or_else(|| DEFAULT_CLIENT_IDENTIFIER.to_string());
-            if let Ok(header_value) = HeaderValue::from_str(&client_id) {
+        // Product/session `x-grok-*` headers are first-party only. Third-party
+        // base URLs (proxies, Azure, BYOK OpenAI, …) must not receive them —
+        // including via extra_headers / env injection (strip below).
+        let first_party = is_first_party_grok_endpoint(&config.base_url);
+        if first_party {
+            // Add x-grok-client-version header for version gating at the proxy.
+            if let Some(client_version) = config.client_version.as_ref()
+                && let Ok(header_value) = HeaderValue::from_str(client_version)
+            {
                 headers.insert(
-                    HeaderName::from_static("x-grok-client-identifier"),
+                    HeaderName::from_static("x-grok-client-version"),
                     header_value,
                 );
             }
+
+            if let Some(deployment_id) = config.deployment_id.as_ref()
+                && let Ok(header_value) = HeaderValue::from_str(deployment_id)
+            {
+                headers.insert(
+                    HeaderName::from_static("x-grok-deployment-id"),
+                    header_value,
+                );
+            }
+
+            if let Some(user_id) = config.user_id.as_ref()
+                && let Ok(header_value) = HeaderValue::from_str(user_id)
+            {
+                headers.insert(HeaderName::from_static("x-grok-user-id"), header_value);
+            }
+
+            {
+                let client_id = config
+                    .client_identifier
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_CLIENT_IDENTIFIER.to_string());
+                if let Ok(header_value) = HeaderValue::from_str(&client_id) {
+                    headers.insert(
+                        HeaderName::from_static("x-grok-client-identifier"),
+                        header_value,
+                    );
+                }
+            }
+        } else {
+            // Drop any x-grok-* that arrived via extra_headers / env_http_headers.
+            strip_x_grok_headers(&mut headers);
         }
 
         // Set User-Agent only when the concrete catalog route did not provide
@@ -1889,6 +1969,12 @@ impl SamplingClient {
             injector.inject(&mut headers);
         }
         normalize_auth_headers(&mut headers, self.defaults.auth_scheme, authoritative_auth);
+        // Privacy: never ship product/session `x-grok-*` to third-party bases,
+        // even if a late injector or resolver reintroduced them. Auth headers
+        // are intentionally left alone.
+        if !is_first_party_grok_endpoint(&self.base_url) {
+            strip_x_grok_headers(&mut headers);
+        }
         let sent_bearer = self.extract_sent_bearer_from(&headers);
         SentRequest {
             builder: self.http.post(url).headers(headers),
@@ -1896,17 +1982,20 @@ impl SamplingClient {
         }
     }
 
-    fn truncate_bearer_prefix(bearer: &str) -> String {
-        // Authorization and x-api-key values are ASCII, so this byte boundary
-        // is also a UTF-8 character boundary.
-        bearer[..crate::attribution::SENT_BEARER_PREFIX_LEN.min(bearer.len())].to_string()
+    /// Whether this client's base URL may receive product/session `x-grok-*`.
+    fn allows_x_grok_headers(&self) -> bool {
+        is_first_party_grok_endpoint(&self.base_url)
     }
 
-    /// Bearer prefix for 401 attribution. When a resolver is wired it is
+    fn bearer_tail_fragment(bearer: &str) -> String {
+        crate::attribution::bearer_tail_fragment(bearer).to_string()
+    }
+
+    /// Bearer tail fragment for 401 attribution. When a resolver is wired it is
     /// authoritative (including `None` ⇒ nothing was sent). Without a resolver,
     /// fall back to construction-time default headers.
     ///
-    /// Prefer the prefix returned by [`Self::post`] for request-path
+    /// Prefer the tail fragment returned by [`Self::post`] for request-path
     /// attribution so the live credential is resolved only once.
     #[cfg_attr(not(test), allow(dead_code))]
     fn current_sent_bearer_prefix(&self) -> Option<String> {
@@ -1915,12 +2004,12 @@ impl SamplingClient {
                 .bearer_resolver
                 .as_ref()
                 .and_then(|r| r.current_bearer())
-                .map(|s| Self::truncate_bearer_prefix(&s));
+                .map(|s| Self::bearer_tail_fragment(&s));
         }
         self.extract_sent_bearer()
     }
 
-    /// Extract the construction-time bearer, truncated to prefix length.
+    /// Extract the construction-time bearer as a bounded tail fragment.
     fn extract_sent_bearer(&self) -> Option<String> {
         self.extract_sent_bearer_from(&self.default_headers)
     }
@@ -1946,7 +2035,7 @@ impl SamplingClient {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.strip_prefix("Bearer ")),
         };
-        raw.map(Self::truncate_bearer_prefix)
+        raw.map(Self::bearer_tail_fragment)
     }
 
     /// Attribute a 401 to the exact bearer already resolved for this request.
@@ -2445,7 +2534,7 @@ impl SamplingClient {
             sent_bearer,
         } = self.post(self.endpoint("chat/completions"));
         let mut http_request = self.apply_chat_session_affinity(
-            grok_headers.apply(builder),
+            grok_headers.apply(builder, self.allows_x_grok_headers()),
             payload.x_grok_session_id.as_deref(),
         );
         if self.defaults.adapter.uses_github_copilot_dialect() {
@@ -2518,7 +2607,7 @@ impl SamplingClient {
         } = self.post(self.endpoint("chat/completions"));
         let mut http_request = self
             .apply_chat_session_affinity(
-                grok_headers.apply(builder),
+                grok_headers.apply(builder, self.allows_x_grok_headers()),
                 payload.x_grok_session_id.as_deref(),
             )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
@@ -2773,7 +2862,7 @@ impl SamplingClient {
             sent_bearer,
         } = self.post(self.endpoint("responses"));
         let mut http_request = self.apply_responses_session_affinity(
-            grok_headers.apply(builder),
+            grok_headers.apply(builder, self.allows_x_grok_headers()),
             request.x_grok_session_id.as_deref(),
         );
         if self.defaults.adapter.uses_github_copilot_dialect() {
@@ -2971,7 +3060,7 @@ impl SamplingClient {
             });
         let mut http_request = self
             .apply_responses_session_affinity(
-                grok_headers.apply(builder),
+                grok_headers.apply(builder, self.allows_x_grok_headers()),
                 request.x_grok_session_id.as_deref(),
             )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
@@ -2982,8 +3071,9 @@ impl SamplingClient {
         {
             http_request = http_request.header(X_CODEX_TURN_STATE_HEADER, turn_state);
         }
-        if doom_loop.is_some() {
-            // Presence opts in; the server ignores the value.
+        if doom_loop.is_some() && self.allows_x_grok_headers() {
+            // Presence opts in; the server ignores the value. First-party only
+            // (`x-grok-doom-loop-check` is product metadata).
             http_request = http_request.header(DOOM_LOOP_CHECK_HEADER, "true");
         }
         if self.defaults.adapter.uses_github_copilot_dialect() {
@@ -3232,7 +3322,7 @@ impl SamplingClient {
             sent_bearer,
         } = self.post(self.endpoint("messages"));
         let mut http_request = self.apply_messages_session_affinity(
-            grok_headers.apply(builder),
+            grok_headers.apply(builder, self.allows_x_grok_headers()),
             request.x_grok_session_id.as_deref(),
         );
         if self.defaults.adapter.uses_github_copilot_dialect() {
@@ -3355,7 +3445,7 @@ impl SamplingClient {
         } = self.post(self.endpoint("messages"));
         let mut http_request = self
             .apply_messages_session_affinity(
-                grok_headers.apply(builder),
+                grok_headers.apply(builder, self.allows_x_grok_headers()),
                 request.x_grok_session_id.as_deref(),
             )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
@@ -3560,6 +3650,9 @@ impl SamplingClient {
             crate::google::build_request(&request, &model, self.defaults.request_compat.as_ref());
         let mut headers = self.default_headers.clone();
         remove_known_auth_headers(&mut headers);
+        // Google endpoints are never first-party xAI; strip any product headers
+        // that may have arrived via shared default_headers.
+        strip_x_grok_headers(&mut headers);
         let api_key = self
             .default_headers
             .get(HeaderName::from_static("x-goog-api-key"))
@@ -3948,7 +4041,7 @@ impl SamplingClient {
         } = self.post(endpoint.clone());
         let mut http_request = self
             .apply_responses_session_affinity(
-                grok_headers.apply(builder),
+                grok_headers.apply(builder, self.allows_x_grok_headers()),
                 wrapper.x_grok_session_id.as_deref(),
             )
             .header(ACCEPT, HeaderValue::from_static("application/json"))
@@ -5124,7 +5217,7 @@ mod tests {
         let client = SamplingClient::new(cfg).expect("client should build");
         let SentRequest {
             builder,
-            sent_bearer: sent_prefix,
+            sent_bearer: sent_fragment,
         } = client.post("https://example.test/v1/responses");
         let request = builder.build().expect("request should build");
         assert_eq!(
@@ -5137,7 +5230,7 @@ mod tests {
         assert!(request.headers().get(AUTHORIZATION).is_none());
         assert!(request.headers().get("x-api-key").is_none());
         assert!(request.headers().get("api-key").is_none());
-        assert_eq!(sent_prefix.as_deref(), Some("fresh-cloudf"));
+        assert_eq!(sent_fragment.as_deref(), Some("oudflare-key"));
     }
 
     // Regression: a past change dropped User-Agent from sampling requests.
@@ -5145,6 +5238,199 @@ mod tests {
     fn sampling_client_always_has_user_agent() {
         let client = SamplingClient::new(minimal_config()).expect("build");
         assert!(client.default_headers.contains_key(USER_AGENT));
+    }
+
+    #[test]
+    fn first_party_endpoint_detection_is_suffix_safe() {
+        assert!(is_first_party_grok_endpoint("https://api.x.ai/v1"));
+        assert!(is_first_party_grok_endpoint("https://x.ai/v1"));
+        assert!(is_first_party_grok_endpoint(
+            "https://cli-chat-proxy.grok.com/v1"
+        ));
+        assert!(is_first_party_grok_endpoint(
+            "https://api.spacexai.com/v1/chat"
+        ));
+        // HTTPS required: cleartext never gets product headers.
+        assert!(!is_first_party_grok_endpoint("http://api.x.ai/v1"));
+        assert!(!is_first_party_grok_endpoint(
+            "http://cli-chat-proxy.grok.com/v1"
+        ));
+        // Third-party / attacker hosts.
+        assert!(!is_first_party_grok_endpoint("https://example.test/v1"));
+        assert!(!is_first_party_grok_endpoint(
+            "https://api.x.ai.evil.example/v1"
+        ));
+        assert!(!is_first_party_grok_endpoint(
+            "https://evil-x.ai.attacker.com/v1"
+        ));
+        assert!(!is_first_party_grok_endpoint("https://openai.com/v1"));
+        assert!(!is_first_party_grok_endpoint("https://localhost:8080/v1"));
+        assert!(!is_first_party_grok_endpoint("not-a-url"));
+    }
+
+    #[test]
+    fn third_party_base_url_does_not_carry_x_grok_product_headers() {
+        let mut cfg = minimal_config();
+        // minimal_config uses example.test (third-party).
+        cfg.client_version = Some("1.2.3".into());
+        cfg.deployment_id = Some("dep-secret".into());
+        cfg.user_id = Some("user-secret".into());
+        cfg.client_identifier = Some("client-secret".into());
+        // Even if extra_headers try to force product metadata…
+        cfg.extra_headers
+            .insert("x-grok-session-id".into(), "sess-leak".into());
+        cfg.extra_headers
+            .insert("x-grok-client-identifier".into(), "forced".into());
+        let client = SamplingClient::new(cfg).expect("client");
+        assert!(
+            client
+                .default_headers
+                .get("x-grok-client-version")
+                .is_none(),
+            "third-party must not get client-version"
+        );
+        assert!(client.default_headers.get("x-grok-deployment-id").is_none());
+        assert!(client.default_headers.get("x-grok-user-id").is_none());
+        assert!(
+            client
+                .default_headers
+                .get("x-grok-client-identifier")
+                .is_none()
+        );
+        assert!(client.default_headers.get("x-grok-session-id").is_none());
+        // Authorization (or equivalent) must still be present for auth.
+        assert!(
+            client.default_headers.get(AUTHORIZATION).is_some(),
+            "auth must be unchanged for third-party"
+        );
+        // post() path also strips late injectors.
+        #[derive(Debug)]
+        struct LeakInjector;
+        impl crate::config::HeaderInjector for LeakInjector {
+            fn inject(&self, headers: &mut HeaderMap) {
+                headers.insert(
+                    HeaderName::from_static("x-grok-session-id"),
+                    HeaderValue::from_static("injected-leak"),
+                );
+            }
+        }
+        let mut cfg = minimal_config();
+        cfg.header_injector = Some(std::sync::Arc::new(LeakInjector));
+        let client = SamplingClient::new(cfg).expect("client");
+        let SentRequest { builder, .. } = client.post("https://example.test/v1/chat/completions");
+        let req = builder.build().expect("build");
+        assert!(
+            req.headers().get("x-grok-session-id").is_none(),
+            "post must strip injector x-grok-* on third-party"
+        );
+        assert!(req.headers().get(AUTHORIZATION).is_some());
+    }
+
+    #[test]
+    fn first_party_base_url_includes_x_grok_product_headers() {
+        let mut cfg = minimal_config();
+        cfg.base_url = "https://api.x.ai/v1".into();
+        cfg.client_version = Some("9.9.9".into());
+        cfg.deployment_id = Some("dep-ok".into());
+        cfg.user_id = Some("user-ok".into());
+        cfg.client_identifier = Some("cli-ok".into());
+        let client = SamplingClient::new(cfg).expect("client");
+        assert_eq!(
+            client
+                .default_headers
+                .get("x-grok-client-version")
+                .and_then(|v| v.to_str().ok()),
+            Some("9.9.9")
+        );
+        assert_eq!(
+            client
+                .default_headers
+                .get("x-grok-deployment-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("dep-ok")
+        );
+        assert_eq!(
+            client
+                .default_headers
+                .get("x-grok-user-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("user-ok")
+        );
+        assert_eq!(
+            client
+                .default_headers
+                .get("x-grok-client-identifier")
+                .and_then(|v| v.to_str().ok()),
+            Some("cli-ok")
+        );
+        // Auth still present.
+        assert!(client.default_headers.get(AUTHORIZATION).is_some());
+
+        // Per-request headers applied only on first-party.
+        let grok = GrokRequestHeaders {
+            conv_id: "c1",
+            req_id: "r1",
+            model_id: "m1",
+            session_id: "s1",
+            turn_idx: Some("3"),
+            agent_id: "a1",
+            deployment_id: None,
+            user_id: None,
+        };
+        let SentRequest { builder, .. } = client.post("https://api.x.ai/v1/chat/completions");
+        let req = grok
+            .apply(builder, client.allows_x_grok_headers())
+            .build()
+            .expect("build");
+        assert_eq!(
+            req.headers()
+                .get("x-grok-session-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("s1")
+        );
+        assert_eq!(
+            req.headers()
+                .get("x-grok-conv-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("c1")
+        );
+    }
+
+    #[test]
+    fn third_party_skips_per_request_x_grok_headers() {
+        let client = SamplingClient::new(minimal_config()).expect("client");
+        assert!(!client.allows_x_grok_headers());
+        let grok = GrokRequestHeaders {
+            conv_id: "c1",
+            req_id: "r1",
+            model_id: "m1",
+            session_id: "s1",
+            turn_idx: Some("3"),
+            agent_id: "a1",
+            deployment_id: Some("d1"),
+            user_id: Some("u1"),
+        };
+        let SentRequest { builder, .. } = client.post("https://example.test/v1/chat/completions");
+        let req = grok
+            .apply(builder, client.allows_x_grok_headers())
+            .build()
+            .expect("build");
+        for name in [
+            "x-grok-session-id",
+            "x-grok-conv-id",
+            "x-grok-req-id",
+            "x-grok-agent-id",
+            "x-grok-deployment-id",
+            "x-grok-user-id",
+            "x-grok-turn-idx",
+            "x-grok-model-override",
+        ] {
+            assert!(
+                req.headers().get(name).is_none(),
+                "third-party must not send {name}"
+            );
+        }
+        assert!(req.headers().get(AUTHORIZATION).is_some());
     }
 
     // Regression: a past change dropped HeaderInjector (traceparent) from sampling requests.

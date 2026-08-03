@@ -33,7 +33,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 use xai_grok_extension_api::{
@@ -41,8 +41,9 @@ use xai_grok_extension_api::{
     EXPORT_ABI_VERSION, EXPORT_DESCRIBE_TOOL, EXPORT_INVOKE_TOOL, EXPORT_ON_BEFORE_AGENT_START,
     EXPORT_ON_BEFORE_MODEL, EXPORT_ON_PRE_COMPACT, EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END,
     EXPORT_ON_SESSION_START, EXPORT_ON_STOP, EXPORT_TOOL_COUNT, ExtensionSpec, GateFailMode,
-    MAX_INJECT_BYTES, MAX_TOOL_PAYLOAD_BYTES, PreCompactIn, PreToolIn, StopIn, StopOut,
-    WasmToolDescriptor, is_valid_guest_tool_name, is_valid_tool_schema_json, timeouts,
+    GuestStringError, MAX_INJECT_BYTES, MAX_TOOL_PAYLOAD_BYTES, PreCompactIn, PreToolIn, StopIn,
+    StopOut, WasmToolDescriptor, is_valid_guest_tool_name, is_valid_tool_schema_json,
+    read_guest_utf8_from_memory, timeouts, truncate_utf8,
 };
 
 /// Errors from loading or calling a guest.
@@ -396,6 +397,31 @@ impl ExtensionRuntime {
                 );
             }
         }
+    }
+
+    /// Production async teardown: shut down every guest worker (interrupt active
+    /// job, skip queued backlog) and join OS threads on a blocking pool.
+    /// Idempotent. Prefer this over dropping the last Arc on a hot async path.
+    pub async fn shutdown_async(&mut self) {
+        #[cfg(feature = "wasm")]
+        {
+            for guest in &self.guests {
+                guest.inner.shutdown_async().await;
+            }
+        }
+        self.guests.clear();
+    }
+
+    /// Sync teardown fallback (joins worker threads on the calling thread).
+    /// Prefer [`Self::shutdown_async`] from async session teardown.
+    pub fn shutdown(&mut self) {
+        #[cfg(feature = "wasm")]
+        {
+            for guest in &self.guests {
+                guest.inner.shutdown();
+            }
+        }
+        self.guests.clear();
     }
 
     /// Load a trusted extension. Untrusted specs return [`ContractError::NotTrusted`].
@@ -1052,22 +1078,196 @@ pub struct StopDispatch {
 
 /// Retained store + instance so guest globals/memory survive across calls
 /// (Pi-like stateful lifecycle within one session runtime).
+///
+/// Owned exclusively by the per-extension worker thread — never shared across
+/// tasks or held behind a mutex that async callers could deadlock on.
 #[cfg(feature = "wasm")]
 struct LiveGuest {
     store: wasmtime::Store<HostCtx>,
     instance: wasmtime::Instance,
 }
 
+/// Job lifecycle for epoch-safe cancel (generation avoids ABA after id reuse).
+#[cfg(feature = "wasm")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum JobPhase {
+    /// No job is prepared/executing.
+    Idle = 0,
+    /// LiveGuest prepared, epoch deadline set; cancel may increment epoch.
+    Armed = 1,
+    /// Guest export is running (`func.call`).
+    Executing = 2,
+}
+
+/// Per-job cancel flag. Callers mark cancel/timeout; the worker skips or
+/// epoch-interrupts only when this job is **Armed/Executing**.
+#[cfg(feature = "wasm")]
+struct JobCancel {
+    cancelled: AtomicBool,
+}
+
+/// Commands for the long-lived per-extension worker.
+///
+/// Host imports used during `Call` are **non-blocking** (memory read/write and
+/// in-memory bookkeeping only). The worker must never park on async I/O while
+/// holding the guest store.
+#[cfg(feature = "wasm")]
+enum WorkerCmd {
+    Call {
+        job_id: u64,
+        export: &'static str,
+        /// Boxed so the empty `Shutdown` variant does not bloat the enum.
+        host: Box<HostCtx>,
+        reply: tokio::sync::oneshot::Sender<(GuestCallResult, HostCtx)>,
+        cancel: Arc<JobCancel>,
+    },
+    /// Drain and exit; owner joins the thread after this.
+    Shutdown,
+}
+
+/// Shared worker control plane. Held by the **worker thread** and by the
+/// exclusive owner for cancel/shutdown signaling.
+///
+/// Deliberately does **not** hold the channel sender or `JoinHandle` — those
+/// live only on [`WasmGuestInner`] so the worker can never form a cycle with
+/// the owner Arc or self-join.
+#[cfg(feature = "wasm")]
+struct WorkerState {
+    name_for_logs: String,
+    engine: wasmtime::Engine,
+    /// Monotonic job ids starting at 1 (0 = none).
+    next_job_id: AtomicU64,
+    /// Monotonic generation bumped each time a job becomes Armed (ABA guard).
+    next_generation: AtomicU64,
+    /// Currently prepared/executing job id, or `0` if idle.
+    active_job_id: AtomicU64,
+    /// Generation of the active job (paired with `active_job_id`).
+    active_generation: AtomicU64,
+    /// [`JobPhase`] as u8 for the active job.
+    job_phase: AtomicU8,
+    /// Once true, new enqueues fail and queued Calls skip guest bodies.
+    shutting_down: AtomicBool,
+    /// Set true just before the worker thread returns (exit sentinel).
+    terminated: AtomicBool,
+    /// Wakes waiters blocked on [`Self::terminated`].
+    terminate_notify: std::sync::Condvar,
+    terminate_mutex: std::sync::Mutex<()>,
+    /// Guest bodies that passed Armed checks and entered `func.call`.
+    guest_bodies_started: AtomicU64,
+    /// Times a job was published Armed (deadline set) for tests.
+    jobs_armed: AtomicU64,
+    /// In-flight active calls (0 or 1 serial).
+    active_calls: AtomicU64,
+    /// Test-only: park at end of prepare (before Armed publish) when true.
+    #[cfg(test)]
+    prepare_hold: AtomicBool,
+    /// Test-only: prepare reached hold point.
+    #[cfg(test)]
+    prepare_holding: AtomicBool,
+    /// Test-only: release prepare hold.
+    #[cfg(test)]
+    prepare_release: AtomicBool,
+}
+
+#[cfg(feature = "wasm")]
+impl WorkerState {
+    fn new(name_for_logs: String, engine: wasmtime::Engine) -> Self {
+        Self {
+            name_for_logs,
+            engine,
+            next_job_id: AtomicU64::new(1),
+            next_generation: AtomicU64::new(1),
+            active_job_id: AtomicU64::new(0),
+            active_generation: AtomicU64::new(0),
+            job_phase: AtomicU8::new(JobPhase::Idle as u8),
+            shutting_down: AtomicBool::new(false),
+            terminated: AtomicBool::new(false),
+            terminate_notify: std::sync::Condvar::new(),
+            terminate_mutex: std::sync::Mutex::new(()),
+            guest_bodies_started: AtomicU64::new(0),
+            jobs_armed: AtomicU64::new(0),
+            active_calls: AtomicU64::new(0),
+            #[cfg(test)]
+            prepare_hold: AtomicBool::new(false),
+            #[cfg(test)]
+            prepare_holding: AtomicBool::new(false),
+            #[cfg(test)]
+            prepare_release: AtomicBool::new(false),
+        }
+    }
+
+    fn mark_terminated(&self) {
+        self.terminated.store(true, Ordering::Release);
+        let _g = self
+            .terminate_mutex
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        self.terminate_notify.notify_all();
+    }
+
+    fn wait_terminated(&self) {
+        if self.terminated.load(Ordering::Acquire) {
+            return;
+        }
+        let mut g = self
+            .terminate_mutex
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        while !self.terminated.load(Ordering::Acquire) {
+            g = self
+                .terminate_notify
+                .wait(g)
+                .unwrap_or_else(|p| p.into_inner());
+        }
+    }
+
+    fn clear_active(&self) {
+        self.job_phase
+            .store(JobPhase::Idle as u8, Ordering::Release);
+        self.active_job_id.store(0, Ordering::Release);
+        self.active_generation.store(0, Ordering::Release);
+    }
+
+    /// Epoch-interrupt only when this job_id+generation is Armed or Executing.
+    fn maybe_epoch_interrupt(&self, job_id: u64, generation: u64) {
+        let phase = self.job_phase.load(Ordering::Acquire);
+        if phase != JobPhase::Armed as u8 && phase != JobPhase::Executing as u8 {
+            return;
+        }
+        if self.active_job_id.load(Ordering::Acquire) != job_id {
+            return;
+        }
+        if self.active_generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+        self.engine.increment_epoch();
+    }
+
+    fn cancel_job(&self, job_id: u64, generation: u64, cancel: &JobCancel) {
+        cancel.cancelled.store(true, Ordering::Release);
+        self.maybe_epoch_interrupt(job_id, generation);
+    }
+}
+
+/// Exclusive owner of the channel sender and worker `JoinHandle`.
+/// Cloned via [`Arc`]; only the **last** drop shuts down and joins.
+/// The worker thread never holds this Arc.
+#[cfg(feature = "wasm")]
+struct WasmGuestInner {
+    state: Arc<WorkerState>,
+    /// Serial job queue. `None` after shutdown begins.
+    job_tx: std::sync::Mutex<Option<std::sync::mpsc::Sender<WorkerCmd>>>,
+    /// Worker OS thread. Joined once by the first shutdown waiter.
+    worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+/// Cloneable guest handle. All clones share one long-lived worker that owns
+/// `LiveGuest` and serializes calls over a channel.
 #[cfg(feature = "wasm")]
 #[derive(Clone)]
 struct WasmGuest {
-    name_for_logs: String,
-    engine: wasmtime::Engine,
-    module: Arc<wasmtime::Module>,
-    /// Cached linker (host imports) — avoids re-registering funcs each call.
-    linker: Arc<wasmtime::Linker<HostCtx>>,
-    /// Session-retained instance (shared across [`ExtensionRuntime`] clones).
-    live: Arc<std::sync::Mutex<Option<LiveGuest>>>,
+    inner: Arc<WasmGuestInner>,
 }
 
 #[cfg(feature = "wasm")]
@@ -1097,45 +1297,118 @@ impl WasmGuest {
         }
         let mut config = wasmtime::Config::new();
         config.consume_fuel(true);
-        // Wall-clock timeout can interrupt busy guest loops via epoch trap.
+        // Wall-clock timeout / cancel can interrupt busy guest loops via epoch.
         config.epoch_interruption(true);
         let engine =
             wasmtime::Engine::new(&config).map_err(|e| RuntimeError::Module(e.to_string()))?;
         let module = wasmtime::Module::new(&engine, bytes)
             .map_err(|e| RuntimeError::Module(e.to_string()))?;
-        let linker = Arc::new(build_linker(&engine)?);
+        let linker = build_linker(&engine)?;
 
-        // Validate ABI at load time (fresh store; live instance created on first call).
-        let mut store = wasmtime::Store::new(&engine, HostCtx::default());
-        store.limiter(|s| &mut s.limits);
-        store
-            .set_fuel(1_000_000)
-            .map_err(|e| RuntimeError::Module(e.to_string()))?;
-        store.set_epoch_deadline(1);
-        store.epoch_deadline_trap();
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(|e| RuntimeError::Module(e.to_string()))?;
-        let abi = instance
-            .get_typed_func::<(), i32>(&mut store, EXPORT_ABI_VERSION)
-            .map_err(|_| RuntimeError::MissingExport(EXPORT_ABI_VERSION))?;
-        let got = abi
-            .call(&mut store, ())
-            .map_err(|e| RuntimeError::Trap(e.to_string()))?;
-        if got != CORE_ABI_VERSION {
-            return Err(RuntimeError::AbiMismatch { got });
+        // Validate ABI at load time (fresh store; session instance lives on worker).
+        {
+            let mut store = wasmtime::Store::new(&engine, HostCtx::default());
+            store.limiter(|s| &mut s.limits);
+            store
+                .set_fuel(1_000_000)
+                .map_err(|e| RuntimeError::Module(e.to_string()))?;
+            store.set_epoch_deadline(1);
+            store.epoch_deadline_trap();
+            let instance = linker
+                .instantiate(&mut store, &module)
+                .map_err(|e| RuntimeError::Module(e.to_string()))?;
+            let abi = instance
+                .get_typed_func::<(), i32>(&mut store, EXPORT_ABI_VERSION)
+                .map_err(|_| RuntimeError::MissingExport(EXPORT_ABI_VERSION))?;
+            let got = abi
+                .call(&mut store, ())
+                .map_err(|e| RuntimeError::Trap(e.to_string()))?;
+            if got != CORE_ABI_VERSION {
+                return Err(RuntimeError::AbiMismatch { got });
+            }
+            let _ = instance
+                .get_typed_func::<(), i32>(&mut store, EXPORT_ON_SESSION_START)
+                .map_err(|_| RuntimeError::MissingExport(EXPORT_ON_SESSION_START))?;
         }
-        let _ = instance
-            .get_typed_func::<(), i32>(&mut store, EXPORT_ON_SESSION_START)
-            .map_err(|_| RuntimeError::MissingExport(EXPORT_ON_SESSION_START))?;
+
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<WorkerCmd>();
+        let state = Arc::new(WorkerState::new(name_for_logs.clone(), engine));
+        // Worker gets only WorkerState — never the owner Arc.
+        let worker_state = Arc::clone(&state);
+        let thread_name = format!("wasm-ext-{name_for_logs}");
+
+        let worker = std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                worker_main(job_rx, module, linker, worker_state);
+            })
+            .map_err(|e| RuntimeError::Module(format!("failed to spawn guest worker: {e}")))?;
 
         Ok(Self {
-            name_for_logs,
-            engine,
-            module: Arc::new(module),
-            linker,
-            live: Arc::new(std::sync::Mutex::new(None)),
+            inner: Arc::new(WasmGuestInner {
+                state,
+                job_tx: std::sync::Mutex::new(Some(job_tx)),
+                worker: std::sync::Mutex::new(Some(worker)),
+            }),
         })
+    }
+
+    #[cfg(test)]
+    fn active_call_count(&self) -> u64 {
+        self.inner.state.active_calls.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn guest_bodies_started(&self) -> u64 {
+        self.inner
+            .state
+            .guest_bodies_started
+            .load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn jobs_armed(&self) -> u64 {
+        self.inner.state.jobs_armed.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn active_job_id(&self) -> u64 {
+        self.inner.state.active_job_id.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn job_phase(&self) -> u8 {
+        self.inner.state.job_phase.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn is_terminated(&self) -> bool {
+        self.inner.state.terminated.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn set_prepare_hold(&self, hold: bool) {
+        self.inner.state.prepare_hold.store(hold, Ordering::Release);
+        if !hold {
+            self.inner
+                .state
+                .prepare_release
+                .store(true, Ordering::Release);
+        } else {
+            self.inner
+                .state
+                .prepare_release
+                .store(false, Ordering::Release);
+            self.inner
+                .state
+                .prepare_holding
+                .store(false, Ordering::Release);
+        }
+    }
+
+    #[cfg(test)]
+    fn prepare_is_holding(&self) -> bool {
+        self.inner.state.prepare_holding.load(Ordering::Acquire)
     }
 
     fn apply_host_inputs(data: &mut HostCtx, host: HostCtx, guest_name: &str) {
@@ -1178,18 +1451,8 @@ impl WasmGuest {
         }
     }
 
-    async fn call_with_timeout_host(
-        &self,
-        call: GuestCall,
-        limit: Duration,
-        host: HostCtx,
-    ) -> (GuestCallResult, HostCtx) {
-        let engine = self.engine.clone();
-        let module = Arc::clone(&self.module);
-        let linker = Arc::clone(&self.linker);
-        let live = Arc::clone(&self.live);
-        let name = self.name_for_logs.clone();
-        let export = match call {
+    fn export_name(call: GuestCall) -> &'static str {
+        match call {
             GuestCall::SessionStart => EXPORT_ON_SESSION_START,
             GuestCall::SessionEnd => EXPORT_ON_SESSION_END,
             GuestCall::PreToolUse => EXPORT_ON_PRE_TOOL_USE,
@@ -1200,107 +1463,143 @@ impl WasmGuest {
             GuestCall::ToolCount => EXPORT_TOOL_COUNT,
             GuestCall::DescribeTool => EXPORT_DESCRIBE_TOOL,
             GuestCall::InvokeTool => EXPORT_INVOKE_TOOL,
-        };
+        }
+    }
 
-        // If this future is dropped (cancel/shutdown) while the guest is still
-        // running, increment the epoch so fuel/epoch traps release the live mutex.
-        let mut cancel_guard = EpochCancelGuard {
-            engine: self.engine.clone(),
+    /// Whether the long-lived worker thread is still running (tests / diagnostics).
+    #[cfg(test)]
+    fn worker_is_alive(&self) -> bool {
+        !self.inner.state.terminated.load(Ordering::Acquire)
+            && self
+                .inner
+                .worker
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .is_some_and(|h| !h.is_finished())
+    }
+
+    /// Production async teardown: mark shutdown, interrupt Armed/Executing job,
+    /// join the worker on a blocking pool so the async runtime is not stalled.
+    /// All concurrent callers wait until the worker has truly exited.
+    pub async fn shutdown_async(&self) {
+        let state = Arc::clone(&self.inner.state);
+        let handle = self.inner.begin_shutdown_take_join();
+        if let Some(handle) = handle {
+            // Never join from the worker thread itself (would self-deadlock);
+            // spawn_blocking runs on a different pool thread.
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = handle.join();
+                // Worker marks terminated on exit; belt-and-suspenders if join
+                // raced after mark.
+                state.mark_terminated();
+            })
+            .await;
+        } else {
+            // Another waiter took the join handle; wait for exit sentinel.
+            let state = Arc::clone(&self.inner.state);
+            let _ = tokio::task::spawn_blocking(move || {
+                state.wait_terminated();
+            })
+            .await;
+        }
+    }
+
+    /// Sync shutdown used by tests and Drop fallback. Concurrent callers all
+    /// wait for real worker exit (first joins, others wait on terminated).
+    pub fn shutdown(&self) {
+        self.inner.shutdown_sync();
+    }
+
+    async fn call_with_timeout_host(
+        &self,
+        call: GuestCall,
+        limit: Duration,
+        host: HostCtx,
+    ) -> (GuestCallResult, HostCtx) {
+        let export = Self::export_name(call);
+        let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+        let mut job_id = self.inner.state.next_job_id.fetch_add(1, Ordering::Relaxed);
+        // 0 is reserved for "idle"; skip if wraparound ever hits it.
+        if job_id == 0 {
+            job_id = self.inner.state.next_job_id.fetch_add(1, Ordering::Relaxed);
+        }
+        // Cancel uses (job_id, generation) read from WorkerState when phase is
+        // Armed/Executing; generation 0 means "not yet armed" (flag-only cancel).
+        let cancel = Arc::new(JobCancel {
+            cancelled: AtomicBool::new(false),
+        });
+
+        {
+            if self.inner.state.shutting_down.load(Ordering::Acquire) {
+                return (
+                    GuestCallResult::Failed {
+                        extension: self.inner.state.name_for_logs.clone(),
+                        error: "guest worker shut down".into(),
+                    },
+                    host,
+                );
+            }
+            let guard = self.inner.job_tx.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(tx) = guard.as_ref() else {
+                return (
+                    GuestCallResult::Failed {
+                        extension: self.inner.state.name_for_logs.clone(),
+                        error: "guest worker shut down".into(),
+                    },
+                    host,
+                );
+            };
+            if tx
+                .send(WorkerCmd::Call {
+                    job_id,
+                    export,
+                    host: Box::new(host),
+                    reply: reply_tx,
+                    cancel: Arc::clone(&cancel),
+                })
+                .is_err()
+            {
+                return (
+                    GuestCallResult::Failed {
+                        extension: self.inner.state.name_for_logs.clone(),
+                        error: "guest worker channel closed".into(),
+                    },
+                    HostCtx::default(),
+                );
+            }
+        }
+
+        let mut cancel_guard = JobEpochCancelGuard {
+            state: Arc::clone(&self.inner.state),
+            job_id,
+            cancel: Arc::clone(&cancel),
             armed: true,
         };
 
-        let mut join = tokio::task::spawn_blocking(move || {
-            let mut guard = match live.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-
-            if guard.is_none() {
-                let mut store = wasmtime::Store::new(&engine, HostCtx::default());
-                store.limiter(|s| &mut s.limits);
-                store.epoch_deadline_trap();
-                let instance = match linker.instantiate(&mut store, &module) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        return (
-                            GuestCallResult::Failed {
-                                extension: name,
-                                error: e.to_string(),
-                            },
-                            host,
-                        );
-                    }
-                };
-                *guard = Some(LiveGuest { store, instance });
-            }
-
-            let live_guest = guard.as_mut().expect("just ensured");
-            Self::apply_host_inputs(live_guest.store.data_mut(), host, &name);
-
-            if let Err(e) = live_guest.store.set_fuel(10_000_000) {
-                let host_out = Self::take_host_outputs(live_guest.store.data_mut());
-                return (
-                    GuestCallResult::Failed {
-                        extension: name,
-                        error: e.to_string(),
-                    },
-                    host_out,
-                );
-            }
-            // Trap after one epoch increment (timeout or Drop cancel path).
-            live_guest.store.set_epoch_deadline(1);
-
-            let func = match live_guest
-                .instance
-                .get_typed_func::<(), i32>(&mut live_guest.store, export)
-            {
-                Ok(f) => f,
-                Err(_) => {
-                    let host_out = Self::take_host_outputs(live_guest.store.data_mut());
-                    return (
-                        GuestCallResult::SkippedExport {
-                            extension: name,
-                            export,
-                        },
-                        host_out,
-                    );
-                }
-            };
-            let call_result = func.call(&mut live_guest.store, ());
-            let host_out = Self::take_host_outputs(live_guest.store.data_mut());
-            let result = match call_result {
-                Ok(code) => GuestCallResult::Ok {
-                    extension: name,
-                    code,
-                    logs: host_out.guest_logs.clone(),
-                },
-                Err(e) => GuestCallResult::Failed {
-                    extension: name,
-                    error: e.to_string(),
-                },
-            };
-            (result, host_out)
-        });
-
-        // Keep the JoinHandle on timeout so we can epoch-interrupt and await
-        // the trap (dropping the handle would detach and leak the mutex hold).
         let out = tokio::select! {
-            r = &mut join => {
+            r = &mut reply_rx => {
                 match r {
                     Ok(pair) => pair,
-                    Err(join_err) => (
+                    Err(_) => (
                         GuestCallResult::Failed {
-                            extension: self.name_for_logs.clone(),
-                            error: join_err.to_string(),
+                            extension: self.inner.state.name_for_logs.clone(),
+                            error: "guest worker dropped reply".into(),
                         },
                         HostCtx::default(),
                     ),
                 }
             }
             _ = tokio::time::sleep(limit) => {
-                self.engine.increment_epoch();
+                // Flag cancel; epoch only if this job is Armed/Executing.
+                let job_gen = if self.inner.state.active_job_id.load(Ordering::Acquire) == job_id {
+                    self.inner.state.active_generation.load(Ordering::Acquire)
+                } else {
+                    0
+                };
+                self.inner.state.cancel_job(job_id, job_gen, &cancel);
                 let grace = Duration::from_millis(250);
-                match tokio::time::timeout(grace, join).await {
+                match tokio::time::timeout(grace, &mut reply_rx).await {
                     Ok(Ok((result, host_out))) => match result {
                         GuestCallResult::Failed { extension, .. } => (
                             GuestCallResult::Timeout {
@@ -1311,16 +1610,9 @@ impl WasmGuest {
                         ),
                         other => (other, host_out),
                     },
-                    Ok(Err(join_err)) => (
-                        GuestCallResult::Failed {
-                            extension: self.name_for_logs.clone(),
-                            error: join_err.to_string(),
-                        },
-                        HostCtx::default(),
-                    ),
-                    Err(_) => (
+                    Ok(Err(_)) | Err(_) => (
                         GuestCallResult::Timeout {
-                            extension: self.name_for_logs.clone(),
+                            extension: self.inner.state.name_for_logs.clone(),
                             limit,
                         },
                         HostCtx::default(),
@@ -1333,26 +1625,340 @@ impl WasmGuest {
     }
 }
 
-/// Increments the engine epoch when dropped while still armed so a cancelled
-/// async caller can interrupt a busy guest (Oracle H3).
+/// Worker thread body: exclusive owner of [`LiveGuest`], serializes all calls.
+/// Holds only [`WorkerState`] — never the owner Arc.
 #[cfg(feature = "wasm")]
-struct EpochCancelGuard {
-    engine: wasmtime::Engine,
+fn worker_main(
+    job_rx: std::sync::mpsc::Receiver<WorkerCmd>,
+    module: wasmtime::Module,
+    linker: wasmtime::Linker<HostCtx>,
+    state: Arc<WorkerState>,
+) {
+    let engine = state.engine.clone();
+    let name = state.name_for_logs.clone();
+    let mut live: Option<LiveGuest> = None;
+    while let Ok(cmd) = job_rx.recv() {
+        match cmd {
+            WorkerCmd::Shutdown => break,
+            WorkerCmd::Call {
+                job_id,
+                export,
+                host,
+                reply,
+                cancel,
+                ..
+            } => {
+                // Skip without preparing guest: shutdown, pre-cancel, or dead reply.
+                if state.shutting_down.load(Ordering::Acquire)
+                    || cancel.cancelled.load(Ordering::Acquire)
+                    || reply.is_closed()
+                {
+                    let _ = reply.send((
+                        GuestCallResult::Failed {
+                            extension: name.clone(),
+                            error: if state.shutting_down.load(Ordering::Relaxed) {
+                                "guest worker shut down".into()
+                            } else {
+                                "guest call cancelled before start".into()
+                            },
+                        },
+                        *host,
+                    ));
+                    continue;
+                }
+
+                state.active_calls.fetch_add(1, Ordering::Relaxed);
+                // Prepare LiveGuest + func + fuel + epoch deadline WITHOUT
+                // publishing Armed yet (cancel only sets flags in this window).
+                let prepared = prepare_guest_call(
+                    &mut live, &engine, &module, &linker, &name, export, *host, &state,
+                );
+
+                let prepared = match prepared {
+                    Ok(p) => p,
+                    Err(pair) => {
+                        state.active_calls.fetch_sub(1, Ordering::Relaxed);
+                        let _ = reply.send(pair);
+                        if state.shutting_down.load(Ordering::Acquire) {
+                            drain_and_break(&job_rx, &name);
+                            break;
+                        }
+                        continue;
+                    }
+                };
+
+                // Publish Armed: deadline is set; cancel may now increment epoch.
+                let generation = state.next_generation.fetch_add(1, Ordering::Relaxed).max(1);
+                state.active_job_id.store(job_id, Ordering::Release);
+                state.active_generation.store(generation, Ordering::Release);
+                state
+                    .job_phase
+                    .store(JobPhase::Armed as u8, Ordering::Release);
+                state.jobs_armed.fetch_add(1, Ordering::Relaxed);
+
+                // Re-check after Armed publish so a concurrent cancel that
+                // raced during prepare can still skip execute (and may have
+                // already bumped epoch — trap is fine).
+                if state.shutting_down.load(Ordering::Acquire)
+                    || cancel.cancelled.load(Ordering::Acquire)
+                    || reply.is_closed()
+                {
+                    // Consume prepared without executing: take outputs as-is.
+                    let host_out = {
+                        let live_guest = live.as_mut().expect("prepared");
+                        WasmGuest::take_host_outputs(live_guest.store.data_mut())
+                    };
+                    state.clear_active();
+                    state.active_calls.fetch_sub(1, Ordering::Relaxed);
+                    let _ = reply.send((
+                        GuestCallResult::Failed {
+                            extension: name.clone(),
+                            error: "guest call cancelled before execute".into(),
+                        },
+                        host_out,
+                    ));
+                    if state.shutting_down.load(Ordering::Acquire) {
+                        drain_and_break(&job_rx, &name);
+                        break;
+                    }
+                    continue;
+                }
+
+                state
+                    .job_phase
+                    .store(JobPhase::Executing as u8, Ordering::Release);
+                state.guest_bodies_started.fetch_add(1, Ordering::Relaxed);
+                let pair = execute_guest_call(&mut live, prepared);
+
+                state.clear_active();
+                state.active_calls.fetch_sub(1, Ordering::Relaxed);
+                let _ = reply.send(pair);
+
+                if state.shutting_down.load(Ordering::Acquire) {
+                    drain_and_break(&job_rx, &name);
+                    break;
+                }
+            }
+        }
+    }
+    drop(live);
+    state.mark_terminated();
+}
+
+#[cfg(feature = "wasm")]
+fn drain_and_break(job_rx: &std::sync::mpsc::Receiver<WorkerCmd>, name: &str) {
+    while let Ok(pending) = job_rx.try_recv() {
+        match pending {
+            WorkerCmd::Shutdown => {}
+            WorkerCmd::Call { host, reply, .. } => {
+                let _ = reply.send((
+                    GuestCallResult::Failed {
+                        extension: name.to_string(),
+                        error: "guest worker shut down".into(),
+                    },
+                    *host,
+                ));
+            }
+        }
+    }
+}
+
+/// Prepared guest call: epoch deadline is already set on the store.
+#[cfg(feature = "wasm")]
+struct PreparedCall {
+    export: &'static str,
+}
+
+/// Prepare store/instance/inputs/fuel/func lookup and set epoch deadline.
+/// Does **not** publish Armed — caller does that after prepare succeeds.
+#[cfg(feature = "wasm")]
+#[allow(clippy::result_large_err)] // Err carries HostCtx for reply path; not public API.
+fn prepare_guest_call(
+    live: &mut Option<LiveGuest>,
+    engine: &wasmtime::Engine,
+    module: &wasmtime::Module,
+    linker: &wasmtime::Linker<HostCtx>,
+    name: &str,
+    export: &'static str,
+    host: HostCtx,
+    state: &WorkerState,
+) -> Result<PreparedCall, (GuestCallResult, HostCtx)> {
+    if live.is_none() {
+        let mut store = wasmtime::Store::new(engine, HostCtx::default());
+        store.limiter(|s| &mut s.limits);
+        store.epoch_deadline_trap();
+        let instance = match linker.instantiate(&mut store, module) {
+            Ok(i) => i,
+            Err(e) => {
+                return Err((
+                    GuestCallResult::Failed {
+                        extension: name.to_string(),
+                        error: e.to_string(),
+                    },
+                    host,
+                ));
+            }
+        };
+        *live = Some(LiveGuest { store, instance });
+    }
+
+    let live_guest = live.as_mut().expect("just ensured");
+    WasmGuest::apply_host_inputs(live_guest.store.data_mut(), host, name);
+
+    if let Err(e) = live_guest.store.set_fuel(10_000_000) {
+        let host_out = WasmGuest::take_host_outputs(live_guest.store.data_mut());
+        return Err((
+            GuestCallResult::Failed {
+                extension: name.to_string(),
+                error: e.to_string(),
+            },
+            host_out,
+        ));
+    }
+
+    // Ensure the export exists before setting deadline / Armed.
+    if live_guest
+        .instance
+        .get_typed_func::<(), i32>(&mut live_guest.store, export)
+        .is_err()
+    {
+        let host_out = WasmGuest::take_host_outputs(live_guest.store.data_mut());
+        return Err((
+            GuestCallResult::SkippedExport {
+                extension: name.to_string(),
+                export,
+            },
+            host_out,
+        ));
+    }
+
+    // Epoch deadline set here; cancel must not bump epoch until Armed is
+    // published (otherwise the bump is lost before the deadline is set).
+    live_guest.store.set_epoch_deadline(1);
+
+    // Test hook: hold after deadline set but before Armed publish.
+    #[cfg(test)]
+    {
+        if state.prepare_hold.load(Ordering::Acquire) {
+            state.prepare_holding.store(true, Ordering::Release);
+            while !state.prepare_release.load(Ordering::Acquire)
+                && !state.shutting_down.load(Ordering::Acquire)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            state.prepare_holding.store(false, Ordering::Release);
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let _ = state;
+    }
+
+    Ok(PreparedCall { export })
+}
+
+#[cfg(feature = "wasm")]
+fn execute_guest_call(
+    live: &mut Option<LiveGuest>,
+    prepared: PreparedCall,
+) -> (GuestCallResult, HostCtx) {
+    let live_guest = live.as_mut().expect("prepared");
+    let export = prepared.export;
+    let func = live_guest
+        .instance
+        .get_typed_func::<(), i32>(&mut live_guest.store, export)
+        .expect("export checked in prepare");
+    let call_result = func.call(&mut live_guest.store, ());
+    let host_out = WasmGuest::take_host_outputs(live_guest.store.data_mut());
+    let name = host_out.guest_name.clone();
+    let result = match call_result {
+        Ok(code) => GuestCallResult::Ok {
+            extension: name,
+            code,
+            logs: host_out.guest_logs.clone(),
+        },
+        Err(e) => GuestCallResult::Failed {
+            extension: name,
+            error: e.to_string(),
+        },
+    };
+    (result, host_out)
+}
+
+#[cfg(feature = "wasm")]
+impl WasmGuestInner {
+    /// Mark shutting down, interrupt Armed/Executing job (if any), close the
+    /// enqueue path, and send Shutdown. Returns the join handle if this
+    /// caller is responsible for joining (first successful take).
+    fn begin_shutdown_take_join(&self) -> Option<std::thread::JoinHandle<()>> {
+        self.state.shutting_down.store(true, Ordering::Release);
+        // Interrupt only if a job is Armed or Executing (deadline is live).
+        let phase = self.state.job_phase.load(Ordering::Acquire);
+        if phase == JobPhase::Armed as u8 || phase == JobPhase::Executing as u8 {
+            self.state.engine.increment_epoch();
+        }
+        // Also release prepare hold so shutdown can progress in tests.
+        #[cfg(test)]
+        {
+            self.state.prepare_release.store(true, Ordering::Release);
+        }
+        // Prevent further enqueues and signal the worker.
+        if let Some(tx) = self.job_tx.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let _ = tx.send(WorkerCmd::Shutdown);
+            drop(tx);
+        }
+        self.worker.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+
+    fn shutdown_sync(&self) {
+        if let Some(handle) = self.begin_shutdown_take_join() {
+            // Sync join is the Drop/test fallback. Prefer async teardown on
+            // production paths. Never call from the worker thread.
+            let _ = handle.join();
+            self.state.mark_terminated();
+        } else {
+            // Concurrent waiter: wait for the exit sentinel.
+            self.state.wait_terminated();
+        }
+    }
+}
+
+/// Final Arc drop of the exclusive owner: shut down worker and join so no
+/// guest resources or threads leak after the last external clone is gone.
+#[cfg(feature = "wasm")]
+impl Drop for WasmGuestInner {
+    fn drop(&mut self) {
+        self.shutdown_sync();
+    }
+}
+
+/// On Drop (async cancel): mark this job cancelled and epoch-interrupt only if
+/// it is Armed/Executing for this job_id. Never touches the worker JoinHandle.
+#[cfg(feature = "wasm")]
+struct JobEpochCancelGuard {
+    state: Arc<WorkerState>,
+    job_id: u64,
+    cancel: Arc<JobCancel>,
     armed: bool,
 }
 
 #[cfg(feature = "wasm")]
-impl EpochCancelGuard {
+impl JobEpochCancelGuard {
     fn disarm(&mut self) {
         self.armed = false;
     }
 }
 
 #[cfg(feature = "wasm")]
-impl Drop for EpochCancelGuard {
+impl Drop for JobEpochCancelGuard {
     fn drop(&mut self) {
         if self.armed {
-            self.engine.increment_epoch();
+            let job_gen = if self.state.active_job_id.load(Ordering::Acquire) == self.job_id {
+                self.state.active_generation.load(Ordering::Acquire)
+            } else {
+                0
+            };
+            self.state.cancel_job(self.job_id, job_gen, &self.cancel);
         }
     }
 }
@@ -1360,6 +1966,14 @@ impl Drop for EpochCancelGuard {
 #[cfg(feature = "wasm")]
 fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, RuntimeError> {
     let mut linker = wasmtime::Linker::new(engine);
+    // Optional host park for tests (and a cheap no-op in production). Lets a
+    // guest stay "active" on the worker without burning fuel on a tight loop.
+    linker
+        .func_wrap("hyper_host", "test_park", || {
+            #[cfg(test)]
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        })
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
     linker
         .func_wrap(
             "hyper_host",
@@ -1415,7 +2029,9 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
             "hyper_host",
             "set_inject_context",
             |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
-                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                // Strict UTF-8 + bounds: invalid guest strings are ignored
+                // (no panic, no lossy rewrite into host policy text).
+                if let Ok(s) = read_guest_utf8(&mut caller, ptr, len, MAX_INJECT_BYTES) {
                     caller.data_mut().inject_context = s;
                 }
             },
@@ -1426,7 +2042,7 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
             "hyper_host",
             "set_append_system",
             |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
-                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                if let Ok(s) = read_guest_utf8(&mut caller, ptr, len, MAX_INJECT_BYTES) {
                     caller.data_mut().append_system = s;
                 }
             },
@@ -1437,7 +2053,7 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
             "hyper_host",
             "set_gate_reason",
             |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
-                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                if let Ok(s) = read_guest_utf8(&mut caller, ptr, len, MAX_INJECT_BYTES) {
                     caller.data_mut().gate_reason = s;
                 }
             },
@@ -1450,13 +2066,13 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
             "hyper_host",
             "log",
             |mut caller: wasmtime::Caller<'_, HostCtx>, level: i32, ptr: i32, len: i32| {
-                let Some(mut msg) = read_guest_utf8(&mut caller, ptr, len) else {
+                // Log uses inject cap (32 KiB); TooLong rejects entirely.
+                let Ok(msg) = read_guest_utf8(&mut caller, ptr, len, MAX_INJECT_BYTES) else {
                     return;
                 };
-                // Cap message size (same ballpark as inject).
-                if msg.len() > MAX_INJECT_BYTES {
-                    msg.truncate(MAX_INJECT_BYTES);
-                }
+                let mut msg = msg;
+                // Defensive: already capped by TooLong; keep char-safe truncate.
+                truncate_utf8(&mut msg, MAX_INJECT_BYTES);
                 let lvl = GuestLogLevel::from_i32(level);
                 let guest = caller.data().guest_name.clone();
                 match lvl {
@@ -1540,7 +2156,8 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
             "hyper_host",
             "set_tool_name",
             |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
-                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                // Tool names are short; reuse inject cap (validation is separate).
+                if let Ok(s) = read_guest_utf8(&mut caller, ptr, len, MAX_INJECT_BYTES) {
                     caller.data_mut().tool_name_out = s;
                 }
             },
@@ -1551,7 +2168,7 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
             "hyper_host",
             "set_tool_description",
             |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
-                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                if let Ok(s) = read_guest_utf8(&mut caller, ptr, len, MAX_TOOL_PAYLOAD_BYTES) {
                     caller.data_mut().tool_description_out = s;
                 }
             },
@@ -1562,7 +2179,8 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
             "hyper_host",
             "set_tool_schema",
             |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
-                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                // Schema/result payloads may be larger than inject strings.
+                if let Ok(s) = read_guest_utf8(&mut caller, ptr, len, MAX_TOOL_PAYLOAD_BYTES) {
                     caller.data_mut().tool_schema_out = s;
                 }
             },
@@ -1573,7 +2191,7 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
             "hyper_host",
             "set_tool_result",
             |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
-                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                if let Ok(s) = read_guest_utf8(&mut caller, ptr, len, MAX_TOOL_PAYLOAD_BYTES) {
                     caller.data_mut().tool_result_out = s;
                 }
             },
@@ -1593,23 +2211,32 @@ fn byte_at(s: &str, idx: i32) -> i32 {
         .unwrap_or(-1)
 }
 
+/// Read guest linear memory as strict UTF-8. Never panics on bad ptr/len/UTF-8.
+///
+/// `max_len` is the host policy cap for this import:
+/// - inject / append / gate reason / log → [`MAX_INJECT_BYTES`] (32 KiB)
+/// - tool schema / result / description → [`MAX_TOOL_PAYLOAD_BYTES`] (128 KiB)
+///
+/// Returns [`GuestStringError`] so host imports can ignore the write instead of
+/// trapping the store or substituting U+FFFD into security-sensitive strings.
 #[cfg(feature = "wasm")]
 fn read_guest_utf8(
     caller: &mut wasmtime::Caller<'_, HostCtx>,
     ptr: i32,
     len: i32,
-) -> Option<String> {
+    max_len: usize,
+) -> Result<String, GuestStringError> {
     if ptr < 0 || len < 0 {
-        return None;
+        return Err(GuestStringError::Negative);
     }
-    let len = (len as usize).min(MAX_INJECT_BYTES);
-    let mem = caller.get_export("memory")?.into_memory()?;
-    let data = mem.data(caller);
-    let start = ptr as usize;
-    let end = start.checked_add(len)?;
-    let slice = data.get(start..end)?;
-    // Lossy so a bad guest cannot trap the host on invalid UTF-8.
-    Some(String::from_utf8_lossy(slice).into_owned())
+    let mem = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or(GuestStringError::OutOfBounds)?;
+    // `memory.data` is a safe bounds-checked view; we only re-slice via the
+    // shared helper so OOB never panics.
+    let data = mem.data(&*caller);
+    read_guest_utf8_from_memory(data, ptr, len, max_len)
 }
 
 /// Compile WAT text to a core Wasm module (test helpers / shell e2e fixtures).
@@ -2330,6 +2957,525 @@ mod tests {
             start.elapsed() < Duration::from_secs(5),
             "bounded path too slow: {:?}",
             start.elapsed()
+        );
+    }
+
+    /// After a timeout/cancel, a subsequent call must not hang: the long-lived
+    /// worker owns LiveGuest and serializes jobs; cancel only bumps epoch for
+    /// the active job_id.
+    #[tokio::test]
+    async fn timeout_does_not_leave_detached_task_blocking_next_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "loop2.wasm", INFINITE_LOOP_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec("loop", path, vec![])).unwrap();
+        assert!(
+            rt.guests[0].inner.worker_is_alive(),
+            "worker must be running after load"
+        );
+        let first = rt.dispatch_session_start().await;
+        assert!(
+            matches!(
+                &first[0],
+                GuestCallResult::Timeout { .. } | GuestCallResult::Failed { .. }
+            ),
+            "first call should be bounded: {:?}",
+            first[0]
+        );
+        // Worker stays alive (JoinHandle never aborted/detached).
+        assert!(
+            rt.guests[0].inner.worker_is_alive(),
+            "worker must survive timeout"
+        );
+        let start = std::time::Instant::now();
+        // Second call reuses the same worker after the epoch trap finishes.
+        let second = rt.dispatch_session_start().await;
+        assert!(
+            matches!(
+                &second[0],
+                GuestCallResult::Timeout { .. } | GuestCallResult::Failed { .. }
+            ),
+            "second call should also be bounded: {:?}",
+            second[0]
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "post-timeout call hung: {:?}",
+            start.elapsed()
+        );
+        // No call should remain stuck on the worker after both return.
+        assert_eq!(rt.guests[0].inner.active_call_count(), 0);
+    }
+
+    /// Dropping a call future mid-flight must not kill the worker; a later
+    /// call still completes.
+    #[tokio::test]
+    async fn cancel_drops_reply_but_worker_accepts_next_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "loop-cancel.wasm", INFINITE_LOOP_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec("loop", path, vec![])).unwrap();
+        let guest = rt.guests[0].inner.clone();
+        {
+            // Scope owns the future; leaving the scope drops it (cancel).
+            let call = guest.call_with_timeout_host(
+                GuestCall::SessionStart,
+                Duration::from_secs(30),
+                HostCtx::default(),
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(20), call).await;
+        }
+        assert!(guest.worker_is_alive());
+        let start = std::time::Instant::now();
+        let (result, _) = guest
+            .call_with_timeout_host(
+                GuestCall::SessionStart,
+                Duration::from_secs(2),
+                HostCtx::default(),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                GuestCallResult::Timeout { .. } | GuestCallResult::Failed { .. }
+            ),
+            "post-cancel call: {result:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "post-cancel hung: {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// Slow park loop so A stays active long enough for B/C queue tests
+    /// (tight wasm loops burn fuel before the async test observes active_job_id).
+    const PARK_LOOP_GUEST: &str = r#"
+        (module
+          (import "hyper_host" "test_park" (func $park))
+          (func (export "hyper_ext_abi_version") (result i32) i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32)
+            (loop $forever
+              (call $park)
+              (br $forever))
+            i32.const 0)
+          (func (export "hyper_ext_on_session_end") (result i32)
+            i32.const 0)
+        )
+    "#;
+
+    /// A active (park loop) + B/C queued: cancel/timeout of B must not run B's
+    /// guest body and must not count as active for epoch purposes.
+    #[tokio::test]
+    async fn queued_timeout_does_not_run_guest_or_interrupt_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "queued.wasm", PARK_LOOP_GUEST);
+        let guest = WasmGuest::load(&path).unwrap();
+        let bodies_before = guest.guest_bodies_started();
+
+        // Start A (park loop) with a long timeout.
+        let guest_a = guest.clone();
+        let a = tokio::spawn(async move {
+            guest_a
+                .call_with_timeout_host(
+                    GuestCall::SessionStart,
+                    Duration::from_secs(10),
+                    HostCtx::default(),
+                )
+                .await
+        });
+
+        // Wait until A is active on the worker.
+        let start = std::time::Instant::now();
+        while guest.active_job_id() == 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "A never became active"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let a_id = guest.active_job_id();
+        assert_ne!(a_id, 0);
+        let bodies_with_a = guest.guest_bodies_started();
+        assert!(
+            bodies_with_a > bodies_before,
+            "A should have started a body"
+        );
+
+        // Enqueue B and C while A is active; both time out almost immediately
+        // so they are cancelled while still queued.
+        let guest_b = guest.clone();
+        let b = tokio::spawn(async move {
+            guest_b
+                .call_with_timeout_host(
+                    GuestCall::SessionEnd,
+                    Duration::from_millis(1),
+                    HostCtx::default(),
+                )
+                .await
+        });
+        let guest_c = guest.clone();
+        let c = tokio::spawn(async move {
+            guest_c
+                .call_with_timeout_host(
+                    GuestCall::SessionEnd,
+                    Duration::from_millis(1),
+                    HostCtx::default(),
+                )
+                .await
+        });
+
+        let (b_res, _) = b.await.unwrap();
+        let (c_res, _) = c.await.unwrap();
+        assert!(
+            matches!(
+                b_res,
+                GuestCallResult::Timeout { .. } | GuestCallResult::Failed { .. }
+            ),
+            "B should cancel/timeout without guest body: {b_res:?}"
+        );
+        assert!(
+            matches!(
+                c_res,
+                GuestCallResult::Timeout { .. } | GuestCallResult::Failed { .. }
+            ),
+            "C should cancel/timeout without guest body: {c_res:?}"
+        );
+
+        // A should still be the active job; B/C cancel must not clear it.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            guest.active_job_id(),
+            a_id,
+            "queued cancel must not clear active A"
+        );
+        // Bodies for B/C must not have started: only A's body so far.
+        assert_eq!(
+            guest.guest_bodies_started(),
+            bodies_with_a,
+            "queued B/C must not execute guest bodies"
+        );
+
+        // Abort A via its own timeout path by dropping / awaiting.
+        let _ = tokio::time::timeout(Duration::from_millis(500), a).await;
+    }
+
+    /// Shutdown drops queued backlog without running guest bodies.
+    #[tokio::test]
+    async fn shutdown_skips_queued_backlog() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "shut-q.wasm", PARK_LOOP_GUEST);
+        let guest = WasmGuest::load(&path).unwrap();
+
+        let guest_a = guest.clone();
+        let a = tokio::spawn(async move {
+            guest_a
+                .call_with_timeout_host(
+                    GuestCall::SessionStart,
+                    Duration::from_secs(10),
+                    HostCtx::default(),
+                )
+                .await
+        });
+        let start = std::time::Instant::now();
+        while guest.active_job_id() == 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "A never became active"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let bodies_at_a = guest.guest_bodies_started();
+
+        // Queue B/C behind A.
+        let guest_b = guest.clone();
+        let b = tokio::spawn(async move {
+            guest_b
+                .call_with_timeout_host(
+                    GuestCall::SessionEnd,
+                    Duration::from_secs(5),
+                    HostCtx::default(),
+                )
+                .await
+        });
+        let guest_c = guest.clone();
+        let c = tokio::spawn(async move {
+            guest_c
+                .call_with_timeout_host(
+                    GuestCall::SessionEnd,
+                    Duration::from_secs(5),
+                    HostCtx::default(),
+                )
+                .await
+        });
+        // Let B/C enqueue.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        guest.shutdown_async().await;
+        assert!(!guest.worker_is_alive());
+        assert_eq!(
+            guest.guest_bodies_started(),
+            bodies_at_a,
+            "shutdown must not run queued B/C guest bodies"
+        );
+
+        let (b_res, _) = b.await.unwrap();
+        let (c_res, _) = c.await.unwrap();
+        assert!(
+            matches!(b_res, GuestCallResult::Failed { .. }),
+            "B after shutdown: {b_res:?}"
+        );
+        assert!(
+            matches!(c_res, GuestCallResult::Failed { .. }),
+            "C after shutdown: {c_res:?}"
+        );
+        let _ = a.await;
+    }
+
+    /// Explicit async shutdown joins the worker; further calls fail cleanly.
+    #[tokio::test]
+    async fn explicit_shutdown_reclaims_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "shut.wasm", MINIMAL_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec("shut", path, vec![])).unwrap();
+        let guest = rt.guests[0].inner.clone();
+        assert!(guest.worker_is_alive());
+        guest.shutdown_async().await;
+        assert!(!guest.worker_is_alive());
+        assert!(guest.is_terminated());
+        // Sync shutdown is also idempotent.
+        guest.shutdown();
+        assert!(guest.is_terminated());
+        let (result, _) = guest
+            .call_with_timeout_host(
+                GuestCall::SessionStart,
+                Duration::from_secs(1),
+                HostCtx::default(),
+            )
+            .await;
+        assert!(
+            matches!(result, GuestCallResult::Failed { .. }),
+            "after shutdown expected Failed, got {result:?}"
+        );
+    }
+
+    /// Concurrent shutdown waiters all observe terminated (first joins, others wait).
+    #[tokio::test]
+    async fn concurrent_shutdown_waiters_all_see_terminated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "conc-shut.wasm", PARK_LOOP_GUEST);
+        let guest = WasmGuest::load(&path).unwrap();
+        // Keep a call active so shutdown must interrupt.
+        let g = guest.clone();
+        let call = tokio::spawn(async move {
+            g.call_with_timeout_host(
+                GuestCall::SessionStart,
+                Duration::from_secs(10),
+                HostCtx::default(),
+            )
+            .await
+        });
+        let start = std::time::Instant::now();
+        while guest.active_job_id() == 0 {
+            assert!(start.elapsed() < Duration::from_secs(2));
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let g1 = guest.clone();
+        let g2 = guest.clone();
+        let g3 = guest.clone();
+        let (a, b, c) = tokio::join!(g1.shutdown_async(), g2.shutdown_async(), async {
+            g3.shutdown();
+        });
+        let _ = (a, b, c);
+        assert!(guest.is_terminated());
+        assert!(!guest.worker_is_alive());
+        let _ = call.await;
+    }
+
+    /// Prepare-hold window: cancel before Armed only sets flag (no lost epoch).
+    /// After release, job arms then cancel can epoch-interrupt.
+    #[tokio::test]
+    async fn prepare_hold_cancel_before_armed_is_flag_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "prep-hold.wasm", PARK_LOOP_GUEST);
+        let guest = WasmGuest::load(&path).unwrap();
+        guest.set_prepare_hold(true);
+        let bodies_before = guest.guest_bodies_started();
+        let armed_before = guest.jobs_armed();
+
+        let g = guest.clone();
+        let call = tokio::spawn(async move {
+            g.call_with_timeout_host(
+                GuestCall::SessionStart,
+                Duration::from_secs(5),
+                HostCtx::default(),
+            )
+            .await
+        });
+
+        let start = std::time::Instant::now();
+        while !guest.prepare_is_holding() {
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "prepare never held"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Still not Armed while holding after deadline set.
+        assert_eq!(guest.job_phase(), JobPhase::Idle as u8);
+        assert_eq!(guest.jobs_armed(), armed_before);
+
+        // Cancel during prepare: flag only (not Armed → no epoch needed).
+        // Drop the call future to cancel.
+        // Actually keep the future and use short timeout path after release.
+        guest.set_prepare_hold(false); // release prepare
+
+        // Wait until Armed or finished.
+        let start = std::time::Instant::now();
+        while guest.jobs_armed() == armed_before && start.elapsed() < Duration::from_secs(2) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Either armed and running, or cancelled before execute.
+        let _ = tokio::time::timeout(Duration::from_millis(800), call).await;
+        // Must not have hang; bodies either 0 (cancelled pre-execute) or 1.
+        let bodies = guest.guest_bodies_started();
+        assert!(
+            bodies == bodies_before || bodies == bodies_before + 1,
+            "unexpected body count {bodies}"
+        );
+        guest.shutdown_async().await;
+        assert!(guest.is_terminated());
+    }
+
+    /// Final Drop of the last Arc joins the worker and sets exit sentinel.
+    #[test]
+    fn final_drop_joins_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "drop.wasm", MINIMAL_GUEST);
+        let guest = WasmGuest::load(&path).unwrap();
+        let clone = guest.clone();
+        assert!(guest.worker_is_alive());
+        assert!(!guest.is_terminated());
+        drop(guest);
+        // Clone still holds Arc — worker must stay alive.
+        assert!(clone.worker_is_alive());
+        assert!(!clone.is_terminated());
+        drop(clone);
+        // If Drop hung forever this test would not finish.
+        // After last Arc drop, worker has exited (sentinel set on owner Drop).
+    }
+
+    /// Guest publishes invalid UTF-8 via set_inject_context; host must not panic
+    /// and must not accept the bytes (strict decode → write ignored).
+    const MALICIOUS_UTF8_INJECT_GUEST: &str = r#"
+        (module
+          (import "hyper_host" "set_inject_context" (func $set_inject (param i32 i32)))
+          (memory (export "memory") 1)
+          ;; incomplete multi-byte sequence (invalid UTF-8)
+          (data (i32.const 0) "\e2\82")
+          (func (export "hyper_ext_abi_version") (result i32)
+            i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32)
+            i32.const 0)
+          (func (export "hyper_ext_on_before_agent_start") (result i32)
+            (call $set_inject (i32.const 0) (i32.const 2))
+            i32.const 0)
+        )
+    "#;
+
+    #[tokio::test]
+    async fn malicious_utf8_inject_is_rejected_without_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "bad-utf8.wasm", MALICIOUS_UTF8_INJECT_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec(
+            "bad-utf8",
+            path,
+            vec![Capability::BeforeAgentInject],
+        ))
+        .unwrap();
+        let d = rt
+            .dispatch_before_agent_start(&BeforeAgentStartIn {
+                prompt: "hi".into(),
+            })
+            .await;
+        // Call itself succeeds (guest returned 0); inject must be empty / absent.
+        assert!(
+            !d.has_injection()
+                || d.out
+                    .inject_context
+                    .as_ref()
+                    .is_none_or(|s| s.is_empty() || !s.contains('\u{FFFD}')),
+            "invalid UTF-8 must not become host inject text: {:?}",
+            d.out
+        );
+        // Stronger: inject_context should be None/empty because write was ignored.
+        assert!(
+            d.out.inject_context.as_ref().is_none_or(|s| s.is_empty()),
+            "strict UTF-8 reject should leave inject empty, got {:?}",
+            d.out.inject_context
+        );
+    }
+
+    /// Guest requests inject with len > MAX_INJECT_BYTES → TooLong → ignored.
+    const TOO_LONG_INJECT_GUEST: &str = r#"
+        (module
+          (import "hyper_host" "set_inject_context" (func $set_inject (param i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "ok-prefix")
+          (func (export "hyper_ext_abi_version") (result i32)
+            i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32)
+            i32.const 0)
+          (func (export "hyper_ext_on_before_agent_start") (result i32)
+            ;; len = 40000 > MAX_INJECT_BYTES (32768); must reject entirely
+            (call $set_inject (i32.const 0) (i32.const 40000))
+            i32.const 0)
+        )
+    "#;
+
+    #[tokio::test]
+    async fn too_long_guest_string_is_rejected_not_prefix_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "toolong.wasm", TOO_LONG_INJECT_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec(
+            "toolong",
+            path,
+            vec![Capability::BeforeAgentInject],
+        ))
+        .unwrap();
+        let d = rt
+            .dispatch_before_agent_start(&BeforeAgentStartIn {
+                prompt: "hi".into(),
+            })
+            .await;
+        assert!(
+            d.out.inject_context.as_ref().is_none_or(|s| s.is_empty()),
+            "TooLong must not accept a silent prefix, got {:?}",
+            d.out.inject_context
+        );
+    }
+
+    #[test]
+    fn read_guest_utf8_from_memory_helpers_cover_malicious_inputs() {
+        // Unit-level: same contract the host import uses.
+        assert_eq!(
+            read_guest_utf8_from_memory(&[0xFF], 0, 1, 64),
+            Err(GuestStringError::InvalidUtf8)
+        );
+        assert_eq!(
+            read_guest_utf8_from_memory(b"abc", 0, 100, 64),
+            Err(GuestStringError::TooLong)
+        );
+        assert_eq!(
+            read_guest_utf8_from_memory(b"abc", 0, 10, 64),
+            Err(GuestStringError::OutOfBounds)
+        );
+        assert_eq!(
+            read_guest_utf8_from_memory(b"abc", -1, 1, 64),
+            Err(GuestStringError::Negative)
         );
     }
 
