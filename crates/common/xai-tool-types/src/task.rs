@@ -142,6 +142,122 @@ pub fn sanitize_optional_arg(value: Option<String>) -> Option<String> {
     })
 }
 
+/// Maximum length for a single path-segment identifier used as a directory or
+/// object-key component (task / subagent / agent names).
+pub const MAX_SAFE_PATH_SEGMENT_LEN: usize = 128;
+
+/// Windows device / reserved basenames (case-insensitive) that must never be
+/// used as a sole path segment on NTFS.
+fn is_windows_reserved_basename(base: &str) -> bool {
+    matches!(
+        base.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+/// Core path-segment safety shared by agent names and task IDs.
+///
+/// Fail-closed:
+/// - non-empty, length ≤ [`MAX_SAFE_PATH_SEGMENT_LEN`]
+/// - not the whole segment `.` or `..`
+/// - no `/`, `\`, NUL, control chars, or Windows ADS `:`
+/// - no leading/trailing ASCII whitespace or trailing `.` (Windows)
+/// - not a Windows reserved device basename (optionally with extension)
+///
+/// `allow_internal_dot`: when true, internal `.` is allowed (`task.v1`);
+/// when false, only `[A-Za-z0-9_-]` (agent / session segments).
+fn is_safe_segment_inner(s: &str, allow_internal_dot: bool) -> bool {
+    if s.is_empty() || s.len() > MAX_SAFE_PATH_SEGMENT_LEN {
+        return false;
+    }
+    // Explicit IDs must not be silently trimmed — surrounding whitespace is
+    // invalid, not normalized away.
+    if s != s.trim() {
+        return false;
+    }
+    if s == "." || s == ".." {
+        return false;
+    }
+    // Trailing dot/space are stripped or reserved on Windows; reject them.
+    if s.ends_with('.') || s.ends_with(' ') {
+        return false;
+    }
+    if s.contains('/') || s.contains('\\') || s.contains('\0') || s.contains(':') {
+        return false;
+    }
+    if s.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    let basename = s.split('.').next().unwrap_or(s);
+    if is_windows_reserved_basename(basename) {
+        return false;
+    }
+    s.chars().all(|c| {
+        c.is_ascii_alphanumeric() || c == '_' || c == '-' || (allow_internal_dot && c == '.')
+    })
+}
+
+/// Whether `s` is safe to use as a single path segment for agent names /
+/// session directory components (no internal dots).
+#[inline]
+pub fn is_safe_path_segment(s: &str) -> bool {
+    is_safe_segment_inner(s, false)
+}
+
+/// Whether `s` is a safe subagent / task id for path joins (worktree dirs,
+/// session meta dirs, resume handles, background output files).
+///
+/// Same traversal / separator rules as [`is_safe_path_segment`], but allows
+/// historical internal single dots such as `task.v1`. Does **not** trim:
+/// leading/trailing whitespace makes the id invalid.
+#[inline]
+pub fn is_safe_task_id(s: &str) -> bool {
+    is_safe_segment_inner(s, true)
+}
+
+/// Validate an optional explicit task / subagent id.
+///
+/// - `None` → `None` (caller generates a UUID)
+/// - sentinel placeholders → `None`
+/// - surrounding whitespace is **not** stripped (fail-closed)
+/// - must pass [`is_safe_task_id`]
+pub fn sanitize_task_id(value: Option<String>) -> Option<String> {
+    value.and_then(|s| {
+        // Sentinels only when the whole value (after optional surrounding
+        // spaces) is a known placeholder — but we still refuse to return a
+        // trimmed form of a non-sentinel id.
+        if !is_not_sentinel(&s) {
+            return None;
+        }
+        // No silent trim of explicit ids.
+        if s != s.trim() {
+            return None;
+        }
+        is_safe_task_id(&s).then_some(s)
+    })
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1402,6 +1518,73 @@ mod tests {
         )
         .unwrap();
         assert!(!foreground.run_in_background);
+    }
+
+    #[test]
+    fn is_safe_task_id_accepts_uuid_v7_legacy_slugs_and_internal_dots() {
+        for good in [
+            "019e0000-0000-7000-8000-0000000000bb",
+            "task-123",
+            "abc-123",
+            "prev-id",
+            "a",
+            "A_b-9",
+            "task.v1",
+            "foo.bar.baz",
+        ] {
+            assert!(is_safe_task_id(good), "{good:?} should be accepted");
+        }
+        // Agent path segments still reject internal dots.
+        assert!(!is_safe_path_segment("task.v1"));
+        assert!(is_safe_path_segment("task-v1"));
+    }
+
+    #[test]
+    fn is_safe_task_id_rejects_path_traversal_and_separators() {
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../etc",
+            "..\\windows",
+            "a/b",
+            "a\\b",
+            "a/../b",
+            "has space",
+            "  leading",
+            "trailing  ",
+            "null\0byte",
+            "ads:stream",
+            "CON",
+            "con.txt",
+            "nul",
+            "ends.",
+            "ctrl\x01char",
+            &"x".repeat(MAX_SAFE_PATH_SEGMENT_LEN + 1),
+        ] {
+            assert!(!is_safe_task_id(bad), "{bad:?} should be rejected");
+        }
+        // Internal ".." as a multi-dot sequence is still only rejected when
+        // it forms path separators; "foo..bar" has no separator and is a
+        // single segment — allowed for task ids (historical).
+        assert!(is_safe_task_id("foo..bar"));
+    }
+
+    #[test]
+    fn sanitize_task_id_drops_sentinels_and_unsafe_without_silent_trim() {
+        assert_eq!(sanitize_task_id(None), None);
+        assert_eq!(sanitize_task_id(Some("null".into())), None);
+        assert_eq!(sanitize_task_id(Some("../escape".into())), None);
+        // Explicit ids with surrounding whitespace are rejected, not trimmed.
+        assert_eq!(sanitize_task_id(Some("  task-ok  ".into())), None);
+        assert_eq!(
+            sanitize_task_id(Some("task-ok".into())),
+            Some("task-ok".into())
+        );
+        assert_eq!(
+            sanitize_task_id(Some("task.v1".into())),
+            Some("task.v1".into())
+        );
     }
 
     #[test]

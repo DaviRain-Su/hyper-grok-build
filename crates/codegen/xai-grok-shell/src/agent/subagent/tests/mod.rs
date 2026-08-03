@@ -270,22 +270,532 @@ fn subagent_max_turns_definition_wins_else_inherits_parent() {
 #[test]
 fn resume_worktree_action_covers_three_outcomes() {
     use super::{ResumeWorktreeAction, resume_worktree_action};
+    // Existing dir wins even when a snapshot is present.
     assert_eq!(
-            resume_worktree_action(true, Some("refs/grok/subagents/x")),
-            ResumeWorktreeAction::Rehydrate
-        );
+        resume_worktree_action(true, Some("refs/grok/subagents/x")),
+        ResumeWorktreeAction::Reuse
+    );
     assert_eq!(
-            resume_worktree_action(false, Some("refs/grok/subagents/x")),
-            ResumeWorktreeAction::Rehydrate
-        );
+        resume_worktree_action(false, Some("refs/grok/subagents/x")),
+        ResumeWorktreeAction::Rehydrate
+    );
     assert_eq!(
-            resume_worktree_action(true, None),
-            ResumeWorktreeAction::Reuse
-        );
+        resume_worktree_action(true, None),
+        ResumeWorktreeAction::Reuse
+    );
     assert_eq!(
-            resume_worktree_action(false, None),
-            ResumeWorktreeAction::Shared
+        resume_worktree_action(false, None),
+        ResumeWorktreeAction::Shared
+    );
+}
+
+#[test]
+fn validate_subagent_worktree_rejects_symlink_to_parent_cwd() {
+    use super::validate_subagent_worktree_path;
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = tmp.path().join("parent-cwd");
+    let managed_base = tmp.path().join("managed-worktrees");
+    std::fs::create_dir_all(&parent).unwrap();
+    std::fs::create_dir_all(&managed_base).unwrap();
+    std::fs::write(parent.join("secret.txt"), "parent data").unwrap();
+
+    let link = managed_base.join("subagent-evil");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&parent, &link).unwrap();
+    #[cfg(not(unix))]
+    {
+        if std::os::windows::fs::symlink_dir(&parent, &link).is_err() {
+            return;
+        }
+    }
+
+    let err = validate_subagent_worktree_path(&link, &parent, &parent, Some("evil")).unwrap_err();
+    assert!(
+        err.contains("symbolic link") || err.contains("symlink"),
+        "expected symlink rejection, got: {err}"
+    );
+}
+
+#[test]
+fn validate_subagent_worktree_rejects_path_outside_managed_base() {
+    use super::validate_subagent_worktree_path;
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = tmp.path().join("parent");
+    let external = tmp.path().join("subagent-x");
+    std::fs::create_dir_all(&parent).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+
+    let err =
+        validate_subagent_worktree_path(&external, &parent, &parent, Some("x")).unwrap_err();
+    assert!(
+        err.contains("outside managed")
+            || err.contains("parent session cwd")
+            || err.contains("isolation")
+            || err.contains("basename"),
+        "expected managed-base / parent rejection, got: {err}"
+    );
+}
+
+/// Global lock for tests that mutate process environment (XDG_RUNTIME_DIR).
+fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Prepare the current process's managed temp worktree base as owner-only
+/// (Unix 0700). Caller must hold [`env_test_lock`] for the whole setup+validate
+/// window so `XDG_RUNTIME_DIR` cannot change between base selection and
+/// `validate_subagent_worktree_path` (which re-resolves the same helper).
+fn prepare_secure_temp_base() -> std::path::PathBuf {
+    use super::subagent_temp_worktree_base;
+    let base = subagent_temp_worktree_base();
+    std::fs::create_dir_all(&base).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if let Err(e) = super::validate_unix_parent_chain(&base) {
+            panic!(
+                "prepare_secure_temp_base parent chain unsafe for {}: {e}",
+                base.display()
+            );
+        }
+        if let Err(e) = super::ensure_real_dir(&base) {
+            panic!(
+                "prepare_secure_temp_base leaf unsafe for {}: {e}",
+                base.display()
+            );
+        }
+    }
+    base
+}
+
+#[test]
+fn subagent_temp_worktree_base_is_per_uid_namespaced() {
+    use super::subagent_temp_worktree_base;
+    let base = subagent_temp_worktree_base();
+    let name = base.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    // Per-UID temp/XDG leaf, or home `subagent-worktrees` fallback.
+    assert!(
+        name.starts_with("grok-subagent-worktrees-") || name == "subagent-worktrees",
+        "temp base must be per-UID/user namespaced or home fallback, got {name}"
+    );
+    assert_ne!(
+        name, "grok-subagent-worktrees",
+        "must not use shared fixed name under /tmp"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_mode_is_owner_only_pure() {
+    use super::unix_mode_is_owner_only;
+    assert!(unix_mode_is_owner_only(0o700));
+    assert!(unix_mode_is_owner_only(0o600));
+    assert!(unix_mode_is_owner_only(0o100_700)); // with file-type bits
+    assert!(!unix_mode_is_owner_only(0o755));
+    assert!(!unix_mode_is_owner_only(0o777));
+    assert!(!unix_mode_is_owner_only(0o750));
+    assert!(!unix_mode_is_owner_only(0o704));
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_parent_component_policy_pure() {
+    use super::{
+        unix_mode_has_sticky, unix_mode_no_group_world_write, unix_parent_component_is_safe,
+        unix_xdg_runtime_dir_mode_ok,
+    };
+    let euid = 1000u32;
+    // Self-owned 0755 (no g/w write) ok.
+    assert!(unix_parent_component_is_safe(euid, 0o755, euid));
+    assert!(unix_mode_no_group_world_write(0o755));
+    // Self-owned 0775 not ok.
+    assert!(!unix_parent_component_is_safe(euid, 0o775, euid));
+    assert!(!unix_mode_no_group_world_write(0o775));
+    // Root-owned sticky /tmp (1777) ok.
+    assert!(unix_mode_has_sticky(0o1777));
+    assert!(unix_parent_component_is_safe(0, 0o1777, euid));
+    // Root-owned 0777 without sticky not ok.
+    assert!(!unix_parent_component_is_safe(0, 0o777, euid));
+    // Other user not ok.
+    assert!(!unix_parent_component_is_safe(1001, 0o755, euid));
+    // XDG: 0700 ok, 0755 ok, 0777 not.
+    assert!(unix_xdg_runtime_dir_mode_ok(0o700));
+    assert!(unix_xdg_runtime_dir_mode_ok(0o755));
+    assert!(!unix_xdg_runtime_dir_mode_ok(0o777));
+}
+
+/// RAII env var restore for tests.
+struct EnvGuard {
+    key: &'static str,
+    prev: Option<String>,
+}
+impl EnvGuard {
+    fn set(key: &'static str, val: &str) -> Self {
+        let prev = std::env::var(key).ok();
+        // SAFETY: single-threaded libtest default; tests that touch env should
+        // not run in parallel with others that depend on the same key.
+        unsafe { std::env::set_var(key, val) };
+        Self { key, prev }
+    }
+}
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => unsafe { std::env::set_var(self.key, v) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn xdg_runtime_dir_0777_is_not_used() {
+    use super::subagent_temp_worktree_base;
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = env_test_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_xdg = tmp.path().join("xdg-insecure");
+    std::fs::create_dir_all(&fake_xdg).unwrap();
+    std::fs::set_permissions(&fake_xdg, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let _guard = EnvGuard::set("XDG_RUNTIME_DIR", fake_xdg.to_str().unwrap());
+    let base = subagent_temp_worktree_base();
+    assert!(
+        !base.starts_with(&fake_xdg),
+        "insecure XDG_RUNTIME_DIR must not be used: {}",
+        base.display()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn xdg_runtime_dir_0700_is_used() {
+    use super::subagent_temp_worktree_base;
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = env_test_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    // Put fake XDG under /tmp-style tree (parent chain: sticky /tmp ok).
+    // tempfile is under /tmp so parents are root sticky or euid.
+    let fake_xdg = tmp.path().join("xdg-secure");
+    std::fs::create_dir_all(&fake_xdg).unwrap();
+    std::fs::set_permissions(&fake_xdg, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Also ensure the tempfile root itself is not group-writable if needed.
+    if let Some(p) = fake_xdg.parent() {
+        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700));
+    }
+    let _guard = EnvGuard::set("XDG_RUNTIME_DIR", fake_xdg.to_str().unwrap());
+    let base = subagent_temp_worktree_base();
+    assert!(
+        base.starts_with(&fake_xdg),
+        "secure XDG_RUNTIME_DIR must be used: got {}, expected under {}",
+        base.display(),
+        fake_xdg.display()
+    );
+    let uid = unsafe { libc::geteuid() };
+    assert!(
+        base.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains(&uid.to_string())),
+        "leaf should include uid"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn home_parent_0755_accepts_leaf_under_private_base() {
+    use super::{unix_parent_component_is_safe, validate_subagent_worktree_path};
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = env_test_lock();
+    let euid = unsafe { libc::geteuid() };
+    assert!(unix_parent_component_is_safe(euid, 0o755, euid));
+
+    let parent = tempfile::tempdir().unwrap();
+    let base = prepare_secure_temp_base();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let id = "home-0755";
+    let dest = base.join(format!("subagent-{id}"));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let result = validate_subagent_worktree_path(&dest, parent.path(), parent.path(), Some(id));
+    let _ = std::fs::remove_dir_all(&dest);
+    assert!(
+        result.is_ok(),
+        "0755 parents + 0700 leaf should work: {result:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn parent_chain_rejects_group_writable_component() {
+    use super::validate_unix_parent_chain;
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let mid = tmp.path().join("gwrite");
+    std::fs::create_dir_all(&mid).unwrap();
+    std::fs::set_permissions(&mid, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let leaf = mid.join("child");
+    let err = validate_unix_parent_chain(&leaf).unwrap_err();
+    let _ = std::fs::set_permissions(&mid, std::fs::Permissions::from_mode(0o755));
+    assert!(
+        err.contains("not a safe parent") || err.contains("group/world") || err.contains("mode"),
+        "0775 parent must be rejected: {err}"
+    );
+}
+
+#[test]
+fn validate_subagent_worktree_accepts_dir_under_temp_fallback() {
+    use super::validate_subagent_worktree_path;
+    let _lock = env_test_lock();
+    let parent = tempfile::tempdir().unwrap();
+    let id = "test-wt-accept";
+    let base = prepare_secure_temp_base();
+    let dest = base.join(format!("subagent-{id}"));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let result = validate_subagent_worktree_path(&dest, parent.path(), parent.path(), Some(id));
+    let _ = std::fs::remove_dir_all(&dest);
+    assert!(
+        result.is_ok(),
+        "secure per-UID temp fallback worktree should be accepted: {result:?}"
+    );
+    if let Ok(identity) = result {
+        assert_eq!(
+            identity.path.file_name().and_then(|n| n.to_str()),
+            Some(format!("subagent-{id}").as_str())
         );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_subagent_worktree_rejects_world_writable_base() {
+    use super::validate_subagent_worktree_path;
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = env_test_lock();
+    let parent = tempfile::tempdir().unwrap();
+    let id = "world-base";
+    let managed = prepare_secure_temp_base();
+    // Temporarily make managed 0777.
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let dest2 = managed.join(format!("subagent-{id}"));
+    let _ = std::fs::remove_dir_all(&dest2);
+    std::fs::create_dir_all(&dest2).unwrap();
+    let err =
+        validate_subagent_worktree_path(&dest2, parent.path(), parent.path(), Some(id)).unwrap_err();
+    // Restore secure perms for other tests.
+    let _ = std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700));
+    let _ = std::fs::remove_dir_all(&dest2);
+    assert!(
+        err.contains("group/world") || err.contains("0700") || err.contains("mode"),
+        "0777 managed base must be rejected: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_subagent_worktree_accepts_owner_only_0700_base() {
+    use super::validate_subagent_worktree_path;
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = env_test_lock();
+    let parent = tempfile::tempdir().unwrap();
+    let id = "safe-0700";
+    let managed = prepare_secure_temp_base();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let dest = managed.join(format!("subagent-{id}"));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let result = validate_subagent_worktree_path(&dest, parent.path(), parent.path(), Some(id));
+    let _ = std::fs::remove_dir_all(&dest);
+    assert!(
+        result.is_ok(),
+        "0700 owner-only base must be accepted: {result:?}"
+    );
+}
+
+#[test]
+fn validate_subagent_worktree_rejects_wrong_agent_basename() {
+    // Agent A metadata must not point at agent B's directory.
+    use super::validate_subagent_worktree_path;
+    let _lock = env_test_lock();
+    let parent = tempfile::tempdir().unwrap();
+    let id_a = "agent-a";
+    let id_b = "agent-b";
+    let base = prepare_secure_temp_base();
+    let dest = base.join(format!("subagent-{id_b}"));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let err =
+        validate_subagent_worktree_path(&dest, parent.path(), parent.path(), Some(id_a)).unwrap_err();
+    let _ = std::fs::remove_dir_all(&dest);
+    assert!(
+        err.contains("must be exactly") || err.contains("basename"),
+        "expected basename identity rejection, got: {err}"
+    );
+}
+
+#[test]
+fn validate_subagent_worktree_rejects_unprefixed_legacy_name() {
+    use super::validate_subagent_worktree_path;
+    let _lock = env_test_lock();
+    let parent = tempfile::tempdir().unwrap();
+    let id = "legacy-id";
+    // Unprefixed directory (legacy style) under temp base — must fail.
+    let base = prepare_secure_temp_base();
+    let dest = base.join(id);
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let err =
+        validate_subagent_worktree_path(&dest, parent.path(), parent.path(), Some(id)).unwrap_err();
+    let _ = std::fs::remove_dir_all(&dest);
+    assert!(
+        err.contains("must be exactly") || err.contains("subagent-"),
+        "unprefixed legacy name must be rejected: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_subagent_worktree_rejects_ancestor_symlink() {
+    use super::validate_subagent_worktree_path;
+    let _lock = env_test_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = tmp.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+
+    // Real leaf under a temporary real dir, then symlink the parent of dest
+    // into the managed temp base path.
+    let real_leaf_root = tmp.path().join("real-root");
+    let real_leaf = real_leaf_root.join("subagent-anc");
+    std::fs::create_dir_all(&real_leaf).unwrap();
+
+    let managed = prepare_secure_temp_base();
+    let link_name = managed.join("symlink-mid");
+    let _ = std::fs::remove_file(&link_name);
+    let _ = std::fs::remove_dir_all(&link_name);
+    std::os::unix::fs::symlink(&real_leaf_root, &link_name).unwrap();
+    let dest = link_name.join("subagent-anc");
+
+    let err =
+        validate_subagent_worktree_path(&dest, &parent, &parent, Some("anc")).unwrap_err();
+    let _ = std::fs::remove_file(&link_name);
+    assert!(
+        err.contains("symbolic link") || err.contains("symlink"),
+        "ancestor/mid-path symlink must be rejected: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_subagent_worktree_rejects_dangling_base_symlink() {
+    use super::validate_subagent_worktree_path;
+    // Path component under managed base is a dangling symlink.
+    let _lock = env_test_lock();
+    let parent = tempfile::tempdir().unwrap();
+    let managed = prepare_secure_temp_base();
+    let dangling = managed.join("dangling-link");
+    let _ = std::fs::remove_file(&dangling);
+    let _ = std::fs::remove_dir_all(&dangling);
+    std::os::unix::fs::symlink("/nonexistent/grok-wt-target-xyz", &dangling).unwrap();
+    let dest = dangling.join("subagent-dangle");
+    let err =
+        validate_subagent_worktree_path(&dest, parent.path(), parent.path(), Some("dangle"))
+            .unwrap_err();
+    let _ = std::fs::remove_file(&dangling);
+    assert!(
+        err.contains("not accessible")
+            || err.contains("symbolic link")
+            || err.contains("symlink")
+            || err.contains("cannot lstat"),
+        "dangling base/component must fail closed: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_subagent_worktree_inode_recheck_detects_replacement() {
+    use super::validate_subagent_worktree_path;
+    let _lock = env_test_lock();
+    let parent = tempfile::tempdir().unwrap();
+    let id = "inode-swap";
+    let base = prepare_secure_temp_base();
+    let dest = base.join(format!("subagent-{id}"));
+    let alt = base.join(format!("subagent-{id}-alt"));
+    let aside = base.join(format!("subagent-{id}-aside"));
+    let _ = std::fs::remove_dir_all(&dest);
+    let _ = std::fs::remove_dir_all(&alt);
+    let _ = std::fs::remove_dir_all(&aside);
+    std::fs::create_dir_all(&dest).unwrap();
+    let identity =
+        validate_subagent_worktree_path(&dest, parent.path(), parent.path(), Some(id)).unwrap();
+
+    // Atomic-ish replacement: create a distinct directory then rename it into
+    // place. remove+create can reuse the same inode on some filesystems.
+    std::fs::create_dir_all(&alt).unwrap();
+    std::fs::rename(&dest, &aside).unwrap();
+    std::fs::rename(&alt, &dest).unwrap();
+
+    let err = identity.matches_path(&dest).unwrap_err();
+    assert!(
+        err.contains("inode replaced") || err.contains("identity") || err.contains("changed"),
+        "inode swap must be detected: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dest);
+    let _ = std::fs::remove_dir_all(&aside);
+}
+
+#[test]
+fn memory_injection_readonly_strips_write_tools_from_definition() {
+    use super::apply_memory_tools_to_definition;
+    use xai_grok_agent::config::AgentDefinition;
+    use xai_grok_tools::registry::types::ToolConfig;
+    use xai_tool_types::SubagentCapabilityMode;
+
+    // Start with a definition that already smuggled write tools (from_id).
+    let mut def = AgentDefinition::builtin_defaults("explore", "test");
+    def.tool_config = xai_grok_tools::registry::types::ToolServerConfig {
+        tools: vec![
+            ToolConfig::from_id("write"),
+            ToolConfig::from_id("search_replace"),
+            ToolConfig::from_id("GrokBuild:read_file"),
+        ],
+        behavior_preset: None,
+    };
+    def.memory = Some(xai_grok_agent::config::MemoryScope::User);
+
+    apply_memory_tools_to_definition(&mut def, Some(SubagentCapabilityMode::ReadOnly), false);
+
+    let ids: Vec<&str> = def.tool_config.tools.iter().map(|t| t.id.as_str()).collect();
+    assert!(
+        !ids.iter().any(|id| {
+            let short = id.rsplit(':').next().unwrap_or(id);
+            matches!(short, "write" | "search_replace" | "search-replace")
+        }),
+        "ReadOnly final tool list must not contain write tools: {ids:?}"
+    );
+}
+
+#[test]
+fn memory_writes_allowed_respects_capability_ceiling() {
+    use super::memory_writes_allowed;
+    use xai_tool_types::SubagentCapabilityMode;
+
+    assert!(
+        memory_writes_allowed(None),
+        "no ceiling: memory writes allowed"
+    );
+    assert!(memory_writes_allowed(Some(SubagentCapabilityMode::ReadWrite)));
+    assert!(memory_writes_allowed(Some(SubagentCapabilityMode::All)));
+    assert!(
+        !memory_writes_allowed(Some(SubagentCapabilityMode::ReadOnly)),
+        "read-only must not receive memory write tools"
+    );
+    assert!(
+        !memory_writes_allowed(Some(SubagentCapabilityMode::Execute)),
+        "execute-only must not receive memory write tools"
+    );
 }
 #[test]
 fn subagent_inherits_parent_lsp_via_context() {

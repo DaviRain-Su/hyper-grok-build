@@ -343,6 +343,53 @@ mod tests {
         assert!(!kinds.contains(&Some(ToolKind::Execute)));
         assert!(!kinds.contains(&Some(ToolKind::Task)));
     }
+
+    #[test]
+    fn read_only_policy_strips_kind_none_write_tools_from_id() {
+        use xai_grok_tools::registry::types::ToolConfig;
+        use xai_tool_types::SubagentCapabilityMode;
+
+        let cwd = tempfile::tempdir().unwrap();
+        let toggles = HashMap::new();
+        let mut definition =
+            resolve_agent_definition("explore", &context(cwd.path(), &toggles)).unwrap();
+        // Simulate a definition that smuggled write tools via from_id (kind=None).
+        definition
+            .tool_config
+            .tools
+            .push(ToolConfig::from_id("write"));
+        definition
+            .tool_config
+            .tools
+            .push(ToolConfig::from_id("search_replace"));
+        definition
+            .tool_config
+            .tools
+            .push(ToolConfig::from_id("GrokBuild:run_terminal_cmd"));
+
+        apply_child_tool_policy(
+            &mut definition,
+            Some(SubagentCapabilityMode::ReadOnly),
+            false,
+        );
+
+        let ids: Vec<&str> = definition
+            .tool_config
+            .tools
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+        assert!(
+            !ids.iter().any(|id| {
+                let short = id.rsplit(':').next().unwrap_or(id);
+                matches!(
+                    short,
+                    "write" | "search_replace" | "run_terminal_cmd" | "bash"
+                )
+            }),
+            "ReadOnly must strip write/execute tools even with kind=None: {ids:?}"
+        );
+    }
     #[test]
     fn gates_disabled_and_not_allowed_definitions() {
         let cwd = tempfile::tempdir().unwrap();

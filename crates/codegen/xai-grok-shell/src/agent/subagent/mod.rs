@@ -2193,23 +2193,764 @@ fn spawn_subagent_budget_monitor(
 /// What to do with a resumed subagent's isolated worktree directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResumeWorktreeAction {
-    /// Directory on disk and no snapshot ref — reuse it as-is.
+    /// Existing real directory on disk — reuse after path validation.
     Reuse,
-    /// Directory gone but a snapshot ref exists — rehydrate from it.
+    /// Directory missing but a snapshot ref exists — rehydrate from it.
     Rehydrate,
-    /// Directory gone and no snapshot — fall back to the shared workspace.
+    /// Directory missing and no snapshot — caller must fail closed (no shared
+    /// workspace fallback when isolation was recorded on the source).
     Shared,
 }
 /// Decide how to recover a resumed subagent's worktree from its on-disk state
 /// and whether a durable snapshot is available. Pure so the three outcomes are
 /// unit-testable without git/async.
+///
+/// Priority: reuse an existing directory first; only rehydrate when the dir is
+/// missing *and* a snapshot is available; otherwise signal fail-closed `Shared`.
+///
+/// `Shared` is a *signal that recovery is impossible*, not permission to share
+/// the parent workspace: `handle_request` aborts the spawn fail-closed.
 fn resume_worktree_action(dir_exists: bool, snapshot_ref: Option<&str>) -> ResumeWorktreeAction {
-    if snapshot_ref.is_some() {
-        ResumeWorktreeAction::Rehydrate
-    } else if dir_exists {
+    if dir_exists {
         ResumeWorktreeAction::Reuse
+    } else if snapshot_ref.is_some() {
+        ResumeWorktreeAction::Rehydrate
     } else {
         ResumeWorktreeAction::Shared
+    }
+}
+
+/// Filesystem identity of a validated worktree (for TOCTOU rechecks).
+///
+/// On Unix this is `(dev, ino)`. On Windows we fall back to the canonical
+/// path string plus file metadata size/modified when available — this cannot
+/// fully eliminate same-user rename races without platform openat APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorktreeIdentity {
+    pub path: std::path::PathBuf,
+    #[cfg(unix)]
+    pub dev: u64,
+    #[cfg(unix)]
+    pub ino: u64,
+    #[cfg(not(unix))]
+    pub modified_ms: Option<u128>,
+}
+
+impl WorktreeIdentity {
+    fn capture(path: &std::path::Path) -> Result<Self, String> {
+        let meta = std::fs::symlink_metadata(path).map_err(|e| {
+            format!(
+                "failed to read metadata for worktree '{}': {e}",
+                path.display()
+            )
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "worktree '{}' became a symbolic link during validation",
+                path.display()
+            ));
+        }
+        if !meta.is_dir() {
+            return Err(format!("worktree '{}' is not a directory", path.display()));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(Self {
+                path: path.to_path_buf(),
+                dev: meta.dev(),
+                ino: meta.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let modified_ms = meta.modified().ok().and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_millis())
+            });
+            Ok(Self {
+                path: path.to_path_buf(),
+                modified_ms,
+            })
+        }
+    }
+
+    /// Re-stat `path` and ensure it still refers to the same directory object.
+    pub(crate) fn matches_path(&self, path: &std::path::Path) -> Result<(), String> {
+        let now = Self::capture(path)?;
+        if now.path != self.path {
+            // Compare via re-canonicalize of the live path.
+            let live = dunce::canonicalize(path)
+                .map_err(|e| format!("re-canonicalize of '{}' failed: {e}", path.display()))?;
+            if live != self.path {
+                return Err(format!(
+                    "worktree path changed: expected '{}', now '{}'",
+                    self.path.display(),
+                    live.display()
+                ));
+            }
+        }
+        #[cfg(unix)]
+        {
+            if now.dev != self.dev || now.ino != self.ino {
+                return Err(format!(
+                    "worktree inode replaced at '{}' (was dev={} ino={}, now dev={} ino={})",
+                    self.path.display(),
+                    self.dev,
+                    self.ino,
+                    now.dev,
+                    now.ino
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if now.modified_ms != self.modified_ms {
+                return Err(format!(
+                    "worktree metadata changed at '{}' (possible replacement)",
+                    self.path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Pure Unix mode check for managed worktree **leaf** bases: owner-only access
+/// (no group/world bits). Extracted for unit tests without needing root.
+#[cfg(unix)]
+pub(crate) fn unix_mode_is_owner_only(mode: u32) -> bool {
+    // Ignore file-type bits in the high nibble; check permission bits only.
+    (mode & 0o077) == 0
+}
+
+/// Pure: group/world write bits must be zero (0755 ok; 0775/0777 not).
+#[cfg(unix)]
+pub(crate) fn unix_mode_no_group_world_write(mode: u32) -> bool {
+    (mode & 0o022) == 0
+}
+
+/// Pure: sticky bit set (`S_ISVTX` = 0o1000).
+#[cfg(unix)]
+pub(crate) fn unix_mode_has_sticky(mode: u32) -> bool {
+    (mode & 0o1000) != 0
+}
+
+/// Pure policy for one parent-chain component (not the leaf base itself).
+///
+/// Rules:
+/// - owner must be `euid` or root (0)
+/// - group/world write bits must be 0, **except** root-owned + sticky
+///   (classic `/tmp` = `drwxrwxrwt`)
+#[cfg(unix)]
+pub(crate) fn unix_parent_component_is_safe(owner_uid: u32, mode: u32, euid: u32) -> bool {
+    let is_root = owner_uid == 0;
+    let is_self = owner_uid == euid;
+    if !is_root && !is_self {
+        return false;
+    }
+    if unix_mode_no_group_world_write(mode) {
+        return true;
+    }
+    // Only root-owned sticky may retain world/group write (e.g. /tmp).
+    is_root && unix_mode_has_sticky(mode)
+}
+
+/// Pure policy for XDG_RUNTIME_DIR (or similar runtime root) itself.
+/// Must be owned by euid, non-symlink (checked elsewhere), and either
+/// owner-only or at least free of group/world write.
+#[cfg(unix)]
+pub(crate) fn unix_xdg_runtime_dir_mode_ok(mode: u32) -> bool {
+    unix_mode_is_owner_only(mode) || unix_mode_no_group_world_write(mode)
+}
+
+/// Walk every existing ancestor of `path` (not including `path` itself if it
+/// does not yet exist) and enforce the Unix parent-chain policy.
+///
+/// Each component must be a non-symlink directory owned by eUID or root,
+/// without group/world write unless root-owned + sticky.
+#[cfg(unix)]
+pub(crate) fn validate_unix_parent_chain(path: &std::path::Path) -> Result<(), String> {
+    use std::fs;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+
+    let euid = unsafe { libc::geteuid() };
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("cannot resolve cwd for parent chain: {e}"))?
+            .join(path)
+    };
+
+    // Collect ancestors from root down to parent of `path`.
+    let mut acc = std::path::PathBuf::new();
+    let components: Vec<_> = abs.components().collect();
+    // Drop the final component (the leaf); validate parents only.
+    let parent_comps = if components.len() > 1 {
+        &components[..components.len() - 1]
+    } else {
+        &components[..]
+    };
+
+    for component in parent_comps {
+        acc.push(component.as_os_str());
+        match component {
+            Component::RootDir | Component::Prefix(_) => continue,
+            _ => {}
+        }
+        let meta = fs::symlink_metadata(&acc)
+            .map_err(|e| format!("cannot lstat parent component '{}': {e}", acc.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "parent component '{}' is a symbolic link; refusing",
+                acc.display()
+            ));
+        }
+        if !meta.is_dir() {
+            return Err(format!(
+                "parent component '{}' is not a directory; refusing",
+                acc.display()
+            ));
+        }
+        let mode = meta.mode();
+        let owner = meta.uid();
+        if !unix_parent_component_is_safe(owner, mode, euid) {
+            return Err(format!(
+                "parent component '{}' owner={} mode={:o} is not a safe parent \
+                 (need owner euid/root, no group/world write unless root+sticky)",
+                acc.display(),
+                owner,
+                mode & 0o7777
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn validate_unix_parent_chain(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// True when `dir` is a usable XDG_RUNTIME_DIR: real dir, owner=euid, safe mode,
+/// no symlink components on the path, and parents satisfy the safe parent chain.
+#[cfg(unix)]
+fn xdg_runtime_dir_is_usable(dir: &std::path::Path) -> bool {
+    use std::fs;
+    use std::os::unix::fs::MetadataExt;
+    if dir.as_os_str().is_empty() {
+        return false;
+    }
+    let abs = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(dir),
+            Err(_) => return false,
+        }
+    };
+    let meta = match fs::symlink_metadata(&abs) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return false;
+    }
+    let euid = unsafe { libc::geteuid() };
+    if meta.uid() != euid {
+        return false;
+    }
+    if !unix_xdg_runtime_dir_mode_ok(meta.mode()) {
+        return false;
+    }
+    // Reject symlink ancestors of XDG itself.
+    if reject_symlink_components(&abs).is_err() {
+        return false;
+    }
+    // Parents of XDG must be safe (root 0755 / sticky /tmp ok). XDG itself is
+    // checked above as euid-owned with no g/w write.
+    if validate_unix_parent_chain(&abs).is_err() {
+        return false;
+    }
+    true
+}
+
+/// User-private home fallback: `~/.grok/subagent-worktrees` (per-user, not /tmp).
+fn subagent_home_worktree_base() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".grok").join("subagent-worktrees"))
+}
+
+/// Per-UID private temp/home root for subagent worktrees.
+///
+/// Selection order (Unix):
+/// 1. `XDG_RUNTIME_DIR/grok-subagent-worktrees-<uid>` only if XDG_RUNTIME_DIR
+///    is a real dir, owner=eUID, mode owner-only (or no g/w write), no symlink chain.
+///    Insecure XDG → soft-skip (do not Err).
+/// 2. `temp_dir()/grok-subagent-worktrees-<uid>` only if the temp **parent**
+///    satisfies the safe parent chain (root-owned sticky `/tmp` ok).
+/// 3. Else `~/.grok/subagent-worktrees` (user-private home path).
+///
+/// Never uses a fixed shared name under `/tmp`.
+///
+/// **Windows:** path namespaced by username; ACL not enforced (degraded).
+pub(crate) fn subagent_temp_worktree_base() -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        let uid = unsafe { libc::geteuid() };
+        let leaf = format!("grok-subagent-worktrees-{uid}");
+
+        if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+            let p = std::path::PathBuf::from(&runtime);
+            if xdg_runtime_dir_is_usable(&p) {
+                return p.join(&leaf);
+            }
+            tracing::warn!(
+                xdg_runtime_dir = %runtime,
+                "XDG_RUNTIME_DIR unsafe for subagent worktrees; falling back"
+            );
+        }
+
+        let temp_candidate = std::env::temp_dir().join(&leaf);
+        // Parent of temp_candidate must be a safe parent chain (e.g. /tmp sticky).
+        if validate_unix_parent_chain(&temp_candidate).is_ok() {
+            return temp_candidate;
+        }
+        tracing::warn!(
+            temp = %temp_candidate.display(),
+            "temp parent chain unsafe for subagent worktrees; using home fallback"
+        );
+
+        if let Some(home_base) = subagent_home_worktree_base() {
+            return home_base;
+        }
+        // Last resort: still return temp path (ensure_real_dir / parent chain
+        // will fail closed at use time if unsafe).
+        temp_candidate
+    }
+    #[cfg(not(unix))]
+    {
+        let user = std::env::var("USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| "user".into());
+        let safe: String = user
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        std::env::temp_dir().join(format!("grok-subagent-worktrees-{safe}"))
+    }
+}
+
+/// Ensure `path` exists as a real (non-symlink) directory suitable as a managed
+/// worktree **leaf** base, and that its parent chain is safe.
+///
+/// On Unix, **every** use requires for the leaf:
+/// - owner == current eUID
+/// - mode has no group/world bits (effectively `0o700`)
+///
+/// And for every parent component:
+/// - non-symlink directory
+/// - owner eUID or root
+/// - no group/world write unless root-owned + sticky (`/tmp`)
+///
+/// If the directory is newly created, `chmod 0700` **must** succeed (`Err` on
+/// failure). Existing insecure leaves/parents are **rejected**, never
+/// auto-chmod'd into acceptance.
+///
+/// **Windows:** only non-symlink directory existence; NTFS ACLs degraded.
+pub(crate) fn ensure_real_dir(path: &std::path::Path) -> Result<(), String> {
+    use std::fs;
+
+    // Parent chain first (before create) so we never mkdir under an unsafe parent.
+    validate_unix_parent_chain(path)?;
+
+    let created = !path.exists();
+    if created {
+        // Ensure parents exist only if parent chain already validated for the
+        // full path; create_dir_all may create intermediate dirs — those are
+        // owned by us. Re-validate after create.
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "failed to create parent of managed worktree base '{}': {e}",
+                    path.display()
+                )
+            })?;
+            // Intermediate parents we just created must be owner-only too
+            // if they sit under a sticky /tmp (e.g. /tmp/foo created by us).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // Only chmod the deepest missing segment chain we own.
+                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+            }
+        }
+        fs::create_dir(path)
+            .or_else(|_| {
+                // Race: another process created it.
+                if path.is_dir() {
+                    Ok(())
+                } else {
+                    fs::create_dir_all(path).map(|_| ())
+                }
+            })
+            .map_err(|e| {
+                format!(
+                    "failed to create managed worktree base '{}': {e}",
+                    path.display()
+                )
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|e| {
+                format!(
+                    "failed to chmod 0700 managed worktree base '{}': {e}",
+                    path.display()
+                )
+            })?;
+        }
+    }
+    let meta = fs::symlink_metadata(path).map_err(|e| {
+        format!(
+            "managed worktree base '{}' is not accessible: {e}",
+            path.display()
+        )
+    })?;
+    if meta.file_type().is_symlink() {
+        return Err(format!(
+            "managed worktree base '{}' is a symbolic link; refusing",
+            path.display()
+        ));
+    }
+    if !meta.is_dir() {
+        return Err(format!(
+            "managed worktree base '{}' is not a directory",
+            path.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != euid {
+            return Err(format!(
+                "managed worktree base '{}' owner uid {} != current euid {}; refusing \
+                 (will not chown/chmod an existing insecure base)",
+                path.display(),
+                meta.uid(),
+                euid
+            ));
+        }
+        let mode = meta.mode();
+        if !unix_mode_is_owner_only(mode) {
+            return Err(format!(
+                "managed worktree base '{}' mode {:o} has group/world bits; \
+                 refusing (expected owner-only 0700; will not auto-chmod)",
+                path.display(),
+                mode & 0o777
+            ));
+        }
+        // Parent chain again after create (intermediates may have appeared).
+        validate_unix_parent_chain(path)?;
+    }
+    let _ = created;
+    Ok(())
+}
+
+/// Walk every component from the filesystem root (or relative start) to
+/// `path` and reject any symlink component. `path` must already exist.
+fn reject_symlink_components(path: &std::path::Path) -> Result<(), String> {
+    use std::fs;
+    let mut acc = std::path::PathBuf::new();
+    // Absolute paths: start empty and rebuild. Relative: start from cwd component.
+    for component in path.components() {
+        acc.push(component.as_os_str());
+        // Skip root/prefix-only components that may not support lstat the same way.
+        use std::path::Component;
+        match component {
+            Component::RootDir | Component::Prefix(_) => continue,
+            _ => {}
+        }
+        match fs::symlink_metadata(&acc) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "path component '{}' is a symbolic link; refusing worktree under it",
+                    acc.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return Err(format!(
+                    "cannot lstat path component '{}': {e}",
+                    acc.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// True when `child` is a strict descendant of `base` (both already canonical).
+fn is_strict_descendant(child: &std::path::Path, base: &std::path::Path) -> bool {
+    child.starts_with(base) && child != base
+}
+
+/// Validate a resumed (or freshly created) subagent worktree path.
+///
+/// Fail-closed (no lexical `starts_with` success path):
+/// 1. `dest` must exist, not be a symlink, and be a directory.
+/// 2. Every path component to `dest` must be non-symlink.
+/// 3. Canonicalize `dest`; must still be a directory.
+/// 4. Allowed managed bases must exist (created if needed), not be symlinks,
+///    and canonicalize successfully; every base component non-symlink.
+/// 5. Canonical dest must be a **strict** descendant of a canonical base.
+/// 6. Dest must not equal parent session cwd.
+/// 7. Basename must be exactly `subagent-{id}` when `subagent_id` is provided
+///    (production naming; no unprefixed legacy directories).
+///
+/// Returns a [`WorktreeIdentity`] (canonical path + Unix dev/ino) for callers
+/// to recheck immediately before child start.
+///
+/// **TOCTOU honesty:** same-user rename races cannot be fully eliminated
+/// without openat/O_NOFOLLOW across platforms; the inode recheck narrows the
+/// window but is not a capability-style handle.
+pub(crate) fn validate_subagent_worktree_path(
+    dest: &std::path::Path,
+    source_cwd: &std::path::Path,
+    parent_cwd: &std::path::Path,
+    subagent_id: Option<&str>,
+) -> Result<WorktreeIdentity, String> {
+    use std::fs;
+
+    // 1. dest exists, not symlink, is dir.
+    match fs::symlink_metadata(dest) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "subagent worktree path '{}' is a symbolic link; refusing to use it",
+                    dest.display()
+                ));
+            }
+            if !meta.is_dir() {
+                return Err(format!(
+                    "subagent worktree path '{}' is not a directory",
+                    dest.display()
+                ));
+            }
+        }
+        Err(e) => {
+            return Err(format!(
+                "subagent worktree path '{}' is not accessible: {e}",
+                dest.display()
+            ));
+        }
+    }
+
+    // 2. No symlink components on the path to dest (use absolute form when possible).
+    let abs_dest = if dest.is_absolute() {
+        dest.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("cannot resolve cwd for relative worktree: {e}"))?
+            .join(dest)
+    };
+    reject_symlink_components(&abs_dest)?;
+
+    // 3. Canonicalize dest.
+    let canonical = dunce::canonicalize(dest).map_err(|e| {
+        format!(
+            "failed to canonicalize subagent worktree '{}': {e}",
+            dest.display()
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(format!(
+            "canonicalized worktree '{}' is not a directory",
+            canonical.display()
+        ));
+    }
+    // Re-check components on the canonical path too.
+    reject_symlink_components(&canonical)?;
+
+    // 4–5. Managed bases: create if needed, non-symlink, Unix owner+0700,
+    // canonicalize, strict contain. Temp fallback is per-UID private.
+    let mut allowed_bases: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(base) = crate::session::worktree::worktree_base_dir_for_source(source_cwd) {
+        allowed_bases.push(base);
+    }
+    allowed_bases.push(subagent_temp_worktree_base());
+
+    let mut matched_base: Option<std::path::PathBuf> = None;
+    let mut base_errors: Vec<String> = Vec::new();
+    for base in &allowed_bases {
+        if let Err(e) = ensure_real_dir(base) {
+            base_errors.push(e);
+            continue;
+        }
+        if let Err(e) = reject_symlink_components(base) {
+            base_errors.push(e);
+            continue;
+        }
+        let base_canon = match dunce::canonicalize(base) {
+            Ok(p) => p,
+            Err(e) => {
+                base_errors.push(format!(
+                    "failed to canonicalize managed base '{}': {e}",
+                    base.display()
+                ));
+                continue;
+            }
+        };
+        if let Err(e) = reject_symlink_components(&base_canon) {
+            base_errors.push(e);
+            continue;
+        }
+        // Re-verify owner+mode on the canonical base path (not just the
+        // pre-canonical lexical path).
+        if let Err(e) = ensure_real_dir(&base_canon) {
+            base_errors.push(e);
+            continue;
+        }
+        if is_strict_descendant(&canonical, &base_canon) {
+            matched_base = Some(base_canon);
+            break;
+        }
+    }
+    if matched_base.is_none() {
+        let detail = if base_errors.is_empty() {
+            "not a strict descendant of any managed base".to_string()
+        } else {
+            format!(
+                "not under a valid managed base ({})",
+                base_errors.join("; ")
+            )
+        };
+        return Err(format!(
+            "subagent worktree '{}' is outside managed worktree bases \
+             (expected under ~/.grok/worktrees/... or per-UID temp \
+             grok-subagent-worktrees-<uid>): {detail}",
+            canonical.display()
+        ));
+    }
+
+    // 6. Not parent cwd (equality only; containment under parent without a
+    // managed base already fails step 5).
+    if let Ok(parent_canon) = dunce::canonicalize(parent_cwd)
+        && canonical == parent_canon
+    {
+        return Err(format!(
+            "subagent worktree '{}' resolves to the parent session cwd; \
+             isolation refused",
+            canonical.display()
+        ));
+    }
+    // Silence unused warning when all bases failed before assignment use.
+    let _ = matched_base;
+
+    // 7. Strict basename identity: production format is always `subagent-{id}`.
+    if let Some(id) = subagent_id {
+        if !xai_tool_types::is_safe_task_id(id) {
+            return Err(format!(
+                "subagent id {id:?} is not a safe path segment for worktree naming"
+            ));
+        }
+        let expected = format!("subagent-{id}");
+        let name = canonical.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name != expected {
+            return Err(format!(
+                "subagent worktree basename '{name}' must be exactly '{expected}' \
+                 (agent metadata must not point at another subagent's directory)"
+            ));
+        }
+    }
+
+    // Capture identity for pre-spawn recheck.
+    WorktreeIdentity::capture(&canonical)
+}
+
+/// Final pre-spawn check: re-validate path and confirm identity still matches.
+pub(crate) fn recheck_worktree_identity(
+    expected: &WorktreeIdentity,
+    source_cwd: &std::path::Path,
+    parent_cwd: &std::path::Path,
+    subagent_id: Option<&str>,
+) -> Result<WorktreeIdentity, String> {
+    let again =
+        validate_subagent_worktree_path(&expected.path, source_cwd, parent_cwd, subagent_id)?;
+    expected.matches_path(&again.path)?;
+    #[cfg(unix)]
+    {
+        if again.dev != expected.dev || again.ino != expected.ino {
+            return Err(format!(
+                "worktree identity changed before spawn at '{}' \
+                 (dev/ino {}/{} → {}/{})",
+                expected.path.display(),
+                expected.dev,
+                expected.ino,
+                again.dev,
+                again.ino
+            ));
+        }
+    }
+    Ok(again)
+}
+
+/// Whether agent-memory write tools (`search_replace` / `write`) may be
+/// injected for a subagent under `capability_mode`.
+///
+/// Read-only and execute-only modes must not gain memory write tools;
+/// `None` (no ceiling) and explicit write modes may.
+pub(crate) fn memory_writes_allowed(
+    capability_mode: Option<xai_tool_types::SubagentCapabilityMode>,
+) -> bool {
+    matches!(
+        capability_mode,
+        None | Some(xai_tool_types::SubagentCapabilityMode::ReadWrite)
+            | Some(xai_tool_types::SubagentCapabilityMode::All)
+    )
+}
+
+/// Apply memory-tool injection + capability re-clamp on a definition.
+///
+/// Mirrors the production path in `handle_request` so tests can assert the
+/// final tool list after inject → filter without spinning a full child.
+pub(crate) fn apply_memory_tools_to_definition(
+    definition: &mut xai_grok_agent::config::AgentDefinition,
+    capability_mode: Option<xai_tool_types::SubagentCapabilityMode>,
+    allow_nested_subagents: bool,
+) {
+    use xai_grok_tools::implementations::{grok_build, opencode};
+
+    let allow_writes = memory_writes_allowed(capability_mode);
+    let mut memory_tools: Vec<xai_grok_tools::registry::types::ToolConfig> =
+        vec![(&grok_build::ReadFileTool).into()];
+    if allow_writes {
+        memory_tools.push((&grok_build::SearchReplaceTool).into());
+        memory_tools.push((&opencode::OpenCodeWriteTool).into());
+    }
+    for tc in memory_tools {
+        if !definition.tool_config.tools.iter().any(|t| t.id == tc.id) {
+            definition.tool_config.tools.push(tc);
+        }
+    }
+    if let Some(mode) = capability_mode {
+        xai_grok_subagent_resolution::apply_child_tool_policy(
+            definition,
+            Some(mode),
+            allow_nested_subagents,
+        );
     }
 }
 /// The parent session's working directory — the source path for a subagent

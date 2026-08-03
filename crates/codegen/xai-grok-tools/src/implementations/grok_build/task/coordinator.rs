@@ -227,6 +227,20 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     return;
                 }
                 let id = request.id.clone();
+                // Boundary validation: every path-joined id must be a safe segment.
+                if !xai_tool_types::is_safe_task_id(&id) {
+                    let _ = command.result_tx.send(SubagentResult {
+                        success: false,
+                        error: Some(format!(
+                            "Invalid subagent id {id:?}: not a safe path segment"
+                        )),
+                        subagent_id: id.clone(),
+                        child_session_id: id,
+                        ..Default::default()
+                    });
+                    return;
+                }
+                // Atomic insert-if-absent: reject duplicates without replacing.
                 if self.pending.contains_key(&id)
                     || self.active.contains_key(&id)
                     || self.completed.contains_key(&id)
@@ -245,18 +259,31 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 let foreground_deadline = (!request.run_in_background
                     && !request.await_to_completion)
                     .then(|| tokio::time::Instant::now() + self.config.foreground_budget);
-                self.pending.insert(
-                    id.clone(),
-                    PendingChild {
-                        request: request.clone(),
-                        started_at: std::time::Instant::now(),
-                        cancellation: cancellation.clone(),
-                        spawn_reply: Some(command.result_tx),
-                        foreground_deadline,
-                        handle_only,
-                        explicitly_killed: false,
-                    },
-                );
+                // Entry API for insert-if-absent race safety within the single-
+                // threaded actor (duplicate check above is the primary gate).
+                match self.pending.entry(id.clone()) {
+                    std::collections::hash_map::Entry::Occupied(_) => {
+                        let _ = command.result_tx.send(SubagentResult {
+                            success: false,
+                            error: Some(format!("Subagent id '{id}' already exists")),
+                            subagent_id: id.clone(),
+                            child_session_id: id,
+                            ..Default::default()
+                        });
+                        return;
+                    }
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(PendingChild {
+                            request: request.clone(),
+                            started_at: std::time::Instant::now(),
+                            cancellation: cancellation.clone(),
+                            spawn_reply: Some(command.result_tx),
+                            foreground_deadline,
+                            handle_only,
+                            explicitly_killed: false,
+                        });
+                    }
+                }
                 self.running_count_changed();
                 let reporter = ChildReporter {
                     subagent_id: id.clone(),

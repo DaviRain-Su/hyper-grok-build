@@ -126,14 +126,50 @@ fn merge_subagents(
     // A user-level ~/.grok/agents/explore.md does NOT shadow built-in explore
     // at spawn time, so it must not shadow it in the visible list either.
     // Otherwise: visible != callable (the guarantee would be broken).
+    //
+    // Names that are not safe path segments are dropped (cannot be joined into
+    // worktree / memory / meta paths without traversal risk).
+    //
+    // Built-in shadowing is **exact-name only** (cross-platform consistent):
+    // a project agent named `Explore` does NOT shadow `explore` and is
+    // rejected so visible names never diverge from lookup names on
+    // case-insensitive filesystems.
     for def in discovered {
         if def.scope == AgentScope::BuiltIn {
             continue;
         }
 
+        if !is_safe_agent_name(&def.name) {
+            tracing::warn!(
+                name = %def.name,
+                scope = ?def.scope,
+                "skipping discovered agent: name is not a safe path segment"
+            );
+            continue;
+        }
+
+        // Exact built-in name match (strum kebab-case wire name).
         let is_builtin_name = BuiltinAgentName::from_str(&def.name)
             .ok()
             .filter(|b| BuiltinAgentName::subagent_variants().contains(b));
+
+        // Reject non-canonical case variants of built-in names so they cannot
+        // appear beside (or silently collide with) the built-in on case-
+        // insensitive filesystems. Display and lookup stay identical.
+        if is_builtin_name.is_none() {
+            let case_collision = BuiltinAgentName::subagent_variants().iter().any(|b| {
+                b.as_ref().eq_ignore_ascii_case(&def.name) && b.as_ref() != def.name.as_str()
+            });
+            if case_collision {
+                tracing::warn!(
+                    name = %def.name,
+                    scope = ?def.scope,
+                    "skipping discovered agent: non-canonical casing of a built-in name \
+                     (use the exact wire name, e.g. \"explore\", to shadow)"
+                );
+                continue;
+            }
+        }
 
         if is_builtin_name.is_some() && def.scope != AgentScope::Project {
             // User-level agent has same name as built-in subagent — skip it.
@@ -142,10 +178,10 @@ fn merge_subagents(
             continue;
         }
 
-        // Check if this name already exists in entries
+        // Exact name match only — no case-insensitive replace of built-ins.
         if let Some(pos) = entries.iter().position(|e| e.name == def.name) {
             let should_replace = match &entries[pos].source {
-                SubagentSource::Builtin(_) => true,
+                SubagentSource::Builtin(_) => def.scope == AgentScope::Project,
                 SubagentSource::UserDefined { scope } => {
                     discovered_scope_priority(def.scope) > discovered_scope_priority(*scope)
                 }
@@ -161,13 +197,13 @@ fn merge_subagents(
                 };
             }
         } else {
-            // New unique name — append after built-ins
+            // New unique name — append after built-ins.
             let cs = source_from_agent_def(&def);
             entries.push(SubagentEntry {
                 name: def.name,
                 description: def.description,
                 source: SubagentSource::UserDefined { scope: def.scope },
-                shadows_builtin: None,
+                shadows_builtin: is_builtin_name,
                 config_source: cs,
             });
         }
@@ -247,6 +283,34 @@ fn discover_with_home(
     definitions
 }
 
+/// Whether `name` is safe as a bare agent identifier / path join operand.
+///
+/// Same rules as [`xai_tool_types::is_safe_path_segment`]: rejects `..`,
+/// separators, NUL, and non-slug characters so agent lookup cannot escape
+/// the agents directory via `name` injection.
+pub fn is_safe_agent_name(name: &str) -> bool {
+    xai_tool_types::is_safe_path_segment(name)
+}
+
+/// Whether a lookup name is safe: bare slug, or a single `plugin:agent`
+/// qualified pair where both halves are safe path segments.
+fn is_safe_agent_lookup_name(name: &str) -> bool {
+    if is_safe_agent_name(name) {
+        return true;
+    }
+    // Qualified plugin form: exactly one colon, both sides safe.
+    if let Some((plugin, agent)) = name.split_once(':')
+        && !plugin.is_empty()
+        && !agent.is_empty()
+        && !agent.contains(':')
+        && is_safe_agent_name(plugin)
+        && is_safe_agent_name(agent)
+    {
+        return true;
+    }
+    false
+}
+
 /// Find an agent definition by name.
 ///
 /// Checks built-ins first, then user-level dirs, then bundled.
@@ -263,6 +327,15 @@ fn by_name_with_home(
     // Check built-ins first — type-safe via BuiltinAgentName strum enum
     if let Ok(builtin) = BuiltinAgentName::from_str(name) {
         return Some(builtin.definition());
+    }
+
+    // Fail-closed: never join an unsafe name into agents_dir.
+    if !is_safe_agent_name(name) {
+        tracing::warn!(
+            name = %name,
+            "rejecting agent lookup: name is not a safe path segment"
+        );
+        return None;
     }
 
     {
@@ -297,6 +370,16 @@ fn by_name_in_cwd_with_home(
     home: Option<&Path>,
     grok_home: Option<&Path>,
 ) -> Option<AgentDefinition> {
+    // Built-ins are always safe names; allow them even if a future rule
+    // tightens slug checks. Unsafe non-builtin names never reach disk.
+    if !is_safe_agent_name(name) && BuiltinAgentName::from_str(name).is_err() {
+        tracing::warn!(
+            name = %name,
+            "rejecting agent lookup: name is not a safe path segment"
+        );
+        return None;
+    }
+
     if let Some(def) = load_project_definition_by_name(name, cwd) {
         return Some(def);
     }
@@ -463,10 +546,21 @@ fn by_name_in_cwd_with_plugins_and_home(
         return Some(def);
     }
 
+    // Fail-closed on path-unsafe lookup names before joining into plugin dirs.
+    if !is_safe_agent_lookup_name(name) {
+        tracing::warn!(
+            name = %name,
+            "rejecting plugin agent lookup: name is not a safe path segment"
+        );
+        return None;
+    }
+
     // Try plugin agents
     if let Some(registry) = plugins {
         // Check if name is qualified (plugin-name:agent-name)
         if let Some((plugin_name, agent_name)) = name.split_once(':')
+            && is_safe_agent_name(plugin_name)
+            && is_safe_agent_name(agent_name)
             && let Some(plugin) = registry.get(plugin_name)
             && plugin.enabled
         {
@@ -483,6 +577,12 @@ fn by_name_in_cwd_with_plugins_and_home(
 
         // Bare name lookup: only resolve if exactly one plugin has this agent.
         // Ambiguous matches (multiple plugins with same agent name) are rejected.
+        // Never let a bare name that collides with a built-in reach plugins —
+        // by_name_in_cwd_with_home already returned the built-in above when
+        // present; if we are here, the bare name is not a built-in.
+        if !is_safe_agent_name(name) {
+            return None;
+        }
         let mut matches: Vec<(&crate::plugins::registry::LoadedPlugin, std::path::PathBuf)> =
             Vec::new();
         for plugin in registry.enabled_plugins() {
@@ -582,6 +682,9 @@ fn load_project_definitions(
 /// First project agent named `name` along the cwd→git-root walk (the shared
 /// [`project_agent_dirs`] SSOT), highest-priority dir first.
 fn load_project_definition_by_name(name: &str, cwd: &Path) -> Option<AgentDefinition> {
+    if !is_safe_agent_name(name) {
+        return None;
+    }
     for agents_dir in project_agent_dirs(Some(cwd)).0 {
         let agent_file = agents_dir.join(format!("{name}.md"));
         if let Some(def) = load_definition_from_path(
@@ -602,6 +705,10 @@ fn load_definition_by_name(
     error_message: &str,
     scope_override: Option<AgentScope>,
 ) -> Option<AgentDefinition> {
+    // Defense in depth: never Path::join an unsafe name (could contain `..`).
+    if !is_safe_agent_name(name) {
+        return None;
+    }
     let agent_file = dir.join(format!("{}.md", name));
     load_definition_from_path(&agent_file, name, error_message, scope_override)
 }
@@ -656,7 +763,28 @@ fn load_definitions_from_dir(
         match AgentDefinition::from_file(&path) {
             Ok(mut def) => {
                 def.scope = scope;
-                // Dedup by name — first occurrence (highest priority) wins
+                if !is_safe_agent_name(&def.name) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        name = %def.name,
+                        "Skipping agent definition: name is not a safe path segment"
+                    );
+                    continue;
+                }
+                // Dedup by name — first occurrence (highest priority) wins.
+                // Also reject case-insensitive collisions so `Explore` cannot
+                // coexist with an earlier `explore` on case-insensitive FS.
+                let collision = seen_names
+                    .iter()
+                    .any(|seen| seen.eq_ignore_ascii_case(&def.name) && seen != &def.name);
+                if collision {
+                    tracing::warn!(
+                        path = %path.display(),
+                        name = %def.name,
+                        "Skipping agent definition: case-insensitive name collision"
+                    );
+                    continue;
+                }
                 if seen_names.insert(def.name.clone()) {
                     definitions.push(def);
                 }
@@ -1226,6 +1354,76 @@ mod tests {
             &explore.source,
             SubagentSource::Builtin(BuiltinAgentName::Explore)
         ));
+    }
+
+    #[test]
+    fn test_merge_rejects_path_traversal_agent_names() {
+        let discovered = vec![
+            synthetic_agent("../escape", "evil", AgentScope::Project),
+            synthetic_agent("a/b", "slash", AgentScope::User),
+            synthetic_agent("safe-agent", "ok", AgentScope::Project),
+        ];
+        let entries = merge_subagents(discovered, &HashMap::new());
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains(&"../escape"));
+        assert!(!names.contains(&"a/b"));
+        assert!(names.contains(&"safe-agent"));
+    }
+
+    #[test]
+    fn test_merge_rejects_non_canonical_builtin_casing() {
+        // Project agent named "Explore" must NOT shadow built-in "explore"
+        // and must not appear in the list (display/lookup stay consistent).
+        let discovered = vec![synthetic_agent(
+            "Explore",
+            "Custom Explore",
+            AgentScope::Project,
+        )];
+        let entries = merge_subagents(discovered, &HashMap::new());
+        assert!(
+            entries.iter().all(|e| e.name != "Explore"),
+            "non-canonical casing must be rejected"
+        );
+        let explore = entries.iter().find(|e| e.name == "explore").unwrap();
+        assert!(
+            matches!(
+                &explore.source,
+                SubagentSource::Builtin(BuiltinAgentName::Explore)
+            ),
+            "built-in explore must remain unshadowed"
+        );
+        assert_ne!(explore.description, "Custom Explore");
+    }
+
+    #[test]
+    fn test_merge_exact_canonical_name_shadows_builtin() {
+        let discovered = vec![synthetic_agent(
+            "explore",
+            "Custom explore",
+            AgentScope::Project,
+        )];
+        let entries = merge_subagents(discovered, &HashMap::new());
+        let explore = entries.iter().find(|e| e.name == "explore").unwrap();
+        assert_eq!(explore.description, "Custom explore");
+        assert_eq!(explore.shadows_builtin, Some(BuiltinAgentName::Explore));
+    }
+
+    #[test]
+    fn test_by_name_rejects_path_traversal() {
+        assert!(by_name("../etc/passwd").is_none());
+        assert!(by_name("a/b").is_none());
+        assert!(by_name("foo..bar").is_none());
+        // Built-ins still resolve.
+        assert!(by_name("explore").is_some());
+    }
+
+    #[test]
+    fn test_is_safe_agent_name() {
+        assert!(is_safe_agent_name("explore"));
+        assert!(is_safe_agent_name("code-reviewer"));
+        assert!(!is_safe_agent_name("../x"));
+        assert!(!is_safe_agent_name("a/b"));
+        assert!(!is_safe_agent_name("has.dot"));
     }
 
     #[test]

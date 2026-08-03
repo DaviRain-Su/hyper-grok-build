@@ -239,6 +239,13 @@ pub(crate) async fn run_shell_child(
     ) {
         return child_run_output(failure_result(&request, &error), completion_data, None);
     }
+    // Fail-closed: when isolation=worktree is requested, never silently fall
+    // back to the shared parent workspace. A silent fallback would let a child
+    // mutate the parent tree under the caller's belief that isolation holds.
+    //
+    // Resume paths additionally reject symlinks and paths outside managed
+    // worktree bases (see `validate_subagent_worktree_path`).
+    let source_cwd_for_wt = parent_source_cwd(&ctx);
     let worktree_path = if let Some(ref source) = resume_source {
         if effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None
             && source.worktree_path.is_none()
@@ -251,8 +258,56 @@ pub(crate) async fn run_shell_child(
         match source.worktree_path.as_deref() {
             None => None,
             Some(dest) => {
-                match resume_worktree_action(dest.is_dir(), source.snapshot_ref.as_deref()) {
-                    ResumeWorktreeAction::Reuse => Some(dest.to_path_buf()),
+                // Prefer an existing real directory; rehydrate only when missing.
+                let dir_exists = match std::fs::symlink_metadata(dest) {
+                    Ok(m) if m.file_type().is_symlink() => {
+                        // Symlink even if target is a dir — treat as unsafe, not "exists".
+                        let msg = format!(
+                            "Resumed subagent worktree '{}' is a symbolic link; \
+                             refusing to reuse it for isolation.",
+                            dest.display()
+                        );
+                        tracing::error!(
+                            subagent_id = %request.id,
+                            worktree = %dest.display(),
+                            "Resumed subagent worktree is a symlink (fail-closed)"
+                        );
+                        return child_run_output(
+                            failure_result(&request, &msg),
+                            completion_data,
+                            None,
+                        );
+                    }
+                    Ok(m) => m.is_dir(),
+                    Err(_) => false,
+                };
+                match resume_worktree_action(dir_exists, source.snapshot_ref.as_deref()) {
+                    ResumeWorktreeAction::Reuse => {
+                        match validate_subagent_worktree_path(
+                            dest,
+                            &source_cwd_for_wt,
+                            &ctx.parent_cwd,
+                            Some(source.subagent_id.as_str()),
+                        ) {
+                            Ok(identity) => Some(identity),
+                            Err(e) => {
+                                let msg = format!(
+                                    "Resumed subagent worktree failed validation: {e}. \
+                                     Isolation was requested; refusing shared workspace."
+                                );
+                                tracing::error!(
+                                    subagent_id = %request.id,
+                                    error = %e,
+                                    "Resumed worktree path validation failed (fail-closed)"
+                                );
+                                return child_run_output(
+                                    failure_result(&request, &msg),
+                                    completion_data,
+                                    None,
+                                );
+                            }
+                        }
+                    }
                     ResumeWorktreeAction::Rehydrate => {
                         let snapshot_ref = source.snapshot_ref.clone().unwrap_or_default();
                         let source_repo = resolve_subagent_source_repo(&ctx);
@@ -265,48 +320,97 @@ pub(crate) async fn run_shell_child(
                         .await
                         {
                             Ok(path) => {
-                                tracing::info!(
-                                    subagent_id = %request.id,
-                                    worktree_path = %path.display(),
-                                    snapshot_ref = %snapshot_ref,
-                                    "Rehydrated subagent worktree from snapshot for resume"
-                                );
-                                Some(path)
+                                match validate_subagent_worktree_path(
+                                    &path,
+                                    &source_cwd_for_wt,
+                                    &ctx.parent_cwd,
+                                    Some(source.subagent_id.as_str()),
+                                ) {
+                                    Ok(identity) => {
+                                        tracing::info!(
+                                            subagent_id = %request.id,
+                                            worktree_path = %identity.path.display(),
+                                            snapshot_ref = %snapshot_ref,
+                                            "Rehydrated subagent worktree from snapshot for resume"
+                                        );
+                                        Some(identity)
+                                    }
+                                    Err(e) => {
+                                        let msg = format!(
+                                            "Rehydrated worktree failed validation: {e}. \
+                                             Isolation was requested; refusing shared workspace."
+                                        );
+                                        return child_run_output(
+                                            failure_result(&request, &msg),
+                                            completion_data,
+                                            None,
+                                        );
+                                    }
+                                }
                             }
                             Err(e) => {
-                                tracing::warn!(
+                                let msg = format!(
+                                    "Failed to rehydrate isolated worktree for subagent: {e}. \
+                                     Isolation was requested; refusing to fall back to the \
+                                     shared parent workspace."
+                                );
+                                tracing::error!(
                                     subagent_id = %request.id,
                                     error = %e,
-                                    "Failed to rehydrate subagent worktree, falling back to shared workspace"
+                                    "Failed to rehydrate subagent worktree (fail-closed)"
                                 );
-                                None
+                                return child_run_output(
+                                    failure_result(&request, &msg),
+                                    completion_data,
+                                    None,
+                                );
                             }
                         }
                     }
                     ResumeWorktreeAction::Shared => {
-                        tracing::warn!(
+                        let msg = format!(
+                            "Resumed subagent worktree '{}' is missing and no snapshot \
+                             is available to rehydrate. Isolation was requested; \
+                             refusing to fall back to the shared parent workspace.",
+                            dest.display()
+                        );
+                        tracing::error!(
                             subagent_id = %request.id,
                             worktree = %dest.display(),
-                            "Resumed subagent worktree dir missing with no snapshot; using shared workspace"
+                            "Resumed subagent worktree missing (fail-closed)"
                         );
-                        None
+                        return child_run_output(
+                            failure_result(&request, &msg),
+                            completion_data,
+                            None,
+                        );
                     }
                 }
             }
         }
     } else if effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None {
-        let source_cwd = parent_source_cwd(&ctx);
+        // Reject unsafe ids before joining them into worktree destinations.
+        if !xai_tool_types::is_safe_task_id(&request.id) {
+            let msg = format!(
+                "Invalid subagent id {:?}: must be a single safe path segment \
+                 (no path separators, NUL, control chars, or reserved names). \
+                 Isolation worktree creation aborted.",
+                request.id
+            );
+            return child_run_output(failure_result(&request, &msg), completion_data, None);
+        }
+        let source_cwd = source_cwd_for_wt.clone();
         let dest = match crate::session::worktree::worktree_base_dir_for_source(&source_cwd) {
             Ok(base) => base.join(format!("subagent-{}", request.id)),
             Err(e) => {
+                // Base-dir resolution failure is not a security downgrade —
+                // we still create an isolated worktree under a temp root.
                 tracing::warn!(
                     subagent_id = %request.id,
                     error = %e,
                     "Could not resolve worktree base dir, using temp dir for subagent worktree"
                 );
-                std::env::temp_dir()
-                    .join("grok-subagent-worktrees")
-                    .join(&request.id)
+                super::subagent_temp_worktree_base().join(format!("subagent-{}", request.id))
             }
         };
         let source_clone = source_cwd;
@@ -327,29 +431,79 @@ pub(crate) async fn run_shell_child(
         .await
         {
             Ok(Ok(report)) => {
-                tracing::info!(
-                    subagent_id = %request.id,
-                    worktree_path = %report.worktree_path.display(),
-                    commit = %report.commit,
-                    "Created isolated worktree for subagent"
-                );
-                Some(report.worktree_path)
+                match validate_subagent_worktree_path(
+                    &report.worktree_path,
+                    &source_cwd_for_wt,
+                    &ctx.parent_cwd,
+                    Some(request.id.as_str()),
+                ) {
+                    Ok(identity) => {
+                        tracing::info!(
+                            subagent_id = %request.id,
+                            worktree_path = %identity.path.display(),
+                            commit = %report.commit,
+                            "Created isolated worktree for subagent"
+                        );
+                        Some(identity)
+                    }
+                    Err(e) => {
+                        let msg = format!(
+                            "Created worktree failed validation: {e}. \
+                             Isolation was requested; refusing shared workspace."
+                        );
+                        return child_run_output(
+                            failure_result(&request, &msg),
+                            completion_data,
+                            None,
+                        );
+                    }
+                }
             }
             Ok(Err(e)) => {
-                tracing::warn!(
+                let msg = format!(
+                    "Failed to create isolated worktree for subagent: {e}. \
+                     Isolation was requested; refusing to fall back to the \
+                     shared parent workspace."
+                );
+                tracing::error!(
                     subagent_id = %request.id,
                     error = %e,
-                    "Failed to create worktree, falling back to shared workspace"
+                    "Failed to create worktree (fail-closed)"
                 );
-                None
+                return child_run_output(failure_result(&request, &msg), completion_data, None);
             }
             Err(e) => {
-                tracing::warn!(
+                let msg = format!(
+                    "Worktree creation task panicked: {e}. Isolation was requested; \
+                     refusing to fall back to the shared parent workspace."
+                );
+                tracing::error!(
                     subagent_id = %request.id,
                     error = %e,
-                    "Worktree creation task panicked, falling back to shared workspace"
+                    "Worktree creation task panicked (fail-closed)"
                 );
-                None
+                return child_run_output(failure_result(&request, &msg), completion_data, None);
+            }
+        }
+    } else {
+        None
+    };
+    // Final pre-start check: re-validate + confirm same inode/dev (Unix).
+    // Cannot fully eliminate same-user TOCTOU without openat/O_NOFOLLOW.
+    let worktree_path = if let Some(ref identity) = worktree_path {
+        match recheck_worktree_identity(
+            identity,
+            &source_cwd_for_wt,
+            &ctx.parent_cwd,
+            Some(request.id.as_str()),
+        ) {
+            Ok(rechecked) => Some(rechecked.path),
+            Err(e) => {
+                let msg = format!(
+                    "Worktree path failed pre-start validation: {e}. \
+                     Isolation was requested; aborting spawn."
+                );
+                return child_run_output(failure_result(&request, &msg), completion_data, None);
             }
         }
     } else {
@@ -806,38 +960,51 @@ pub(crate) async fn run_shell_child(
         }
     }
     if let Some(scope) = agent_memory_scope {
-        let memory_tools: Vec<xai_grok_tools::registry::types::ToolConfig> = vec![
-            (&grok_build::ReadFileTool).into(),
-            (&grok_build::SearchReplaceTool).into(),
-            (&opencode::OpenCodeWriteTool).into(),
-        ];
-        for tc in memory_tools {
-            if !definition.tool_config.tools.iter().any(|t| t.id == tc.id) {
-                definition.tool_config.tools.push(tc);
-            }
+        // Always allow reading MEMORY.md. Write tools are gated by capability
+        // (see `apply_memory_tools_to_definition` / `memory_writes_allowed`).
+        if !memory_writes_allowed(effective_runtime.capability_mode) {
+            tracing::info!(
+                subagent_id = %request.id,
+                capability_mode = ?effective_runtime.capability_mode,
+                "Skipping memory write tools under non-write capability mode"
+            );
         }
-        let resolved_mem = scope.resolve_dir(&agent_name_for_memory, &ctx.parent_cwd);
-        let memory_dir = &resolved_mem.path;
-        let memory_md = memory_dir.join("MEMORY.md");
-        if memory_md.is_file()
-            && let Ok(content) = std::fs::read_to_string(&memory_md)
-        {
-            const MAX_LINES: usize = 200;
-            const MAX_BYTES: usize = 25 * 1024;
-            let truncated: String = content
-                .lines()
-                .take(MAX_LINES)
-                .collect::<Vec<_>>()
-                .join("\n");
-            let truncated =
-                xai_grok_tools::util::truncate::truncate_str(&truncated, MAX_BYTES).to_string();
-            if !truncated.is_empty() {
-                let injection = format!(
-                    "\n\n<agent-memory>\nMemory directory: {}\n\n{truncated}\n</agent-memory>",
-                    memory_dir.display()
-                );
-                definition.prompt_body =
-                    Some(definition.prompt_body.unwrap_or_default() + injection.as_str());
+        apply_memory_tools_to_definition(
+            &mut definition,
+            effective_runtime.capability_mode,
+            allow_nested_subagents,
+        );
+        // Agent names are joined into memory dirs — reject traversal names.
+        if !xai_tool_types::is_safe_path_segment(&agent_name_for_memory) {
+            tracing::warn!(
+                subagent_id = %request.id,
+                agent = %agent_name_for_memory,
+                "Skipping agent memory: agent name is not a safe path segment"
+            );
+        } else {
+            let resolved_mem = scope.resolve_dir(&agent_name_for_memory, &ctx.parent_cwd);
+            let memory_dir = &resolved_mem.path;
+            let memory_md = memory_dir.join("MEMORY.md");
+            if memory_md.is_file()
+                && let Ok(content) = std::fs::read_to_string(&memory_md)
+            {
+                const MAX_LINES: usize = 200;
+                const MAX_BYTES: usize = 25 * 1024;
+                let truncated: String = content
+                    .lines()
+                    .take(MAX_LINES)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let truncated =
+                    xai_grok_tools::util::truncate::truncate_str(&truncated, MAX_BYTES).to_string();
+                if !truncated.is_empty() {
+                    let injection = format!(
+                        "\n\n<agent-memory>\nMemory directory: {}\n\n{truncated}\n</agent-memory>",
+                        memory_dir.display()
+                    );
+                    definition.prompt_body =
+                        Some(definition.prompt_body.unwrap_or_default() + injection.as_str());
+                }
             }
         }
     }

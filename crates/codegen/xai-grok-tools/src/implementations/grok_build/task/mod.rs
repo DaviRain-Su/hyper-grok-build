@@ -356,11 +356,28 @@ impl xai_tool_runtime::Tool for TaskTool {
             }
         }
 
-        // 3. Build the subagent request
-        let id = input
-            .task_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        // 3. Build the subagent request.
+        //
+        // `task_id` is joined into worktree / session meta / output paths.
+        // Explicit ids are never silently trimmed. Allow historical internal
+        // dots (`task.v1`); reject separators, NUL, control chars, Windows
+        // ADS/reserved names, and surrounding whitespace.
+        let id = match input.task_id {
+            None => uuid::Uuid::now_v7().to_string(),
+            Some(raw) => {
+                let Some(safe) = xai_tool_types::sanitize_task_id(Some(raw.clone())) else {
+                    return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                        "Invalid task_id {raw:?}: must be a single path segment \
+                         (ASCII alphanumeric, '_', '-', optional internal '.', \
+                         no path separators/NUL/control chars/ADS/reserved names, \
+                         no surrounding whitespace, max {} chars). \
+                         Omit task_id to auto-generate a UUID.",
+                        xai_tool_types::MAX_SAFE_PATH_SEGMENT_LEN
+                    )));
+                };
+                safe
+            }
+        };
         let child_cancellation = tokio_util::sync::CancellationToken::new();
         let cancellation_forwarder = (!input.run_in_background)
             .then(|| {
@@ -997,6 +1014,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn path_traversal_task_id_rejected_before_spawn() {
+        for bad_id in [
+            "../escape",
+            "a/b",
+            "a\\b",
+            "  padded  ",
+            "ads:stream",
+            "CON",
+            "ends.",
+        ] {
+            let (backend, mut rx) = make_backend();
+            let resources = resources_for_task(backend);
+            let mut input = task_input("general-purpose", true);
+            input.task_id = Some(bad_id.into());
+            let result =
+                xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input)
+                    .await;
+            let msg = result.expect_err("must reject unsafe task_id").to_string();
+            assert!(
+                msg.contains("Invalid task_id"),
+                "expected Invalid task_id error for {bad_id:?}, got: {msg}"
+            );
+            assert!(rx.try_recv().is_err(), "must not spawn for {bad_id:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn safe_task_id_is_accepted_and_forwarded() {
+        let (backend, mut rx) = make_backend();
+        let resources = resources_for_task(backend);
+        let safe_id = "019e0000-0000-7000-8000-0000000000bb";
+
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            assert_eq!(request.id, safe_id);
+            let _ = request.respond_with(|r| SubagentResult {
+                success: true,
+                output: std::sync::Arc::from("ok"),
+                subagent_id: r.id.clone(),
+                child_session_id: r.id.clone(),
+                ..Default::default()
+            });
+        });
+
+        let mut input = task_input("general-purpose", false);
+        input.task_id = Some(safe_id.into());
+        let result =
+            xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input).await;
+        assert!(
+            result.is_ok(),
+            "safe UUID task_id must be accepted: {result:?}"
+        );
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn historical_dotted_task_id_is_accepted() {
+        let (backend, mut rx) = make_backend();
+        let resources = resources_for_task(backend);
+        let id = "task.v1";
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            assert_eq!(request.id, id);
+            let _ = request.respond_with(|r| SubagentResult {
+                success: true,
+                output: std::sync::Arc::from("ok"),
+                subagent_id: r.id.clone(),
+                child_session_id: r.id.clone(),
+                ..Default::default()
+            });
+        });
+        let mut input = task_input("general-purpose", false);
+        input.task_id = Some(id.into());
+        let result =
+            xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input).await;
+        assert!(result.is_ok(), "task.v1 must be accepted: {result:?}");
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn unknown_subagent_type_returns_error_before_spawn() {
         let available = vec!["general-purpose".to_string(), "explore".to_string()];
         let (backend, mut rx) =
@@ -1329,9 +1426,11 @@ mod tests {
         assert_eq!(
             schema["properties"]["model"]["description"],
             "Optional model slug for this agent. If provided, it must resolve to one of the \
-             available model slugs. If omitted, the subagent uses the same model as the parent \
-             agent. Do not pass if resume_from is set (prior model will be used). Only choose \
-             an explicit model when the user directly requests it."
+             available model slugs. If omitted, the runtime resolves the configured per-agent \
+             pin, then the agent definition, then the parent model. Do not pass if resume_from \
+             is set (the source model will be used). To apply a changed model pin, start a fresh \
+             child without resume_from and omit this field. Only choose an explicit model when \
+             the user directly requests it."
         );
     }
 

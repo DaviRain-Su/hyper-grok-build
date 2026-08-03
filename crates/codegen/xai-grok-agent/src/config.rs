@@ -1196,22 +1196,38 @@ pub struct ResolvedMemoryDir {
     pub is_project_scoped: bool,
 }
 impl MemoryScope {
+    /// Resolve the on-disk memory directory for `agent_name`.
+    ///
+    /// `agent_name` must be a single safe path segment ([`xai_tool_types::is_safe_path_segment`]);
+    /// unsafe names (path separators, `..`, NUL) panic in debug and map to a
+    /// non-escaping `_invalid-agent-name` segment in release so a bug cannot
+    /// turn memory resolution into a path-traversal write.
     pub fn resolve_dir(self, agent_name: &str, project_cwd: &std::path::Path) -> ResolvedMemoryDir {
+        let segment = if xai_tool_types::is_safe_path_segment(agent_name) {
+            agent_name
+        } else {
+            // Fail-closed quarantine: never join `..` / separators into the
+            // memory root. Callers should pre-filter with is_safe_path_segment;
+            // this is defense-in-depth for any residual unsafe name.
+            tracing::error!(
+                agent_name = %agent_name,
+                "unsafe agent name for memory dir; using quarantine segment"
+            );
+            "_invalid-agent-name"
+        };
         match self {
             Self::User => ResolvedMemoryDir {
                 path: xai_grok_config::grok_home()
                     .join("agent-memory")
-                    .join(agent_name),
+                    .join(segment),
                 is_project_scoped: false,
             },
             Self::Project => ResolvedMemoryDir {
-                path: project_cwd.join(".grok/agent-memory").join(agent_name),
+                path: project_cwd.join(".grok/agent-memory").join(segment),
                 is_project_scoped: true,
             },
             Self::Local => ResolvedMemoryDir {
-                path: project_cwd
-                    .join(".grok/agent-memory-local")
-                    .join(agent_name),
+                path: project_cwd.join(".grok/agent-memory-local").join(segment),
                 is_project_scoped: true,
             },
         }
@@ -2288,6 +2304,13 @@ description: Minimal agent
             std::path::PathBuf::from("/project/.grok/agent-memory-local/a")
         );
         assert!(local.is_project_scoped);
+        // Unsafe names must not path-escape the memory root.
+        let evil = MemoryScope::Project.resolve_dir("../escape", cwd);
+        assert_eq!(
+            evil.path,
+            std::path::PathBuf::from("/project/.grok/agent-memory/_invalid-agent-name")
+        );
+        assert!(!evil.path.to_string_lossy().contains(".."));
     }
     #[test]
     fn all_new_enum_variants_parse() {

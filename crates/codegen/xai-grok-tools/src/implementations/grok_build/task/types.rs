@@ -201,9 +201,12 @@ pub fn sanitize_cwd_value(s: &str) -> Option<String> {
 }
 
 /// Returns `true` if the string looks like a real subagent ID rather than a
-/// model-emitted placeholder (`""`, `"null"`, `"none"`, `"undefined"`, whitespace).
+/// model-emitted placeholder (`""`, `"null"`, `"none"`, `"undefined"`, whitespace)
+/// and is safe to join into filesystem paths (no `/`, `\\`, NUL, ADS, etc.).
+///
+/// Does not silently trim: surrounding whitespace fails the safety check.
 pub fn is_valid_resume_id(s: &str) -> bool {
-    is_not_sentinel(s)
+    is_not_sentinel(s) && xai_tool_types::is_safe_task_id(s)
 }
 
 /// Extension methods for [`SubagentCapabilityMode`] that depend on this crate's
@@ -213,8 +216,9 @@ pub trait SubagentCapabilityModeExt {
     ///
     /// Uses the `kind` field on each `ToolConfig`, populated automatically
     /// by `for_tool::<T>()` / `From<&T: Tool>` at toolset construction time.
-    /// Tools without a `kind` (e.g. MCP/custom tools via
-    /// `ToolConfig::from_id()`) are preserved unconditionally.
+    /// When `kind` is `None` (e.g. `ToolConfig::from_id()`), known production
+    /// write/execute IDs are classified via [`classify_tool_id_for_capability`]
+    /// and fail-closed under ReadOnly/Execute. Unknown MCP/custom ids stay.
     fn filter_tool_config(self, config: &mut crate::registry::types::ToolServerConfig);
 
     /// Return the set of `ToolKind`s allowed under this capability mode.
@@ -256,15 +260,85 @@ fn is_background_capable_bash_tool(tc: &crate::registry::types::ToolConfig) -> b
     }
 }
 
+/// Short tool name (last `Namespace:` segment) for fail-closed ID classification
+/// when `ToolConfig::kind` is missing (e.g. `ToolConfig::from_id`).
+fn short_tool_id(id: &str) -> &str {
+    id.rsplit(':').next().unwrap_or(id)
+}
+
+/// Known production write / edit tool short names that must not survive a
+/// non-write capability mode even when `kind` is `None`.
+const KNOWN_WRITE_TOOL_SHORT_NAMES: &[&str] = &[
+    "write",
+    "search_replace",
+    "search-replace",
+    "edit",
+    "apply_patch",
+    "apply-patch",
+    "hashline_edit",
+    "delete_file",
+    "delete",
+    "move_file",
+    "rename",
+    "create_file",
+    "todo_write",
+    "todowrite",
+];
+
+/// Known production execute / shell tool short names that must not survive a
+/// non-execute capability mode when `kind` is `None`.
+const KNOWN_EXECUTE_TOOL_SHORT_NAMES: &[&str] = &[
+    "run_terminal_cmd",
+    "run_terminal_command",
+    "bash",
+    "shell",
+    "terminal",
+    "execute",
+    "run",
+];
+
+/// Infer a capability class for a tool whose `kind` is missing, from its id.
+///
+/// Returns `Some(ToolKind)` for known write/execute production IDs so
+/// ReadOnly / Execute modes can fail closed. Unknown ids stay `None` (MCP /
+/// custom tools) and are preserved.
+pub fn classify_tool_id_for_capability(id: &str) -> Option<crate::types::tool::ToolKind> {
+    use crate::types::tool::ToolKind;
+    let short = short_tool_id(id);
+    let lower = short.to_ascii_lowercase();
+    if KNOWN_WRITE_TOOL_SHORT_NAMES.contains(&lower.as_str()) {
+        // Prefer Write for "write"; Edit for search_replace/edit family.
+        return Some(if lower == "write" || lower == "create_file" {
+            ToolKind::Write
+        } else if lower == "delete" || lower == "delete_file" {
+            ToolKind::Delete
+        } else if lower == "move_file" || lower == "rename" {
+            ToolKind::Move
+        } else {
+            ToolKind::Edit
+        });
+    }
+    if KNOWN_EXECUTE_TOOL_SHORT_NAMES.contains(&lower.as_str()) {
+        return Some(ToolKind::Execute);
+    }
+    None
+}
+
 impl SubagentCapabilityModeExt for SubagentCapabilityMode {
     fn filter_tool_config(self, config: &mut crate::registry::types::ToolServerConfig) {
         if self == Self::All {
             return;
         }
         let allowed = self.allowed_tool_kinds();
-        config.tools.retain(|tc| match tc.kind {
-            Some(k) => allowed.contains(&k),
-            None => true,
+        config.tools.retain(|tc| {
+            let kind = tc.kind.or_else(|| classify_tool_id_for_capability(&tc.id));
+            match kind {
+                Some(k) => allowed.contains(&k),
+                // Unknown kind=None tools (MCP/custom): preserve for All is
+                // already handled; for restricted modes keep only when we
+                // cannot classify as write/execute. MCP remains allowed.
+                None => true,
+            }
         });
         prune_orphaned_background_task_tools(config);
     }
@@ -1101,6 +1175,7 @@ mod tests {
 
     use super::SubagentCapabilityMode;
     use super::SubagentCapabilityModeExt;
+    use super::classify_tool_id_for_capability;
     use super::is_valid_resume_id;
 
     /// Create a `ToolConfig` with the given id and kind set.
@@ -1226,10 +1301,108 @@ mod tests {
     }
 
     #[test]
+    fn is_valid_resume_id_rejects_path_traversal() {
+        for bad in [
+            "../etc",
+            "a/b",
+            "a\\b",
+            "has space",
+            "  padded  ",
+            "ads:stream",
+            "CON",
+        ] {
+            assert!(
+                !is_valid_resume_id(bad),
+                "{bad:?} must not be a valid resume id"
+            );
+        }
+    }
+
+    #[test]
     fn is_valid_resume_id_accepts_real_ids() {
-        for good in ["019e0000-0000-7000-8000-0000000000bb", "abc-123", "prev-id"] {
+        for good in [
+            "019e0000-0000-7000-8000-0000000000bb",
+            "abc-123",
+            "prev-id",
+            "task.v1",
+        ] {
             assert!(is_valid_resume_id(good), "{good:?} should be valid");
         }
+    }
+
+    #[test]
+    fn read_only_filter_drops_kind_none_write_tools_by_id() {
+        let mut config = ToolServerConfig {
+            tools: vec![
+                ToolConfig::from_id("write"),
+                ToolConfig::from_id("search_replace"),
+                ToolConfig::from_id("GrokBuild:run_terminal_cmd"),
+                ToolConfig::from_id("OpenCode:bash"),
+                tc("GrokBuild:read_file", ToolKind::Read),
+                ToolConfig::from_id("mcp_custom_unknown"),
+            ],
+            behavior_preset: None,
+        };
+        SubagentCapabilityMode::ReadOnly.filter_tool_config(&mut config);
+        let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
+        assert!(
+            !ids.iter()
+                .any(|id| id.contains("write") || id.contains("search_replace")),
+            "write tools must be stripped: {ids:?}"
+        );
+        assert!(
+            !ids.iter()
+                .any(|id| id.contains("run_terminal") || id.contains("bash")),
+            "execute tools must be stripped: {ids:?}"
+        );
+        assert!(ids.contains(&"GrokBuild:read_file"));
+        assert!(
+            ids.contains(&"mcp_custom_unknown"),
+            "unknown MCP-like tools without kind stay: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn execute_filter_drops_kind_none_write_keeps_execute() {
+        let mut config = ToolServerConfig {
+            tools: vec![
+                ToolConfig::from_id("write"),
+                ToolConfig::from_id("search_replace"),
+                tc("GrokBuild:run_terminal_cmd", ToolKind::Execute),
+                tc("GrokBuild:read_file", ToolKind::Read),
+            ],
+            behavior_preset: None,
+        };
+        SubagentCapabilityMode::Execute.filter_tool_config(&mut config);
+        let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
+        assert!(
+            !ids.iter()
+                .any(|id| *id == "write" || *id == "search_replace")
+        );
+        assert!(ids.contains(&"GrokBuild:run_terminal_cmd"));
+        assert!(ids.contains(&"GrokBuild:read_file"));
+    }
+
+    #[test]
+    fn classify_tool_id_for_capability_covers_production_ids() {
+        use crate::types::tool::ToolKind;
+        assert_eq!(
+            classify_tool_id_for_capability("write"),
+            Some(ToolKind::Write)
+        );
+        assert_eq!(
+            classify_tool_id_for_capability("GrokBuild:search_replace"),
+            Some(ToolKind::Edit)
+        );
+        assert_eq!(
+            classify_tool_id_for_capability("OpenCode:bash"),
+            Some(ToolKind::Execute)
+        );
+        assert_eq!(
+            classify_tool_id_for_capability("run_terminal_cmd"),
+            Some(ToolKind::Execute)
+        );
+        assert_eq!(classify_tool_id_for_capability("mcp_foo"), None);
     }
 
     #[test]

@@ -268,17 +268,53 @@ impl BackgroundTaskRegistry {
     }
 }
 
+/// Error when a background-task output path cannot be formed safely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsafeTaskPathId {
+    pub field: &'static str,
+    pub value: String,
+}
+
+impl std::fmt::Display for UnsafeTaskPathId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unsafe {} for background task path: {:?}",
+            self.field, self.value
+        )
+    }
+}
+
+impl std::error::Error for UnsafeTaskPathId {}
+
 /// Get output file path for a background task.
 ///
 /// Creates the directory structure if it doesn't exist.
 /// Path format: `~/.grok/sessions/{session_id}/tasks/{task_id}.log`
-pub fn get_task_output_path(session_id: &str, task_id: &str) -> PathBuf {
+///
+/// Both `session_id` and `task_id` must be safe path segments
+/// ([`xai_tool_types::is_safe_task_id`]). Unsafe ids are **rejected**
+/// (no shared quarantine name that could collide).
+pub fn get_task_output_path(session_id: &str, task_id: &str) -> Result<PathBuf, UnsafeTaskPathId> {
     use crate::util::grok_home::grok_home;
+
+    if !xai_tool_types::is_safe_task_id(session_id) {
+        return Err(UnsafeTaskPathId {
+            field: "session_id",
+            value: session_id.to_string(),
+        });
+    }
+    if !xai_tool_types::is_safe_task_id(task_id) {
+        return Err(UnsafeTaskPathId {
+            field: "task_id",
+            value: task_id.to_string(),
+        });
+    }
 
     let tasks_dir = grok_home().join("sessions").join(session_id).join("tasks");
     // Create directory (ignore errors - will fail on write if dir creation fails)
     std::fs::create_dir_all(&tasks_dir).ok();
-    tasks_dir.join(format!("{}.log", task_id))
+    Ok(tasks_dir.join(format!("{task_id}.log")))
 }
 
 // ── Background task manifest for session resume ──
@@ -768,5 +804,27 @@ mod tests {
             format_duration_ago(now, now + Duration::from_secs(100)),
             "0s ago"
         );
+    }
+
+    #[test]
+    fn get_task_output_path_rejects_unsafe_ids() {
+        let err = get_task_output_path("sess-ok", "../escape").unwrap_err();
+        assert_eq!(err.field, "task_id");
+        assert!(err.value.contains(".."));
+
+        let err2 = get_task_output_path("a/b", "task.v1").unwrap_err();
+        assert_eq!(err2.field, "session_id");
+
+        // Distinct unsafe ids both reject (no shared quarantine collision).
+        assert!(get_task_output_path("x", "a/b").is_err());
+        assert!(get_task_output_path("x", "c/d").is_err());
+    }
+
+    #[test]
+    fn get_task_output_path_accepts_safe_ids() {
+        let path = get_task_output_path("session-1", "task.v1").unwrap();
+        let s = path.to_string_lossy();
+        assert!(s.contains("session-1"));
+        assert!(s.ends_with("task.v1.log") || s.contains("task.v1.log"));
     }
 }
