@@ -5,7 +5,10 @@ use xai_grok_tools::types::output::{ToolOutput, ToolRunResult};
 
 fn succeeding_am() -> Arc<AuthManager> {
     let dir = tempfile::tempdir().unwrap();
-    let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    let am = Arc::new(AuthManager::new_test_isolated(
+        dir.path(),
+        GrokComConfig::default(),
+    ));
     am.hot_swap(GrokAuth {
         key: "expired".into(),
         auth_mode: AuthMode::Oidc,
@@ -36,7 +39,10 @@ fn succeeding_am() -> Arc<AuthManager> {
 
 fn failing_am() -> Arc<AuthManager> {
     let dir = tempfile::tempdir().unwrap();
-    let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    let am = Arc::new(AuthManager::new_test_isolated(
+        dir.path(),
+        GrokComConfig::default(),
+    ));
     am.hot_swap(GrokAuth {
         key: "expired".into(),
         auth_mode: AuthMode::Oidc,

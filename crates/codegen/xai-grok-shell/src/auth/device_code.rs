@@ -554,7 +554,7 @@ pub(crate) mod tests {
         proxy_base_url: &str,
     ) -> Arc<AuthManager> {
         Arc::new(
-            AuthManager::new(grok_home, GrokComConfig::default())
+            AuthManager::new_test_isolated(grok_home, GrokComConfig::default())
                 .with_proxy_base_url(proxy_base_url),
         )
     }
@@ -683,8 +683,10 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let grok_home = temp_dir.path().join(".grok");
         std::fs::create_dir_all(&grok_home).unwrap();
-        let auth_manager =
-            Arc::new(AuthManager::new(&grok_home, cfg).with_proxy_base_url("http://127.0.0.1:9"));
+        let auth_manager = Arc::new(
+            AuthManager::new_test_isolated(&grok_home, cfg)
+                .with_proxy_base_url("http://127.0.0.1:9"),
+        );
 
         let err = tokio::runtime::Runtime::new()
             .unwrap()
@@ -727,8 +729,10 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let grok_home = temp_dir.path().join(".grok");
         std::fs::create_dir_all(&grok_home).unwrap();
-        let auth_manager =
-            Arc::new(AuthManager::new(&grok_home, cfg).with_proxy_base_url("http://127.0.0.1:9"));
+        let auth_manager = Arc::new(
+            AuthManager::new_test_isolated(&grok_home, cfg)
+                .with_proxy_base_url("http://127.0.0.1:9"),
+        );
 
         let auth = tokio::runtime::Runtime::new()
             .unwrap()

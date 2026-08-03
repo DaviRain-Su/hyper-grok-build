@@ -77,7 +77,11 @@ impl AgentTask {
         let pid = prompt_id.clone();
         Self {
             prompt_id,
-            handle: tokio::task::spawn_local(async move {
+            // Box the task future so the large `handle_prompt` state machine
+            // is heap-allocated when the LocalSet task is created (not stacked
+            // into the spawn frame). Same root cause as the auth_retry_budget
+            // stack overflow: composing huge async fns without boxing.
+            handle: tokio::task::spawn_local(Box::pin(async move {
                 run_task(
                     session.clone(),
                     input,
@@ -94,7 +98,7 @@ impl AgentTask {
                     parsed_prompt_tx,
                 )
                 .await
-            })
+            }))
             .abort_handle(),
         }
     }
@@ -157,8 +161,10 @@ async fn run_task(
     persist_ack: Option<oneshot::Sender<()>>,
     parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
 ) {
-    let result = session
-        .handle_prompt(
+    // Pin the large `handle_prompt` future from a thin never-inlined frame
+    // (see turn.rs `box_turn_future` / docs/test-isolation.md §8.3).
+    let result = super::turn::box_turn_future(|| {
+        session.handle_prompt(
             &prompt_id,
             input,
             prompt_mode,
@@ -171,7 +177,8 @@ async fn run_task(
             persist_ack,
             parsed_prompt_tx,
         )
-        .await;
+    })
+    .await;
     let _ = completion_tx.send((prompt_id, result));
 }
 

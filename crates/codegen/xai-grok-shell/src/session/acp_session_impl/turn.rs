@@ -37,6 +37,26 @@ pub(crate) fn validate_structured_output(
         Err(e) => Err(format!("output does not match the required schema: {e}")),
     }
 }
+
+/// Pin a large turn future on the heap from a **thin, never-inlined**
+/// stack frame.
+///
+/// `Box::pin(fut)` still constructs `fut` on the *caller* stack before the
+/// move. Calling that construction from an `#[inline(never)]` helper keeps
+/// the outer `handle_prompt` / recovery frames small so the default 2 MiB
+/// thread stack has room for the temporary. Pair with structural splits of
+/// huge async fns (setup vs loop) so no single future exceeds ~2 MiB.
+///
+/// No `stacker` / permanent `RUST_MIN_STACK` — see docs/test-isolation.md §8.3.
+#[inline(never)]
+pub(crate) fn box_turn_future<'a, F, T>(
+    build: impl FnOnce() -> F,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>
+where
+    F: std::future::Future<Output = T> + 'a,
+{
+    Box::pin(build())
+}
 /// Result of the turn-end usage drain (and cancel's no-drain snapshot).
 ///
 /// **Ledger marks** only when [`Self::fail_closed`]. Sticky and background
@@ -239,6 +259,43 @@ impl SessionActor {
         )
     )]
     pub(super) async fn handle_prompt(
+        self: &Arc<Self>,
+        prompt_id: &str,
+        prompt_blocks: Vec<acp::ContentBlock>,
+        prompt_mode: PromptMode,
+        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
+        artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+        prompt_client_identifier: Option<String>,
+        prompt_screen_mode: Option<String>,
+        verbatim: bool,
+        json_schema: Option<serde_json::Value>,
+        persist_ack: Option<oneshot::Sender<()>>,
+        parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
+    ) -> PromptTurnResult {
+        // Thin entry: pin the large body future from a never-inlined frame so
+        // construction does not sit under the caller's stack load (docs §8.3).
+        box_turn_future(|| {
+            self.handle_prompt_body(
+                prompt_id,
+                prompt_blocks,
+                prompt_mode,
+                trace_gcs_config,
+                artifact_tracker,
+                prompt_client_identifier,
+                prompt_screen_mode,
+                verbatim,
+                json_schema,
+                persist_ack,
+                parsed_prompt_tx,
+            )
+        })
+        .await
+    }
+
+    /// Full prompt turn body (never-inlined so `box_turn_future` constructs
+    /// its state machine on a thin stack frame).
+    #[inline(never)]
+    async fn handle_prompt_body(
         self: &Arc<Self>,
         prompt_id: &str,
         prompt_blocks: Vec<acp::ContentBlock>,
@@ -867,15 +924,17 @@ impl SessionActor {
         let turn_timer = std::time::Instant::now();
         // Outer loop (goal / stop_gate) always shell-side. Each round uses
         // Hypercore when enabled (incl. json_schema since P4), else legacy.
-        let result = self
-            .run_turn_outer_loop(
+        // Pin large outer-loop future from a thin frame — see `box_turn_future`.
+        let result = box_turn_future(|| {
+            self.run_turn_outer_loop(
                 prompt_id,
                 prompt_text_for_hook.trim(),
                 trace_gcs_config,
                 artifact_tracker,
                 json_schema,
             )
-            .await;
+        })
+        .await;
         let turn_duration_ms = turn_timer.elapsed().as_millis() as u64;
         let handle_prompt_elapsed_ms = handle_prompt_start.elapsed().as_millis() as u64;
         xai_grok_telemetry::unified_log::info(
@@ -1624,12 +1683,14 @@ impl SessionActor {
                 "outer_round": outer_round,
             })),
         );
-        self.process_conversation_turn_with_recovery(
-            prompt_id,
-            trace_gcs_config,
-            artifact_tracker,
-            json_schema,
-        )
+        box_turn_future(|| {
+            self.process_conversation_turn_with_recovery(
+                prompt_id,
+                trace_gcs_config,
+                artifact_tracker,
+                json_schema,
+            )
+        })
         .await
     }
 
@@ -1665,7 +1726,7 @@ impl SessionActor {
             Some(req) => req,
             None => {
                 return self
-                    .process_conversation_turn(
+                    .process_conversation_turn_boxed(
                         req_id,
                         trace_gcs_config,
                         artifact_tracker.as_ref(),
@@ -1678,7 +1739,7 @@ impl SessionActor {
             Some(r) => r.clone(),
             None => {
                 return self
-                    .process_conversation_turn(
+                    .process_conversation_turn_boxed(
                         req_id,
                         trace_gcs_config,
                         artifact_tracker.as_ref(),
@@ -1690,7 +1751,7 @@ impl SessionActor {
         let required_tool = completion_req.tool.clone();
         let recovery_prompt = completion_req.reminder.clone();
         let mut result = self
-            .process_conversation_turn(
+            .process_conversation_turn_boxed(
                 req_id,
                 trace_gcs_config.clone(),
                 artifact_tracker.as_ref(),
@@ -1757,7 +1818,7 @@ impl SessionActor {
             let recovery_message = ConversationItem::auto_recovery(recovery_prompt.clone());
             self.chat_state_handle.push_user_message(recovery_message);
             result = self
-                .process_conversation_turn(
+                .process_conversation_turn_boxed(
                     req_id,
                     trace_gcs_config.clone(),
                     artifact_tracker.as_ref(),
@@ -1785,6 +1846,26 @@ impl SessionActor {
                 return result;
             }
         }
+    }
+
+    /// Heap-allocate the legacy turn future and poll it under a temporary
+    /// heap pin from thin frame. See [`box_turn_future`] / docs §8.3.
+    fn process_conversation_turn_boxed<'a>(
+        self: &'a Arc<Self>,
+        req_id: &'a str,
+        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
+        artifact_tracker: Option<&'a crate::upload::manifest::ArtifactTracker>,
+        json_schema: Option<serde_json::Value>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TurnOutcome, acp::Error>> + 'a>>
+    {
+        box_turn_future(|| {
+            self.process_conversation_turn_body(
+                req_id,
+                trace_gcs_config,
+                artifact_tracker,
+                json_schema,
+            )
+        })
     }
     /// Compute the first-turn memory reminder, if one should be injected.
     ///
@@ -2033,6 +2114,27 @@ impl SessionActor {
         artifact_tracker: Option<&crate::upload::manifest::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
     ) -> Result<TurnOutcome, acp::Error> {
+        // Pin the large body from a never-inlined frame (docs §8.3).
+        box_turn_future(|| {
+            self.process_conversation_turn_body(
+                req_id,
+                trace_gcs_config,
+                artifact_tracker,
+                json_schema,
+            )
+        })
+        .await
+    }
+
+    /// Legacy agentic turn body (setup + tool/sample loop).
+    #[inline(never)]
+    async fn process_conversation_turn_body(
+        self: &Arc<Self>,
+        req_id: &str,
+        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
+        artifact_tracker: Option<&crate::upload::manifest::ArtifactTracker>,
+        json_schema: Option<serde_json::Value>,
+    ) -> Result<TurnOutcome, acp::Error> {
         let conv_turn_start = std::time::Instant::now();
         let conv_turn_clock = DualClock::now();
         self.maybe_refresh_model_metadata_on_resume().await;
@@ -2069,6 +2171,10 @@ impl SessionActor {
         let mut prompt_timing = Some(crate::session::prompt_timing::PromptTiming::start());
         let tool_prep_start = std::time::Instant::now();
         let (tool_definitions, mcp_wait_ms) = self.prepare_tool_definitions_timed().await;
+        // Heap-allocate large turn-scoped values so the async state machine
+        // holds pointers across awaits instead of multi-KB enum variants
+        // (root cause of default-stack overflow in auth_retry_budget_tests).
+        let tool_definitions = std::sync::Arc::new(tool_definitions);
         let total_prep_ms = tool_prep_start.elapsed().as_millis() as u64;
         if let Some(ref mut pt) = prompt_timing {
             pt.record_tool_prep(mcp_wait_ms, total_prep_ms);
@@ -2085,7 +2191,7 @@ impl SessionActor {
         );
         if let Some(ref gcs_config) = trace_gcs_config {
             let gcs_cfg = gcs_config.clone();
-            let tool_defs = tool_definitions.clone();
+            let tool_defs = tool_definitions.as_ref().clone();
             let manifest_clone = artifact_tracker.cloned();
             let auth_manager = self.auth_manager.clone();
             tokio::spawn(async move {
@@ -2109,10 +2215,11 @@ impl SessionActor {
         let mut turn_span_totals = TurnSpanTotals::default();
         let mut model_fingerprint: Option<String> = None;
         let mut structured_output_retries: u32 = 0;
-        let structured_output_validator = json_schema.as_ref().map(|schema| {
+        // Validator is large; keep it on the heap for the whole turn.
+        let structured_output_validator = std::sync::Arc::new(json_schema.as_ref().map(|schema| {
             jsonschema::validator_for(schema).map_err(|e| format!("invalid output schema: {e}"))
-        });
-        let schema_ok = matches!(structured_output_validator, Some(Ok(_)));
+        }));
+        let schema_ok = matches!(structured_output_validator.as_ref(), Some(Ok(_)));
         let native_backend = if json_schema.is_some() {
             match self.chat_state_handle.get_sampling_config().await {
                 Some(c) => c.api_backend.supports_native_schema(),
@@ -2256,7 +2363,7 @@ impl SessionActor {
                 if let Some(ref override_tools) = self.forked_tool_override {
                     override_tools.clone()
                 } else {
-                    self.turn_base_tool_specs(&tool_definitions).await
+                    self.turn_base_tool_specs(tool_definitions.as_ref()).await
                 };
             if structured_output_tool && let Some(schema) = json_schema.clone() {
                 effective_tools.push(ToolSpec {
@@ -2297,7 +2404,9 @@ impl SessionActor {
                     "loop_index": loop_index,
                 })),
             );
-            let mut request = request;
+            // Box request/response: ConversationRequest holds the full item
+            // history + tool specs and is live across the sampler await.
+            let mut request = Box::new(request);
             request.x_grok_session_id = Some(self.session_info.id.to_string());
             request.x_grok_turn_idx =
                 Some(self.chat_state_handle.get_prompt_index().await.to_string());
@@ -2334,8 +2443,8 @@ impl SessionActor {
                 })),
             );
             let model_timer = std::time::Instant::now();
-            let (response, latency) = match self.run_turn_via_sampler(request.clone()).await {
-                Ok(SamplerTurnOutcome::Response(r, latency)) => (r, latency),
+            let (response, latency) = match self.run_turn_via_sampler((*request).clone()).await {
+                Ok(SamplerTurnOutcome::Response(r, latency)) => (Box::new(r), latency),
                 Err(error) => {
                     self.tool_context.fail_task_output_usage_closed();
                     return Err(error);
@@ -2721,7 +2830,8 @@ impl SessionActor {
                     refusal: turn_refused.then(|| refusal_explanation.clone().unwrap_or_default()),
                 });
             }
-            if structured_output_tool && let Some(validator) = structured_output_validator.as_ref()
+            if structured_output_tool
+                && let Some(validator) = structured_output_validator.as_ref().as_ref()
             {
                 match self
                     .handle_structured_output_tool_call(

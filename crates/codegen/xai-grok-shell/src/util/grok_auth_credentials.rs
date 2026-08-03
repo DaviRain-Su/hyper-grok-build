@@ -145,7 +145,10 @@ mod tests {
         expires_at: chrono::DateTime<Utc>,
     ) -> (Arc<AuthManager>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+        let mgr = Arc::new(AuthManager::new_test_isolated(
+            dir.path(),
+            GrokComConfig::default(),
+        ));
         let auth = GrokAuth {
             key: "test-bearer-token".into(),
             auth_mode: AuthMode::External,
@@ -182,7 +185,10 @@ mod tests {
     #[test]
     fn resolve_returns_none_when_no_token_at_all() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+        let mgr = Arc::new(AuthManager::new_test_isolated(
+            dir.path(),
+            GrokComConfig::default(),
+        ));
         let creds = GrokAuthCredentials::new(None).with_auth_manager(mgr);
         assert!(creds.resolve().user_token.is_none());
     }

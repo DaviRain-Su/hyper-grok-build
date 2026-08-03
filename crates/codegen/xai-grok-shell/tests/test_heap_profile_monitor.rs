@@ -243,7 +243,11 @@ impl Harness {
         let config = resolve_from_settings(&fetched);
         let home = tempfile::TempDir::new().expect("temp home");
         seed_auth_json(home.path(), AUTH_TOKEN);
-        let auth = Arc::new(AuthManager::new(home.path(), GrokComConfig::default()));
+        // Explicit isolated constructor — never reads GROK_AUTH / real home.
+        let auth = Arc::new(AuthManager::for_test_home(
+            home.path(),
+            GrokComConfig::default(),
+        ));
         let handles = proxy_handles(&server, Arc::clone(&auth));
         let mut mon = HeapProfileMonitor::new();
         mon.reconfigure(config, Some(handles));
@@ -486,4 +490,46 @@ async fn re_enable_after_kill_switch_keeps_prior_latches() {
     assert_ne!(uploads[0].path, uploads[2].path);
     assert_storage_auth(&uploads[2..]);
     assert_meta_json(&uploads[3].body, 200, 500, 1_000);
+}
+
+/// Integration-visible constructor must ignore process env (poisoned HOME /
+/// GROK_AUTH / GROK_AUTH_PATH) and only use the TempDir auth.json.
+#[test]
+#[serial_test::serial(heap_profile_integration)]
+fn for_test_home_ignores_poisoned_env() {
+    use xai_grok_test_support::EnvGuard;
+    let home = tempfile::TempDir::new().unwrap();
+    seed_auth_json(home.path(), AUTH_TOKEN);
+
+    let poison = tempfile::TempDir::new().unwrap();
+    seed_auth_json(poison.path(), "poison-token");
+    let poison_auth = poison.path().join("auth.json");
+    let _h = EnvGuard::set("HOME", poison.path().to_str().unwrap());
+    let _g = EnvGuard::set("GROK_HOME", poison.path().to_str().unwrap());
+    let _p = EnvGuard::set("GROK_AUTH_PATH", poison_auth.to_str().unwrap());
+    let poison_inline = serde_json::to_string(&GrokAuth {
+        key: "inline-poison".into(),
+        auth_mode: AuthMode::Oidc,
+        create_time: Utc::now(),
+        user_id: "poison".into(),
+        refresh_token: Some("rt".into()),
+        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+        coding_data_retention_opt_out: true,
+        ..GrokAuth::default()
+    })
+    .unwrap();
+    let _a = EnvGuard::set("GROK_AUTH", poison_inline);
+
+    let mgr = AuthManager::for_test_home(home.path(), GrokComConfig::default());
+    assert_eq!(
+        mgr.auth_json_path(),
+        home.path().join("auth.json"),
+        "path is solely the passed home"
+    );
+    // In-memory credential must be the TempDir seed — not poisoned env.
+    assert_eq!(
+        mgr.current().as_ref().map(|a| a.key.as_str()),
+        Some(AUTH_TOKEN),
+        "for_test_home must load TempDir seed into memory, not poisoned env"
+    );
 }

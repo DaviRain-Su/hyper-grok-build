@@ -144,7 +144,8 @@ async fn auth_backend_contract_token_responses_map_to_outcomes() {
         let (base_url, server) = start_idp(*status, body.to_string(), hits.clone(), 0).await;
         let dir = tempfile::tempdir().unwrap();
         let auth_manager = Arc::new(
-            AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+            AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+                .with_proxy_base_url(&base_url),
         );
         auth_manager.hot_swap(expired_oidc(&base_url));
 
@@ -181,7 +182,8 @@ async fn auth_backend_contract_concurrent_401s_hit_idp_once() {
     .await;
     let dir = tempfile::tempdir().unwrap();
     let auth_manager = Arc::new(
-        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+        AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+            .with_proxy_base_url(&base_url),
     );
     auth_manager.hot_swap(expired_oidc(&base_url));
     auth_manager.set_refresher(Arc::new(OidcRefresher::new(auth_manager.clone())));
@@ -232,7 +234,8 @@ async fn auth_backend_contract_dead_token_emits_typed_manual_auth_event() {
             start_idp(400, r#"{"error":"invalid_grant"}"#.to_string(), hits, 0).await;
         let dir = tempfile::tempdir().unwrap();
         let auth_manager = Arc::new(
-            AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&url),
+            AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+                .with_proxy_base_url(&url),
         );
         auth_manager.hot_swap(expired_oidc(&url));
         auth_manager.set_refresher(Arc::new(OidcRefresher::new(auth_manager.clone())));
@@ -283,7 +286,8 @@ async fn auth_backend_contract_dead_token_emits_typed_manual_auth_event() {
     .await;
     let ok_dir = tempfile::tempdir().unwrap();
     let ok_manager = Arc::new(
-        AuthManager::new(ok_dir.path(), GrokComConfig::default()).with_proxy_base_url(&ok_url),
+        AuthManager::new_test_isolated(ok_dir.path(), GrokComConfig::default())
+            .with_proxy_base_url(&ok_url),
     );
     ok_manager.hot_swap(expired_oidc(&ok_url));
     ok_manager.set_refresher(Arc::new(OidcRefresher::new(ok_manager.clone())));
@@ -314,7 +318,8 @@ async fn auth_backend_contract_transient_failures_escalate_to_non_sticky_permane
     let (base_url, server) = start_idp(503, "{}".to_string(), hits, 0).await;
     let dir = tempfile::tempdir().unwrap();
     let auth_manager = Arc::new(
-        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+        AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+            .with_proxy_base_url(&base_url),
     );
     auth_manager.hot_swap(expired_oidc(&base_url));
 
@@ -375,7 +380,8 @@ async fn auth_backend_contract_two_instances_share_one_idp_call() {
     // genuinely contend, like two processes).
     let new_instance = || {
         let m = Arc::new(
-            AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&url),
+            AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+                .with_proxy_base_url(&url),
         );
         m.hot_swap(expired_oidc(&url));
         m.set_refresher(Arc::new(OidcRefresher::new(m.clone())));

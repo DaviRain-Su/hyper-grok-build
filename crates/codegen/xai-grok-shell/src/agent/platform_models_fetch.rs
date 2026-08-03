@@ -636,10 +636,22 @@ struct RadiusCacheFile {
     models: Vec<RadiusWireModel>,
 }
 
+/// On-disk radius catalog path.
+///
+/// Non-empty `GROK_RADIUS_MODELS_CACHE_PATH` wins (empty = unset).
+/// Otherwise `grok_home()/radius_models_cache.json`.
+///
+/// Production default path resolver. Prefer passing an explicit `Path` into
+/// [`load_radius_cache`] / [`store_radius_cache`] / [`lock_radius_cache`].
+/// Tests inject a per-TempDir path (directly or via non-empty
+/// `GROK_RADIUS_MODELS_CACHE_PATH`); empty env = unset.
 fn radius_cache_path() -> std::path::PathBuf {
-    std::env::var("GROK_RADIUS_MODELS_CACHE_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| xai_grok_config::grok_home().join("radius_models_cache.json"))
+    if let Ok(p) = std::env::var("GROK_RADIUS_MODELS_CACHE_PATH")
+        && !p.is_empty()
+    {
+        return std::path::PathBuf::from(p);
+    }
+    xai_grok_config::grok_home().join("radius_models_cache.json")
 }
 
 fn radius_credential_scope(kind: &str, bearer: &str) -> String {
@@ -656,10 +668,9 @@ fn radius_credential_scope(kind: &str, bearer: &str) -> String {
         .collect()
 }
 
-fn lock_radius_cache() -> Option<std::fs::File> {
+fn lock_radius_cache(cache_path: &std::path::Path) -> Option<std::fs::File> {
     use fs2::FileExt as _;
 
-    let cache_path = radius_cache_path();
     let lock_path = cache_path.with_extension("lock");
     if let Some(parent) = lock_path.parent()
         && !parent.as_os_str().is_empty()
@@ -699,11 +710,12 @@ fn radius_cache_age_seconds(fetched_at: chrono::DateTime<chrono::Utc>) -> Option
 }
 
 fn load_radius_cache(
+    cache_path: &std::path::Path,
     gateway: &str,
     credential_scope: &str,
     fresh_only: bool,
 ) -> Option<IndexMap<String, ModelEntry>> {
-    let raw = std::fs::read_to_string(radius_cache_path()).ok()?;
+    let raw = std::fs::read_to_string(cache_path).ok()?;
     let cache: RadiusCacheFile = serde_json::from_str(&raw).ok()?;
     if cache.version != 2 || cache.gateway != gateway || cache.credential_scope != credential_scope
     {
@@ -723,14 +735,13 @@ fn load_radius_cache(
 }
 
 fn store_radius_cache(
+    path: &std::path::Path,
     gateway: &str,
     credential_scope: &str,
     base_url: &str,
     models: Vec<RadiusWireModel>,
 ) {
     use std::io::Write as _;
-
-    let path = radius_cache_path();
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -766,7 +777,7 @@ fn store_radius_cache(
             .open(&tmp)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
-        std::fs::rename(&tmp, &path)?;
+        std::fs::rename(&tmp, path)?;
         if let Ok(directory) = std::fs::File::open(parent) {
             let _ = directory.sync_all();
         }
@@ -1050,18 +1061,22 @@ fn fetch_radius_models_if_enabled(
         }
     };
 
-    if let Some(fresh) = load_radius_cache(&gateway, &initial_scope, true) {
+    // Explicit path (env or grok_home default). Tests pass per-TempDir via
+    // GROK_RADIUS_MODELS_CACHE_PATH or call load/store with a PathBuf.
+    let cache_path = radius_cache_path();
+
+    if let Some(fresh) = load_radius_cache(&cache_path, &gateway, &initial_scope, true) {
         return Some(fresh);
     }
     let _process_guard = RADIUS_FETCH_LOCK.lock().ok()?;
-    if let Some(fresh) = load_radius_cache(&gateway, &initial_scope, true) {
+    if let Some(fresh) = load_radius_cache(&cache_path, &gateway, &initial_scope, true) {
         return Some(fresh);
     }
-    let Some(_file_guard) = lock_radius_cache() else {
+    let Some(_file_guard) = lock_radius_cache(&cache_path) else {
         tracing::warn!("radius config cache lock unavailable; trying stale cache");
-        return load_radius_cache(&gateway, &initial_scope, false);
+        return load_radius_cache(&cache_path, &gateway, &initial_scope, false);
     };
-    if let Some(fresh) = load_radius_cache(&gateway, &initial_scope, true) {
+    if let Some(fresh) = load_radius_cache(&cache_path, &gateway, &initial_scope, true) {
         return Some(fresh);
     }
 
@@ -1070,17 +1085,17 @@ fn fetch_radius_models_if_enabled(
         RadiusDiscoveryCredential::OAuth { gateway, .. } => {
             let Some(auth) = crate::auth::radius::ensure_radius_auth_blocking() else {
                 tracing::warn!("radius OAuth refresh unavailable; trying stale cache");
-                return load_radius_cache(&gateway, &initial_scope, false);
+                return load_radius_cache(&cache_path, &gateway, &initial_scope, false);
             };
             if oauth_gateway_for_auth(&auth).as_deref() != Some(gateway.as_str()) {
                 tracing::warn!(
                     "radius OAuth gateway changed during discovery; refusing to mix token and gateway"
                 );
-                return load_radius_cache(&gateway, &initial_scope, false);
+                return load_radius_cache(&cache_path, &gateway, &initial_scope, false);
             }
             let active_scope = radius_credential_scope("oauth", &auth.key);
             if active_scope != initial_scope
-                && let Some(fresh) = load_radius_cache(&gateway, &active_scope, true)
+                && let Some(fresh) = load_radius_cache(&cache_path, &gateway, &active_scope, true)
             {
                 return Some(fresh);
             }
@@ -1092,7 +1107,7 @@ fn fetch_radius_models_if_enabled(
         Ok(url) => url,
         Err(error) => {
             tracing::warn!(%error, "radius config URL invalid; trying stale cache");
-            return load_radius_cache(&gateway, &initial_scope, false);
+            return load_radius_cache(&cache_path, &gateway, &initial_scope, false);
         }
     };
     let client = crate::http::shared_startup_blocking_client();
@@ -1106,7 +1121,7 @@ fn fetch_radius_models_if_enabled(
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(%error, "radius config fetch failed; trying stale cache");
-            return load_radius_cache(&gateway, &initial_scope, false);
+            return load_radius_cache(&cache_path, &gateway, &initial_scope, false);
         }
     };
     if !response.status().is_success() {
@@ -1114,29 +1129,35 @@ fn fetch_radius_models_if_enabled(
             status = %response.status(),
             "radius config fetch failed; trying stale cache"
         );
-        return load_radius_cache(&gateway, &initial_scope, false);
+        return load_radius_cache(&cache_path, &gateway, &initial_scope, false);
     }
     let parsed = match read_radius_config_response(response) {
         Ok(parsed) => parsed,
         Err(error) => {
             tracing::warn!(%error, "radius config parse failed; trying stale cache");
-            return load_radius_cache(&gateway, &initial_scope, false);
+            return load_radius_cache(&cache_path, &gateway, &initial_scope, false);
         }
     };
     let base_url = match crate::auth::radius::normalize_gateway_root(&parsed.base_url) {
         Ok(base_url) => base_url,
         Err(error) => {
             tracing::warn!(%error, "radius config baseUrl invalid; trying stale cache");
-            return load_radius_cache(&gateway, &initial_scope, false);
+            return load_radius_cache(&cache_path, &gateway, &initial_scope, false);
         }
     };
     if let Err(error) = validate_radius_config(&base_url, &parsed.models) {
         tracing::warn!(%error, "radius config validation failed; trying stale cache");
-        return load_radius_cache(&gateway, &initial_scope, false);
+        return load_radius_cache(&cache_path, &gateway, &initial_scope, false);
     }
 
     let entries = radius_models_to_entries(&base_url, parsed.models.clone());
-    store_radius_cache(&gateway, &active_scope, &base_url, parsed.models);
+    store_radius_cache(
+        &cache_path,
+        &gateway,
+        &active_scope,
+        &base_url,
+        parsed.models,
+    );
     Some(entries)
 }
 
@@ -1532,18 +1553,27 @@ mod tests {
         let gateway = "https://gateway.radius.test";
         let base = "https://inference.radius.test/v1";
         let scope = radius_credential_scope("api-key", "test-key");
-        store_radius_cache(gateway, &scope, base, vec![radius_wire("cached")]);
+        store_radius_cache(
+            &cache_path,
+            gateway,
+            &scope,
+            base,
+            vec![radius_wire("cached")],
+        );
 
-        assert!(load_radius_cache(gateway, &scope, true).is_some());
+        assert!(load_radius_cache(&cache_path, gateway, &scope, true).is_some());
         assert!(
             load_radius_cache(
+                &cache_path,
                 gateway,
                 &radius_credential_scope("api-key", "different-key"),
                 false
             )
             .is_none()
         );
-        assert!(load_radius_cache("https://other.radius.test", &scope, false).is_none());
+        assert!(
+            load_radius_cache(&cache_path, "https://other.radius.test", &scope, false).is_none()
+        );
         assert!(
             std::fs::read_dir(dir.path())
                 .unwrap()
@@ -1560,8 +1590,8 @@ mod tests {
             models: vec![radius_wire("stale")],
         };
         std::fs::write(&cache_path, serde_json::to_vec(&stale).unwrap()).unwrap();
-        assert!(load_radius_cache(gateway, &scope, true).is_none());
-        assert!(load_radius_cache(gateway, &scope, false).is_some());
+        assert!(load_radius_cache(&cache_path, gateway, &scope, true).is_none());
+        assert!(load_radius_cache(&cache_path, gateway, &scope, false).is_some());
 
         let expired = RadiusCacheFile {
             fetched_at: chrono::Utc::now()
@@ -1569,7 +1599,7 @@ mod tests {
             ..stale
         };
         std::fs::write(&cache_path, serde_json::to_vec(&expired).unwrap()).unwrap();
-        assert!(load_radius_cache(gateway, &scope, false).is_none());
+        assert!(load_radius_cache(&cache_path, gateway, &scope, false).is_none());
     }
 
     #[test]
@@ -1677,5 +1707,32 @@ mod tests {
 
         assert!(fetch_radius_models_if_enabled(&PlatformsConfig::default()).is_none());
         assert!(!cache_path.exists());
+    }
+
+    /// Radius cache tests must inject a per-test path; empty env override
+    /// is treated as unset (same harness convention as GROK_AUTH_PATH).
+    #[test]
+    #[serial_test::serial]
+    fn radius_cache_path_honors_env_and_empty_is_unset() {
+        use xai_grok_test_support::EnvGuard;
+        let dir = tempfile::tempdir().unwrap();
+        let override_path = dir.path().join("radius-cache.json");
+        {
+            let _g = EnvGuard::set(
+                "GROK_RADIUS_MODELS_CACHE_PATH",
+                override_path.to_str().unwrap(),
+            );
+            assert_eq!(radius_cache_path(), override_path);
+        }
+        {
+            let _g = EnvGuard::set("GROK_RADIUS_MODELS_CACHE_PATH", "");
+            let resolved = radius_cache_path();
+            assert_ne!(resolved, override_path);
+            assert!(
+                resolved.ends_with("radius_models_cache.json"),
+                "empty override falls back to default name, got {}",
+                resolved.display()
+            );
+        }
     }
 }

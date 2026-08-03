@@ -1702,7 +1702,7 @@ fn build_minimal_agent_for_tests() -> MvpAgent {
     use crate::auth::{AuthManager, GrokComConfig};
     let temp_dir = tempfile::tempdir().unwrap();
     let auth_manager =
-        std::sync::Arc::new(AuthManager::new(temp_dir.path(), GrokComConfig::default()));
+        std::sync::Arc::new(AuthManager::new_test_isolated(temp_dir.path(), GrokComConfig::default()));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = AgentConfig::default();
@@ -1765,7 +1765,7 @@ fn build_agent_with_auth(auth: crate::auth::GrokAuth) -> MvpAgent {
     use crate::auth::{AuthManager, GrokComConfig};
     let temp_dir = tempfile::tempdir().unwrap();
     let auth_manager =
-        std::sync::Arc::new(AuthManager::new(temp_dir.path(), GrokComConfig::default()));
+        std::sync::Arc::new(AuthManager::new_test_isolated(temp_dir.path(), GrokComConfig::default()));
     auth_manager.hot_swap(auth);
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
@@ -1799,7 +1799,7 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
     .unwrap();
     let auth_home = tempfile::tempdir().unwrap();
     let auth_manager =
-        std::sync::Arc::new(AuthManager::new(auth_home.path(), GrokComConfig::default()));
+        std::sync::Arc::new(AuthManager::new_test_isolated(auth_home.path(), GrokComConfig::default()));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let mut cfg = AgentConfig::default();
@@ -1991,7 +1991,7 @@ async fn push_roster_activity_delta_broadcasts_overridden_activity() {
     use crate::auth::{AuthManager, GrokComConfig};
     let temp_dir = tempfile::tempdir().unwrap();
     let auth_manager =
-        std::sync::Arc::new(AuthManager::new(temp_dir.path(), GrokComConfig::default()));
+        std::sync::Arc::new(AuthManager::new_test_isolated(temp_dir.path(), GrokComConfig::default()));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = AgentConfig::default();
@@ -2521,7 +2521,7 @@ fn build_agent_with_api_key_auth_disabled() -> MvpAgent {
     use crate::auth::{AuthManager, GrokComConfig};
     let temp_dir = tempfile::tempdir().unwrap();
     let auth_manager =
-        std::sync::Arc::new(AuthManager::new(temp_dir.path(), GrokComConfig::default()));
+        std::sync::Arc::new(AuthManager::new_test_isolated(temp_dir.path(), GrokComConfig::default()));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let mut cfg = AgentConfig::default();
@@ -4248,7 +4248,7 @@ fn post_auth_settings_not_coalesced_by_in_flight_reapply() {
 /// notifications), and the proxy URL pointed at a mock `/v1/settings`.
 ///
 /// Bootstrap (`MvpAgent::new` → `ensure_remote_settings_side_effects`) early-
-/// prefetches via `AuthManager::new(grok_home(), …).current()` and
+/// prefetches via `AuthManager::new_test_isolated(grok_home(), …).current()` and
 /// `EndpointsConfig::from_effective_config()` — i.e. the process home / effective
 /// config, not this fixture's `AuthManager` or mock URL. A live developer
 /// session under `~/.grok` can therefore install `cfg.remote_settings` before
@@ -4277,7 +4277,7 @@ fn build_agent_with_auth_and_proxy(
     // yet in this process (it is a `OnceLock`).
     let _isolated_home = EnvGuard::set("GROK_HOME", temp_dir.path());
     let auth_manager =
-        std::sync::Arc::new(AuthManager::new(temp_dir.path(), GrokComConfig::default()));
+        std::sync::Arc::new(AuthManager::new_test_isolated(temp_dir.path(), GrokComConfig::default()));
     auth_manager.hot_swap(auth);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
@@ -4629,7 +4629,7 @@ fn build_agent_with_gateway_rx() -> (
     use crate::auth::{AuthManager, GrokComConfig};
     let temp_dir = tempfile::tempdir().unwrap();
     let auth_manager =
-        std::sync::Arc::new(AuthManager::new(temp_dir.path(), GrokComConfig::default()));
+        std::sync::Arc::new(AuthManager::new_test_isolated(temp_dir.path(), GrokComConfig::default()));
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = AgentConfig::default();
@@ -5680,7 +5680,7 @@ mod soft_default_settings_emit {
         local
             .run_until(async {
                 let temp_dir = tempfile::tempdir().unwrap();
-                let auth_manager = std::sync::Arc::new(AuthManager::new(
+                let auth_manager = std::sync::Arc::new(AuthManager::new_test_isolated(
                     temp_dir.path(),
                     GrokComConfig::default(),
                 ));

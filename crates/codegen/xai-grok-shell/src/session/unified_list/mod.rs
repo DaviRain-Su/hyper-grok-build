@@ -784,7 +784,7 @@ mod tests {
         );
     }
     fn xai_auth_manager(dir: &std::path::Path) -> std::sync::Arc<crate::auth::AuthManager> {
-        let am = std::sync::Arc::new(crate::auth::AuthManager::new(
+        let am = std::sync::Arc::new(crate::auth::AuthManager::new_test_isolated(
             dir,
             crate::auth::GrokComConfig::default(),
         ));
@@ -870,7 +870,7 @@ mod tests {
     #[serial_test::serial]
     async fn degraded_conversations_lane_reports_no_oauth() {
         let home = tempfile::tempdir().expect("tempdir");
-        let auth = std::sync::Arc::new(crate::auth::AuthManager::new(
+        let auth = std::sync::Arc::new(crate::auth::AuthManager::new_test_isolated(
             home.path(),
             crate::auth::GrokComConfig::default(),
         ));

@@ -1410,7 +1410,7 @@ mod tests {
     #[test]
     fn expired_refreshable_session_gate() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = AuthManager::new(dir.path(), GrokComConfig::default());
+        let mgr = AuthManager::new_test_isolated(dir.path(), GrokComConfig::default());
 
         // Expired but refreshable → returned. Guards a `current_or_expired()` ->
         // `current()` regression that would disable the relay on a transient blip.
@@ -1463,7 +1463,10 @@ mod tests {
         // writing fails — exercising the save-failure path.
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-        let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+        let mgr = Arc::new(AuthManager::new_test_isolated(
+            dir.path(),
+            GrokComConfig::default(),
+        ));
         let minted = oidc_session("minted-token", Some("rt"));
 
         let save = mgr.save_without_enrichment(minted.clone()).await;
@@ -1501,7 +1504,8 @@ mod tests {
             ..GrokComConfig::default()
         };
         let mgr = Arc::new(
-            AuthManager::new(dir.path(), cfg.clone()).with_proxy_base_url(&dead_proxy_url()),
+            AuthManager::new_test_isolated(dir.path(), cfg.clone())
+                .with_proxy_base_url(&dead_proxy_url()),
         );
 
         let auth = mint_session_noninteractive(&mgr).await;
@@ -1514,7 +1518,7 @@ mod tests {
     async fn external_provider_rejects_wrong_team_and_persists_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = Arc::new(
-            AuthManager::new(dir.path(), pinned_cfg("team-good"))
+            AuthManager::new_test_isolated(dir.path(), pinned_cfg("team-good"))
                 .with_proxy_base_url(&dead_proxy_url()),
         );
         let cmd = format!("printf '%s' {}", team_jwt("team-wrong"));
@@ -1541,7 +1545,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let jwt = team_jwt("team-good");
         let mgr = Arc::new(
-            AuthManager::new(dir.path(), pinned_cfg("team-good"))
+            AuthManager::new_test_isolated(dir.path(), pinned_cfg("team-good"))
                 .with_proxy_base_url(&dead_proxy_url()),
         );
         let cmd = format!("printf '%s' {jwt}");
@@ -1571,7 +1575,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mgr = Arc::new(
-            AuthManager::new(dir.path(), GrokComConfig::default())
+            AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
                 .with_proxy_base_url(&format!("http://127.0.0.1:{port}")),
         );
         assert!(mgr.current_or_expired().is_none(), "precondition: no auth");
@@ -1589,7 +1593,7 @@ mod tests {
         // Carry path must not need /user: dead proxy port, flags from prev.
         let dir = tempfile::tempdir().unwrap();
         let mgr = Arc::new(
-            AuthManager::new(dir.path(), GrokComConfig::default())
+            AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
                 .with_proxy_base_url(&dead_proxy_url()),
         );
         mgr.hot_swap(GrokAuth {
@@ -1624,7 +1628,8 @@ mod tests {
             "precondition: --device-auth resolves to the device flow"
         );
         let mgr = Arc::new(
-            AuthManager::new(dir.path(), cfg.clone()).with_proxy_base_url(&dead_proxy_url()),
+            AuthManager::new_test_isolated(dir.path(), cfg.clone())
+                .with_proxy_base_url(&dead_proxy_url()),
         );
         let (auth, did_auth) = run_auth_flow_interactive(
             &mgr,
@@ -2038,7 +2043,8 @@ mod tests {
         // Write a valid token to disk via a second AuthManager (simulates
         // a sibling process that already refreshed).
         let writer = Arc::new(
-            AuthManager::new(dir.path(), cfg.clone()).with_proxy_base_url("http://127.0.0.1:1"),
+            AuthManager::new_test_isolated(dir.path(), cfg.clone())
+                .with_proxy_base_url("http://127.0.0.1:1"),
         );
         let valid_disk = GrokAuth {
             key: "fresh-token-from-disk".into(),
@@ -2052,7 +2058,7 @@ mod tests {
         writer.update(valid_disk).await.unwrap();
 
         // Primary manager: in-memory token is expired
-        let mgr = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
+        let mgr = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg.clone()));
         let expired = GrokAuth {
             key: "expired-access-token".into(),
             auth_mode: AuthMode::Oidc,
@@ -2089,7 +2095,7 @@ mod tests {
     async fn run_auth_flow_returns_cached_when_valid() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = GrokComConfig::default();
-        let mgr = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
+        let mgr = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg.clone()));
 
         let valid = GrokAuth {
             key: "still-valid".into(),
@@ -2123,7 +2129,8 @@ mod tests {
         let cfg = GrokComConfig::default();
 
         let writer = Arc::new(
-            AuthManager::new(dir.path(), cfg.clone()).with_proxy_base_url("http://127.0.0.1:1"),
+            AuthManager::new_test_isolated(dir.path(), cfg.clone())
+                .with_proxy_base_url("http://127.0.0.1:1"),
         );
         let expired_with_rt = GrokAuth {
             key: "expired-access-token".into(),
@@ -2136,7 +2143,7 @@ mod tests {
         };
         writer.update(expired_with_rt.clone()).await.unwrap();
 
-        let mgr = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
+        let mgr = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg.clone()));
         mgr.hot_swap(expired_with_rt);
         assert!(mgr.is_expired());
         mgr.set_refresher(std::sync::Arc::new(AlwaysTransientRefresher));
@@ -2167,7 +2174,8 @@ mod tests {
         cfg.oauth2.as_mut().unwrap().issuer = "http://127.0.0.1:1".into();
 
         let writer = Arc::new(
-            AuthManager::new(dir.path(), cfg.clone()).with_proxy_base_url("http://127.0.0.1:1"),
+            AuthManager::new_test_isolated(dir.path(), cfg.clone())
+                .with_proxy_base_url("http://127.0.0.1:1"),
         );
         let expired_no_rt = GrokAuth {
             key: "expired-legacy".into(),
@@ -2178,7 +2186,7 @@ mod tests {
         };
         writer.update(expired_no_rt.clone()).await.unwrap();
 
-        let mgr = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
+        let mgr = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg.clone()));
         mgr.hot_swap(expired_no_rt);
         assert!(mgr.is_expired());
 
@@ -2248,7 +2256,7 @@ mod tests {
     async fn external_provider_cli_path_does_not_deadlock_on_large_stderr() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = Arc::new(
-            AuthManager::new(dir.path(), GrokComConfig::default())
+            AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
                 .with_proxy_base_url(&dead_proxy_url()),
         );
         let cmd = r#"sh -c 'i=0; while [ $i -lt 2000 ]; do printf "%s" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" >&2; i=$((i+1)); done; printf token'"#;
@@ -2305,7 +2313,7 @@ mod tests {
         crate::auth::storage::write_auth_json(&auth_path, &store).unwrap();
 
         // Same engine as `try_ensure_fresh_auth`.
-        let auth_manager = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
+        let auth_manager = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg.clone()));
         auth_manager.configure_refresher(cfg.auth_provider_command.clone(), None);
 
         assert!(
@@ -2362,7 +2370,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let cfg = GrokComConfig::default();
-        let am = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
+        let am = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg.clone()));
         am.configure_refresher(cfg.auth_provider_command.clone(), None);
         am.hot_swap(GrokAuth {
             key: "expired".into(),

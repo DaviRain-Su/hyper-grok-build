@@ -571,7 +571,10 @@ mod tests {
 
     fn mgr() -> (tempfile::TempDir, Arc<AuthManager>) {
         let dir = tempfile::tempdir().unwrap();
-        let m = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+        let m = Arc::new(AuthManager::new_test_isolated(
+            dir.path(),
+            GrokComConfig::default(),
+        ));
         (dir, m)
     }
 
@@ -746,7 +749,7 @@ mod tests {
             )),
             ..GrokComConfig::default()
         };
-        let m = Arc::new(AuthManager::new(dir.path(), cfg));
+        let m = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg));
         m.hot_swap(GrokAuth {
             key: team_jwt("team-wrong"),
             auth_mode: AuthMode::Oidc,
@@ -1111,7 +1114,7 @@ mod tests {
             ..GrokComConfig::default()
         };
         let scope = cfg.auth_scope();
-        let m = Arc::new(AuthManager::new(dir.path(), cfg));
+        let m = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg));
 
         // In-memory: the rejected (expired) session that triggered recovery.
         seed(&m, AuthMode::Oidc, Some("rt"));

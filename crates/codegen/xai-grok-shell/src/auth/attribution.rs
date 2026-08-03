@@ -462,7 +462,7 @@ mod tests {
     fn empty_auth_manager() -> (tempfile::TempDir, AuthManager) {
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = GrokComConfig::default();
-        let am = AuthManager::new(dir.path(), cfg);
+        let am = AuthManager::new_test_isolated(dir.path(), cfg);
         (dir, am)
     }
 

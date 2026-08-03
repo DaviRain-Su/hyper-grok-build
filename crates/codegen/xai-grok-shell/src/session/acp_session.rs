@@ -99,6 +99,7 @@ mod goal;
 mod hypercore_turn;
 #[path = "acp_session_impl/turn.rs"]
 mod turn;
+pub(crate) use turn::box_turn_future;
 #[path = "acp_session_impl/workflow.rs"]
 mod workflow_run;
 pub(crate) use auth_retry::{

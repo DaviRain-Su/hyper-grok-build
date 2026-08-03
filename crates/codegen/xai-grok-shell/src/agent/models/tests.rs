@@ -6,7 +6,10 @@ fn test_manager() -> ModelsManager {
         .with_test_writer()
         .try_init();
     let tmp = std::env::temp_dir().join("grok-test-models-manager");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    let auth_manager = Arc::new(AuthManager::new_test_isolated(
+        &tmp,
+        GrokComConfig::default(),
+    ));
     ModelsManagerBuilder::new(
         None,
         IndexMap::new(),
@@ -45,7 +48,10 @@ async fn catalog_retry_recovers_after_endpoint_returns() {
 
     let calls = Arc::new(AtomicUsize::new(0));
     let tmp = std::env::temp_dir().join("grok-test-catalog-retry");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    let auth_manager = Arc::new(AuthManager::new_test_isolated(
+        &tmp,
+        GrokComConfig::default(),
+    ));
     let mgr = ModelsManagerBuilder::new(
         None,
         IndexMap::new(),
@@ -102,7 +108,10 @@ async fn offline_strategy_serves_cache_without_fetching() {
 
     let calls = Arc::new(AtomicUsize::new(0));
     let tmp = tempfile::TempDir::new().unwrap();
-    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
+    let auth_manager = Arc::new(AuthManager::new_test_isolated(
+        tmp.path(),
+        GrokComConfig::default(),
+    ));
     let mgr = ModelsManagerBuilder::new(
         None,
         IndexMap::new(),
@@ -164,7 +173,10 @@ async fn auth_refresh_watcher_refetches_on_notify() {
 
     let calls = Arc::new(AtomicUsize::new(0));
     let tmp = std::env::temp_dir().join("grok-test-auth-refresh-watcher");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    let auth_manager = Arc::new(AuthManager::new_test_isolated(
+        &tmp,
+        GrokComConfig::default(),
+    ));
     let mgr = ModelsManagerBuilder::new(
         None,
         IndexMap::new(),
@@ -211,7 +223,10 @@ async fn hanging_fetch_does_not_block_refresh() {
     }
 
     let tmp = std::env::temp_dir().join("grok-test-hanging-fetch");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    let auth_manager = Arc::new(AuthManager::new_test_isolated(
+        &tmp,
+        GrokComConfig::default(),
+    ));
     let mgr = ModelsManagerBuilder::new(
         None,
         IndexMap::new(),
@@ -260,7 +275,10 @@ async fn slow_fetch_within_timeout_still_applies() {
     }
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
+    let auth_manager = Arc::new(AuthManager::new_test_isolated(
+        tmp.path(),
+        GrokComConfig::default(),
+    ));
     let mgr = ModelsManagerBuilder::new(
         None,
         IndexMap::new(),
@@ -303,7 +321,10 @@ async fn etag_refresh_is_bounded_and_single_flighted() {
 
     let calls = Arc::new(AtomicUsize::new(0));
     let tmp = tempfile::TempDir::new().unwrap();
-    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
+    let auth_manager = Arc::new(AuthManager::new_test_isolated(
+        tmp.path(),
+        GrokComConfig::default(),
+    ));
     let mgr = ModelsManagerBuilder::new(
         None,
         IndexMap::new(),
@@ -358,7 +379,10 @@ fn config_from_toml(toml: &str) -> config::Config {
 #[test]
 fn available_marks_config_owned_models_for_client_side_reload() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
+    let auth_manager = Arc::new(AuthManager::new_test_isolated(
+        tmp.path(),
+        GrokComConfig::default(),
+    ));
     let cfg = config_from_toml(
         r#"
             [model.centos]
@@ -774,7 +798,10 @@ fn current_reasoning_effort_round_trip() {
 #[test]
 fn current_reasoning_effort_seeded_from_config() {
     let tmp = std::env::temp_dir().join("grok-test-models-manager-seed");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    let auth_manager = Arc::new(AuthManager::new_test_isolated(
+        &tmp,
+        GrokComConfig::default(),
+    ));
     let mut cfg = config::Config::default();
     cfg.models.default_reasoning_effort = Some(ReasoningEffort::Xhigh);
     let mgr = ModelsManager::new(
@@ -940,7 +967,10 @@ fn config_menu_only_model_derives_support_and_default() {
     assert_eq!(catalog["plain"].info.reasoning_effort, None);
 
     let tmp = std::env::temp_dir().join("grok-test-models-manager-menu-only");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    let auth_manager = Arc::new(AuthManager::new_test_isolated(
+        &tmp,
+        GrokComConfig::default(),
+    ));
     let mgr = ModelsManager::new(
         None,
         catalog,
@@ -1052,7 +1082,10 @@ fn spawn_background_refresh_is_noop_when_real_catalog_present() {
 #[test]
 fn from_config_without_prefetch_produces_usable_catalog() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
+    let auth_manager = Arc::new(AuthManager::new_test_isolated(
+        tmp.path(),
+        GrokComConfig::default(),
+    ));
     let cfg = config::Config::default();
 
     let mgr = ModelsManager::from_config(&cfg, None, auth_manager).unwrap();
@@ -2210,4 +2243,87 @@ async fn identity_switch_clears_user_pick_latch() {
         "grok-4.5",
         "a new identity's first catalog must reselect the default after clear()",
     );
+}
+
+// ── Isolation: explicit path injection (no process-shared cache) ────
+
+/// Production default may resolve via grok_home OnceLock; unit tests must
+/// always inject a per-test TempDir via `with_path` / `test_cache_manager`.
+#[test]
+fn models_cache_manager_with_path_is_isolated_per_tempdir() {
+    let a = tempfile::TempDir::new().unwrap();
+    let b = tempfile::TempDir::new().unwrap();
+    let ma = ModelsCacheManager::with_path(a.path().join(MODELS_CACHE_FILE));
+    let mb = ModelsCacheManager::with_path(b.path().join(MODELS_CACHE_FILE));
+    assert_ne!(ma.path, mb.path);
+    assert!(ma.path.starts_with(a.path()));
+    assert!(mb.path.starts_with(b.path()));
+    // Neither path is under the real user home models cache.
+    #[allow(deprecated)]
+    let real = std::env::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".grok")
+        .join(MODELS_CACHE_FILE);
+    assert_ne!(ma.path, real);
+    assert_ne!(mb.path, real);
+}
+
+/// Non-empty `GROK_MODELS_CACHE_PATH` redirects `models_cache_path()`;
+/// empty string is treated as unset (harness convention).
+#[test]
+#[serial_test::serial]
+fn models_cache_path_env_override_and_empty_is_unset() {
+    use xai_grok_test_support::EnvGuard;
+    let dir = tempfile::tempdir().unwrap();
+    let override_path = dir.path().join("custom-models-cache.json");
+    {
+        let _g = EnvGuard::set("GROK_MODELS_CACHE_PATH", override_path.to_str().unwrap());
+        assert_eq!(models_cache_path(), override_path);
+    }
+    {
+        let _g = EnvGuard::set("GROK_MODELS_CACHE_PATH", "");
+        // Empty = unset → must not equal the empty-path join; resolves via grok_home.
+        let resolved = models_cache_path();
+        assert_ne!(resolved, std::path::PathBuf::from(""));
+        assert!(
+            resolved.ends_with(MODELS_CACHE_FILE),
+            "empty override falls back to …/models_cache.json, got {}",
+            resolved.display()
+        );
+    }
+}
+
+/// Prefetch path accepts an injected cache manager — tests must not call
+/// `ModelsCacheManager::new()` (which may resolve real grok_home).
+#[test]
+fn prefetch_with_cache_uses_injected_path_only() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cache_path = dir.path().join(MODELS_CACHE_FILE);
+    let cache = ModelsCacheManager::with_path(cache_path.clone());
+    // No network: remote_fetch disabled → cache miss returns None without
+    // writing outside the injected path.
+    let endpoints = crate::agent::config::EndpointsConfig::default();
+    let out = super::prefetch_models_blocking_with_cache(
+        &endpoints,
+        None,
+        ModelFetchAuth::Session,
+        false,
+        cache,
+    );
+    assert!(out.is_none());
+    assert!(
+        !cache_path.exists() || cache_path.metadata().map(|m| m.len()).unwrap_or(0) == 0,
+        "disabled remote fetch must not poison unrelated paths"
+    );
+    // Sibling path under real home must not have been created by this call.
+    #[allow(deprecated)]
+    let real = std::env::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".grok")
+        .join(MODELS_CACHE_FILE);
+    // We cannot assert real doesn't exist (developer may have it); only that
+    // our injected path is the one the manager was bound to.
+    let mgr = ModelsCacheManager::with_path(cache_path.clone());
+    assert_eq!(mgr.path, cache_path);
+    let _ = real; // documented debt: production new() still uses grok_home
 }

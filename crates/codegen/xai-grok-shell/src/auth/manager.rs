@@ -298,16 +298,21 @@ impl AuthManager {
         );
 
         // GROK_AUTH_PATH: custom file path (overrides default $GROK_HOME/auth.json).
-        // Resolved before the GROK_AUTH branch so inline-credential managers
-        // also honor it: their later refresh persistence (`update()`) writes to
-        // this path, and previously the inline branch hardcoded the default —
-        // silently splitting reads (inline) from writes (default path).
+        // Empty string is treated as unset (subprocess harnesses often pass
+        // `env -u`-style empty overrides). Resolved before the GROK_AUTH branch
+        // so inline-credential managers also honor it: their later refresh
+        // persistence (`update()`) writes to this path.
         let path = std::env::var("GROK_AUTH_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|_| grok_home.join("auth.json"));
+            .unwrap_or_else(|| grok_home.join("auth.json"));
 
         // GROK_AUTH: inline JSON credentials (highest priority, read-only).
-        if let Ok(inline_json) = std::env::var("GROK_AUTH") {
+        // Empty override is treated as unset.
+        if let Ok(inline_json) = std::env::var("GROK_AUTH")
+            && !inline_json.is_empty()
+        {
             if let Ok(auth) = serde_json::from_str::<GrokAuth>(&inline_json) {
                 return Self::assemble(
                     Some(auth),
@@ -321,6 +326,18 @@ impl AuthManager {
             tracing::warn!("GROK_AUTH set but failed to parse as JSON, falling back to file");
         }
 
+        Self::from_auth_json_path(path, scope, grok_com_config, proxy_base_url)
+    }
+
+    /// Load `auth.json` at `path` and assemble a manager. Shared by
+    /// [`Self::new`] (after env resolution) and [`Self::new_test_isolated`]
+    /// (which never consults process-global auth env vars).
+    fn from_auth_json_path(
+        path: PathBuf,
+        scope: String,
+        grok_com_config: GrokComConfig,
+        proxy_base_url: String,
+    ) -> Self {
         let (auth, auth_read_detail, initial_disk_state) = match read_auth_json(&path) {
             Ok(map) => {
                 let found = lookup_auth(&map, &scope);
@@ -397,25 +414,51 @@ impl AuthManager {
         manager
     }
 
-    /// Construct an empty manager at `grok_home/auth.json` without consulting
-    /// process-global `GROK_AUTH` or `GROK_AUTH_PATH`.
+    /// Deterministic proxy stub for test constructors that must not touch
+    /// effective config / real home.
+    #[doc(hidden)]
+    pub const TEST_ISOLATED_PROXY: &str = "http://127.0.0.1:9";
+
+    /// Explicit-path constructor for tests and integration binaries.
     ///
-    /// Unit tests that inject credentials with [`Self::hot_swap`] use this
-    /// instead of temporarily mutating environment variables, which would race
-    /// unrelated tests running in the same process.
+    /// - **Never** reads `GROK_AUTH` / `GROK_AUTH_PATH` / `HOME` / `GROK_HOME`
+    /// - **Never** calls `EndpointsConfig::from_effective_config()` or `grok_home()`
+    /// - Loads/persists **only** the given `auth_json_path`
+    /// - Uses `proxy_base_url` as-is (pass [`Self::TEST_ISOLATED_PROXY`] or a mock)
+    ///
+    /// `#[doc(hidden)]`: not a product API — for hermetic harnesses only.
+    /// Prefer over [`Self::new`] whenever env precedence is not under test.
+    #[doc(hidden)]
+    pub fn for_test_with_auth_path(
+        auth_json_path: impl Into<PathBuf>,
+        grok_com_config: GrokComConfig,
+        proxy_base_url: impl Into<String>,
+    ) -> Self {
+        Self::from_auth_json_path(
+            auth_json_path.into(),
+            grok_com_config.auth_scope(),
+            grok_com_config,
+            proxy_base_url.into(),
+        )
+    }
+
+    /// Convenience: `grok_home/auth.json` + [`Self::TEST_ISOLATED_PROXY`].
+    ///
+    /// Available to lib unit tests (`cfg(test)`) and integration crates via
+    /// [`Self::for_test_with_auth_path`]. Does not consult process env.
+    #[doc(hidden)]
+    pub fn for_test_home(grok_home: &Path, grok_com_config: GrokComConfig) -> Self {
+        Self::for_test_with_auth_path(
+            grok_home.join("auth.json"),
+            grok_com_config,
+            Self::TEST_ISOLATED_PROXY,
+        )
+    }
+
+    /// Lib-unit alias of [`Self::for_test_home`] (historical name).
     #[cfg(test)]
     pub(crate) fn new_test_isolated(grok_home: &Path, grok_com_config: GrokComConfig) -> Self {
-        let scope = grok_com_config.auth_scope();
-        let proxy_base_url =
-            crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
-        Self::assemble(
-            None,
-            grok_home.join("auth.json"),
-            scope,
-            grok_com_config,
-            proxy_base_url,
-            None,
-        )
+        Self::for_test_home(grok_home, grok_com_config)
     }
 
     /// Single field-assembly point for [`Self::new`]'s two construction paths
@@ -734,8 +777,10 @@ impl AuthManager {
         }
     }
 
-    /// Cached in-memory token if outside the early-invalidation buffer.
-    pub(crate) fn current(&self) -> Option<GrokAuth> {
+    /// Snapshot of the in-memory credential if outside the early-invalidation
+    /// buffer. Public so integration tests can assert isolation of
+    /// [`Self::for_test_home`] / [`Self::for_test_with_auth_path`].
+    pub fn current(&self) -> Option<GrokAuth> {
         let auth = self
             .inner
             .read()
@@ -985,7 +1030,10 @@ impl AuthManager {
     /// Path to the `auth.json` this manager reads/writes (respects
     /// `GROK_AUTH_PATH` / constructor home). Prefer this over
     /// `grok_home()/auth.json` so temp-home tests and custom stores stay isolated.
-    pub(crate) fn auth_json_path(&self) -> &Path {
+    ///
+    /// Public so integration tests can assert isolation of
+    /// [`Self::for_test_with_auth_path`] without relying on env.
+    pub fn auth_json_path(&self) -> &Path {
         &self.path
     }
 

@@ -2085,7 +2085,10 @@ mod tests {
         };
         let with_session = {
             let dir = tempfile::tempdir().unwrap();
-            let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+            let am = Arc::new(AuthManager::new_test_isolated(
+                dir.path(),
+                GrokComConfig::default(),
+            ));
             am.hot_swap(session);
             am
         };
@@ -2224,7 +2227,10 @@ mod tests {
             ..Default::default()
         };
         let tmp = tempfile::tempdir().unwrap();
-        let auth_manager = Arc::new(AuthManager::new(tmp.path(), grok_com_config.clone()));
+        let auth_manager = Arc::new(AuthManager::new_test_isolated(
+            tmp.path(),
+            grok_com_config.clone(),
+        ));
 
         let arm = DeferredRelayArm {
             relay_on_demand: false, // bare leader: eager once armed
@@ -2324,7 +2330,10 @@ mod tests {
             panic!("expected ConfigUpdate::Auth");
         };
 
-        let auth_manager = Arc::new(AuthManager::new(tmp.path(), grok_com_config.clone()));
+        let auth_manager = Arc::new(AuthManager::new_test_isolated(
+            tmp.path(),
+            grok_com_config.clone(),
+        ));
         let (ws_to_agent_tx, _ws_to_agent_rx) = mpsc::unbounded_channel();
         let agent_to_ws_tx: Rc<Mutex<Option<mpsc::UnboundedSender<String>>>> =
             Rc::new(Mutex::new(None));

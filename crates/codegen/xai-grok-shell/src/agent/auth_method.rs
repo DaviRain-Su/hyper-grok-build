@@ -1116,7 +1116,7 @@ mod tests {
         // AuthManager picks it up from the env var directly (no file needed).
         let dir = tempfile::tempdir().unwrap();
         let cfg = GrokComConfig::default();
-        let mgr = AuthManager::new(dir.path(), cfg);
+        let mgr = AuthManager::new_test_isolated(dir.path(), cfg);
         let current = mgr.current();
         assert!(
             current.is_some(),
@@ -1177,7 +1177,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // No auth.json in the tempdir.
         let cfg = GrokComConfig::default();
-        let mgr = AuthManager::new(dir.path(), cfg);
+        let mgr = AuthManager::new_test_isolated(dir.path(), cfg);
         assert!(mgr.current().is_none());
 
         let built = build_auth_methods(AuthMethodsBuildInputs {

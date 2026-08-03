@@ -5,6 +5,23 @@ use super::*;
 pub(crate) const MODELS_CACHE_FILE: &str = "models_cache.json";
 pub(crate) const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Resolve the on-disk models catalog path for production / harness use.
+///
+/// Honors non-empty `GROK_MODELS_CACHE_PATH` (empty string = unset, for
+/// subprocess harnesses). Otherwise `grok_home()/models_cache.json`.
+///
+/// **Tests must not rely on this for isolation** — pass an explicit path
+/// via [`ModelsCacheManager::with_path`] / per-test `TempDir` instead of
+/// racing the OnceLock-cached real home.
+pub(crate) fn models_cache_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("GROK_MODELS_CACHE_PATH")
+        && !p.is_empty()
+    {
+        return std::path::PathBuf::from(p);
+    }
+    crate::util::grok_home::grok_home().join(MODELS_CACHE_FILE)
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct ModelsCache {
     pub(crate) fetched_at: DateTime<Utc>,
@@ -43,7 +60,15 @@ pub(crate) struct ModelsCacheManager {
 impl ModelsCacheManager {
     pub(crate) fn new() -> Self {
         Self {
-            path: crate::util::grok_home::grok_home().join(MODELS_CACHE_FILE),
+            path: models_cache_path(),
+            ttl: CACHE_TTL,
+        }
+    }
+
+    /// Explicit path (tests / injected home). Prefer over mutating `GROK_HOME`.
+    pub(crate) fn with_path(path: std::path::PathBuf) -> Self {
+        Self {
+            path,
             ttl: CACHE_TTL,
         }
     }

@@ -1000,7 +1000,8 @@ mod tests {
         let cfg = crate::auth::GrokComConfig::default();
         let scope = cfg.auth_scope();
         let am = Arc::new(
-            AuthManager::new(dir.path(), cfg.clone()).with_proxy_base_url("http://127.0.0.1:1"),
+            AuthManager::new_test_isolated(dir.path(), cfg.clone())
+                .with_proxy_base_url("http://127.0.0.1:1"),
         );
         let expired_session = GrokAuth {
             auth_mode: AuthMode::Oidc,
@@ -1051,7 +1052,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::auth::GrokComConfig::default();
-        let am = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
+        let am = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg.clone()));
         let fresh_session = GrokAuth {
             auth_mode: AuthMode::Oidc,
             oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
@@ -1105,7 +1106,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::auth::GrokComConfig::default();
         let scope = cfg.auth_scope();
-        let am = Arc::new(AuthManager::new(dir.path(), cfg));
+        let am = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg));
         am.hot_swap(test_auth("old-key"));
         write_test_auth_to_disk(dir.path(), &scope, &test_auth("new-key"));
         let config = RelayConfig {
@@ -1158,7 +1159,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::auth::GrokComConfig::default();
         let scope = cfg.auth_scope();
-        let am = Arc::new(AuthManager::new(dir.path(), cfg));
+        let am = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg));
         am.hot_swap(test_auth("old-key"));
         write_test_auth_to_disk(dir.path(), &scope, &test_auth("old-key"));
         let config = RelayConfig {

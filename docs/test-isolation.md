@@ -152,3 +152,46 @@ scratch 路径（`cli_models` 用的就是这个，避开 `OnceLock`-cached 真�
 `theme::cache::current_kind()` 的慢路径是 check-then-disk-read-then-store 的无锁序列:某个并行测试在 `LOADED=false` 时进入 `load_from_disk()`（慢磁盘读）,期间失败测试的 pin 完成 `set(GrokNight)` 并渲染;在途的磁盘读返回后执行 `CURRENT.store(TokyoNight)` 覆盖显式写入——`TEST_LOCK` 管不到不持锁的普通读者。
 
 **修复（生产级,非测试补丁)**:`theme/cache.rs` 新增 `STATE_LOCK`——`current_kind()` 慢路径持锁复查 `LOADED` 后再发布,`set()` / `reset_for_test()` 也持同一把锁（不复用 `TEST_LOCK`,否则与持锁读者死锁）。同一 lost-update 在生产上显式换肤与首次初始化重叠时也存在,故修在渲染 crate 而非测试侧。回归测试经 `set_disk_kind_override_for_test` / `set_load_pause_for_test` 两个测试钩子确定性覆盖两种交错序。验证:scrollback::blocks ×16 线程 ×8 轮 0 失败,全量套件 ×5 轮仅余 `mermaid_worker` 时序 flake。
+
+## 8. 已修用例索引（2026-08-03 / follow-up，测试套件稳定性）
+
+本轮（含 Oracle follow-up）聚焦：**auth env 竞争**、**模型缓存真实 HOME 污染**、**SessionActor 巨大 future 栈溢出**。
+
+### 8.1 Auth 测试构造器（不碰 effective config / grok_home）
+
+| API | 说明 |
+|-----|------|
+| `AuthManager::for_test_with_auth_path(path, cfg, proxy)` | **公开** `#[doc(hidden)]`：集成测试可用；绝不读 env / effective config |
+| `AuthManager::for_test_home(home, cfg)` | `home/auth.json` + stub proxy |
+| `AuthManager::new_test_isolated` | lib unit 别名（`cfg(test)`） |
+| `AuthManager::new` | 生产 / **env precedence 测试**（`#[serial]` + `EnvGuard`） |
+
+不读：`GROK_AUTH` / `GROK_AUTH_PATH` / `HOME` / `GROK_HOME`。空串 override = unset。
+回归：`new_test_isolated_ignores_*`、`for_test_home_ignores_poisoned_env`（integration）、`production_new_*`。
+
+### 8.2 动态模型 / radius 缓存：显式路径注入
+
+| 项 | 约定 |
+|----|------|
+| Models | `ModelsCacheManager::with_path` / `prefetch_models_blocking_with_cache`；单测禁止裸 `::new()` |
+| Radius | `load/store/lock_radius_cache(path, …)`；生产 fetch 内 `let cache_path = radius_cache_path()` |
+| 覆盖 | 非空 `GROK_MODELS_CACHE_PATH` / `GROK_RADIUS_MODELS_CACHE_PATH`；**空串 = unset** |
+| 单测 | 每测独立 `TempDir`（直接 Path 或 EnvGuard） |
+
+**遗留**：`grok_home()` OnceLock 仍可能钉死真实 home；生产 `ModelsCacheManager::new()` / 未覆盖 env 的默认路径仍可写真实 home。目标测试路径已显式隔离，**不保证全 crate hermetic**。
+
+### 8.3 SessionActor / `auth_retry_budget` 栈溢出（shell 无 stacker）
+
+| 项 | 内容 |
+|----|------|
+| 根因 | 巨大 async state machine；`Box::pin(fut)` 在调用方栈构造 |
+| 禁止 | **xai-grok-shell** 生产依赖 `stacker`（或通过 stacker 拉入 `psm`）；永久 `RUST_MIN_STACK`；每 poll grow。不声称整个 workspace 无 `psm`（其他 crate 可能仍有传递依赖） |
+| 修法 | 堆化大 locals；`#[inline(never)]` body + `box_turn_future` 薄帧 pin |
+| 回归 | libtest 默认栈下用例通过；**另** `auth_retry_budget_*_on_explicit_2mib_stack` 用 **命名 2 MiB 线程** + current-thread runtime + LocalSet（不依赖 libtest 默认栈；跨平台/OS 栈语义可能不同，以 Linux Debug 为准）。Release 可在 CI workflow 另行启用 |
+
+### 8.4 触点摘要
+
+- `auth/manager.rs` + `manager_tests.rs`
+- `agent/models/cache.rs`、`platform_models_fetch.rs` + 相关 tests
+- `session/acp_session_impl/turn.rs`、`tasks_cancel.rs`、`auth_retry_budget_tests.rs`
+- `docs/test-isolation.md`（本文）

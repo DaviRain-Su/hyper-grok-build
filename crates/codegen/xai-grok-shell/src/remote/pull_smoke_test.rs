@@ -31,7 +31,7 @@ mod tests {
         };
 
         let auth = load_prod_auth().expect("No auth.json — run `grok login`");
-        let am = Arc::new(crate::auth::AuthManager::new(
+        let am = Arc::new(crate::auth::AuthManager::new_test_isolated(
             &crate::util::grok_home::grok_home(),
             crate::auth::GrokComConfig::default(),
         ));

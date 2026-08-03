@@ -193,7 +193,7 @@ mod tests {
         ttl: Duration,
     ) -> (Arc<crate::auth::AuthManager>, tempfile::TempDir) {
         let dir = tempdir().expect("tempdir for share auth test");
-        let mgr = Arc::new(crate::auth::AuthManager::new(
+        let mgr = Arc::new(crate::auth::AuthManager::new_test_isolated(
             dir.path(),
             GrokComConfig::default(),
         ));
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn share_fails_with_no_auth_at_all() {
         let dir = tempdir().expect("tempdir");
-        let mgr = Arc::new(crate::auth::AuthManager::new(
+        let mgr = Arc::new(crate::auth::AuthManager::new_test_isolated(
             dir.path(),
             GrokComConfig::default(),
         ));
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn share_rejects_non_xai_auth_with_actionable_grok_login_message() {
         let dir = tempdir().expect("tempdir");
-        let mgr = Arc::new(crate::auth::AuthManager::new(
+        let mgr = Arc::new(crate::auth::AuthManager::new_test_isolated(
             dir.path(),
             GrokComConfig::default(),
         ));

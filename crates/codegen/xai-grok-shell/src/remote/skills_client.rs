@@ -823,7 +823,7 @@ mod tests {
     fn test_auth_manager() -> Arc<AuthManager> {
         use crate::auth::{AuthMode, GrokAuth, GrokComConfig, XAI_OAUTH2_ISSUER};
         let dir = tempfile::tempdir().unwrap();
-        let mgr = AuthManager::new(dir.path(), GrokComConfig::default());
+        let mgr = AuthManager::new_test_isolated(dir.path(), GrokComConfig::default());
         mgr.hot_swap(GrokAuth {
             key: "token".into(),
             auth_mode: AuthMode::Oidc,

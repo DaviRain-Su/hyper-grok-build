@@ -570,7 +570,7 @@ mod tests {
             format!("http://127.0.0.1:{}", l.local_addr().unwrap().port())
         };
         let auth_manager = Arc::new(
-            AuthManager::new(temp_dir.path(), GrokComConfig::default())
+            AuthManager::new_test_isolated(temp_dir.path(), GrokComConfig::default())
                 .with_proxy_base_url(&dead_proxy),
         );
 

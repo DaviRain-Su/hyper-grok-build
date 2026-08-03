@@ -216,7 +216,7 @@ mod tests {
             auth_token_ttl: Some(3600), // 1 hour
             ..GrokComConfig::default()
         };
-        let mgr = AuthManager::new(dir.path(), cfg);
+        let mgr = AuthManager::new_test_isolated(dir.path(), cfg);
 
         // Token created 2 hours ago, no expires_at. With auth_token_ttl=3600,
         // is_token_expired should return true (age 2h > ttl 1h).

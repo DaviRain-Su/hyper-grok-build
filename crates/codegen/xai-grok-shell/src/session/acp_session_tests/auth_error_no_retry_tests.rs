@@ -487,7 +487,10 @@ async fn pre_flight_soft_expired_transient_fail_retains_seed() {
                 AlwaysFail(call_count.clone())
             });
             let dir = tempfile::tempdir().expect("tempdir");
-            let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+            let am = Arc::new(AuthManager::new_test_isolated(
+                dir.path(),
+                GrokComConfig::default(),
+            ));
             // Inside the early-invalidation buffer but still hard-valid.
             am.hot_swap(GrokAuth {
                 key: "buffered-test-key".into(),
@@ -626,7 +629,10 @@ async fn legacy_auth_hint_on_404_model_not_found() {
     local
         .run_until(async {
             let dir = tempfile::tempdir().expect("tempdir");
-            let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+            let am = Arc::new(AuthManager::new_test_isolated(
+                dir.path(),
+                GrokComConfig::default(),
+            ));
             am.hot_swap(GrokAuth {
                 key: "legacy-token".into(),
                 auth_mode: AuthMode::WebLogin,
@@ -694,7 +700,10 @@ async fn legacy_auth_hint_on_401_unauthorized() {
     local
         .run_until(async {
             let dir = tempfile::tempdir().expect("tempdir");
-            let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+            let am = Arc::new(AuthManager::new_test_isolated(
+                dir.path(),
+                GrokComConfig::default(),
+            ));
             am.hot_swap(GrokAuth {
                 key: "legacy-token".into(),
                 auth_mode: AuthMode::WebLogin,
@@ -734,7 +743,10 @@ async fn no_legacy_hint_on_401_for_oidc_auth() {
     local
         .run_until(async {
             let dir = tempfile::tempdir().expect("tempdir");
-            let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+            let am = Arc::new(AuthManager::new_test_isolated(
+                dir.path(),
+                GrokComConfig::default(),
+            ));
             am.hot_swap(GrokAuth {
                 key: "oidc-token".into(),
                 auth_mode: AuthMode::Oidc,
@@ -776,7 +788,10 @@ async fn no_legacy_hint_for_oidc_auth() {
     local
         .run_until(async {
             let dir = tempfile::tempdir().expect("tempdir");
-            let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+            let am = Arc::new(AuthManager::new_test_isolated(
+                dir.path(),
+                GrokComConfig::default(),
+            ));
             am.hot_swap(GrokAuth {
                 key: "oidc-token".into(),
                 auth_mode: AuthMode::Oidc,

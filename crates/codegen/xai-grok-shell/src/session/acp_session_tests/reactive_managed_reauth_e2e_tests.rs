@@ -154,7 +154,7 @@ async fn actor_with_proxy(
     let mut actor = create_test_actor(100, 128_000, 80, gw_tx, persist_tx).await;
 
     let home = tempfile::tempdir().expect("tempdir");
-    let auth_manager = Arc::new(crate::auth::AuthManager::new(
+    let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
         home.path(),
         crate::auth::GrokComConfig::default(),
     ));

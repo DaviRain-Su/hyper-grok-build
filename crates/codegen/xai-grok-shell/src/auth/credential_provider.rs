@@ -492,7 +492,7 @@ mod tests {
     /// Build an `AuthManager` rooted at `dir`. Caller keeps `dir` alive for
     /// the duration of the test so the `TempDir` `Drop` actually cleans up.
     fn make_manager(dir: &tempfile::TempDir, initial: Option<GrokAuth>) -> Arc<AuthManager> {
-        let mgr = AuthManager::new(dir.path(), GrokComConfig::default());
+        let mgr = AuthManager::new_test_isolated(dir.path(), GrokComConfig::default());
         if let Some(auth) = initial {
             mgr.hot_swap(auth);
         }
@@ -594,7 +594,7 @@ mod tests {
     async fn refresh_after_unauthorized_drives_recovery_state_machine() {
         let _guard = EarlyInvalidationGuard::pin_to_default();
         let dir = tempfile::tempdir().unwrap();
-        let mgr = Arc::new(AuthManager::new(
+        let mgr = Arc::new(AuthManager::new_test_isolated(
             dir.path(),
             crate::auth::GrokComConfig::default(),
         ));
@@ -783,7 +783,7 @@ mod tests {
         let bootstrap_mgr = make_manager(&bootstrap_dir, None);
         let provider = OtelAuthCredentialProvider::new(bootstrap_mgr);
         let live_dir = tempfile::tempdir().unwrap();
-        let live_mgr = Arc::new(AuthManager::new(
+        let live_mgr = Arc::new(AuthManager::new_test_isolated(
             live_dir.path(),
             crate::auth::GrokComConfig::default(),
         ));

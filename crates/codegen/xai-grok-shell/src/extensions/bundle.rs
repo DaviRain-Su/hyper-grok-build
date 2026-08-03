@@ -499,7 +499,10 @@ mod tests {
     }
     fn test_auth_manager() -> Arc<crate::auth::AuthManager> {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = crate::auth::AuthManager::new(dir.path(), crate::auth::GrokComConfig::default());
+        let mgr = crate::auth::AuthManager::new_test_isolated(
+            dir.path(),
+            crate::auth::GrokComConfig::default(),
+        );
         mgr.hot_swap(test_auth());
         std::mem::forget(dir);
         Arc::new(mgr)

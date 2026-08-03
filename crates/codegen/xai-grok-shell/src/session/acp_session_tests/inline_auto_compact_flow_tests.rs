@@ -1307,7 +1307,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 model_auth_memo: std::cell::RefCell::new(None),
                 auth_manager: {
                     let dir = tempfile::tempdir().unwrap();
-                    let mgr = std::sync::Arc::new(crate::auth::AuthManager::new(
+                    let mgr = std::sync::Arc::new(crate::auth::AuthManager::new_test_isolated(
                         dir.path(),
                         crate::auth::GrokComConfig::default(),
                     ));

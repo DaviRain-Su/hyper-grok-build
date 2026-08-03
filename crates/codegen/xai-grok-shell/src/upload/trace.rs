@@ -1643,7 +1643,7 @@ mod tests {
         store.insert(scope.clone(), initial_auth);
         let auth_json = serde_json::to_string_pretty(&store).unwrap();
         std::fs::write(dir.path().join("auth.json"), &auth_json).unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(
+        let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
             dir.path(),
             grok_com_config.clone(),
         ));
@@ -1713,7 +1713,7 @@ mod tests {
         store.insert(scope.clone(), expired_auth);
         let auth_json = serde_json::to_string_pretty(&store).unwrap();
         std::fs::write(dir.path().join("auth.json"), &auth_json).unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(
+        let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
             dir.path(),
             grok_com_config.clone(),
         ));
@@ -1775,7 +1775,10 @@ mod tests {
         store.insert(scope, expired_auth);
         let auth_json = serde_json::to_string_pretty(&store).unwrap();
         std::fs::write(dir.path().join("auth.json"), &auth_json).unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
+            dir.path(),
+            grok_com_config,
+        ));
         let resolver = DynamicResolver {
             auth_manager,
             base_config: TraceExportConfig {
@@ -1821,7 +1824,10 @@ mod tests {
         store.insert(scope, valid_auth);
         let auth_json = serde_json::to_string_pretty(&store).unwrap();
         std::fs::write(dir.path().join("auth.json"), &auth_json).unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
+            dir.path(),
+            grok_com_config,
+        ));
         let resolver = DynamicResolver {
             auth_manager,
             base_config: TraceExportConfig {
@@ -1873,7 +1879,10 @@ mod tests {
         store.insert(scope, expired_auth);
         let auth_json = serde_json::to_string_pretty(&store).unwrap();
         std::fs::write(dir.path().join("auth.json"), &auth_json).unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
+            dir.path(),
+            grok_com_config,
+        ));
         struct FreshRefresher;
         #[async_trait::async_trait]
         impl crate::auth::refresh::TokenRefresher for FreshRefresher {
@@ -1929,7 +1938,10 @@ mod tests {
         use chrono::{Duration, Utc};
         let dir = tempfile::tempdir().unwrap();
         let grok_com_config = GrokComConfig::default();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
+            dir.path(),
+            grok_com_config,
+        ));
         auth_manager.hot_swap(GrokAuth {
             key: "expired-oidc".into(),
             refresh_token: Some("rt".into()),
@@ -2002,7 +2014,10 @@ mod tests {
         use crate::session::repo_changes::UploadMethod;
         let dir = tempfile::tempdir().unwrap();
         let grok_com_config = crate::auth::GrokComConfig::default();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
+            dir.path(),
+            grok_com_config,
+        ));
         let base_config = TraceExportConfig {
             bucket_url: None,
             service_account_key: None,
@@ -2045,7 +2060,10 @@ mod tests {
         store.insert(scope, auth);
         let auth_json = serde_json::to_string_pretty(&store).unwrap();
         std::fs::write(dir.path().join("auth.json"), &auth_json).unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
+            dir.path(),
+            grok_com_config,
+        ));
         let base_config = TraceExportConfig {
             bucket_url: Some("gs://bucket".into()),
             service_account_key: Some("sa-key".into()),
@@ -2083,7 +2101,7 @@ mod tests {
         use crate::session::repo_changes::UploadMethod;
         use xai_file_utils::queue::TraceExportSource;
         let dir = tempfile::tempdir().unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(
+        let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
             dir.path(),
             crate::auth::GrokComConfig::default(),
         ));
@@ -2125,7 +2143,7 @@ mod tests {
         use crate::session::repo_changes::UploadMethod;
         use xai_file_utils::queue::TraceExportSource;
         let dir = tempfile::tempdir().unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(
+        let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
             dir.path(),
             crate::auth::GrokComConfig::default(),
         ));
@@ -2168,7 +2186,7 @@ mod tests {
         use crate::session::repo_changes::UploadMethod;
         use xai_file_utils::queue::TraceExportSource;
         let dir = tempfile::tempdir().unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(
+        let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
             dir.path(),
             crate::auth::GrokComConfig::default(),
         ));
@@ -2207,7 +2225,10 @@ mod tests {
         use crate::session::repo_changes::UploadMethod;
         let dir = tempfile::tempdir().unwrap();
         let grok_com_config = crate::auth::GrokComConfig::default();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
+            dir.path(),
+            grok_com_config,
+        ));
         let gcs_config = TraceExportConfig {
             bucket_url: None,
             service_account_key: None,

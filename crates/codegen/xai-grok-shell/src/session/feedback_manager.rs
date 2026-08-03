@@ -1381,7 +1381,10 @@ mod tests {
         use std::sync::Arc;
 
         let dir = tempfile::tempdir().unwrap();
-        let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+        let am = Arc::new(AuthManager::new_test_isolated(
+            dir.path(),
+            GrokComConfig::default(),
+        ));
         let client = FeedbackClient::new("http://example/v1", None).with_auth_manager(am.clone());
 
         assert!(!client.is_auth_permanently_failed());
@@ -1431,7 +1434,10 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+        let am = Arc::new(AuthManager::new_test_isolated(
+            dir.path(),
+            GrokComConfig::default(),
+        ));
 
         let bare = FeedbackClient::new("http://example/v1", None);
         assert!(!bare.has_token_refresher());

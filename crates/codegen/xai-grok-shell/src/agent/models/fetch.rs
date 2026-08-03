@@ -72,9 +72,25 @@ fn prefetch_models_blocking_gated(
     fetch_auth: ModelFetchAuth,
     remote_fetch_enabled: bool,
 ) -> Option<IndexMap<String, ModelEntry>> {
+    prefetch_models_blocking_with_cache(
+        endpoints,
+        auth,
+        fetch_auth,
+        remote_fetch_enabled,
+        ModelsCacheManager::new(),
+    )
+}
+
+/// Prefetch with an explicit cache manager (tests inject `with_path(TempDir)`).
+pub(crate) fn prefetch_models_blocking_with_cache(
+    endpoints: &config::EndpointsConfig,
+    auth: Option<&GrokAuth>,
+    fetch_auth: ModelFetchAuth,
+    remote_fetch_enabled: bool,
+    cache: ModelsCacheManager,
+) -> Option<IndexMap<String, ModelEntry>> {
     let cache_auth = fetch_auth.cache_auth_method();
     let cache_origin = crate::remote::models_list_url(endpoints, fetch_auth);
-    let cache = ModelsCacheManager::new();
     let platforms = crate::agent::platform_models_fetch::load_platforms_config();
 
     // xAI disk cache hit: still merge live platform listings so Kimi/Moonshot

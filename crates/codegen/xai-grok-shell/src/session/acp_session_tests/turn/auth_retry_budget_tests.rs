@@ -53,7 +53,10 @@ fn expired_auth_manager(
     refresher: Arc<dyn crate::auth::refresh::TokenRefresher>,
 ) -> (tempfile::TempDir, Arc<AuthManager>) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    let am = Arc::new(AuthManager::new_test_isolated(
+        dir.path(),
+        GrokComConfig::default(),
+    ));
     am.hot_swap(GrokAuth {
         key: "initial-test-key".into(),
         auth_mode: AuthMode::Oidc,
@@ -184,8 +187,9 @@ async fn run_prompt(
     let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
         "hello".to_string(),
     ))];
-    tokio::time::timeout(
-        Duration::from_secs(60),
+    // Pin from a thin never-inlined frame (production `run_task` path).
+    // No stacker / RUST_MIN_STACK — see docs/test-isolation.md §8.3.
+    let fut = crate::session::acp_session::box_turn_future(|| {
         actor.handle_prompt(
             prompt_id,
             prompt_blocks,
@@ -198,10 +202,11 @@ async fn run_prompt(
             None,
             None,
             None,
-        ),
-    )
-    .await
-    .expect("turn must finish within timeout")
+        )
+    });
+    tokio::time::timeout(Duration::from_secs(60), fut)
+        .await
+        .expect("turn must finish within timeout")
 }
 
 /// The wake sequence: the resolver has nothing wire-valid, the send goes
@@ -308,4 +313,111 @@ async fn authenticated_401s_still_exhaust_after_three_retries() {
             );
         })
         .await;
+}
+
+/// Explicit 2 MiB named-thread + current-thread runtime + LocalSet.
+/// Does **not** rely on libtest's default stack size (which varies by
+/// harness / OS). Debug builds must pass here; release can be enabled in
+/// CI workflow separately.
+#[test]
+fn auth_retry_budget_fail_closed_on_explicit_2mib_stack() {
+    run_on_2mib_thread("auth-retry-2mib-fail-closed", || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let server = MockInferenceServer::start_with_required_auth(
+                        vec![MockModelEntry::new("test")],
+                        FRESH_TOKEN,
+                    )
+                    .await
+                    .expect("mock inference server");
+                    let calls = Arc::new(AtomicU32::new(0));
+                    let refresher = Arc::new(WakeGapRefresher {
+                        calls: calls.clone(),
+                        fail_pre_request: true,
+                    });
+                    let (_dir, am) = expired_auth_manager(refresher);
+                    let actor = session_token_actor(&server, am).await;
+                    let outcome = run_prompt(&actor, "auth-retry-2mib-fail-closed").await;
+                    assert!(
+                        outcome.is_ok(),
+                        "fail-closed 401 must not fail the turn on 2MiB stack: {outcome:?}"
+                    );
+                    assert!(
+                        calls.load(Ordering::SeqCst) >= 2,
+                        "pre-flight + recovery refresh must run"
+                    );
+                })
+                .await;
+        });
+    });
+}
+
+/// Same explicit-stack harness for the authenticated budget-exhaust path
+/// (virtual time via start_paused is unavailable outside #[tokio::test];
+/// we still exercise construction + first poll of the large turn future).
+#[test]
+fn auth_retry_budget_constructs_turn_on_explicit_2mib_stack() {
+    run_on_2mib_thread("auth-retry-2mib-construct", || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let server = MockInferenceServer::start_with_required_auth(
+                        vec![MockModelEntry::new("test")],
+                        "never-issued-token",
+                    )
+                    .await
+                    .expect("mock");
+                    let refresher = Arc::new(WakeGapRefresher {
+                        calls: Arc::new(AtomicU32::new(0)),
+                        fail_pre_request: false,
+                    });
+                    let (_dir, am) = expired_auth_manager(refresher);
+                    let actor = session_token_actor(&server, am).await;
+                    // Construct + start the large future; timeout quickly if
+                    // the budget path would sleep forever without paused time.
+                    let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "hello".to_string(),
+                    ))];
+                    let fut = crate::session::acp_session::box_turn_future(|| {
+                        actor.handle_prompt(
+                            "auth-retry-2mib-construct",
+                            prompt_blocks,
+                            PromptMode::Agent,
+                            None,
+                            None,
+                            None,
+                            None,
+                            true,
+                            None,
+                            None,
+                            None,
+                        )
+                    });
+                    // Even if the turn later fails/times out, constructing and
+                    // polling the future on a 2 MiB stack must not SIGABRT.
+                    let _ = tokio::time::timeout(Duration::from_millis(500), fut).await;
+                })
+                .await;
+        });
+    });
+}
+
+fn run_on_2mib_thread(name: &str, f: impl FnOnce() + Send + 'static) {
+    const TWO_MIB: usize = 2 * 1024 * 1024;
+    let builder = std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(TWO_MIB);
+    let handle = builder.spawn(f).expect("spawn 2MiB thread");
+    handle.join().expect("2MiB thread panicked or overflowed");
 }

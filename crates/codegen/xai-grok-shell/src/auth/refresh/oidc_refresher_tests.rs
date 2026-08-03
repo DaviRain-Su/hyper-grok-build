@@ -78,7 +78,8 @@ async fn oidc_refresher_e2e_full_refresh_cycle() {
     let (base_url, server) = start_mock_oidc_and_proxy().await;
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+        AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+            .with_proxy_base_url(&base_url),
     );
 
     // Seed an expired OIDC token with all required fields.
@@ -117,7 +118,8 @@ async fn oidc_refresher_e2e_proactive_returns_cached_when_valid() {
     let (base_url, server) = start_mock_oidc_and_proxy().await;
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+        AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+            .with_proxy_base_url(&base_url),
     );
 
     // Seed a valid (not expired) OIDC token.
@@ -151,7 +153,8 @@ async fn oidc_refresher_e2e_force_refreshes_locally_valid_token() {
     let (base_url, server) = start_mock_oidc_and_proxy().await;
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+        AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+            .with_proxy_base_url(&base_url),
     );
 
     // Seed a valid (not yet expired) OIDC token. force=true simulates
@@ -197,7 +200,8 @@ async fn oidc_refresher_e2e_near_expiry_within_buffer_refreshes() {
     let (base_url, server) = start_mock_oidc_and_proxy().await;
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+        AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+            .with_proxy_base_url(&base_url),
     );
 
     // Token expires in 3 minutes — inside the 5-minute buffer.
@@ -292,7 +296,8 @@ async fn oidc_refresher_attributes_the_refresh_token_it_spent_on_invalid_grant()
 
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+        AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+            .with_proxy_base_url(&base_url),
     );
     mgr.hot_swap(GrokAuth {
         key: "spent-access-token".into(),
@@ -364,7 +369,8 @@ async fn oidc_refresher_e2e_near_expiry_idp_rejects_refresh() {
 
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+        AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+            .with_proxy_base_url(&base_url),
     );
 
     let near_expiry = GrokAuth {
@@ -435,7 +441,8 @@ async fn oidc_refresher_e2e_invalid_client_retains_credentials() {
 
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+        AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+            .with_proxy_base_url(&base_url),
     );
 
     let expired = GrokAuth {
@@ -515,7 +522,8 @@ async fn oidc_refresher_e2e_invalid_client_adopts_valid_sibling_disk_token() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = GrokComConfig::default();
     let scope = cfg.auth_scope();
-    let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url(&base_url));
+    let mgr =
+        Arc::new(AuthManager::new_test_isolated(dir.path(), cfg).with_proxy_base_url(&base_url));
 
     // Pre-populate disk with auth that has a *different* client_id,
     // simulating another process having re-authenticated.
@@ -585,7 +593,9 @@ async fn oidc_refresh_picks_up_valid_disk_token() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = GrokComConfig::default();
     let scope = cfg.auth_scope();
-    let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url("http://127.0.0.1:1"));
+    let mgr = Arc::new(
+        AuthManager::new_test_isolated(dir.path(), cfg).with_proxy_base_url("http://127.0.0.1:1"),
+    );
 
     // Seed in-memory with an expired token (stale refresh_token).
     let expired = GrokAuth {
@@ -682,7 +692,8 @@ async fn oidc_refresh_uses_disk_refresh_token() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = GrokComConfig::default();
     let scope = cfg.auth_scope();
-    let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url(&base_url));
+    let mgr =
+        Arc::new(AuthManager::new_test_isolated(dir.path(), cfg).with_proxy_base_url(&base_url));
 
     mgr.hot_swap(GrokAuth {
         key: "old-mem-token".into(),
@@ -734,7 +745,8 @@ async fn lock_timeout_falls_through_to_refresh() {
     let (base_url, server) = start_mock_oidc_and_proxy().await;
     let dir = tempfile::tempdir().unwrap();
     let cfg = GrokComConfig::default();
-    let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url(&base_url));
+    let mgr =
+        Arc::new(AuthManager::new_test_isolated(dir.path(), cfg).with_proxy_base_url(&base_url));
 
     // Seed with expired token that has a valid refresh_token.
     let expired = GrokAuth {
@@ -904,7 +916,8 @@ async fn refresher_retries_with_disk_token_after_invalid_grant() {
     )
     .await;
 
-    let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url(&base_url));
+    let mgr =
+        Arc::new(AuthManager::new_test_isolated(dir.path(), cfg).with_proxy_base_url(&base_url));
 
     // Disk and memory both have rt-stale; mock rotates disk on
     // the first invalid_grant so the retry sees the fresh RT.
@@ -1030,7 +1043,8 @@ async fn refresher_disk_retry_invalid_client_with_different_client_id_preserves_
 
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url(&base_url));
+    let mgr =
+        Arc::new(AuthManager::new_test_isolated(dir.path(), cfg).with_proxy_base_url(&base_url));
 
     let stale = GrokAuth {
         key: "stale-access".into(),
@@ -1096,7 +1110,8 @@ async fn refresher_disk_retry_is_one_shot() {
     )
     .await;
 
-    let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url(&base_url));
+    let mgr =
+        Arc::new(AuthManager::new_test_isolated(dir.path(), cfg).with_proxy_base_url(&base_url));
 
     let stale = GrokAuth {
         key: "stale-access-token".into(),
@@ -1211,7 +1226,8 @@ async fn sleep_gate_e2e_defers_then_recovers_on_wake() {
     let (base_url, server) = start_counting_mock_oidc(token_hits.clone()).await;
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+        AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+            .with_proxy_base_url(&base_url),
     );
     mgr.hot_swap(expired_oidc_for(&base_url));
     mgr.set_refresher(Arc::new(OidcRefresher::new(mgr.clone())));
@@ -1299,7 +1315,8 @@ async fn sleep_gate_e2e_in_flight_refresh_completes_across_imminent_sleep() {
 
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+        AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())
+            .with_proxy_base_url(&base_url),
     );
     mgr.hot_swap(expired_oidc_for(&base_url));
     mgr.set_refresher(Arc::new(OidcRefresher::new(mgr.clone())));
