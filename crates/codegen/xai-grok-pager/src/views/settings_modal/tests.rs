@@ -111,17 +111,18 @@ fn effective_enum_choices_hides_auto_for_permission_mode_when_gated_off() {
         "Auto must be selectable when the gate is on"
     );
 
-    // A non-gated key is never filtered.
-    let theme = reg.find("theme").expect("theme registered");
+    // A non-gated, non-theme key is never filtered. Theme choices are
+    // separately constrained by the terminal's truecolor capability.
+    let scroll_mode = reg.find("scroll_mode").expect("scroll_mode registered");
     if let SettingKind::Enum {
-        choices: theme_choices,
+        choices: scroll_mode_choices,
         ..
-    } = &theme.kind
+    } = &scroll_mode.kind
     {
         assert_eq!(
-            effective_enum_choices("theme", theme_choices, &gated_off).len(),
-            theme_choices.len(),
-            "non-permission_mode keys are never filtered"
+            effective_enum_choices("scroll_mode", scroll_mode_choices, &gated_off).len(),
+            scroll_mode_choices.len(),
+            "unrelated enum keys must not inherit permission-mode gating"
         );
     }
 }

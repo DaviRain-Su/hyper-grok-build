@@ -7,8 +7,8 @@ use crate::diagnostics::probes::{
 use crate::diagnostics::{
     ClipboardFacts, ColorFacts, DataControlFact, DiagnosticFacts, DiagnosticFinding, DiagnosticId,
     DiagnosticReport, FindingDisposition, KeyboardFact, ManualRemediation, NewlineFact, ProbeNote,
-    ProbeStatus, RuntimeFact, TerminalWarning, TmuxFacts, TmuxOptionFact, TmuxSupportFact,
-    WarningCategory,
+    ProbeStatus, RuntimeFact, TerminalWarning, TmuxColorPassthrough, TmuxFacts, TmuxOptionFact,
+    TmuxSupportFact, WarningCategory,
 };
 use crate::terminal::TerminalName;
 
@@ -103,14 +103,13 @@ pub fn view(snapshot: DiagnosticSnapshot<'_>) -> DiagnosticReport {
         &snapshot.common,
     ));
     warnings.extend(wezterm_warning);
-    if let RuntimeEvidence::Available(color_level) = snapshot.color_level {
-        warnings.extend(super::color_support_warning(
-            color_level,
-            ctx.brand,
-            ctx.is_tmux_backed(),
-            &ctx.tmux_config_path(),
-        ));
-    }
+    warnings.extend(super::color_support_warning(
+        snapshot.color_level,
+        ctx.brand,
+        tmux_color_passthrough(&snapshot.common.tmux.client_features),
+        ctx.is_tmux_backed(),
+        &ctx.tmux_config_path(),
+    ));
 
     let (facts, clipboard_recovery) = facts(&snapshot, suppress_newline);
     let mut findings = warnings
@@ -235,6 +234,7 @@ fn facts(
                     &snapshot.common.tmux.allow_passthrough_support,
                 ),
                 allow_passthrough: tmux_option_fact(&snapshot.common.tmux.allow_passthrough),
+                color_passthrough: tmux_color_passthrough(&snapshot.common.tmux.client_features),
             },
             color: ColorFacts {
                 level: match snapshot.color_level {
@@ -533,6 +533,7 @@ pub(crate) const fn id_for(category: WarningCategory) -> Option<DiagnosticId> {
         WarningCategory::WaylandNoDataControl => "wayland-data-control",
         WarningCategory::WezTermKittyKeyboardOff => "wezterm-kitty",
         WarningCategory::LimitedColorSupport => "limited-color",
+        WarningCategory::TmuxColorReduced => "tmux-truecolor",
         WarningCategory::SshWithoutWrap => "ssh-wrap",
         WarningCategory::NotificationProtocolFallback => {
             return Some(crate::diagnostics::NOTIFICATION_PROTOCOL_FALLBACK_ID);
@@ -581,6 +582,11 @@ fn probe_notes(snapshot: &DiagnosticSnapshot<'_>) -> Vec<ProbeNote> {
             "tmux.control-mode",
             &snapshot.common.tmux.control_mode,
         );
+        probe_note(
+            &mut notes,
+            "tmux.client-features",
+            &snapshot.common.tmux.client_features,
+        );
     }
     runtime_probe_note(
         &mut notes,
@@ -610,6 +616,26 @@ fn tmux_option_fact(result: &TmuxProbeResult<String>) -> TmuxOptionFact {
         TmuxProbeResult::Unsupported => TmuxOptionFact::Unsupported,
         TmuxProbeResult::Unavailable => TmuxOptionFact::Unavailable,
         TmuxProbeResult::Error(_) => TmuxOptionFact::Error,
+    }
+}
+
+/// tmux marks a client `RGB` when the outer terminfo declares `RGB`/`Tc` or
+/// `terminal-features` adds it; either way the feature list is the single
+/// authoritative signal, and a missing answer is not evidence of clamping.
+fn tmux_color_passthrough(result: &TmuxProbeResult<String>) -> TmuxColorPassthrough {
+    let TmuxProbeResult::Available(features) = result else {
+        return TmuxColorPassthrough::Unknown;
+    };
+    if features.trim().is_empty() {
+        return TmuxColorPassthrough::Unknown;
+    }
+    if features
+        .split(',')
+        .any(|feature| feature.trim().eq_ignore_ascii_case("RGB"))
+    {
+        TmuxColorPassthrough::Forwarded
+    } else {
+        TmuxColorPassthrough::Reduced
     }
 }
 

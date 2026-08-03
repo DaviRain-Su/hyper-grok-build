@@ -87,7 +87,7 @@ pub enum ConfigUpdate {
 /// Runs on `tokio::spawn` (`Send`). Receives raw [`ConfigChangeEvent`]s from
 /// the file watcher, diffs against last-known state, and sends [`ConfigUpdate`]
 /// messages to the agent via an `mpsc` channel.
-pub struct ConfigReloader {
+pub(crate) struct ConfigReloader {
     last_auth_key_hash: u64,
     last_global_config: toml::Value,
     /// Per-cwd content hash of the project MCP config files, used to

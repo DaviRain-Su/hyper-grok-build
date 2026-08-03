@@ -118,6 +118,24 @@ pub struct TmuxFacts {
     pub set_clipboard: TmuxOptionFact,
     pub allow_passthrough_support: TmuxSupportFact,
     pub allow_passthrough: TmuxOptionFact,
+    pub color_passthrough: TmuxColorPassthrough,
+}
+
+/// Whether the attached tmux client forwards 24-bit color to the terminal.
+///
+/// tmux resolves a client's features once, at attach time, so this describes
+/// the live client and not the config on disk: a config change applies only
+/// after that client reattaches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TmuxColorPassthrough {
+    /// The client advertises `RGB`, so truecolor SGR reaches the terminal.
+    Forwarded,
+    /// tmux reduces 24-bit color to the client terminfo's palette, which is
+    /// what makes themes look washed out even when Grok emits truecolor.
+    Reduced,
+    /// No usable evidence: tmux predates `terminal-features` (3.2), no client
+    /// is attached, or the query failed. Never treated as a problem.
+    Unknown,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -45,6 +45,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub use xai_tty_utils::{ProcessResources, sample_process_memory};
+
 /// Allocator gauges sampled from jemalloc (`stats.*` mallctls). All bytes.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct AllocatorStats {
@@ -133,125 +135,6 @@ pub fn install_allocator_dump_provider(provider: fn() -> String) {
 /// footprint halves). Idempotent; first caller wins.
 pub fn install_threshold_hook(hook: fn(&Path, u64)) {
     let _ = THRESHOLD_HOOK.set(hook);
-}
-
-// ─── Process memory sampling ──────────────────────────────────────────────
-
-/// Cross-platform process memory gauges. Fields are `None` where the
-/// platform offers no cheap equivalent.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ProcessMem {
-    pub footprint_bytes: Option<u64>,
-    pub rss_bytes: Option<u64>,
-}
-
-/// Sample this process's memory. Sub-microsecond syscall on macOS/Linux.
-pub fn sample_process_memory() -> ProcessMem {
-    imp::sample()
-}
-
-#[cfg(target_os = "macos")]
-mod imp {
-    use super::ProcessMem;
-
-    // Hand-rolled `task_vm_info` prefix through `phys_footprint` (the kernel
-    // accepts any count ≤ the current struct revision; passing the prefix
-    // count returns exactly these fields). Layout per XNU osfmk/mach/task_info.h.
-    #[repr(C)]
-    #[derive(Default)]
-    struct TaskVmInfoPrefix {
-        virtual_size: u64,
-        region_count: i32,
-        page_size: i32,
-        resident_size: u64,
-        resident_size_peak: u64,
-        device: u64,
-        device_peak: u64,
-        internal: u64,
-        internal_peak: u64,
-        external: u64,
-        external_peak: u64,
-        reusable: u64,
-        reusable_peak: u64,
-        purgeable_volatile_pmap: u64,
-        purgeable_volatile_resident: u64,
-        purgeable_volatile_virtual: u64,
-        compressed: u64,
-        compressed_peak: u64,
-        compressed_lifetime: u64,
-        phys_footprint: u64,
-    }
-
-    const TASK_VM_INFO: u32 = 22;
-    // mach natural_t (u32) units.
-    const PREFIX_COUNT: u32 = (size_of::<TaskVmInfoPrefix>() / size_of::<u32>()) as u32;
-
-    unsafe extern "C" {
-        // libSystem: the calling task's control port and task_info(2).
-        static mach_task_self_: u32;
-        fn task_info(task: u32, flavor: u32, info: *mut u8, count: *mut u32) -> i32;
-    }
-
-    pub(super) fn sample() -> ProcessMem {
-        let mut info = TaskVmInfoPrefix::default();
-        let mut count = PREFIX_COUNT;
-        // SAFETY: `info` is a properly sized/aligned out-buffer and `count`
-        // tells the kernel its length in natural_t units; TASK_VM_INFO on
-        // the caller's own task port cannot fault.
-        let kr = unsafe {
-            task_info(
-                mach_task_self_,
-                TASK_VM_INFO,
-                (&raw mut info).cast::<u8>(),
-                &raw mut count,
-            )
-        };
-        if kr != 0 {
-            return ProcessMem::default();
-        }
-        ProcessMem {
-            footprint_bytes: Some(info.phys_footprint),
-            rss_bytes: Some(info.resident_size),
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-mod imp {
-    use super::ProcessMem;
-
-    pub(super) fn sample() -> ProcessMem {
-        // /proc/self/statm field 2 = resident pages.
-        let Ok(statm) = std::fs::read_to_string("/proc/self/statm") else {
-            return ProcessMem::default();
-        };
-        let rss_pages: u64 = statm
-            .split_whitespace()
-            .nth(1)
-            .and_then(|f| f.parse().ok())
-            .unwrap_or(0);
-        // Kernel page size is not always 4 KiB (aarch64 kernels commonly use
-        // 16K/64K pages); ask once.
-        // SAFETY: sysconf(_SC_PAGESIZE) has no preconditions.
-        static PAGE_SIZE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-        let page = *PAGE_SIZE.get_or_init(|| {
-            let sz = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-            if sz > 0 { sz as u64 } else { 4096 }
-        });
-        ProcessMem {
-            footprint_bytes: None,
-            rss_bytes: Some(rss_pages * page),
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-mod imp {
-    use super::ProcessMem;
-
-    pub(super) fn sample() -> ProcessMem {
-        ProcessMem::default()
-    }
 }
 
 // ─── Threshold state (pure; unit-tested) ──────────────────────────────────
@@ -675,19 +558,6 @@ mod tests {
             "buckets are floored at 64 MiB, tiny footprints never fire"
         );
         assert_eq!(t.observe(64 << 20), vec![64 << 20]);
-    }
-
-    #[test]
-    fn process_memory_sampling_returns_gauges() {
-        let mem = sample_process_memory();
-        #[cfg(target_os = "macos")]
-        {
-            assert!(mem.footprint_bytes.unwrap_or(0) > 0, "footprint on macOS");
-            assert!(mem.rss_bytes.unwrap_or(0) > 0, "rss on macOS");
-        }
-        #[cfg(target_os = "linux")]
-        assert!(mem.rss_bytes.unwrap_or(0) > 0, "rss on linux");
-        let _ = mem;
     }
 
     #[test]

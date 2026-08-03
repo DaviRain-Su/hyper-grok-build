@@ -281,6 +281,15 @@ fi
 echo "{\"access_token\": \"$TOKEN\", \"expires_in\": 3600}"
 ```
 
+The refresh run is headless: stdin is closed and the binary is given a few
+seconds, so it cannot prompt you. If it can't produce a token there — because
+your SSO session lapsed and it needs you to sign in again — Grok stops treating
+the stored credential as usable and starts the interactive flow instead, the
+same one you get on a machine that has never signed in. That run has a long
+timeout and shows your binary's stderr, so a device-code URL or a browser prompt
+reaches you. Mid-session, the turn fails with a re-auth prompt and `/login`
+re-runs the binary interactively.
+
 ### Environment Variables
 
 | Variable | Description |

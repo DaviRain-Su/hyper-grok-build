@@ -32,7 +32,7 @@ use tracing::debug;
 /// 2. If `HTTPS_PROXY` (or `https_proxy`) is set, return its value.
 /// 3. If `HTTP_PROXY` (or `http_proxy`) is set, return its value.
 /// 4. Otherwise return `None`.
-pub fn resolve_proxy_for_host(target_host: &str) -> Option<String> {
+pub(crate) fn resolve_proxy_for_host(target_host: &str) -> Option<String> {
     resolve_proxy_for_host_with(target_host, |key| std::env::var(key))
 }
 
@@ -120,7 +120,7 @@ fn is_host_bypassed(host: &str, no_proxy: &str) -> bool {
 /// 3. Wrap the tunnel in TLS (using rustls with native root certificates).
 /// 4. Return the stream as `MaybeTlsStream<TcpStream>` so it is compatible
 ///    with `tokio_tungstenite::client_async`.
-pub async fn connect_via_proxy(
+pub(crate) async fn connect_via_proxy(
     proxy_url: &str,
     target_host: &str,
     target_port: u16,

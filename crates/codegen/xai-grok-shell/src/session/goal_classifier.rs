@@ -2404,14 +2404,6 @@ pub(crate) fn parse_verdict_path_from_prompt(prompt: &str) -> Option<String> {
     parse_prompt_path(prompt, "goal-verdict-", ".json")
 }
 
-/// Pull the per-skeptic `{DETAILS_FILE}` path out of a rendered verifier
-/// prompt (anchor: the `-skeptic-` file-name marker). Shared by the
-/// classifier and strategist e2e suites.
-#[cfg(test)]
-pub(crate) fn parse_skeptic_details_path_from_prompt(prompt: &str) -> Option<String> {
-    parse_prompt_path(prompt, "-skeptic-", ".md")
-}
-
 /// Extract an absolute artifact path from a rendered prompt: the files
 /// live under the per-goal scratch root (an arbitrary temp-dir path),
 /// so anchor on a stable file-name `marker`, walk back to the start of

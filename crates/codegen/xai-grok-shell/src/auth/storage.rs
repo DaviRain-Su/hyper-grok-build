@@ -876,7 +876,11 @@ fn ensure_live_auth_file_lock(
 /// the lock). Writes `PID:TS` holder info so the AuthManager stale-lock path
 /// can still identify the holder. Failure to open or acquire the lock aborts
 /// the write: proceeding unlocked can lose a sibling process's auth scope.
-fn with_auth_json_scope_lock<R>(
+///
+/// Shared by third-party scope writers (`store_*_auth`) and xAI
+/// [`AuthManager::update`] / `save_without_enrichment` so multi-provider
+/// logins coexist under one `auth.json`.
+pub(crate) fn with_auth_json_scope_lock<R>(
     auth_json_path: &Path,
     f: impl FnOnce() -> std::io::Result<R>,
 ) -> std::io::Result<R> {

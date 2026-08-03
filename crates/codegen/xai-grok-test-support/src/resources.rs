@@ -1,14 +1,13 @@
-//! Generic OS resource snapshots for soak tests. No shell types: `rss_bytes`
-//! reads `/proc` (Linux) or shells out to `ps` (macOS); the task/fd counters
-//! are Linux-only and return `None` elsewhere.
+//! OS resource snapshots for soak tests, read through `xai_tty_utils` so the
+//! soaks and production measure the same way.
 
-/// RSS (bytes), live threads, and open fds sampled together. `None` marks a
+/// RSS in bytes, live threads, and open files, sampled together. `None` marks a
 /// metric the platform can't report.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ResourceSnapshot {
     pub rss: Option<usize>,
     pub threads: Option<usize>,
-    pub fds: Option<usize>,
+    pub open_files: Option<usize>,
 }
 
 /// Saturating per-field growth of one [`ResourceSnapshot`] over an earlier
@@ -18,23 +17,26 @@ pub struct ResourceSnapshot {
 pub struct ResourceGrowth {
     pub rss: Option<usize>,
     pub threads: Option<usize>,
-    pub fds: Option<usize>,
+    pub open_files: Option<usize>,
 }
 
 impl ResourceSnapshot {
     pub fn capture() -> Self {
+        let usage = xai_tty_utils::sample_process_resources();
+        let widen = |value: Option<u64>| value.map(|n| n as usize);
         Self {
-            rss: rss_bytes(),
-            threads: thread_count(),
-            fds: fd_count(),
+            rss: widen(usage.rss_bytes),
+            threads: widen(usage.threads),
+            open_files: widen(usage.open_files),
         }
     }
 
-    /// RSS only, skipping the thread and fd probes. For hot sampling loops that
-    /// use just `rss`: on Linux this avoids the per-tick `/proc/self/{task,fd}`
-    /// directory scans. The RSS read itself still shells out to `ps` on macOS.
+    /// RSS only, skipping the thread and descriptor scans. For sampling loops
+    /// that read just `rss`.
     pub fn capture_rss() -> Option<usize> {
-        rss_bytes()
+        xai_tty_utils::sample_process_memory()
+            .rss_bytes
+            .map(|n| n as usize)
     }
 
     /// Growth of `self` (after) over `baseline` (before); see [`ResourceGrowth`].
@@ -45,65 +47,8 @@ impl ResourceSnapshot {
         ResourceGrowth {
             rss: delta(self.rss, baseline.rss),
             threads: delta(self.threads, baseline.threads),
-            fds: delta(self.fds, baseline.fds),
+            open_files: delta(self.open_files, baseline.open_files),
         }
-    }
-}
-
-fn rss_bytes() -> Option<usize> {
-    #[cfg(target_os = "linux")]
-    {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        for line in status.lines() {
-            if let Some(val) = line.strip_prefix("VmRSS:") {
-                let kb: usize = val.trim().trim_end_matches(" kB").trim().parse().ok()?;
-                return Some(kb * 1024);
-            }
-        }
-        None
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
-        let output = Command::new("ps")
-            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-            .output()
-            .ok()?;
-        let kb: usize = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse()
-            .ok()?;
-        Some(kb * 1024)
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        None
-    }
-}
-
-fn thread_count() -> Option<usize> {
-    #[cfg(target_os = "linux")]
-    {
-        Some(std::fs::read_dir("/proc/self/task").ok()?.count())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
-/// The read's own transient fd closes with the iterator, so before and after
-/// samples stay symmetric.
-fn fd_count() -> Option<usize> {
-    #[cfg(target_os = "linux")]
-    {
-        Some(std::fs::read_dir("/proc/self/fd").ok()?.count())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
     }
 }
 
@@ -116,18 +61,18 @@ mod tests {
         let before = ResourceSnapshot {
             rss: Some(100),
             threads: Some(5),
-            fds: None,
+            open_files: None,
         };
         let after = ResourceSnapshot {
             rss: Some(30),
             threads: Some(9),
-            fds: Some(3),
+            open_files: Some(3),
         };
         let growth = after.growth_from(&before);
         assert_eq!(growth.rss, Some(0), "a shrink saturates to zero");
         assert_eq!(growth.threads, Some(4), "growth is the delta");
         assert_eq!(
-            growth.fds, None,
+            growth.open_files, None,
             "a missing baseline sample propagates None"
         );
     }

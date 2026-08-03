@@ -9,7 +9,7 @@ use xai_grok_workspace::session::jj;
 /// Handle a `x.ai/git/*` method for a jj-colocated repo.
 ///
 /// Returns `Some(result)` if handled, `None` to fall through to git.
-pub async fn try_handle(
+pub(crate) async fn try_handle(
     method: &str,
     git_root: &std::path::Path,
     raw_params: &serde_json::value::RawValue,

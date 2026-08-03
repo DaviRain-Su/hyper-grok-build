@@ -78,6 +78,7 @@ impl MvpAgent {
         if let Some(ops) = self.workspace_ops.borrow().as_ref() {
             ops.end_local_session(id.0.as_ref());
         }
+        self.log_resource_usage(xai_grok_telemetry::events::ResourceReportTrigger::SessionClose);
     }
     /// Get-or-create the per-session dispatch lock. `prompt` holds it across
     /// intake so a cancel cannot overtake the prompt it targets.

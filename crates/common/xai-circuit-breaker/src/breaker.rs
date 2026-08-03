@@ -14,6 +14,14 @@ use crate::window::SlidingWindow;
 
 static NOOP_OBSERVER: NoopObserver = NoopObserver;
 
+/// Encoded `probe_claimed_at_millis` value meaning no claim timestamp has
+/// been published for the current half-open generation.
+const NO_PROBE_CLAIM: u64 = 0;
+
+fn encode_probe_claim_millis(elapsed_millis: u64) -> u64 {
+    elapsed_millis.saturating_add(1)
+}
+
 /// Cheaply-clonable handle around a shared [`CircuitBreakerInner`].
 #[derive(Clone)]
 pub struct CircuitBreaker {
@@ -29,15 +37,19 @@ pub(crate) struct CircuitBreakerInner {
     baseline: Instant,
     opened_at_millis: AtomicU64,
     half_open_probes: AtomicUsize,
-    /// When the most recent half-open probe slot was claimed
-    /// (millisecond offset from `baseline`). A probe whose owner never
-    /// reaches `record()` — e.g. its future is dropped on caller
+    /// When the most recent half-open probe slot was claimed, encoded as the
+    /// millisecond offset from `baseline` plus one. Raw zero means that no
+    /// claim timestamp has been published for the current generation. A probe
+    /// whose owner never reaches `record()` — e.g. its future is dropped on caller
     /// cancellation — would otherwise hold its slot forever and strand
     /// the breaker in `HalfOpen`, shedding all traffic with no path
     /// back to `Closed`. `try_half_open_probe` treats a claim older
     /// than `open_duration` as abandoned and lets one caller reclaim
     /// it, so a lost probe delays recovery by at most one cool-down.
     probe_claimed_at_millis: AtomicU64,
+    /// Coordinates Open/HalfOpen generation changes with probe reservation and
+    /// timestamp publication. The Closed `check()` fast path never takes it.
+    probe_state_lock: Mutex<()>,
     /// Lock-free mirror of `state == Open`. Written after the
     /// authoritative `state` store with `Release`; read with
     /// `Relaxed` from the `is_open()` hot path.
@@ -67,7 +79,8 @@ impl CircuitBreaker {
                 baseline,
                 opened_at_millis: AtomicU64::new(0),
                 half_open_probes: AtomicUsize::new(0),
-                probe_claimed_at_millis: AtomicU64::new(0),
+                probe_claimed_at_millis: AtomicU64::new(NO_PROBE_CLAIM),
+                probe_state_lock: Mutex::new(()),
                 is_open_fast: AtomicBool::new(false),
                 window: Mutex::new(SlidingWindow::new()),
                 clock,
@@ -177,11 +190,17 @@ impl CircuitBreaker {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn force_half_open(&self) {
         let prev = self.state();
-        self.inner
-            .state
-            .store(BreakerState::HalfOpen as u8, Ordering::Release);
-        self.inner.is_open_fast.store(false, Ordering::Release);
-        self.inner.half_open_probes.store(0, Ordering::Release);
+        {
+            let _guard = self.lock_probe_state();
+            self.inner.half_open_probes.store(0, Ordering::Release);
+            self.inner
+                .probe_claimed_at_millis
+                .store(NO_PROBE_CLAIM, Ordering::Release);
+            self.inner
+                .state
+                .store(BreakerState::HalfOpen as u8, Ordering::Release);
+            self.inner.is_open_fast.store(false, Ordering::Release);
+        }
         if prev != BreakerState::HalfOpen {
             self.observer()
                 .on_state_change(prev, BreakerState::HalfOpen, "force_half_open");
@@ -190,6 +209,13 @@ impl CircuitBreaker {
 
     fn lock_window(&self) -> std::sync::MutexGuard<'_, SlidingWindow> {
         self.inner.window.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_probe_state(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.inner
+            .probe_state_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn elapsed_millis(&self) -> u64 {
@@ -206,15 +232,23 @@ impl CircuitBreaker {
         let elapsed = Duration::from_millis(now.saturating_sub(opened));
 
         if elapsed >= self.inner.config.open_duration {
-            if self.cas_state(BreakerState::Open, BreakerState::HalfOpen) {
-                self.inner.is_open_fast.store(false, Ordering::Release);
-                // Do NOT reset `half_open_probes` here. It is already 0:
-                // `trip()` zeroes it on entry to `Open` and nothing
-                // increments it while `Open`. Resetting after the CAS
-                // publishes `HalfOpen` races a loser thread that observes
-                // `HalfOpen` and claims a probe slot in the gap, which the
-                // reset would then clear — admitting two probes instead of
-                // one.
+            let won_cas = {
+                let _guard = self.lock_probe_state();
+                if self.cas_state(BreakerState::Open, BreakerState::HalfOpen) {
+                    self.inner.is_open_fast.store(false, Ordering::Release);
+                    // Do NOT reset `half_open_probes` here. It is already 0:
+                    // `trip()` zeroes it on entry to `Open` and nothing
+                    // increments it while `Open`. Resetting after the CAS
+                    // publishes `HalfOpen` races a loser thread that observes
+                    // `HalfOpen` and claims a probe slot in the gap, which the
+                    // reset would then clear — admitting two probes instead of
+                    // one.
+                    true
+                } else {
+                    false
+                }
+            };
+            if won_cas {
                 self.observer().on_state_change(
                     BreakerState::Open,
                     BreakerState::HalfOpen,
@@ -246,15 +280,24 @@ impl CircuitBreaker {
     }
 
     fn trip(&self, prev: BreakerState, reason: &'static str) {
-        self.inner
-            .state
-            .store(BreakerState::Open as u8, Ordering::Release);
-        self.inner
-            .opened_at_millis
-            .store(self.elapsed_millis(), Ordering::Release);
-        self.inner.half_open_probes.store(0, Ordering::Release);
-        // Mirror after the authoritative state store.
-        self.inner.is_open_fast.store(true, Ordering::Release);
+        // Initialize the new Open generation and publish state under the
+        // probe lock so a concurrent half-open reservation cannot leave
+        // stale accounting after this transition.
+        {
+            let _guard = self.lock_probe_state();
+            self.inner
+                .opened_at_millis
+                .store(self.elapsed_millis(), Ordering::Release);
+            self.inner.half_open_probes.store(0, Ordering::Release);
+            self.inner
+                .probe_claimed_at_millis
+                .store(NO_PROBE_CLAIM, Ordering::Release);
+            self.inner
+                .state
+                .store(BreakerState::Open as u8, Ordering::Release);
+            // Mirror after the authoritative state store.
+            self.inner.is_open_fast.store(true, Ordering::Release);
+        }
         if prev != BreakerState::Open {
             self.observer()
                 .on_state_change(prev, BreakerState::Open, reason);
@@ -262,12 +305,20 @@ impl CircuitBreaker {
     }
 
     fn close(&self, prev: BreakerState, reason: &'static str) {
-        self.inner
-            .state
-            .store(BreakerState::Closed as u8, Ordering::Release);
+        {
+            let _guard = self.lock_probe_state();
+            self.inner
+                .state
+                .store(BreakerState::Closed as u8, Ordering::Release);
+            self.inner.half_open_probes.store(0, Ordering::Release);
+            self.inner
+                .probe_claimed_at_millis
+                .store(NO_PROBE_CLAIM, Ordering::Release);
+            self.inner.is_open_fast.store(false, Ordering::Release);
+        }
+        // Window clear uses a separate mutex; keep lock order
+        // probe_state_lock → window by never nesting them.
         self.lock_window().clear();
-        self.inner.half_open_probes.store(0, Ordering::Release);
-        self.inner.is_open_fast.store(false, Ordering::Release);
         if prev != BreakerState::Closed {
             self.observer()
                 .on_state_change(prev, BreakerState::Closed, reason);
@@ -275,48 +326,91 @@ impl CircuitBreaker {
     }
 
     fn try_half_open_probe(&self) -> Result<(), BreakerOpen> {
-        let now = self.elapsed_millis();
-        let prev = self.inner.half_open_probes.fetch_add(1, Ordering::AcqRel);
-        if prev < self.inner.config.half_open_max_probes {
-            self.inner
-                .probe_claimed_at_millis
-                .store(now, Ordering::Release);
-            self.observer().on_probe_admission(true);
-            return Ok(());
-        }
-        self.inner.half_open_probes.fetch_sub(1, Ordering::AcqRel);
+        self.try_half_open_probe_after_reservation(|| {})
+    }
 
-        // All probe slots are claimed. A claim is only released via
-        // `record()`; if a probe's owner was cancelled before recording
-        // (its future dropped mid-flight), the slot would be held forever
-        // and the breaker could never leave `HalfOpen`. Treat a claim
-        // older than `open_duration` as abandoned and let exactly one
-        // caller (the CAS winner) take it over. A slow-but-alive probe
-        // that outlives the lease may briefly coexist with its
-        // replacement; both outcomes are recorded, same as running with
-        // an extra probe slot.
-        let lease_millis = self.inner.config.open_duration.as_millis() as u64;
-        let claimed = self.inner.probe_claimed_at_millis.load(Ordering::Acquire);
-        if now.saturating_sub(claimed) >= lease_millis
-            && self
-                .inner
-                .probe_claimed_at_millis
-                .compare_exchange(claimed, now, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        {
-            self.observer().on_probe_admission(true);
-            return Ok(());
+    fn try_half_open_probe_after_reservation(
+        &self,
+        after_reservation: impl FnOnce(),
+    ) -> Result<(), BreakerOpen> {
+        enum Decision {
+            Admit,
+            Deny,
         }
 
-        self.observer().on_probe_admission(false);
-        // Slot-exhausted rejection: callers that map this to HTTP
-        // `Retry-After` shouldn't advertise the full open-duration
-        // cool-down; advertise a small fixed backoff (capped to
-        // `open_duration`).
-        const HALF_OPEN_PROBE_BACKOFF: Duration = Duration::from_millis(50);
-        Err(BreakerOpen {
-            retry_after: HALF_OPEN_PROBE_BACKOFF.min(self.inner.config.open_duration),
-        })
+        // Hold the probe lock across reservation + timestamp publication so a
+        // concurrent trip/close cannot clear generation metadata while a slot
+        // is only half-published. Observer callbacks stay outside.
+        let decision = {
+            let _guard = self.lock_probe_state();
+            if self.state() != BreakerState::HalfOpen {
+                Decision::Deny
+            } else {
+                let now = self.elapsed_millis();
+                let encoded_now = encode_probe_claim_millis(now);
+                let prev = self.inner.half_open_probes.fetch_add(1, Ordering::AcqRel);
+                // Test hook: may block while the lock is held so concurrent
+                // trip/close wait until this generation decision finishes.
+                after_reservation();
+                if prev < self.inner.config.half_open_max_probes {
+                    self.inner
+                        .probe_claimed_at_millis
+                        .store(encoded_now, Ordering::Release);
+                    Decision::Admit
+                } else {
+                    self.inner.half_open_probes.fetch_sub(1, Ordering::AcqRel);
+
+                    // All probe slots are claimed. A claim is only released via
+                    // `record()`; if a probe's owner was cancelled before recording
+                    // (its future dropped mid-flight), the slot would be held forever
+                    // and the breaker could never leave `HalfOpen`. Treat a claim
+                    // older than `open_duration` as abandoned and let exactly one
+                    // caller take it over. Raw zero means "unpublished / no claim"
+                    // and must never be reclaimed.
+                    let lease_millis = self.inner.config.open_duration.as_millis() as u64;
+                    let claimed = self.inner.probe_claimed_at_millis.load(Ordering::Acquire);
+                    if claimed != NO_PROBE_CLAIM {
+                        let claimed_at = claimed - 1;
+                        if now.saturating_sub(claimed_at) >= lease_millis
+                            && self
+                                .inner
+                                .probe_claimed_at_millis
+                                .compare_exchange(
+                                    claimed,
+                                    encoded_now,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                )
+                                .is_ok()
+                        {
+                            Decision::Admit
+                        } else {
+                            Decision::Deny
+                        }
+                    } else {
+                        Decision::Deny
+                    }
+                }
+            }
+        };
+
+        match decision {
+            Decision::Admit => {
+                self.observer().on_probe_admission(true);
+                Ok(())
+            }
+            Decision::Deny => {
+                self.observer().on_probe_admission(false);
+                // Slot-exhausted rejection: callers that map this to HTTP
+                // `Retry-After` shouldn't advertise the full open-duration
+                // cool-down; advertise a small fixed backoff (capped to
+                // `open_duration`).
+                const HALF_OPEN_PROBE_BACKOFF: Duration = Duration::from_millis(50);
+                Err(BreakerOpen {
+                    retry_after: HALF_OPEN_PROBE_BACKOFF.min(self.inner.config.open_duration),
+                })
+            }
+        }
     }
 
     fn cas_state(&self, from: BreakerState, to: BreakerState) -> bool {

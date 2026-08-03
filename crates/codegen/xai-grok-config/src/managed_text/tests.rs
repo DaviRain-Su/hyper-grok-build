@@ -271,7 +271,7 @@ fn symlink_resolution_depth_cycles_and_parent_symlinks_are_refused() {
     let plan = ManagedConfig::plan(request(&relative, &[("item", "body")])).unwrap();
     assert_eq!(
         plan.target_path(),
-        fs::canonicalize(&physical).unwrap().as_path()
+        dunce::canonicalize(&physical).unwrap().as_path()
     );
     ManagedConfig::apply(plan).unwrap();
     assert!(
@@ -304,7 +304,7 @@ fn symlink_resolution_depth_cycles_and_parent_symlinks_are_refused() {
         ManagedConfig::plan(request(&linked_parent.join("rc"), &[("item", "body")])).unwrap();
     assert_eq!(
         plan.target_path().parent(),
-        Some(fs::canonicalize(&real_parent).unwrap().as_path())
+        Some(dunce::canonicalize(&real_parent).unwrap().as_path())
     );
 }
 

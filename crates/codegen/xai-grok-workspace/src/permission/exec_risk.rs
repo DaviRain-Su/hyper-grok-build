@@ -226,7 +226,12 @@ pub(crate) fn segment_exec_facts(words: &[String]) -> SegmentExecFacts {
     }
 }
 
-const SAFE_GIT_SUBCOMMANDS: &[&str] = &[
+/// Read-only git query verbs. SINGLE SOURCE for every git allow decision:
+/// [`git_words_are_read_only_query`] (the manager safe lists and the auto-mode
+/// routine heuristic both call it) and the `alias.<verb> = !cmd` shadowing
+/// check in the ambient config scan below. Add a new read-only verb here and
+/// every consumer inherits it — do not grow per-consumer prefix lists.
+pub(crate) const SAFE_GIT_SUBCOMMANDS: &[&str] = &[
     "status",
     "branch",
     "log",
@@ -234,7 +239,125 @@ const SAFE_GIT_SUBCOMMANDS: &[&str] = &[
     "ls-files",
     "show",
     "rev-parse",
+    "blame",
+    "grep",
+    "describe",
+    "merge-base",
+    "check-ignore",
+    "check-attr",
+    "cat-file",
+    "ls-tree",
+    "show-ref",
+    "for-each-ref",
+    "rev-list",
+    "name-rev",
+    "count-objects",
+    "shortlog",
 ];
+
+/// Options that make an otherwise read-only git verb run repo-configured
+/// content drivers or write arbitrary paths — one table applied to EVERY
+/// [`SAFE_GIT_SUBCOMMANDS`] verb, so a new safe verb inherits the policy:
+/// `--filters`/`--textconv` run `filter.*.smudge` / `diff.*.textconv`
+/// (`filter.*.smudge` is outside the ambient local-config exec scan),
+/// `--ext-diff` runs the external diff driver, `--output` writes an arbitrary
+/// file, and `--open-files-in-pager` executes a pager command (`git grep`'s
+/// short-attached `-O<cmd>` form is guarded in
+/// [`git_words_have_unsafe_query_option`]).
+const GIT_QUERY_UNSAFE_OPTIONS: &[&str] = &[
+    "--filters",
+    "--textconv",
+    "--output",
+    "--ext-diff",
+    "--open-files-in-pager",
+];
+
+/// Git accepts uniquely-abbreviated long options, so any `--` word (pre-`=`,
+/// ≥3 chars) that prefixes a table entry fails closed — including
+/// abbreviations a specific verb would resolve to a benign sibling
+/// (`git grep --text` collides with `--textconv` and prompts).
+fn git_query_option_is_unsafe(word: &str) -> bool {
+    let flag = word.split('=').next().unwrap_or(word);
+    flag.len() > 2
+        && GIT_QUERY_UNSAFE_OPTIONS
+            .iter()
+            .any(|full| full.starts_with(flag))
+}
+
+/// Resolve the subcommand index, skipping only modeled-benign globals:
+/// `-C <path>` / `-C<path>` (the ambient config scan tracks the retargeted
+/// cwd) and `--no-pager` / `-P`. Every other pre-subcommand option fails
+/// closed (`None`) — `-c`, `--config-env`, `--git-dir`, `--work-tree`,
+/// `--exec-path`, `--paginate`, `--attr-source`, … can change what executes
+/// or which config a query reads.
+fn git_safe_query_verb_index(words: &[String]) -> Option<usize> {
+    let mut i = 1;
+    loop {
+        let tok = words.get(i).map(String::as_str)?;
+        if tok == "-" || tok == "--" {
+            return None;
+        }
+        if !tok.starts_with('-') {
+            return Some(i);
+        }
+        if tok == "-C" {
+            i += 2;
+            continue;
+        }
+        if attached_git_c_path(tok).is_some() || tok == "--no-pager" || tok == "-P" {
+            i += 1;
+            continue;
+        }
+        return None;
+    }
+}
+
+/// True when a `git` invocation carries an option from the shared unsafe
+/// table ([`GIT_QUERY_UNSAFE_OPTIONS`], plus `git grep`'s short-attached
+/// `-O<cmd>`), whatever the verb. Used on its own to keep a session
+/// whitelist-prefix grant from riding over a driver/write flag, and by
+/// [`git_words_are_read_only_query`].
+pub(crate) fn git_words_have_unsafe_query_option(words: &[String]) -> bool {
+    if words.first().map(String::as_str) != Some("git") {
+        return false;
+    }
+    if words.iter().skip(1).any(|w| git_query_option_is_unsafe(w)) {
+        return true;
+    }
+    // `git grep -O<cmd>` / `-O <cmd>` executes <cmd>; the short-attached form
+    // is not a long-option abbreviation, so guard it verb-specifically.
+    matches!(git_safe_query_verb_index(words), Some(i) if words[i] == "grep")
+        && words.iter().skip(1).any(|w| w.starts_with("-O"))
+}
+
+/// Single decision point for auto-approvable read-only `git` queries, shared
+/// by the manager safe lists and the auto-mode routine heuristic so verb
+/// policy and flag policy live in one place:
+/// 1. resolve the subcommand via [`git_safe_query_verb_index`] (benign
+///    globals skipped, config/retarget/unknown globals fail closed — plus a
+///    redundant [`git_has_exec_risk_global`] belt for odd `-C` value shapes);
+/// 2. allow only [`SAFE_GIT_SUBCOMMANDS`] verbs;
+/// 3. reject the shared unsafe-option table
+///    ([`git_words_have_unsafe_query_option`]).
+///
+/// Callers pass wrapper-peeled words; `words[0]` must be literally `git`
+/// (path-qualified or case-variant "git" binaries fail closed — a different
+/// binary of the same basename must not ride the allowlist).
+pub(crate) fn git_words_are_read_only_query(words: &[String]) -> bool {
+    if words.first().map(String::as_str) != Some("git") {
+        return false;
+    }
+    if git_has_exec_risk_global(words) {
+        return false;
+    }
+    let Some(verb_idx) = git_safe_query_verb_index(words) else {
+        return false;
+    };
+    if !SAFE_GIT_SUBCOMMANDS.contains(&words[verb_idx].as_str()) {
+        return false;
+    }
+    !git_words_have_unsafe_query_option(words)
+}
 
 fn local_git_config_entry_is_exec(name: &str, value: &str) -> bool {
     let name = name.to_ascii_lowercase();
@@ -534,6 +657,79 @@ mod tests {
         ] {
             assert!(!segment_has_exec_risk_flag(&words(cmd)), "{cmd}");
         }
+    }
+
+    #[test]
+    fn read_only_git_queries() {
+        // Safe verbs, benign globals, ordinary flags.
+        for cmd in [
+            "git status",
+            "git -C sub status",
+            "git -C/abs/path log --oneline --graph",
+            "git --no-pager diff --stat",
+            "git -P show HEAD",
+            "git cat-file -p HEAD:src/main.rs",
+            "git grep --only-matching pattern",
+            "git grep --or -e a -e b",
+            "git rev-parse --show-toplevel",
+            "git shortlog -sn",
+        ] {
+            assert!(git_words_are_read_only_query(&words(cmd)), "{cmd}");
+        }
+        // Non-query verbs, unmodeled/exec globals, non-bare git.
+        for cmd in [
+            "git push --force",
+            "git checkout main",
+            "git",
+            "git -C sub",
+            "git -c core.fsmonitor=/x status",
+            "git --git-dir=/evil/.git status",
+            "git --exec-path=/evil status",
+            "git -p status",
+            "git --paginate status",
+            "git --attr-source=evil check-attr -a f",
+            "git -- status",
+            "/usr/bin/git status",
+            "Git status",
+            "rm -rf /",
+        ] {
+            assert!(!git_words_are_read_only_query(&words(cmd)), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn unsafe_query_options_apply_to_every_verb() {
+        // Driver / write flags block on any verb, abbreviations fail closed.
+        for cmd in [
+            "git cat-file --filters HEAD:data.bin",
+            "git cat-file --textconv HEAD:data.bin",
+            "git cat-file --filt HEAD:data.bin",
+            "git show --textconv HEAD:data.bin",
+            "git log --textconv -p",
+            "git log --ext-diff",
+            "git show --output=/tmp/out HEAD",
+            "git log --output /tmp/out",
+            "git grep -Ovim TODO",
+            "git grep -O touch-evil TODO",
+            "git grep --open-files-in-pager=sh TODO",
+            "git grep --op=sh TODO",
+        ] {
+            assert!(git_words_have_unsafe_query_option(&words(cmd)), "{cmd}");
+            assert!(!git_words_are_read_only_query(&words(cmd)), "{cmd}");
+        }
+        for cmd in [
+            "git cat-file -p HEAD:src/main.rs",
+            "git log --oneline",
+            "git log --only-matching",
+            "git grep --or -e a -e b",
+            "git show --stat HEAD",
+        ] {
+            assert!(!git_words_have_unsafe_query_option(&words(cmd)), "{cmd}");
+        }
+        // `-O` outside `git grep` is not the pager flag.
+        assert!(!git_words_have_unsafe_query_option(&words(
+            "git log -O/tmp/orderfile"
+        )));
     }
 
     #[test]

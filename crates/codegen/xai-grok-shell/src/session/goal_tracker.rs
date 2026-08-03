@@ -718,7 +718,7 @@ impl GoalTracker {
     /// variants (including [`GoalStatus::InfraPaused`]) are preserved
     /// so `pause_message` and pause cause stay aligned. Clear
     /// `current_subagent_id`.
-    pub fn from_snapshot(session_dir: PathBuf, mut snapshot: GoalOrchestration) -> Self {
+    pub(crate) fn from_snapshot(session_dir: PathBuf, mut snapshot: GoalOrchestration) -> Self {
         if matches!(snapshot.phase, GoalPhase::Planning | GoalPhase::Executing) {
             snapshot.phase = GoalPhase::Idle;
             snapshot.current_subagent_id = None;
@@ -785,7 +785,7 @@ impl GoalTracker {
         self.orchestration.as_ref()
     }
 
-    pub fn snapshot_mut(&mut self) -> Option<&mut GoalOrchestration> {
+    pub(crate) fn snapshot_mut(&mut self) -> Option<&mut GoalOrchestration> {
         self.orchestration.as_mut()
     }
 
@@ -830,7 +830,7 @@ impl GoalTracker {
     /// Path to the immutable baseline snapshot of the planner's original
     /// plan (`<session_dir>/goal/plan.baseline.md`); written once after
     /// the planner first produces `plan.md`. Sibling of [`Self::plan_path`].
-    pub fn plan_baseline_path(&self) -> PathBuf {
+    pub(crate) fn plan_baseline_path(&self) -> PathBuf {
         self.goal_dir().join("plan.baseline.md")
     }
 
@@ -842,7 +842,7 @@ impl GoalTracker {
     /// blocked awaiting it), so there's no concurrent implementer edit to
     /// clobber. Sibling of [`Self::plan_path`]; may not exist until the
     /// strategist first runs.
-    pub fn strategy_path(&self) -> PathBuf {
+    pub(crate) fn strategy_path(&self) -> PathBuf {
         self.goal_dir().join("strategy.md")
     }
 
@@ -904,7 +904,7 @@ impl GoalTracker {
     /// call site (or `None` if not available). It is consumed by
     /// value — callers with `&str` should `.to_string()` at the call
     /// site rather than have the helper clone.
-    pub fn create_goal(
+    pub(crate) fn create_goal(
         &mut self,
         goal_id: String,
         objective: String,
@@ -1024,7 +1024,7 @@ impl GoalTracker {
     /// reason so the user-visible block reason survives until the next
     /// transition out of the paused state.
     /// Returns `true` if the transition was applied.
-    pub fn pause_with_message(&mut self, reason: GoalPauseReason, message: String) -> bool {
+    pub(crate) fn pause_with_message(&mut self, reason: GoalPauseReason, message: String) -> bool {
         self.pause_inner(reason, Some(message))
     }
 
@@ -1118,7 +1118,7 @@ impl GoalTracker {
 
     /// Mark the goal as budget-limited. Accepts `Active` or any paused variant.
     /// Returns `true` if the transition was applied.
-    pub fn budget_limit(&mut self) -> bool {
+    pub(crate) fn budget_limit(&mut self) -> bool {
         if let Some(o) = &mut self.orchestration
             && (o.status == GoalStatus::Active || o.status.is_paused())
         {
@@ -1175,7 +1175,7 @@ impl GoalTracker {
     /// progress tick. Single-slot, last-writer-wins by design: a display
     /// hint may flip between concurrent children; authoritative totals
     /// come from the token records.
-    pub fn update_live_progress(
+    pub(crate) fn update_live_progress(
         &mut self,
         subagent_tokens: u64,
         tokens_by_model: Vec<(String, u64)>,
@@ -1195,7 +1195,7 @@ impl GoalTracker {
     }
 
     /// Flush elapsed wall-clock time into `elapsed_ms`.
-    pub fn account_elapsed(&mut self) {
+    pub(crate) fn account_elapsed(&mut self) {
         if let Some(o) = &mut self.orchestration
             && let Some(since) = self.active_since
         {
@@ -1215,7 +1215,7 @@ impl GoalTracker {
     /// in flight (cap bonus active). A fingerprint that differs from the
     /// previous one resets the streak to its first occurrence. No-op
     /// (returns `false`) without an orchestration.
-    pub fn record_classifier_stall(&mut self, fingerprint: &str) -> bool {
+    pub(crate) fn record_classifier_stall(&mut self, fingerprint: &str) -> bool {
         let Some(o) = self.orchestration.as_mut() else {
             return false;
         };
@@ -1233,7 +1233,7 @@ impl GoalTracker {
         o.classifier_stall_count >= threshold
     }
 
-    pub fn record_evaluator_blocker(&mut self, blocker_key: &str) -> u32 {
+    pub(crate) fn record_evaluator_blocker(&mut self, blocker_key: &str) -> u32 {
         let Some(o) = self.orchestration.as_mut() else {
             return 0;
         };
@@ -1246,7 +1246,7 @@ impl GoalTracker {
         o.evaluator_blocked_streak
     }
 
-    pub fn reset_evaluator_blocker(&mut self) {
+    pub(crate) fn reset_evaluator_blocker(&mut self) {
         if let Some(o) = self.orchestration.as_mut() {
             o.reset_evaluator_blocker_fields();
         }
@@ -1255,7 +1255,7 @@ impl GoalTracker {
     /// Undo the most recent attempt-slot reservation. Used when a
     /// rejection is routed to the `Blocked` outcome so it does not
     /// consume the retry budget the user gets back on resume.
-    pub fn rollback_classifier_attempt(&mut self) {
+    pub(crate) fn rollback_classifier_attempt(&mut self) {
         if let Some(o) = self.orchestration.as_mut() {
             o.classifier_runs_attempted = o.classifier_runs_attempted.saturating_sub(1);
         }
@@ -1264,7 +1264,7 @@ impl GoalTracker {
     /// Clear the stall streak so the next rejection starts a fresh
     /// fingerprint comparison. Used on the `Blocked` route — a paused-for-
     /// user goal must not carry a half-built streak into its resume.
-    pub fn reset_classifier_stall(&mut self) {
+    pub(crate) fn reset_classifier_stall(&mut self) {
         if let Some(o) = self.orchestration.as_mut() {
             o.reset_classifier_stall_fields();
         }
@@ -1273,7 +1273,7 @@ impl GoalTracker {
     /// Increment the consecutive-`NotAchieved` streak and return the new
     /// value. Drives the (skip-robust) strategist trigger. No-op (returns
     /// 0) without an orchestration.
-    pub fn record_not_achieved_streak(&mut self) -> u32 {
+    pub(crate) fn record_not_achieved_streak(&mut self) -> u32 {
         match self.orchestration.as_mut() {
             Some(o) => {
                 o.consecutive_not_achieved = o.consecutive_not_achieved.saturating_add(1);
@@ -1293,7 +1293,10 @@ impl GoalTracker {
     /// strategist. On fire it also grants the cap bonus and resets the
     /// gap-fingerprint stall streak so the restructure runs against a relaxed,
     /// freshly-measured stall window. No-op (`None`) without an orchestration.
-    pub fn claim_strategist_fire(&mut self, should_fire: impl Fn(u32, u32) -> bool) -> Option<u32> {
+    pub(crate) fn claim_strategist_fire(
+        &mut self,
+        should_fire: impl Fn(u32, u32) -> bool,
+    ) -> Option<u32> {
         let o = self.orchestration.as_mut()?;
         if should_fire(o.consecutive_not_achieved, o.last_strategist_fired_at) {
             o.last_strategist_fired_at = o.consecutive_not_achieved;
@@ -1311,7 +1314,7 @@ impl GoalTracker {
     /// Deliberately conservative: the bonus is set, never stacked, so this
     /// also wipes an earlier successful fire's bonus — capping early beats
     /// running unearned rounds under a relaxed stall guard.
-    pub fn revoke_strategist_cap_bonus(&mut self) {
+    pub(crate) fn revoke_strategist_cap_bonus(&mut self) {
         if let Some(o) = self.orchestration.as_mut() {
             o.strategist_cap_bonus = 0;
         }
@@ -1322,7 +1325,7 @@ impl GoalTracker {
     /// the `Blocked` route (paused for the user). Symmetric with the
     /// `complete`/`budget_limit`/`resume` resets so a paused/solved goal
     /// never replays a stale recommendation.
-    pub fn reset_strategist_state(&mut self) {
+    pub(crate) fn reset_strategist_state(&mut self) {
         if let Some(o) = self.orchestration.as_mut() {
             o.reset_strategist_fields();
         }
@@ -1331,14 +1334,14 @@ impl GoalTracker {
     /// Persist the strategist's latest output path + short recommendation
     /// so the continuation directive can inline them. No-op without an
     /// orchestration.
-    pub fn record_strategy_recommendation(&mut self, path: String, recommendation: String) {
+    pub(crate) fn record_strategy_recommendation(&mut self, path: String, recommendation: String) {
         if let Some(o) = self.orchestration.as_mut() {
             o.last_strategy_path = Some(path);
             o.last_strategy_recommendation = Some(recommendation);
         }
     }
 
-    pub fn append_history(&mut self, entry: GoalHistoryEntry) {
+    pub(crate) fn append_history(&mut self, entry: GoalHistoryEntry) {
         if let Some(o) = &mut self.orchestration {
             o.history.push(entry);
             // Bound the persisted timeline; drop oldest past the cap.

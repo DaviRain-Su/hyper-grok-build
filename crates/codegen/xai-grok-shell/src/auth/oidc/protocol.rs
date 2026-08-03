@@ -96,7 +96,7 @@ pub(crate) fn with_alpha_test_key(
     let _ = url;
     builder
 }
-pub fn is_configured(config: &GrokComConfig) -> bool {
+pub(crate) fn is_configured(config: &GrokComConfig) -> bool {
     config.oidc.is_some()
 }
 /// Peek at the unverified access token JWT to extract the `principal_type`

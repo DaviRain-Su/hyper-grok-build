@@ -608,17 +608,3 @@ pub(crate) fn assert_goal_discipline_in_reminder(reminder: &str, site: &str) {
         "{site} must not leave {{DISCIPLINE_BLOCK}} unsubstituted:\n{reminder}"
     );
 }
-#[cfg(test)]
-pub(crate) fn assert_resume_recap_discipline_tracking_order(text: &str, recap_marker: &str) {
-    let recap_idx = text.find(recap_marker).unwrap_or_else(|| {
-        panic!("resume reminder must include block recap `{recap_marker}`:\n{text}");
-    });
-    assert_goal_discipline_in_reminder(text, "goal_resume");
-    let discipline_idx = text
-        .find("<task_completion_discipline>")
-        .expect("resume reminder must include discipline block");
-    assert!(
-        recap_idx < discipline_idx,
-        "resume reminder must place recap before discipline (recap={recap_idx} discipline={discipline_idx}):\n{text}"
-    );
-}

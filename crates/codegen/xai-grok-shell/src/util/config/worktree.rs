@@ -1,5 +1,4 @@
 use super::RemoteSettings;
-use super::mcp::use_leader_from_toml;
 use serde::{Deserialize, Serialize};
 use toml::Value as TomlValue;
 use xai_fast_worktree::CreationMode;
@@ -47,7 +46,7 @@ impl From<WorktreeType> for CreationMode {
 
 /// Returns `Some(type)` when `[cli] worktree_type` is set to a valid value in config.toml,
 /// `None` when absent or the value type is wrong. Logs a warning for invalid strings.
-pub fn worktree_type_from_toml_opt(root: &TomlValue) -> Option<WorktreeType> {
+pub(crate) fn worktree_type_from_toml_opt(root: &TomlValue) -> Option<WorktreeType> {
     if let TomlValue::Table(table) = root
         && let Some(TomlValue::Table(cli)) = table.get("cli")
         && let Some(toml_value) = cli.get("worktree_type")
@@ -70,14 +69,14 @@ pub fn worktree_type_from_toml_opt(root: &TomlValue) -> Option<WorktreeType> {
 ///
 /// Set in config.toml under [cli] as `worktree_type = "linked|standalone|git"`.
 /// Defaults to `WorktreeType::Linked` when not explicitly set.
-pub fn worktree_type_from_toml(root: &TomlValue) -> WorktreeType {
+pub(crate) fn worktree_type_from_toml(root: &TomlValue) -> WorktreeType {
     worktree_type_from_toml_opt(root).unwrap_or_default()
 }
 
 /// Resolve worktree type: local config > remote settings > default (`Linked`).
 ///
 /// Returns the resolved type and its provenance (`"local"`, `"remote"`, or `"default"`).
-pub fn resolve_worktree_type(
+pub(crate) fn resolve_worktree_type(
     raw_config: &TomlValue,
     remote: Option<&RemoteSettings>,
 ) -> (WorktreeType, &'static str) {
@@ -105,29 +104,20 @@ pub fn worktree_type() -> WorktreeType {
 }
 
 /// Returns `Some(value)` when `[cli] restore_code` is set as a boolean in config.toml.
-pub fn restore_code_from_toml(root: &TomlValue) -> Option<bool> {
+pub(crate) fn restore_code_from_toml(root: &TomlValue) -> Option<bool> {
     root.get("cli")
         .and_then(|c| c.get("restore_code"))
         .and_then(|v| v.as_bool())
 }
 
 /// Resolve restore_code: local config > remote settings > default (`false`).
-pub fn resolve_restore_code(raw_config: &TomlValue, remote: Option<&RemoteSettings>) -> bool {
+pub(crate) fn resolve_restore_code(
+    raw_config: &TomlValue,
+    remote: Option<&RemoteSettings>,
+) -> bool {
     restore_code_from_toml(raw_config)
         .or(remote.and_then(|r| r.restore_code))
         .unwrap_or(false)
-}
-
-/// Synchronously check if leader mode is enabled in the config file.
-/// When true, the agent will connect to a shared leader process instead of
-/// running the agent directly. This allows multiple agent instances to share one backend.
-/// Defaults to false when not explicitly set.
-pub fn use_leader_sync() -> bool {
-    let root: TomlValue = match crate::config::load_effective_config() {
-        Ok(r) => r,
-        Err(_) => return false,
-    };
-    use_leader_from_toml(&root)
 }
 
 /// Parse `[worktree.auto_gc]` (per-field tolerant via [`WorktreeAutoGcSettings`]).
@@ -153,7 +143,7 @@ pub fn resolve_worktree_auto_gc(
 }
 
 /// Same layering with already-parsed settings.
-pub fn resolve_worktree_auto_gc_from_settings(
+pub(crate) fn resolve_worktree_auto_gc_from_settings(
     local: Option<&super::WorktreeAutoGcSettings>,
     remote: Option<&super::WorktreeAutoGcSettings>,
 ) -> xai_fast_worktree::ResolvedWorktreeAutoGc {

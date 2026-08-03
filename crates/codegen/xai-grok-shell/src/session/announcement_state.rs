@@ -41,7 +41,7 @@ pub struct McpServerFingerprint {
 }
 
 /// Convert from in-memory fingerprint map to persistable map.
-pub fn to_persisted_fingerprints(
+pub(crate) fn to_persisted_fingerprints(
     in_memory: &HashMap<String, (usize, u64, u64)>,
 ) -> HashMap<String, McpServerFingerprint> {
     in_memory
@@ -60,7 +60,7 @@ pub fn to_persisted_fingerprints(
 }
 
 /// Convert from persisted fingerprint map to in-memory map.
-pub fn from_persisted_fingerprints(
+pub(crate) fn from_persisted_fingerprints(
     persisted: &HashMap<String, McpServerFingerprint>,
 ) -> HashMap<String, (usize, u64, u64)> {
     persisted

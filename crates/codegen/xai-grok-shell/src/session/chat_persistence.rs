@@ -18,7 +18,7 @@ use super::persistence::PersistenceMsg;
 /// - `persist_working_directory_switch_and_ack` → `PersistenceMsg::AppendCwdSwitchAndAck`
 /// - `replace_history` → `PersistenceMsg::ReplaceChatHistory`
 /// - `flush` → `PersistenceMsg::Flush`
-pub struct ChannelChatPersistence {
+pub(crate) struct ChannelChatPersistence {
     tx: mpsc::UnboundedSender<PersistenceMsg>,
 }
 

@@ -456,6 +456,7 @@ mod sampling_error_map_tests {
             message: "m".into(),
             is_retryable: true,
             retry_after_secs: None,
+            should_retry: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,

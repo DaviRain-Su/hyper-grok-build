@@ -14,10 +14,13 @@ pub(crate) fn snapshot_to_result(
     read_file_tool_name: &str,
     max_output_bytes: usize,
 ) -> TaskOutputResult {
+    let output_view = s.output_view();
+    let raw_output_bytes = output_view.total_bytes();
+
     // Truncate output to protect model's context window
     let (output, truncated) = if s.output.len() > max_output_bytes {
         truncate_with_preview(
-            &s.output,
+            output_view,
             max_output_bytes,
             PREVIEW_SIZE,
             Some(&format!(
@@ -43,9 +46,7 @@ pub(crate) fn snapshot_to_result(
     );
 
     // Compute duration before moving fields.
-    // Capture raw byte count before moving `s.output`.
     let duration_secs = s.duration_secs();
-    let raw_output_bytes = s.output.len();
 
     TaskOutputResult {
         task_id: s.task_id,
@@ -113,7 +114,22 @@ mod tests {
             owner_session_id: None,
             description: None,
             is_backgrounded: false,
+            output_total_bytes: 0,
         }
+    }
+
+    /// A snapshot that holds only part of a large log must still report the
+    /// task's real size, which polling uses to tell progress from a stall.
+    #[test]
+    fn raw_output_bytes_reports_the_task_total_not_the_part_held() {
+        let mut snapshot = make_test_snapshot("test-1", true, Some(0));
+        snapshot.output = "x".repeat(1024);
+        snapshot.output_total_bytes = 5 * 1024 * 1024;
+        snapshot.truncated = true;
+
+        let result = snapshot_to_result(snapshot, "read_file", DEFAULT_TOOL_OUTPUT_BYTES);
+
+        assert_eq!(result.raw_output_bytes, 5 * 1024 * 1024);
     }
 
     #[test]

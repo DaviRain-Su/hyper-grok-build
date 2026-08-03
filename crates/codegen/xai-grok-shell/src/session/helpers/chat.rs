@@ -122,21 +122,3 @@ pub fn build_prompt_from_template(
     }
     prompt
 }
-
-/// Convenience helper to complete text from a template + system string using the common pattern.
-/// Returns only the model text (already trimmed).
-pub async fn template_completion(
-    sampling_client: &OaiCompatClient,
-    system_text: &str,
-    conversation: &[ConversationItem],
-    template: &str,
-    word_budget: usize,
-    extras: &[(&str, &str)],
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-) -> Result<String> {
-    let prompt = build_prompt_from_template(conversation, template, word_budget, extras);
-    let system = ChatRequestMessage::system(system_text);
-    let user = ChatRequestMessage::user(prompt);
-    text_completion(sampling_client, system, user, temperature, max_tokens).await
-}

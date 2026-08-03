@@ -201,18 +201,6 @@ impl LeaderLock {
         }
     }
 
-    /// Acquire exclusive lock, blocking until available.
-    ///
-    /// Used by the leader process on startup. Blocks until the lock is available.
-    /// After acquiring, call `write_pid()` to record the leader's PID.
-    pub fn acquire_blocking(&mut self) -> Result<(), LockError> {
-        let file = self.open_lock_file()?;
-
-        file.lock_exclusive()?;
-        self.mark_acquired(file);
-        Ok(())
-    }
-
     /// Acquire exclusive lock with a bounded wait, re-opening the lock-file path
     /// on every attempt.
     ///
@@ -224,7 +212,10 @@ impl LeaderLock {
     ///
     /// Async so the 200ms poll yields to the Tokio runtime instead of blocking a
     /// worker thread — `run_leader` calls this on the multi-thread runtime.
-    pub async fn acquire_reopen_timeout(&mut self, timeout: Duration) -> Result<(), LockError> {
+    pub(crate) async fn acquire_reopen_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<(), LockError> {
         let deadline = Instant::now() + timeout;
         let poll_interval = Duration::from_millis(200);
 
@@ -263,7 +254,7 @@ impl LeaderLock {
         Self::read_pid_from_path(&self.lock_path)
     }
 
-    pub fn read_pid_from_path(path: &Path) -> Option<u32> {
+    pub(crate) fn read_pid_from_path(path: &Path) -> Option<u32> {
         let mut content = String::new();
         File::open(path)
             .and_then(|mut f| f.read_to_string(&mut content))
@@ -272,7 +263,7 @@ impl LeaderLock {
     }
 
     /// Delete the socket file. Call while holding the lock.
-    pub fn cleanup_socket(&self) -> io::Result<()> {
+    pub(crate) fn cleanup_socket(&self) -> io::Result<()> {
         match fs::remove_file(&self.sock_path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),

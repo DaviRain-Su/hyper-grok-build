@@ -194,8 +194,13 @@ impl CompiledPolicy {
     ) -> Option<GateDecision> {
         let path = normalize_shell_path(token);
         let is_absolute = is_absolute_shell_path(&path);
+        // Cwd-aware rule match mirrors the direct Read/Edit tool gate, so a
+        // rooted rule like `Read(src/**)` also keys on the same file spelled
+        // absolutely. An unpinned cwd anchors nothing: relative operands then
+        // keep text-only matching (absolute operands are cwd-independent).
+        let rule_cwd = (is_absolute || !cwd_unpinned).then_some(cwd);
         // Escalate only: drop Allow so a file allow-rule can't auto-approve here.
-        let escalate = |access: &AccessKind| match self.evaluate(access) {
+        let escalate = |access: &AccessKind| match self.evaluate_with_cwd(access, rule_cwd) {
             Some(Decision::Reject(reason)) => Some(GateDecision::Reject(reason)),
             Some(Decision::Ask) => Some(GateDecision::AskRuleMatch),
             _ => None,
@@ -1407,6 +1412,32 @@ mod tests {
             deny.evaluate_shell_file_access_gate("cat .env", cwd()),
             Some(GateDecision::Reject(_))
         ));
+    }
+
+    #[test]
+    fn shell_gate_matches_cwd_relative_rules_on_absolute_operands() {
+        let deny = compiled(vec![file_rule(
+            RuleAction::Deny,
+            ToolFilter::Read,
+            "src/**",
+        )]);
+        // A rooted relative rule keys on the same file spelled absolutely,
+        // matching the direct Read tool gate (which evaluates with the cwd).
+        assert!(matches!(
+            deny.evaluate_shell_file_access_gate("cat /work/src/secret.txt", cwd()),
+            Some(GateDecision::Reject(_))
+        ));
+        // An absolute operand is cwd-independent, so it stays covered even
+        // after a `cd` unpins the working directory.
+        assert!(matches!(
+            deny.evaluate_shell_file_access_gate("cd /tmp && cat /work/src/secret.txt", cwd()),
+            Some(GateDecision::Reject(_))
+        ));
+        // Outside the working directory the rooted rule stays silent.
+        assert_eq!(
+            deny.evaluate_shell_file_access_gate("cat /elsewhere/src/secret.txt", cwd()),
+            None
+        );
     }
 
     #[test]

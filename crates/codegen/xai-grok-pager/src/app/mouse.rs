@@ -281,6 +281,13 @@ impl AgentView {
                     self.scrollback.goto_bottom();
                     return InputOutcome::Changed;
                 }
+                if self
+                    .hit_response_top_indicator
+                    .contains(mouse.column, mouse.row)
+                {
+                    self.scrollback.prev_response();
+                    return InputOutcome::Changed;
+                }
                 if let Some(hd_area) = self.history_dropdown_area
                     && hd_area.contains((mouse.column, mouse.row).into())
                     && self.prompt.history_search.is_active()
@@ -1105,6 +1112,9 @@ impl AgentView {
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .hit_follow_indicator
+                    .update_hover(mouse.column, mouse.row);
+                changed |= self
+                    .hit_response_top_indicator
                     .update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cancel_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_bg_button.update_hover(mouse.column, mouse.row);

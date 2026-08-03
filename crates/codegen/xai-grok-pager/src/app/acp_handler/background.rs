@@ -132,7 +132,9 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
     // and backends predating that field still bake a "[monitor] <desc>" prefix
     // into the command — detect it and strip the prefix so those render as a
     // "Monitor" row instead of a bash-highlighted "[monitor] …" under Tasks.
-    let monitor_prefix = command.strip_prefix("[monitor] ").map(str::to_string);
+    let monitor_prefix = command
+        .strip_prefix(crate::app::agent::MONITOR_PREFIX)
+        .map(str::to_string);
     let is_monitor = monitor_description.is_some() || monitor_prefix.is_some();
     // Always drain the deferred-tool suppression key now that routing is being
     // set up — even when we end up preferring the wire `description`. This entry
@@ -152,6 +154,15 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
         .or_else(|| non_blank(monitor_prefix))
         .or_else(|| non_blank(notif_description))
         .or_else(|| non_blank(deferred_description));
+
+    // Completed-before-Backgrounded race: short bg shells can exit (and the
+    // terminal poll emit `TaskCompleted`) before this notification is sent.
+    // Never overwrite the recorded terminal state back to Running — the
+    // completion already came and went, so it would stick forever.
+    let completed_early = session
+        .bg_tasks
+        .get(&task_id)
+        .is_some_and(|t| t.status != BgTaskStatus::Running);
 
     // Create central bg task state (description may still be filled from the
     // Execute block on demotion before we insert into the map).
@@ -199,7 +210,12 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
             scrollback.mark_height_dirty(eid);
             scrollback.finish_running(eid);
             session.tracker.remove_pending_tool(&tool_call_id);
-            eid
+            Some(eid)
+        } else if completed_early {
+            // Entry gone and the task already completed: the completion
+            // block is already in scrollback — nothing left to render.
+            session.tracker.remove_pending_tool(&tool_call_id);
+            None
         } else {
             // Entry was removed between the tracker lookup and now (compaction,
             // clear, etc.). Create a fresh BgTask so the task has UI presence.
@@ -208,26 +224,33 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
                 .with_description(description.clone());
             let fallback = scrollback.push_block(RenderBlock::BgTask(block));
             scrollback.set_last_running(true);
-            fallback
+            Some(fallback)
         }
+    } else if completed_early {
+        // The completion block is already in scrollback; a fresh "Task
+        // started" block would render out of order and animate forever.
+        None
     } else {
         let block = crate::scrollback::blocks::BgTaskBlock::started(&command, &task_id)
             .with_description(description.clone());
         let eid = scrollback.push_block(RenderBlock::BgTask(block));
         scrollback.set_last_running(true);
-        eid
+        Some(eid)
     };
 
     bg_task.description = description;
 
-    session.bg_tasks.insert(task_id.clone(), bg_task);
+    if completed_early {
+        if let Some(existing) = session.bg_tasks.get_mut(&task_id) {
+            existing.absorb_late_backgrounded(bg_task, entry_id);
+        }
+    } else {
+        bg_task.scrollback_entry_id = entry_id;
+        session.bg_tasks.insert(task_id.clone(), bg_task);
+    }
     session
         .bg_tool_call_to_task
         .insert(tool_call_id.clone(), task_id.clone());
-
-    if let Some(bg) = session.bg_tasks.get_mut(&task_id) {
-        bg.scrollback_entry_id = Some(entry_id);
-    }
 
     is_active
 }
@@ -564,6 +587,9 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
         _ => return false,
     };
 
+    // Stamps `restored_from_replay` on tombstones inserted below.
+    let meta = NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()));
+
     let (matched, is_active, agent) = match resolve_notif_agent(app, &session_notif.session_id) {
         Some(t) => t,
         None => return false,
@@ -618,7 +644,8 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
                 bg_task.scrollback_entry_id,
             )
         } else {
-            // Task we didn't know about — use snapshot data. Prefer
+            // Task we didn't know about — its `TaskBackgrounded` hasn't
+            // arrived yet. Label from the model-supplied description, else
             // display_command when it differs from the raw command (monitors /
             // isolation-wrapped shells); treat equal values as non-labels.
             let command = task_snapshot.command.clone();
@@ -626,21 +653,41 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
                 .end_time
                 .and_then(|end| end.duration_since(task_snapshot.start_time).ok())
                 .unwrap_or_default();
-            let description = task_snapshot.display_command.clone().and_then(|d| {
-                // Strip the baked "[monitor] " prefix so the completed label
-                // matches the "Task started" path (which uses the bare
-                // monitor description), not "[monitor] …".
-                let d = d
-                    .strip_prefix("[monitor] ")
-                    .map(str::to_string)
-                    .unwrap_or(d);
-                let t = d.trim();
-                if t.is_empty() || t == command.trim() {
-                    None
-                } else {
-                    Some(d)
-                }
-            });
+            let description = task_snapshot
+                .description
+                .clone()
+                .filter(|d| !d.trim().is_empty())
+                .or_else(|| {
+                    task_snapshot.display_command.clone().and_then(|d| {
+                        // Bare label, matching the "Task started" path.
+                        let d = d
+                            .strip_prefix(crate::app::agent::MONITOR_PREFIX)
+                            .map(str::to_string)
+                            .unwrap_or(d);
+                        let t = d.trim();
+                        if t.is_empty() || t == command.trim() {
+                            None
+                        } else {
+                            Some(d)
+                        }
+                    })
+                });
+
+            // Record the terminal state so the late `TaskBackgrounded` merges
+            // into it instead of inserting a fresh Running entry.
+            let status = if success {
+                BgTaskStatus::Done
+            } else {
+                BgTaskStatus::Failed
+            };
+            let tombstone = BgTaskState::tombstone_from_snapshot(
+                &task_snapshot,
+                status,
+                description.clone(),
+                meta.is_replay,
+            );
+            session.bg_tasks.insert(task_id.clone(), tombstone);
+
             (command, elapsed, description, None)
         };
 
@@ -692,7 +739,16 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
         RenderBlock::bg_task_failed(&command, task_id, elapsed, exit_code, signal)
             .with_bg_task_description(description)
     };
-    scrollback.push_block(block);
+    let completion_eid = scrollback.push_block(block);
+
+    // Anchor tasks that have no "Task started" block (tombstones) to the
+    // completion block, so block-viewer actions don't fall back to a bogus
+    // EntryId(0) and immediately close.
+    if let Some(bg_task) = session.bg_tasks.get_mut(task_id)
+        && bg_task.scrollback_entry_id.is_none()
+    {
+        bg_task.scrollback_entry_id = Some(completion_eid);
+    }
 
     is_active
 }

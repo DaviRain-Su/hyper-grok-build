@@ -136,7 +136,7 @@ impl TriggerCondition {
 }
 
 impl TriggerSignalSnapshot {
-    pub fn from_signals(signals: &SessionSignals) -> Self {
+    pub(crate) fn from_signals(signals: &SessionSignals) -> Self {
         Self {
             turn_count: signals.turn_count,
             tool_calls_count: signals.tool_call_count,
@@ -403,7 +403,7 @@ impl FeedbackHeuristics {
     }
 
     /// Get the feedback mode for a tier.
-    pub fn feedback_mode(&self, tier: FeedbackTier) -> FeedbackMode {
+    pub(crate) fn feedback_mode(&self, tier: FeedbackTier) -> FeedbackMode {
         match tier {
             FeedbackTier::Tier1 => self.tier1_feedback_mode,
             FeedbackTier::Tier2 => self.tier2_feedback_mode,
@@ -426,65 +426,6 @@ impl FeedbackHeuristics {
             FeedbackTier::Tier1 => &self.tier1_prompt,
             FeedbackTier::Tier2 => &self.tier2_prompt,
             FeedbackTier::Tier3 => &self.tier3_prompt,
-        }
-    }
-
-    /// Create a heuristics evaluator with custom thresholds for testing.
-    #[cfg(test)]
-    pub fn with_thresholds(
-        tier1_turns: u32,
-        tier1_tools: u32,
-        tier1_compactions: u32,
-        tier2_turns: u32,
-        tier2_tools: u32,
-        tier2_compactions: u32,
-        tier2_errors: u32,
-        tier3_turns: u32,
-    ) -> Self {
-        Self {
-            enabled: true,
-            cooldown_seconds: 300,
-            max_requests_per_session: 3,
-            tier1_enabled: true,
-            tier1_sample_rate: 0.0005,
-            tier1_min_turns: tier1_turns,
-            tier1_min_tool_calls: tier1_tools,
-            tier1_min_compactions: tier1_compactions,
-            tier1_no_cancellations: true,
-            tier1_feedback_mode: FeedbackMode::Thumbs,
-            tier1_dismissible: true,
-            tier1_prompt:
-                "You've been using Grok Code productively! Would you mind sharing quick feedback?"
-                    .to_string(),
-            tier2_enabled: true,
-            tier2_sample_rate: 0.0002,
-            tier2_min_turns: tier2_turns,
-            tier2_min_tool_calls: tier2_tools,
-            tier2_min_compactions: tier2_compactions,
-            tier2_min_errors: tier2_errors,
-            tier2_feedback_mode: FeedbackMode::ThumbsText,
-            tier2_dismissible: true,
-            tier2_prompt:
-                "You've worked through a complex session. Your feedback would help us improve."
-                    .to_string(),
-            tier3_enabled: true,
-            tier3_sample_rate: 0.0001,
-            tier3_min_turns: tier3_turns,
-            tier3_requires_cancellation: false,
-            tier3_requires_revert: false,
-            tier3_requires_recovery: true,
-            tier3_feedback_mode: FeedbackMode::StarsText,
-            tier3_dismissible: true,
-            tier3_prompt:
-                "Thanks for sticking with us through that session. Got a moment to share feedback?"
-                    .to_string(),
-            tier1_max_triggers: 1,
-            tier2_max_triggers: 1,
-            tier3_max_triggers: 1,
-            trigger_counts: std::collections::HashMap::new(),
-            requests_sent: 0,
-            last_request_time: None,
-            last_request_at: None,
         }
     }
 
@@ -564,11 +505,6 @@ impl FeedbackHeuristics {
     /// Mark a tier as triggered (increments trigger count).
     pub fn mark_triggered(&mut self, tier: FeedbackTier) {
         *self.trigger_counts.entry(tier).or_insert(0) += 1;
-    }
-
-    /// Check if a tier has exhausted its trigger limit.
-    pub fn is_triggered(&self, tier: FeedbackTier) -> bool {
-        self.tier_exhausted(tier)
     }
 
     /// Reset trigger counts (e.g., for a new session).
@@ -717,7 +653,7 @@ impl FeedbackHeuristics {
     }
 
     /// Wall-clock timestamp of the last feedback request sent this session.
-    pub fn last_request_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+    pub(crate) fn last_request_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         self.last_request_at
     }
 }

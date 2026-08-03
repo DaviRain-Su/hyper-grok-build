@@ -19,7 +19,7 @@ pub fn user_query(user_message: String) -> String {
 /// When `None`, values are read from the local machine. When `Some`,
 /// the provided values are used (e.g. from a remote workspace via
 /// `workspace.info` RPC).
-pub struct UserInfoOverride {
+pub(crate) struct UserInfoOverride {
     pub os: String,
     pub shell: String,
     pub cwd: String,
@@ -30,7 +30,7 @@ pub struct UserInfoOverride {
 /// Intentionally excludes workspace snapshot and git status.
 /// When `override_info` is provided, uses remote workspace info instead
 /// of local machine introspection.
-pub fn construct_user_message_minimal(
+pub(crate) fn construct_user_message_minimal(
     working_directory: &Path,
     override_info: Option<&UserInfoOverride>,
 ) -> String {
@@ -80,7 +80,7 @@ fn resolve_shell_display() -> String {
     }
 }
 
-pub fn format_vcs_status_block(status: &str, vcs_kind: VcsKind) -> String {
+pub(crate) fn format_vcs_status_block(status: &str, vcs_kind: VcsKind) -> String {
     let (tag, description) = if vcs_kind.is_jj() {
         (
             "jj_status",
@@ -100,7 +100,7 @@ pub fn format_vcs_status_block(status: &str, vcs_kind: VcsKind) -> String {
 }
 
 /// Compute the VCS status block (without the `<user_info>` wrapper).
-pub async fn compute_vcs_status_block(
+pub(crate) async fn compute_vcs_status_block(
     working_directory: &Path,
     vcs_kind: VcsKind,
 ) -> Option<String> {
@@ -157,7 +157,7 @@ pub async fn compute_vcs_status_block(
 /// When `override_info` is provided, uses remote workspace info and
 /// `vcs_status_override` (pre-fetched from the remote workspace) instead
 /// of local introspection.
-pub async fn construct_user_message(
+pub(crate) async fn construct_user_message(
     working_directory: &Path,
     vcs_kind: VcsKind,
     override_info: Option<&UserInfoOverride>,

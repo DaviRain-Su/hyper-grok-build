@@ -3635,11 +3635,25 @@ mod tests {
             };
             db.register(&record).unwrap();
 
-            let mut child = std::process::Command::new("sleep")
-                .arg("30")
-                .current_dir(&nested)
-                .spawn()
-                .expect("spawn sleep");
+            let scope = xai_tty_utils::ProcessScope::new();
+            let mut group = xai_tty_utils::ProcessGroup::new().expect("create process group");
+            let mut command = std::process::Command::new("sleep");
+            command.arg("30").current_dir(&nested);
+            xai_tty_utils::detach_std_command(&mut command);
+            #[allow(clippy::disallowed_methods)]
+            // Synchronous test child: detached above and enrolled immediately below.
+            let mut child = command.spawn().expect("spawn sleep");
+            group.attach_pid(child.id()).unwrap_or_else(|error| {
+                child.kill().ok();
+                child.wait().ok();
+                panic!("enroll sleep process group: {error}");
+            });
+            let group = std::sync::Arc::new(group);
+            if !scope.register(&group) {
+                child.kill().ok();
+                child.wait().ok();
+                panic!("fresh process scope unexpectedly closed");
+            }
             let want = dunce::canonicalize(&nested).unwrap();
             assert!(
                 wait_until(|| scan_has_cwd_under(&want)),
@@ -3663,6 +3677,9 @@ mod tests {
             // Once the process exits, the same expired worktree is reclaimed.
             child.kill().ok();
             child.wait().ok();
+            // Drop the owner after reap so the scope's Weak cannot target a
+            // recycled process-group id when it is dropped.
+            drop(group);
             assert!(
                 wait_until(|| !scan_has_cwd_under(&want)),
                 "child CWD must leave the scan after exit before reclaim"

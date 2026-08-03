@@ -1259,6 +1259,23 @@ impl ApiBackend {
             Self::PiMessages => "messages",
         }
     }
+
+    /// Whether replayed reasoning must be stripped. Only the Messages API rejects thinking blocks sent without a top-level `thinking` config.
+    pub fn requires_reasoning_strip(&self) -> bool {
+        matches!(self, Self::Messages)
+    }
+
+    /// Whether [`ConversationRequest::prompt_cache_key`] reaches the wire.
+    /// OpenAI Chat Completions and both Responses dialects serialize it; native
+    /// provider backends do not.
+    ///
+    /// [`ConversationRequest::prompt_cache_key`]: crate::conversation::ConversationRequest::prompt_cache_key
+    pub fn forwards_prompt_cache_key(&self) -> bool {
+        matches!(
+            self,
+            Self::ChatCompletions | Self::Responses | Self::CodexResponses
+        )
+    }
 }
 
 /// Sampling client configuration (API key excluded — that stays in the client).

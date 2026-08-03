@@ -25,13 +25,13 @@ pub struct PromptEntry {
 }
 
 /// Get the path to the prompt history file for a given CWD
-pub fn prompt_history_path(cwd: &str) -> PathBuf {
+pub(crate) fn prompt_history_path(cwd: &str) -> PathBuf {
     crate::util::grok_home::sessions_cwd_dir(cwd).join(PROMPT_HISTORY_FILE)
 }
 
 /// Append a prompt to the history file (synchronous, fast append-only).
 /// Creates parent directories if they don't exist.
-pub fn append_prompt(cwd: &str, entry: &PromptEntry) -> io::Result<()> {
+pub(crate) fn append_prompt(cwd: &str, entry: &PromptEntry) -> io::Result<()> {
     let path = prompt_history_path(cwd);
     crate::util::grok_home::ensure_sessions_cwd_dir(cwd)?;
 
@@ -49,7 +49,7 @@ pub fn append_prompt(cwd: &str, entry: &PromptEntry) -> io::Result<()> {
 
 /// Load prompts for a given CWD.
 /// Returns prompts in reverse chronological order (most recent first).
-pub fn load_prompts(cwd: &str) -> io::Result<Vec<String>> {
+pub(crate) fn load_prompts(cwd: &str) -> io::Result<Vec<String>> {
     load_prompts_filtered(cwd, |_| true)
 }
 
@@ -57,13 +57,13 @@ pub fn load_prompts(cwd: &str) -> io::Result<Vec<String>> {
 /// Returns prompts in reverse chronological order (most recent first), matching
 /// `load_prompts` ordering — used by the pager's up-arrow / Ctrl+R history
 /// overlay when it wants only the current session's prompts.
-pub fn load_prompts_for_session(cwd: &str, session_id: &str) -> io::Result<Vec<String>> {
+pub(crate) fn load_prompts_for_session(cwd: &str, session_id: &str) -> io::Result<Vec<String>> {
     load_prompts_filtered(cwd, |e| e.session_id == session_id)
 }
 
 /// Truncate the history file to MAX_PROMPT_HISTORY_ENTRIES if it exceeds the limit.
 /// Uses atomic rename for safety.
-pub fn truncate_if_needed(cwd: &str) -> io::Result<()> {
+pub(crate) fn truncate_if_needed(cwd: &str) -> io::Result<()> {
     let path = prompt_history_path(cwd);
     if !path.exists() {
         return Ok(());
@@ -103,7 +103,7 @@ pub fn truncate_if_needed(cwd: &str) -> io::Result<()> {
 }
 
 /// Async wrapper for append_prompt (fire-and-forget via spawn_blocking)
-pub async fn append_prompt_async(cwd: String, entry: PromptEntry) {
+pub(crate) async fn append_prompt_async(cwd: String, entry: PromptEntry) {
     let _ = tokio::task::spawn_blocking(move || {
         if let Err(e) = append_prompt(&cwd, &entry) {
             tracing::warn!(?e, "failed to append prompt to history");
@@ -114,7 +114,7 @@ pub async fn append_prompt_async(cwd: String, entry: PromptEntry) {
 
 /// Load only bash-command prompts for a given CWD.
 /// Returns prompts in reverse chronological order (most recent first).
-pub fn load_bash_prompts(cwd: &str) -> io::Result<Vec<String>> {
+pub(crate) fn load_bash_prompts(cwd: &str) -> io::Result<Vec<String>> {
     load_prompts_filtered(cwd, |e| e.is_bash)
 }
 
@@ -151,14 +151,14 @@ fn load_prompts_filtered(
 }
 
 /// Async wrapper for load_prompts
-pub async fn load_prompts_async(cwd: String) -> io::Result<Vec<String>> {
+pub(crate) async fn load_prompts_async(cwd: String) -> io::Result<Vec<String>> {
     tokio::task::spawn_blocking(move || load_prompts(&cwd))
         .await
         .map_err(io::Error::other)?
 }
 
 /// Async wrapper for load_prompts_for_session
-pub async fn load_prompts_for_session_async(
+pub(crate) async fn load_prompts_for_session_async(
     cwd: String,
     session_id: String,
 ) -> io::Result<Vec<String>> {
@@ -168,14 +168,14 @@ pub async fn load_prompts_for_session_async(
 }
 
 /// Async wrapper for load_bash_prompts
-pub async fn load_bash_prompts_async(cwd: String) -> io::Result<Vec<String>> {
+pub(crate) async fn load_bash_prompts_async(cwd: String) -> io::Result<Vec<String>> {
     tokio::task::spawn_blocking(move || load_bash_prompts(&cwd))
         .await
         .map_err(io::Error::other)?
 }
 
 /// Async wrapper for truncate_if_needed (background maintenance)
-pub async fn truncate_if_needed_async(cwd: String) {
+pub(crate) async fn truncate_if_needed_async(cwd: String) {
     let _ = tokio::task::spawn_blocking(move || {
         if let Err(e) = truncate_if_needed(&cwd) {
             tracing::warn!(?e, "failed to truncate prompt history");

@@ -105,7 +105,7 @@ impl ProductSkillsCatalog {
     ///
     /// Mirrors grok-web: enabled user skills first (and hide same-named
     /// bundled entries they override), then remaining bundled skills.
-    pub fn to_skill_infos(&self) -> Vec<SkillInfo> {
+    pub(crate) fn to_skill_infos(&self) -> Vec<SkillInfo> {
         let enabled_user: Vec<(String, &UserSkill)> = self
             .user
             .iter()
@@ -662,7 +662,7 @@ impl SkillsClient {
     /// alt while primary is tenant-tagged. Callers still success-cache under
     /// the **primary** identity (team/org of primary) so the same session
     /// hits TTL; personal primaries cannot match that entry.
-    pub async fn try_list_catalog(
+    pub(crate) async fn try_list_catalog(
         &self,
         locale: &str,
     ) -> Result<(ProductSkillsCatalog, bool), SkillsError> {

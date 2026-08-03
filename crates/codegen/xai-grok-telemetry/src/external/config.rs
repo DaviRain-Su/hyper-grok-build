@@ -158,6 +158,13 @@ pub struct ExternalOtelConfig {
     /// `OTEL_EXPORTER_OTLP_HEADERS` plus `OTEL_EXPORTER_OTLP_METRICS_HEADERS`.
     /// The **only** headers the external metric exporter ever sends.
     pub metrics_headers: Vec<(String, String)>,
+    /// PEM file with additional trusted CA certificate(s) for verifying the
+    /// logs collector (`OTEL_EXPORTER_OTLP_CERTIFICATE`, overridden by
+    /// `OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE`). Additive to the default roots.
+    pub logs_ca_certificate: Option<String>,
+    /// Same for the metrics collector (`OTEL_EXPORTER_OTLP_CERTIFICATE`,
+    /// overridden by `OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE`).
+    pub metrics_ca_certificate: Option<String>,
     /// `OTEL_EXPORTER_OTLP_TIMEOUT` (ms). Default 10 s.
     pub timeout: Duration,
     /// `OTEL_METRIC_EXPORT_INTERVAL` (ms). Default 60 s.
@@ -350,6 +357,21 @@ impl ExternalOtelConfig {
         let logs_headers = resolve_signal_headers("OTEL_EXPORTER_OTLP_LOGS_HEADERS");
         let metrics_headers = resolve_signal_headers("OTEL_EXPORTER_OTLP_METRICS_HEADERS");
 
+        // Collector CA certificate (OTLP spec): base var with per-signal
+        // overrides. A path, not a secret — but env-only like headers, so
+        // resolution stays a pure function of the standard OTEL_* interface.
+        let base_certificate =
+            getenv("OTEL_EXPORTER_OTLP_CERTIFICATE").filter(|s| !s.trim().is_empty());
+        let resolve_signal_certificate = |signal_var: &str| {
+            getenv(signal_var)
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| base_certificate.clone())
+                .map(|s| s.trim().to_string())
+        };
+        let logs_ca_certificate = resolve_signal_certificate("OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE");
+        let metrics_ca_certificate =
+            resolve_signal_certificate("OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE");
+
         let gates = ContentGates {
             log_user_prompts: getenv("OTEL_LOG_USER_PROMPTS")
                 .as_deref()
@@ -380,6 +402,8 @@ impl ExternalOtelConfig {
             metrics_endpoint,
             logs_headers,
             metrics_headers,
+            logs_ca_certificate,
+            metrics_ca_certificate,
             timeout: parse_ms(
                 getenv("OTEL_EXPORTER_OTLP_TIMEOUT"),
                 Duration::from_millis(10_000),
@@ -632,6 +656,43 @@ mod tests {
             cfg.metrics_headers,
             vec![("authorization".to_string(), "Bearer metrics".to_string())]
         );
+    }
+
+    #[test]
+    fn ca_certificate_resolved_with_signal_overrides() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("GROK_EXTERNAL_OTEL", "1"),
+                ("OTEL_LOGS_EXPORTER", "otlp"),
+                ("OTEL_METRICS_EXPORTER", "otlp"),
+                ("OTEL_EXPORTER_OTLP_CERTIFICATE", "/etc/ssl/corp-ca.pem"),
+                (
+                    "OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE",
+                    "/etc/ssl/metrics-ca.pem",
+                ),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.logs_ca_certificate.as_deref(),
+            Some("/etc/ssl/corp-ca.pem")
+        );
+        assert_eq!(
+            cfg.metrics_ca_certificate.as_deref(),
+            Some("/etc/ssl/metrics-ca.pem")
+        );
+    }
+
+    #[test]
+    fn ca_certificate_defaults_to_none() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[("GROK_EXTERNAL_OTEL", "1"), ("OTEL_LOGS_EXPORTER", "otlp")]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.logs_ca_certificate, None);
+        assert_eq!(cfg.metrics_ca_certificate, None);
     }
 
     #[test]

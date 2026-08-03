@@ -142,11 +142,8 @@ fn attestation_signals(app_session_id: &str) -> Vec<u8> {
 /// `buildClientAttestation` in the TS original.
 fn build_client_attestation(result: &DeviceCheckResult) -> String {
     let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    if result.supported && result.token_base64.is_some() {
-        entries.push((
-            cbor_text("token"),
-            cbor_text(result.token_base64.as_ref().unwrap()),
-        ));
+    if let (true, Some(token)) = (result.supported, result.token_base64.as_deref()) {
+        entries.push((cbor_text("token"), cbor_text(token)));
     } else {
         // error_code: 3 = unsupported, 4 = supported but no token.
         let code = if result.supported { 4u64 } else { 3u64 };

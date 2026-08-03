@@ -229,8 +229,12 @@ impl<'de> Deserialize<'de> for EditPolicy {
         deserializer.deserialize_str(V)
     }
 }
+/// The requesting session's execution cwd for one permission request. Shared
+/// parent/subagent managers serve sessions whose cwd differs from the
+/// manager's, so path rules and edit-target resolution must anchor to where
+/// the requesting tool actually resolves paths, not where the manager lives.
 #[derive(Debug, Clone)]
-pub struct EditPathContext {
+pub struct RequestPathContext {
     pub real_cwd: std::path::PathBuf,
     pub display_cwd: Option<std::path::PathBuf>,
 }
@@ -239,7 +243,7 @@ pub enum PermissionCommand {
     Request {
         access: AccessKind,
         tool_call_update: acp::ToolCallUpdate,
-        edit_path_context: Option<EditPathContext>,
+        path_context: Option<RequestPathContext>,
         respond_to: oneshot::Sender<Decision>,
         /// Session ID originating this request. Used to attribute
         /// permission events to child subagents.

@@ -166,6 +166,10 @@ pub const BG_TASK_MAX_STDOUT: usize = 10 * 1024 * 1024;
 /// How long to wait for a kill response before auto-clearing `pending_kill`
 /// so the user can retry. Applied to both bg tasks and subagents.
 pub const PENDING_KILL_TIMEOUT_SECS: u64 = 10;
+/// Prefix baked into monitor commands by backends predating the structured
+/// `monitor_description` field (and by reparented monitors). Shared
+/// convention with the shell's task notifications.
+pub const MONITOR_PREFIX: &str = "[monitor] ";
 /// Status of a background task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BgTaskStatus {
@@ -276,6 +280,82 @@ impl BgTaskState {
             self.truncated = true;
         }
         self.stdout_line_count = self.stdout.lines().count();
+    }
+    /// Terminal state recorded when a `TaskCompleted` arrives for a task with
+    /// no `bg_tasks` entry (its `TaskBackgrounded` hasn't arrived yet — short
+    /// bg shells can exit on the terminal's first poll). Keeps the late
+    /// `TaskBackgrounded` from inserting a fresh Running entry that nothing
+    /// would ever complete; see [`Self::absorb_late_backgrounded`].
+    pub fn tombstone_from_snapshot(
+        snapshot: &xai_grok_tools::types::TaskSnapshot,
+        status: BgTaskStatus,
+        description: Option<String>,
+        restored_from_replay: bool,
+    ) -> Self {
+        let is_monitor = matches!(
+            snapshot.kind,
+            xai_grok_tools::computer::types::TaskKind::Monitor
+        ) || snapshot
+            .display_command
+            .as_deref()
+            .is_some_and(|d| d.starts_with(MONITOR_PREFIX));
+        let mut tombstone = Self {
+            task_id: snapshot.task_id.clone(),
+            tool_call_id: String::new(),
+            command: snapshot.command.clone(),
+            description,
+            cwd: snapshot.cwd.clone(),
+            output_file: snapshot.output_file.to_string_lossy().into_owned(),
+            status,
+            start_time: snapshot.start_time,
+            end_time: Some(snapshot.end_time.unwrap_or_else(SystemTime::now)),
+            exit_code: snapshot.exit_code,
+            signal: snapshot.signal.clone(),
+            stdout: String::new(),
+            stdout_line_count: 0,
+            truncated: snapshot.truncated,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            is_monitor,
+            restored_from_replay,
+        };
+        if !snapshot.output.is_empty() {
+            let end = crate::render::line_utils::floor_char_boundary(
+                &snapshot.output,
+                BG_TASK_MAX_STDOUT,
+            );
+            tombstone.set_stdout(snapshot.output[..end].to_string());
+            if end < snapshot.output.len() {
+                tombstone.truncated = true;
+            }
+        }
+        tombstone
+    }
+    /// Fold a late `TaskBackgrounded` into an already-terminal entry: keep the
+    /// terminal status/exit/timing, backfill only what the completion snapshot
+    /// couldn't know (blank fields, demoted-Execute stdout, scrollback entry).
+    pub fn absorb_late_backgrounded(&mut self, fresh: BgTaskState, entry_id: Option<EntryId>) {
+        self.tool_call_id = fresh.tool_call_id;
+        if self.command.trim().is_empty() {
+            self.command = fresh.command;
+        }
+        if self
+            .description
+            .as_ref()
+            .is_none_or(|d| d.trim().is_empty())
+        {
+            self.description = fresh.description;
+        }
+        self.is_monitor |= fresh.is_monitor;
+        if self.stdout.is_empty() && !fresh.stdout.is_empty() {
+            self.stdout = fresh.stdout;
+            self.stdout_line_count = fresh.stdout_line_count;
+            self.truncated |= fresh.truncated;
+        }
+        if self.scrollback_entry_id.is_none() {
+            self.scrollback_entry_id = entry_id;
+        }
     }
 }
 /// State for a scheduled (loop) task, displayed in the tasks pane.
@@ -1778,5 +1858,49 @@ mod tests {
             merged.combined_texts,
             vec!["hi /commit".to_string(), "go /push now".to_string()]
         );
+    }
+    /// Folding a late `TaskBackgrounded` into a terminal tombstone keeps the
+    /// terminal state and backfills only what the snapshot couldn't know —
+    /// including a blank command (gateway-bridge completions synthesize one).
+    #[test]
+    fn absorb_late_backgrounded_backfills_without_resurrecting() {
+        let snapshot = xai_grok_tools::types::TaskSnapshot {
+            task_id: "t1".into(),
+            command: String::new(),
+            display_command: None,
+            cwd: "/tmp".into(),
+            start_time: SystemTime::now(),
+            end_time: None,
+            output: String::new(),
+            output_file: "/tmp/out.log".into(),
+            truncated: false,
+            exit_code: Some(0),
+            signal: None,
+            completed: true,
+            kind: Default::default(),
+            block_waited: false,
+            explicitly_killed: false,
+            owner_session_id: None,
+            description: None,
+            is_backgrounded: true,
+            output_total_bytes: 0,
+        };
+        let mut tombstone =
+            BgTaskState::tombstone_from_snapshot(&snapshot, BgTaskStatus::Done, None, false);
+        assert_eq!(tombstone.status, BgTaskStatus::Done);
+        assert!(tombstone.end_time.is_some(), "end_time falls back to now");
+        let mut fresh =
+            BgTaskState::tombstone_from_snapshot(&snapshot, BgTaskStatus::Running, None, false);
+        fresh.tool_call_id = "tc-1".into();
+        fresh.command = "echo hi".into();
+        fresh.description = Some("say hi".into());
+        fresh.set_stdout("demoted output".into());
+        tombstone.absorb_late_backgrounded(fresh, None);
+        assert_eq!(tombstone.status, BgTaskStatus::Done, "terminal status kept");
+        assert_eq!(tombstone.tool_call_id, "tc-1");
+        assert_eq!(tombstone.command, "echo hi", "blank command backfilled");
+        assert_eq!(tombstone.description.as_deref(), Some("say hi"));
+        assert_eq!(tombstone.stdout, "demoted output");
+        assert_eq!(tombstone.stdout_line_count, 1);
     }
 }

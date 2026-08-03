@@ -43,6 +43,7 @@ fn unavailable_tmux() -> TmuxProbeFacts {
         allow_passthrough_support: TmuxProbeResult::Unavailable,
         allow_passthrough: TmuxProbeResult::Unavailable,
         control_mode: TmuxProbeResult::Unavailable,
+        client_features: TmuxProbeResult::Unavailable,
     }
 }
 
@@ -171,6 +172,7 @@ fn tmux_config_and_reload_notes_output_is_stable() {
             allow_passthrough_support: TmuxProbeResult::Available(()),
             allow_passthrough: TmuxProbeResult::Available("off".to_owned()),
             control_mode: TmuxProbeResult::Available(false),
+            client_features: TmuxProbeResult::Unavailable,
         },
         &TMUX_ROUTE,
         "pbcopy",
@@ -202,17 +204,17 @@ fn tmux_config_and_reload_notes_output_is_stable() {
             "  ! terminal.tmux-clipboard  `set-clipboard` is off in tmux, so OSC 52 clipboard copies are blocked\n",
             "      Automatic setup: `grok doctor fix tmux-clipboard`\n",
             "      Add `set -g set-clipboard on` to ~/.byobu/.tmux.conf\n",
-            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or detach and reattach.\n",
+            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or restart the tmux server.\n",
             "\n",
             "  ! terminal.dcs-passthrough  `allow-passthrough` is off in tmux, which can block clipboard copies in nested sessions\n",
             "      Automatic setup: `grok doctor fix dcs-passthrough`\n",
             "      Add `set -wg allow-passthrough on` to ~/.byobu/.tmux.conf\n",
-            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or detach and reattach.\n",
+            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or restart the tmux server.\n",
             "\n",
             "  ! terminal.tmux-extended-keys  `extended-keys` is off in tmux, so some shortcuts may not work\n",
             "      Automatic setup: `grok doctor fix tmux-extended-keys`\n",
             "      Add `set -g extended-keys on` to ~/.byobu/.tmux.conf\n",
-            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or detach and reattach.\n",
+            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or restart the tmux server.\n",
         )
     );
 }
@@ -232,26 +234,29 @@ fn limited_color_output_is_stable() {
 
     assert_eq!(
         output,
-        concat!(
-            "Environment\n",
-            "  terminal     Ghostty\n",
-            "  multiplexer  None detected\n",
-            "  ssh          no\n",
-            "  color        256\n",
-            "  themes       2/5: groknight, grokday\n",
-            "\n",
-            "Clipboard\n",
-            "  native       local (pbcopy)\n",
-            "  tmux         off\n",
-            "  osc 52       off\n",
-            "  wrap         off\n",
-            "  status       confirmed\n",
-            "\n",
-            "Issues (1)\n",
-            "\n",
-            "  ! terminal.limited-color  This terminal reports 256 color, so truecolor themes are unavailable\n",
-            "      Run: `export COLORTERM=truecolor`\n",
-            "      Note: Add this export to your shell startup file, such as `~/.zshrc` or `~/.bashrc`, then restart Grok.\n",
+        format!(
+            concat!(
+                "Environment\n",
+                "  terminal     Ghostty\n",
+                "  multiplexer  None detected\n",
+                "  ssh          no\n",
+                "  color        256\n",
+                "  themes       2/{}: groknight, grokday\n",
+                "\n",
+                "Clipboard\n",
+                "  native       local (pbcopy)\n",
+                "  tmux         off\n",
+                "  osc 52       off\n",
+                "  wrap         off\n",
+                "  status       confirmed\n",
+                "\n",
+                "Issues (1)\n",
+                "\n",
+                "  ! terminal.limited-color  This terminal reports 256 color, so truecolor themes are unavailable\n",
+                "      Run: `export COLORTERM=truecolor`\n",
+                "      Note: Add this export to your shell startup file, such as `~/.zshrc` or `~/.bashrc`, then restart Grok.\n",
+            ),
+            crate::theme::ThemeKind::ALL.len()
         )
     );
 }
@@ -393,6 +398,7 @@ fn unavailable_and_error_probes_do_not_create_false_issues() {
             allow_passthrough_support: TmuxProbeResult::Unavailable,
             allow_passthrough: TmuxProbeResult::Error("query failed".to_owned()),
             control_mode: TmuxProbeResult::Unavailable,
+            client_features: TmuxProbeResult::Unavailable,
         },
         &TMUX_ROUTE,
         "pbcopy",
@@ -488,6 +494,7 @@ fn runtime_merge_does_not_duplicate_view_findings() {
                 allow_passthrough_support: TmuxProbeResult::Available(()),
                 allow_passthrough: TmuxProbeResult::Available("off".to_owned()),
                 control_mode: TmuxProbeResult::Available(false),
+                client_features: TmuxProbeResult::Unavailable,
             },
             &TMUX_ROUTE,
             "pbcopy",
@@ -620,6 +627,7 @@ fn keyboard_fact_formats_from_explicit_target_evidence() {
                 set_clipboard: crate::diagnostics::TmuxOptionFact::Unavailable,
                 allow_passthrough_support: crate::diagnostics::TmuxSupportFact::Unavailable,
                 allow_passthrough: crate::diagnostics::TmuxOptionFact::Unavailable,
+                color_passthrough: crate::diagnostics::TmuxColorPassthrough::Unknown,
             },
             color: ColorFacts {
                 level: RuntimeFact::Available(ColorLevel::TrueColor),

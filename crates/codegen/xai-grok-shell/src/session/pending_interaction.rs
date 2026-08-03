@@ -28,7 +28,7 @@ use crate::extensions::notification::{SessionNotification, SessionUpdate as XaiS
 /// [`crate::session::handle::SessionHandle`]: the same `Arc` is shared between
 /// the session actor (which mutates it) and the handle (which the roster reads
 /// synchronously).
-pub type PendingInteractions = Arc<Mutex<HashMap<String, PendingKind>>>;
+pub(crate) type PendingInteractions = Arc<Mutex<HashMap<String, PendingKind>>>;
 
 /// Which kind of blocking reverse-request is pending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -85,7 +85,7 @@ fn broadcast(gateway: &GatewaySender, session_id: &acp::SessionId, update: XaiSe
 /// actually removed one) broadcasts `interaction_resolved`. The
 /// remove-or-no-op makes resolution **idempotent / first-answer-wins**: a
 /// second drop / already-removed key is silent.
-pub struct PendingInteractionGuard {
+pub(crate) struct PendingInteractionGuard {
     pending: PendingInteractions,
     gateway: GatewaySender,
     session_id: acp::SessionId,

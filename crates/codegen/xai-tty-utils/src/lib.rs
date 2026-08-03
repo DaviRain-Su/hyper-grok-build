@@ -39,6 +39,9 @@
 use std::collections::HashMap;
 use std::io;
 
+mod process_resources;
+pub use process_resources::{ProcessResources, sample_process_memory, sample_process_resources};
+
 mod process_scope;
 pub use process_scope::{ProcessScope, global_process_scope};
 
@@ -491,6 +494,30 @@ impl ProcessGroup {
         }
     }
 
+    /// Whether any process still exists in this group. `None` where the
+    /// platform cannot say (Windows, `EPERM`); treat it as alive.
+    ///
+    /// Over-reports, never under-reports: an unreaped zombie is still a
+    /// process, so it counts as live. Filtering zombies out would let a
+    /// reaped leader with a live descendant look empty.
+    pub fn has_live_members(&self) -> Option<bool> {
+        #[cfg(unix)]
+        {
+            let Some(leader) = self.leader else {
+                return Some(false);
+            };
+            match nix::sys::signal::killpg(nix::unistd::Pid::from_raw(leader.get() as i32), None) {
+                Ok(()) => Some(true),
+                Err(nix::errno::Errno::ESRCH) => Some(false),
+                Err(_) => None,
+            }
+        }
+        #[cfg(windows)]
+        {
+            None
+        }
+    }
+
     /// Ask an interactive shell to hang up. Its job-control children each live
     /// in their own process group, which no `killpg` here reaches, but a shell
     /// forwards the hangup to them before it exits.
@@ -824,6 +851,29 @@ mod tests {
     fn kill_on_parent_death_std_does_not_panic() {
         let mut cmd = std::process::Command::new("echo");
         kill_on_parent_death_std(&mut cmd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn has_live_members_tracks_the_group_emptying() {
+        let mut group = ProcessGroup::new().expect("group");
+        assert_eq!(group.has_live_members(), Some(false));
+
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("1000")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        detach_std_command(&mut cmd);
+        #[allow(clippy::disallowed_methods)] // test: exercises ProcessGroup directly
+        let mut child = cmd.spawn().expect("spawn sleeper");
+        group.attach_std(&child).expect("attach");
+        assert_eq!(group.has_live_members(), Some(true));
+
+        group.kill().expect("kill group");
+        // Required: an unreaped zombie still reports live.
+        child.wait().expect("reap sleeper");
+        assert_eq!(group.has_live_members(), Some(false));
     }
 
     /// Debug builds enforce the top-of-doc caveat that arming and spawning

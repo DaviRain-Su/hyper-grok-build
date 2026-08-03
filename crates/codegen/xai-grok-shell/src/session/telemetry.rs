@@ -145,7 +145,7 @@ pub(crate) struct SessionHarnessMetrics {
 }
 
 impl SessionHarnessMetrics {
-    pub async fn into_event(self, hooks: Vec<HookRegInfo>) -> SessionHarness {
+    pub(crate) async fn into_event(self, hooks: Vec<HookRegInfo>) -> SessionHarness {
         // One `plugin.loaded` span per enabled plugin at session start.
         if let Some(registry) = self.plugin_registry.as_deref() {
             for plugin in registry.enabled_plugins() {

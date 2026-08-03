@@ -44,7 +44,7 @@ impl BashToolConfig {
     /// `remote_auto_bg` is the remote settings fallback for `auto_background_on_timeout`
     /// and `remote_allow_background_operator` for `allow_background_operator`.
     /// Resolution: local config.toml > remote fallback > `true`.
-    pub fn to_bash_params_json(
+    pub(crate) fn to_bash_params_json(
         &self,
         remote_auto_bg: Option<bool>,
         remote_allow_background_operator: Option<bool>,
@@ -123,7 +123,7 @@ impl WebFetchToolConfig {
     /// `remote_proxy` and `remote_domains` are the remote settings fallback values
     /// from `RemoteSettings`. `context_window` comes from the session's
     /// SamplingConfig (model-provided).
-    pub fn resolve_params(
+    pub(crate) fn resolve_params(
         &self,
         remote_proxy: Option<&str>,
         remote_domains: Option<&[String]>,
@@ -271,14 +271,9 @@ impl ShellToolsetConfig {
         toolset
     }
 
-    /// Returns true if web search is enabled based on config.
-    pub fn web_search_enabled(&self) -> bool {
-        self.web_search.api_key.is_some()
-    }
-
     /// Resolve the effective file toolset. Local config takes precedence;
     /// remote `/v1/settings` is used as fallback when local is the default.
-    pub fn resolve_file_toolset(
+    pub(crate) fn resolve_file_toolset(
         &self,
         remote: Option<&crate::util::config::RemoteSettings>,
     ) -> FileToolset {

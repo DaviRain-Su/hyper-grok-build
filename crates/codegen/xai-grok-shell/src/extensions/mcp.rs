@@ -72,7 +72,7 @@ fn default_true() -> bool {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct McpListResponse {
+pub(crate) struct McpListResponse {
     pub servers: Vec<McpServerEntry>,
 }
 
@@ -179,7 +179,7 @@ pub struct McpToolEntry {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct McpCallRequest {
+pub(crate) struct McpCallRequest {
     /// When present: session pool. When absent: agent pool (config.toml only).
     #[serde(default)]
     pub session_id: Option<String>,
@@ -287,7 +287,7 @@ pub use crate::session::mcp_dispatcher::{
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct McpReadResourceRequest {
+pub(crate) struct McpReadResourceRequest {
     #[serde(default)]
     pub session_id: Option<String>,
     pub server: String,
@@ -411,7 +411,7 @@ pub fn build_mcp_catalog(
     build_mcp_catalog_with_gateway_tools(managed_configs, local_servers, None, &Default::default())
 }
 
-pub fn build_mcp_catalog_with_gateway_tools(
+pub(crate) fn build_mcp_catalog_with_gateway_tools(
     managed_configs: &[crate::session::managed_mcp::ManagedMcpConfig],
     local_servers: &[acp::McpServer],
     gateway_catalog: Option<&crate::session::managed_mcp::GatewayToolCatalog>,
@@ -608,7 +608,7 @@ fn disabled_server_placeholder_entry(name: &str) -> McpServerEntry {
 
 /// Build session MCP status: which servers are enabled, healthy, and what tools they expose.
 /// Clones state under lock then releases — does not hold lock across awaits.
-pub async fn build_mcp_status(
+pub(crate) async fn build_mcp_status(
     mcp_state: &Arc<TokioMutex<McpState>>,
     tool_bridge: &Arc<xai_grok_tools::bridge::ToolBridge>,
     event_writer: Option<&xai_file_utils::events::EventWriter>,
@@ -767,7 +767,10 @@ async fn ensure_agent_pool_initialized(mcp_state: &Arc<TokioMutex<McpState>>) {
 
 /// Spawn config.toml MCP clients into the agent pool. Handshakes happen
 /// lazily on first `CallMcpTool`.
-pub async fn init_agent_mcp_pool(mcp_state: &Arc<TokioMutex<McpState>>, cwd: &std::path::Path) {
+pub(crate) async fn init_agent_mcp_pool(
+    mcp_state: &Arc<TokioMutex<McpState>>,
+    cwd: &std::path::Path,
+) {
     use crate::session::mcp_servers::start_mcp_servers;
 
     let configs = {
@@ -1240,7 +1243,7 @@ async fn handle_read_resource(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
     to_ext_response(Ok(result))
 }
 
-pub async fn read_mcp_resource(
+pub(crate) async fn read_mcp_resource(
     mcp_state: &Arc<TokioMutex<McpState>>,
     server_name: &str,
     uri: &str,
@@ -1329,7 +1332,7 @@ pub async fn read_mcp_resource(
 ///
 /// Injected into the agent's `SharedResources` via `tool_bridge.update_resource()`
 /// at session startup so tools can enumerate and fetch MCP resources.
-pub struct McpStateResourceProvider(pub Arc<TokioMutex<McpState>>);
+pub(crate) struct McpStateResourceProvider(pub Arc<TokioMutex<McpState>>);
 
 #[async_trait::async_trait]
 impl xai_grok_tools::types::resources::McpResourceProvider for McpStateResourceProvider {

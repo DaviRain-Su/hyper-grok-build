@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Seek};
 use std::path::{Path, PathBuf};
 
 use crate::extensions::notification::SessionNotification;
@@ -488,22 +488,6 @@ impl UpdatesIterator {
         let file = std::fs::File::open(path)?;
         Ok(Some(Self {
             reader: BufReader::new(file),
-            line_buffer: String::new(),
-        }))
-    }
-
-    /// Create a new iterator starting at the given byte offset.
-    /// Returns None if the file doesn't exist.
-    /// Used for delta replay: read only updates appended after a known offset.
-    pub fn open_at(path: &Path, offset: u64) -> io::Result<Option<Self>> {
-        if !path.exists() {
-            return Ok(None);
-        }
-        let file = std::fs::File::open(path)?;
-        let mut reader = BufReader::new(file);
-        reader.seek(SeekFrom::Start(offset))?;
-        Ok(Some(Self {
-            reader,
             line_buffer: String::new(),
         }))
     }

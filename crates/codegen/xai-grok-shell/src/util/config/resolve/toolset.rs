@@ -15,7 +15,7 @@ use xai_grok_tools::implementations::grok_build::ask_user_question;
 /// which the caller bakes into a
 /// [`xai_grok_tools::computer::local::SearchShadowConfig`] on the local terminal
 /// backend.
-pub fn resolve_search_tools_enabled(
+pub(crate) fn resolve_search_tools_enabled(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
     managed: Option<&TomlValue>,
@@ -44,7 +44,7 @@ pub fn resolve_search_tools_enabled(
 /// when unset or unparseable (the child then inherits the full environment). This
 /// is the authoritative parse; the `Config` field of the same name only feeds the
 /// unrecognized-key scan.
-pub fn resolve_shell_env_policy(
+pub(crate) fn resolve_shell_env_policy(
     effective_cfg: Option<&TomlValue>,
 ) -> Option<xai_grok_tools::util::ShellEnvironmentPolicy> {
     let value = effective_cfg?.get("shell_environment_policy")?.clone();
@@ -91,7 +91,7 @@ fn login_shell_capture_from_toml(v: Option<&TomlValue>) -> Option<bool> {
         .as_bool()
 }
 
-pub fn resolve_login_shell_capture(remote: Option<bool>) -> bool {
+pub(crate) fn resolve_login_shell_capture(remote: Option<bool>) -> bool {
     let requirements = crate::config::load_merged_requirements();
     let layers = match crate::config::ConfigLayers::load() {
         Ok(l) => Some(l),

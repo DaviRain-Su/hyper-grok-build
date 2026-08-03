@@ -208,14 +208,13 @@ impl StickyHeaderLayout {
         Some(pushed_visible + gap_after_pushed)
     }
 
-    /// Screen row where the gap after header is (for selection corners).
-    /// Returns None if no header.
+    /// Screen row of the gap after a pinned header (selection corners, the
+    /// ▲ response-top indicator). `None` without a pinned header: a
+    /// push-only header renders no gap after it (see
+    /// [`Self::header_screen_rows`]), so this row would point at content.
     pub fn gap_row(&self) -> Option<u16> {
-        if self.has_header() {
-            Some(self.header_content_height())
-        } else {
-            None
-        }
+        self.pinned?;
+        Some(self.header_content_height())
     }
 
     /// Screen row where pushed header starts (always 0 if present).
@@ -1334,10 +1333,7 @@ mod tests {
         // Need to find scroll where both pushed and pinned exist
         for scroll in 0..20 {
             let layout = compute_sticky_layout(scroll, 20, &prompts);
-            if layout.pushed.is_some() && layout.pinned.is_some() {
-                let pushed = layout.pushed.unwrap();
-                let pinned = layout.pinned.unwrap();
-
+            if let (Some(pushed), Some(pinned)) = (&layout.pushed, &layout.pinned) {
                 // Pushed rows → entry 0
                 for row in 0..pushed.visible_height() {
                     assert_eq!(layout.entry_at_header_row(row), Some(0));

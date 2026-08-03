@@ -24,6 +24,8 @@ use syntect::easy::HighlightLines;
 use crate::render::scrollbar::SCROLLBAR_TOTAL_COLS;
 use crate::render::wrapping::word_wrap_line;
 use crate::scrollback::blocks::markdown_content::MarkdownContent;
+use crate::scrollback::blocks::mermaid_content::{MermaidDisplay, mermaid_display};
+use crate::scrollback::render::DiagramAffordancePlacement;
 use crate::syntax::get_syntect;
 use crate::theme::Theme;
 use crate::views::list_pane::{
@@ -31,6 +33,9 @@ use crate::views::list_pane::{
 };
 
 use xai_ratatui_textarea::ElementId;
+
+/// Stable ids for mermaid affordance rows (above source lines and comments).
+const MERMAID_AFFORDANCE_ID_BASE: u64 = 2_000_000;
 
 // ── Line item ───────────────────────────────────────────────────────────
 
@@ -421,12 +426,103 @@ impl ListItem for CommentLine {
     }
 }
 
+// ── Mermaid affordance row ────────────────────────────────────────────
+
+/// Blank reserved row under a Mermaid diagram; buttons are painted by the
+/// draw loop (same pattern as scrollback).
+pub struct MermaidAffordanceLine {
+    item_id: u64,
+    /// Fence body — data for Open / Copy path / Copy source.
+    pub source: String,
+    prefix: Line<'static>,
+}
+
+impl MermaidAffordanceLine {
+    fn new(item_id: u64, source: String, max_digits: usize) -> Self {
+        let prefix = Line::from(Span::styled(
+            " ".repeat(max_digits + 1),
+            Style::default().fg(Theme::current().gray_dim),
+        ));
+        Self {
+            item_id,
+            source,
+            prefix,
+        }
+    }
+
+    fn prefix_width(&self) -> u16 {
+        crate::views::list_pane::line_display_width(&self.prefix) as u16
+    }
+}
+
+impl ListItem for MermaidAffordanceLine {
+    fn content(&self) -> &Line<'_> {
+        static EMPTY: std::sync::LazyLock<Line<'static>> = std::sync::LazyLock::new(Line::default);
+        &EMPTY
+    }
+
+    fn prefix(&self) -> Option<Line<'_>> {
+        Some(self.prefix.clone())
+    }
+
+    fn prefix_in_selection(&self) -> Option<Line<'_>> {
+        Some(self.prefix.clone())
+    }
+
+    fn prefix_cursor(&self) -> Option<Line<'_>> {
+        Some(self.prefix.clone())
+    }
+
+    fn stable_id(&self) -> u64 {
+        self.item_id
+    }
+
+    fn is_selectable(&self) -> bool {
+        false
+    }
+
+    fn search_text(&self) -> &str {
+        ""
+    }
+
+    fn copy_text(&self) -> String {
+        String::new()
+    }
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        1
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer, _selected: bool, _focused: bool) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+        // Blank prefix only — write via cell_mut so out-of-bounds coords
+        // cannot panic (Buffer::set_line indexes and panics on OOB).
+        let prefix_w = self.prefix_width().min(area.width);
+        let style = self
+            .prefix
+            .spans
+            .first()
+            .map(|s| s.style)
+            .unwrap_or_default();
+        for dx in 0..prefix_w {
+            let Some(cell) = buf.cell_mut((area.x.saturating_add(dx), area.y)) else {
+                break;
+            };
+            cell.set_char(' ');
+            cell.set_style(style);
+        }
+    }
+}
+
 // ── Plan viewer item ──────────────────────────────────────────────────
 
-/// A viewer item: either a source line or an inline review comment.
+/// Source line, review comment, or Mermaid affordance row.
 pub enum PlanViewerItem {
     Source(Box<SourceLine>),
     Comment(CommentLine),
+    MermaidAffordance(MermaidAffordanceLine),
 }
 
 impl PlanViewerItem {
@@ -434,14 +530,14 @@ impl PlanViewerItem {
     pub fn line_number(&self) -> Option<usize> {
         match self {
             Self::Source(s) => Some(s.line_number),
-            Self::Comment(_) => None,
+            Self::Comment(_) | Self::MermaidAffordance(_) => None,
         }
     }
 
     /// The comment ID, if this is a comment item.
     pub fn comment_id(&self) -> Option<u64> {
         match self {
-            Self::Source(_) => None,
+            Self::Source(_) | Self::MermaidAffordance(_) => None,
             Self::Comment(c) => Some(c.comment_id),
         }
     }
@@ -452,6 +548,7 @@ impl ListItem for PlanViewerItem {
         match self {
             Self::Source(s) => s.content(),
             Self::Comment(c) => c.content(),
+            Self::MermaidAffordance(m) => m.content(),
         }
     }
 
@@ -459,6 +556,7 @@ impl ListItem for PlanViewerItem {
         match self {
             Self::Source(s) => s.prefix(),
             Self::Comment(c) => c.prefix(),
+            Self::MermaidAffordance(m) => m.prefix(),
         }
     }
 
@@ -466,6 +564,7 @@ impl ListItem for PlanViewerItem {
         match self {
             Self::Source(s) => s.prefix_in_selection(),
             Self::Comment(c) => c.prefix_in_selection(),
+            Self::MermaidAffordance(m) => m.prefix_in_selection(),
         }
     }
 
@@ -473,6 +572,7 @@ impl ListItem for PlanViewerItem {
         match self {
             Self::Source(s) => s.prefix_cursor(),
             Self::Comment(c) => c.prefix_cursor(),
+            Self::MermaidAffordance(m) => m.prefix_cursor(),
         }
     }
 
@@ -480,17 +580,22 @@ impl ListItem for PlanViewerItem {
         match self {
             Self::Source(s) => s.stable_id(),
             Self::Comment(c) => c.stable_id(),
+            Self::MermaidAffordance(m) => m.stable_id(),
         }
     }
 
     fn is_selectable(&self) -> bool {
-        true
+        match self {
+            Self::Source(_) | Self::Comment(_) => true,
+            Self::MermaidAffordance(m) => m.is_selectable(),
+        }
     }
 
     fn search_text(&self) -> &str {
         match self {
             Self::Source(s) => s.search_text(),
             Self::Comment(c) => c.search_text(),
+            Self::MermaidAffordance(m) => m.search_text(),
         }
     }
 
@@ -498,6 +603,7 @@ impl ListItem for PlanViewerItem {
         match self {
             Self::Source(s) => s.copy_text(),
             Self::Comment(c) => c.copy_text(),
+            Self::MermaidAffordance(m) => m.copy_text(),
         }
     }
 
@@ -505,6 +611,7 @@ impl ListItem for PlanViewerItem {
         match self {
             Self::Source(s) => s.desired_height(width),
             Self::Comment(c) => c.desired_height(width),
+            Self::MermaidAffordance(m) => m.desired_height(width),
         }
     }
 
@@ -512,13 +619,14 @@ impl ListItem for PlanViewerItem {
         match self {
             Self::Source(s) => s.render(area, buf, selected, focused),
             Self::Comment(c) => c.render(area, buf, selected, focused),
+            Self::MermaidAffordance(m) => m.render(area, buf, selected, focused),
         }
     }
 
     fn goto_line_number(&self) -> Option<usize> {
         match self {
             Self::Source(s) => Some(s.line_number),
-            Self::Comment(_) => None,
+            Self::Comment(_) | Self::MermaidAffordance(_) => None,
         }
     }
 }
@@ -619,6 +727,8 @@ pub struct LineViewerState {
     /// Copy of comments last applied via `rebuild_with_comments`, so that
     /// a width-triggered rebuild can re-interleave them automatically.
     last_comments: Vec<crate::views::plan_approval_view::PlanComment>,
+    /// `(source_lines index to follow, diagram source)` for affordance rows.
+    mermaid_after: Vec<(usize, String)>,
     /// When `true`, the viewer uses the full overlay area instead of the
     /// 75% centered popup. Toggled by Ctrl+F.
     pub fullscreen: bool,
@@ -669,6 +779,7 @@ impl LineViewerState {
             markdown_content: None,
             last_table_width: None,
             last_comments: Vec::new(),
+            mermaid_after: Vec::new(),
             fullscreen: false,
         })
     }
@@ -730,6 +841,7 @@ impl LineViewerState {
             markdown_content: Some(content),
             last_table_width: None,
             last_comments: Vec::new(),
+            mermaid_after: Vec::new(),
             fullscreen: false,
         })
     }
@@ -784,9 +896,11 @@ impl LineViewerState {
         }
         self.last_table_width = Some(content_width);
 
-        self.source_lines = build_markdown_lines(content, Some(content_width));
+        let built = build_markdown_lines(content, Some(content_width));
+        self.source_lines = built.source_lines;
+        self.mermaid_after = built.mermaid_after;
 
-        if self.last_comments.is_empty() {
+        if self.last_comments.is_empty() && self.mermaid_after.is_empty() {
             self.lines = self
                 .source_lines
                 .iter()
@@ -797,6 +911,64 @@ impl LineViewerState {
             let comments = self.last_comments.clone();
             self.interleave_comments(&comments);
         }
+    }
+
+    /// Screen rects for visible Mermaid affordance rows (for paint + hit-testing).
+    pub fn diagram_affordance_placements(
+        &self,
+        content_area: Rect,
+    ) -> Vec<DiagramAffordancePlacement> {
+        if content_area.width == 0 || content_area.height == 0 {
+            return Vec::new();
+        }
+
+        let scroll = self.list_state.scroll_offset();
+        let layout = self.list_state.layout();
+        let visible = self.list_state.visible_range();
+        if visible.is_empty() {
+            return Vec::new();
+        }
+        let first_vi = visible.start;
+        let skip_first = self.list_state.first_item_skip_rows();
+        let mut placements = Vec::new();
+
+        for vi in visible {
+            let pi = self.list_state.to_physical(vi);
+            let Some(PlanViewerItem::MermaidAffordance(m)) = self.lines.get(pi) else {
+                continue;
+            };
+            let item_h = layout.item_height(vi);
+            let skip = if vi == first_vi { skip_first } else { 0 };
+            if skip >= item_h {
+                continue;
+            }
+            // Align with list-pane layout: first visible item may be top-clipped.
+            let screen_y_offset = layout
+                .virtual_y(vi)
+                .saturating_sub(scroll)
+                .saturating_add(skip as usize);
+            if screen_y_offset >= content_area.height as usize {
+                continue;
+            }
+            let prefix_w = m.prefix_width();
+            let text_w = content_area
+                .width
+                .saturating_sub(prefix_w)
+                .saturating_sub(SCROLLBAR_TOTAL_COLS);
+            if text_w == 0 {
+                continue;
+            }
+            placements.push(DiagramAffordancePlacement {
+                screen_rect: Rect {
+                    x: content_area.x.saturating_add(prefix_w),
+                    y: content_area.y.saturating_add(screen_y_offset as u16),
+                    width: text_w,
+                    height: 1,
+                },
+                source: m.source.clone(),
+            });
+        }
+        placements
     }
 
     #[cfg(test)]
@@ -889,9 +1061,19 @@ impl LineViewerState {
         self.list_state.invalidate_layout();
     }
 
-    /// Interleave source lines with comments without updating `last_comments`.
+    /// Interleave source lines with Mermaid affordance rows and comments
+    /// without updating `last_comments`.
+    ///
+    /// `mermaid_after` is document-ordered; affordances sit under the
+    /// diagram art, before any comments on the same source line.
     fn interleave_comments(&mut self, comments: &[crate::views::plan_approval_view::PlanComment]) {
-        let max_digits = digit_count(self.source_lines.len().max(1));
+        let max_digits = digit_count(
+            self.source_lines
+                .last()
+                .map(|s| s.line_number)
+                .unwrap_or(1)
+                .max(1),
+        );
 
         let mut sorted: Vec<_> = comments.iter().collect();
         sorted.sort_by_key(|c| c.line_range.end);
@@ -906,12 +1088,25 @@ impl LineViewerState {
         let mut items: Vec<PlanViewerItem> = Vec::new();
         let mut comment_idx = 0;
         let comment_id_base: u64 = 1_000_000;
+        let mut mermaid_i = 0usize;
 
-        for src in &self.source_lines {
+        for (src_idx, src) in self.source_lines.iter().enumerate() {
             let ln = src.line_number;
             let mut src = src.clone();
             src.commented = commented_lines.contains(&ln);
             items.push(PlanViewerItem::Source(Box::new(src)));
+
+            while mermaid_i < self.mermaid_after.len() && self.mermaid_after[mermaid_i].0 == src_idx
+            {
+                items.push(PlanViewerItem::MermaidAffordance(
+                    MermaidAffordanceLine::new(
+                        MERMAID_AFFORDANCE_ID_BASE + mermaid_i as u64,
+                        self.mermaid_after[mermaid_i].1.clone(),
+                        max_digits,
+                    ),
+                ));
+                mermaid_i += 1;
+            }
 
             while comment_idx < sorted.len() && sorted[comment_idx].line_range.end == ln + 1 {
                 let c = sorted[comment_idx];
@@ -1032,16 +1227,27 @@ fn source_line_count(content: &str) -> usize {
     }
 }
 
+struct BuiltMarkdownLines {
+    source_lines: Vec<SourceLine>,
+    /// Document-ordered `(source_lines index to follow, diagram source)`.
+    mermaid_after: Vec<(usize, String)>,
+}
+
 /// Build markdown-rendered source lines from file content.
 ///
 /// Uses `MarkdownContent` to render the full document, then groups rendered
 /// lines by source line using `line_source_map`. Each source line becomes
 /// one `SourceLine` item that may span multiple visual lines (e.g., a table
 /// block renders as border + header + separator + data + border).
-fn build_markdown_lines(content: &str, max_table_width: Option<usize>) -> Vec<SourceLine> {
+///
+/// With `render_mermaid` auto/on, also anchors affordance rows under each
+/// closed mermaid fence.
+fn build_markdown_lines(content: &str, max_table_width: Option<usize>) -> BuiltMarkdownLines {
     let md = MarkdownContent::new_source_faithful(content, max_table_width);
     let pre_wrap = md.pre_wrap_lines();
     let source_map = md.line_source_map();
+    let mermaid = md.mermaid_content();
+    let mermaid_ranges = md.mermaid_block_ranges();
 
     // Background colors come from each line's style (set by the renderer
     // for code blocks etc.). pre_wrap_lines() returns owned Lines that
@@ -1053,9 +1259,9 @@ fn build_markdown_lines(content: &str, max_table_width: Option<usize>) -> Vec<So
     let slc = source_line_count(content);
     let max_digits = digit_count(slc.max(1));
 
-    // Group rendered lines by source line number.
-    // source_map is indexed by rendered-line index, value is 0-based source line.
+    // Group by source line; track which group each pre-wrap line lands in.
     let mut groups: Vec<(usize, Vec<Line<'static>>, Vec<Option<Color>>)> = Vec::new();
+    let mut prewrap_to_group: Vec<usize> = Vec::with_capacity(pre_wrap.len());
     for (rendered_idx, rendered_line) in pre_wrap.into_iter().enumerate() {
         let src_line = source_map.get(rendered_idx).copied().unwrap_or(0);
         let bg = line_bgs.get(rendered_idx).copied().flatten();
@@ -1064,11 +1270,15 @@ fn build_markdown_lines(content: &str, max_table_width: Option<usize>) -> Vec<So
         {
             last.1.push(rendered_line);
             last.2.push(bg);
+            prewrap_to_group.push(groups.len() - 1);
             continue;
         }
         groups.push((src_line, vec![rendered_line], vec![bg]));
+        prewrap_to_group.push(groups.len() - 1);
     }
 
+    // group index → source_lines index after blank-line injection.
+    let mut group_to_source_idx: Vec<usize> = Vec::with_capacity(groups.len());
     let mut source_lines = Vec::new();
     let mut next_item_id = 0u64;
     let mut next_blank_src = 0usize;
@@ -1091,6 +1301,7 @@ fn build_markdown_lines(content: &str, max_table_width: Option<usize>) -> Vec<So
             }
         }
 
+        group_to_source_idx.push(source_lines.len());
         source_lines.push(SourceLine::new_markdown(
             next_item_id,
             src_line_0based + 1,
@@ -1120,7 +1331,31 @@ fn build_markdown_lines(content: &str, max_table_width: Option<usize>) -> Vec<So
         }
     }
 
-    source_lines
+    let show_affordances = mermaid_display(crate::appearance::cache::load_render_mermaid())
+        == MermaidDisplay::Affordances;
+    let mut mermaid_after = Vec::new();
+    if show_affordances {
+        for (i, range) in mermaid_ranges.iter().enumerate() {
+            if range.is_empty() {
+                continue;
+            }
+            let Some(&group_idx) = prewrap_to_group.get(range.end - 1) else {
+                continue;
+            };
+            let Some(&src_idx) = group_to_source_idx.get(group_idx) else {
+                continue;
+            };
+            let Some(source) = mermaid.source(i) else {
+                continue;
+            };
+            mermaid_after.push((src_idx, source.to_owned()));
+        }
+    }
+
+    BuiltMarkdownLines {
+        source_lines,
+        mermaid_after,
+    }
 }
 
 /// Convert syntect highlighting output to a ratatui Line.
@@ -1726,7 +1961,7 @@ mod tests {
     fn source_line(item: &PlanViewerItem) -> &SourceLine {
         match item {
             PlanViewerItem::Source(source) => source,
-            PlanViewerItem::Comment(_) => panic!("expected source line"),
+            _ => panic!("expected source line"),
         }
     }
 
@@ -1741,8 +1976,9 @@ mod tests {
 
     #[test]
     fn build_markdown_lines_preserves_blank_source_lines() {
-        let lines = build_markdown_lines("# Plan\n\n- First\n\n- Second", Some(80));
-        let numbered_rows: Vec<(usize, Vec<String>)> = lines
+        let built = build_markdown_lines("# Plan\n\n- First\n\n- Second", Some(80));
+        let numbered_rows: Vec<(usize, Vec<String>)> = built
+            .source_lines
             .iter()
             .map(|line| {
                 (
@@ -1766,14 +2002,47 @@ mod tests {
 
     #[test]
     fn markdown_source_blank_line_renders_as_numbered_empty_row() {
-        let lines = build_markdown_lines("# Plan\n\n- First", Some(80));
-        let blank = &lines[1];
+        let built = build_markdown_lines("# Plan\n\n- First", Some(80));
+        let blank = &built.source_lines[1];
         let mut buf = Buffer::empty(Rect::new(0, 0, 20, 1));
 
         blank.render(Rect::new(0, 0, 20, 1), &mut buf, false, true);
 
         assert_eq!(blank.line_number, 2);
         assert_eq!(row_text(&buf, 0), "2                   ");
+    }
+
+    #[test]
+    fn mermaid_affordance_respects_render_setting() {
+        use crate::appearance::{RenderMermaid, cache};
+
+        const MD: &str = "# Plan\n\n```mermaid\nflowchart TD\n  A --> B\n```\n\nDone.\n";
+
+        cache::set_render_mermaid(RenderMermaid::On);
+        let built = build_markdown_lines(MD, Some(80));
+        assert_eq!(built.mermaid_after.len(), 1);
+        assert!(built.mermaid_after[0].1.contains("A --> B"));
+        assert!(built.mermaid_after[0].0 < built.source_lines.len());
+
+        let mut viewer =
+            LineViewerState::open_markdown_content("plan.md", MD.to_owned(), None).unwrap();
+        viewer.prepare_layout(100, 40);
+        assert_eq!(
+            viewer
+                .lines
+                .iter()
+                .filter(|i| matches!(i, PlanViewerItem::MermaidAffordance(_)))
+                .count(),
+            1
+        );
+        let placements = viewer.diagram_affordance_placements(Rect::new(0, 0, 100, 40));
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].screen_rect.height, 1);
+        assert!(placements[0].screen_rect.width > 0);
+
+        cache::set_render_mermaid(RenderMermaid::Off);
+        assert!(build_markdown_lines(MD, Some(80)).mermaid_after.is_empty());
+        cache::set_render_mermaid(RenderMermaid::Auto);
     }
 
     #[test]

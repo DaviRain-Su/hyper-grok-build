@@ -648,6 +648,7 @@ fn fail(
             message: message.into(),
             is_retryable: false,
             retry_after_secs: None,
+            should_retry: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,

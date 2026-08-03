@@ -368,9 +368,8 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
         hit!("lsp");
     }
     // Project `.cursor/mcp.json` — vendor MCP loading is default-on and tagged
-    // `Project`, so a repo shipping ONLY this file must still be gated. (File
-    // presence is enough; if the `.cursor` compat flag is off the servers won't
-    // spawn and gating is a harmless no-op.)
+    // `Project`, so a repo shipping ONLY this file must still be gated (file
+    // presence is enough).
     if cwd.join(".cursor").join("mcp.json").is_file() {
         hit!("mcp");
     }

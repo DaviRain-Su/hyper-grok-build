@@ -276,7 +276,7 @@ impl ModelGlobSet {
 }
 
 /// Single source of truth for the catalog. Applies, in order: `disabled_models`
-pub fn resolve_model_catalog(
+pub(crate) fn resolve_model_catalog(
     cfg: &config::Config,
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> IndexMap<String, ModelEntry> {

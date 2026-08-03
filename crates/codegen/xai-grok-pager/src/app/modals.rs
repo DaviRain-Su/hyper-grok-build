@@ -1291,10 +1291,15 @@ impl AgentView {
                         }
                     }
                     PickerOutcome::SubmitQuery => {
-                        let query = state.query().trim().to_string();
-                        if !query.is_empty() {
+                        // Free-text load only for a UUID session id.
+                        // Own the id before clearing the modal (state is a
+                        // reborrow of `active_modal`).
+                        let load_id =
+                            crate::views::session_picker::session_id_for_direct_load(state.query())
+                                .map(str::to_owned);
+                        if let Some(sid) = load_id {
                             self.active_modal = None;
-                            InputOutcome::Action(Action::LoadSession(query, None, false))
+                            InputOutcome::Action(Action::LoadSession(sid, None, false))
                         } else {
                             InputOutcome::Unchanged
                         }
@@ -3003,6 +3008,43 @@ mod session_picker_delete_tests {
         assert!(
             !st.selection_hidden,
             "typing a query restores the selection highlight"
+        );
+    }
+
+    /// Paste garbage + Enter with no rows must not LoadSession.
+    #[test]
+    fn enter_with_garbage_query_does_not_load_session() {
+        let mut agent = make_agent();
+        open_picker(&mut agent, vec![]);
+        if let Some(ActiveModal::SessionPicker { state, .. }) = agent.active_modal.as_mut() {
+            state.set_query("this is pasted garbage!!!");
+        }
+        let out = agent.handle_palette_or_arg_input(&key_code(KeyCode::Enter));
+        assert!(
+            matches!(out, InputOutcome::Unchanged),
+            "garbage query must be a no-op, got {out:?}"
+        );
+        assert!(
+            matches!(agent.active_modal, Some(ActiveModal::SessionPicker { .. })),
+            "picker must stay open"
+        );
+    }
+
+    #[test]
+    fn enter_with_uuid_query_loads_session() {
+        let mut agent = make_agent();
+        open_picker(&mut agent, vec![]);
+        let sid = "019fb61a-85a5-7ba0-a4ec-24647dca1893";
+        if let Some(ActiveModal::SessionPicker { state, .. }) = agent.active_modal.as_mut() {
+            state.set_query(sid);
+        }
+        let out = agent.handle_palette_or_arg_input(&key_code(KeyCode::Enter));
+        assert!(
+            matches!(
+                out,
+                InputOutcome::Action(Action::LoadSession(ref id, None, false)) if id == sid
+            ),
+            "UUID query should direct-load, got {out:?}"
         );
     }
 }

@@ -141,7 +141,7 @@ pub enum McpServerStatusReason {
 /// Build [`McpServerSource`] from a server name. Mirrors the
 /// existing convention used by `build_mcp_catalog` and friends:
 /// names with the `MANAGED_MCP_PREFIX` prefix are managed.
-pub fn classify_source(name: &str) -> McpServerSource {
+pub(crate) fn classify_source(name: &str) -> McpServerSource {
     if name.starts_with(MANAGED_MCP_PREFIX) {
         McpServerSource::Managed
     } else {
@@ -189,7 +189,7 @@ pub fn classify_source(name: &str) -> McpServerSource {
 /// that timer was never wired. The doc has been updated to match
 /// the actual semantics.)
 #[derive(Default)]
-pub struct ShutdownState {
+pub(crate) struct ShutdownState {
     shutting_down: HashSet<McpServerName>,
     /// Servers with an `auto_restart_stdio` task currently in flight.
     ///
@@ -211,7 +211,7 @@ impl ShutdownState {
     /// Used by the auto-restart task: when `true`, skip respawn
     /// because the session is intentionally tearing the client
     /// down (config diff / toggle-off).
-    pub fn is_shutting_down(&self, name: &str) -> bool {
+    pub(crate) fn is_shutting_down(&self, name: &str) -> bool {
         self.shutting_down.contains(name)
     }
     pub fn forget(&mut self, name: &str) {
@@ -221,11 +221,11 @@ impl ShutdownState {
     /// Atomically claim the in-flight restart slot for `name`. Returns
     /// `true` if newly claimed, `false` if a restart is already in
     /// flight. See `in_flight_restart`.
-    pub fn begin_restart(&mut self, name: McpServerName) -> bool {
+    pub(crate) fn begin_restart(&mut self, name: McpServerName) -> bool {
         self.in_flight_restart.insert(name)
     }
     /// Release the in-flight restart claim taken by [`Self::begin_restart`].
-    pub fn end_restart(&mut self, name: &str) {
+    pub(crate) fn end_restart(&mut self, name: &str) {
         self.in_flight_restart.remove(name);
     }
 }
@@ -240,12 +240,12 @@ impl ShutdownState {
 /// `HashSet` insert / lookup. The dispatcher's per-flush update path
 /// also takes the lock under `flush_window`, which itself runs
 /// synchronously.
-pub type SharedShutdownState = Arc<std::sync::Mutex<ShutdownState>>;
+pub(crate) type SharedShutdownState = Arc<std::sync::Mutex<ShutdownState>>;
 
 /// Construct a fresh shared `ShutdownState`. Convenience helper so
 /// the session actor and the unit tests don't need to repeat the
 /// `Arc<std::sync::Mutex<_>>` boilerplate.
-pub fn new_shutdown_state() -> SharedShutdownState {
+pub(crate) fn new_shutdown_state() -> SharedShutdownState {
     Arc::new(std::sync::Mutex::new(ShutdownState::default()))
 }
 
@@ -255,7 +255,7 @@ pub fn new_shutdown_state() -> SharedShutdownState {
 /// registered client when several closes land in one window, so
 /// `closed` accumulates every close identity per server.
 #[derive(Default)]
-pub struct CoalescedWindow {
+pub(crate) struct CoalescedWindow {
     /// Last-write-wins per `(server, kind)` — wire-push dedup.
     pub buf: HashMap<(McpServerName, McpClientEventKind), McpClientEvent>,
     /// All `TransportClosed` client identities per server seen in the
@@ -281,7 +281,7 @@ pub struct CoalescedWindow {
 ///    `ConfigRemoved` keys at insertion time.
 ///
 /// Returns the coalesced window.
-pub async fn collect_window(
+pub(crate) async fn collect_window(
     rx: &mut UnboundedReceiver<McpClientEvent>,
     window: Duration,
 ) -> Option<CoalescedWindow> {
@@ -378,7 +378,7 @@ fn kind_of(ev: &McpClientEvent) -> McpClientEventKind {
 ///
 /// The `HandshakeFailed` `reason` is passed through verbatim as the
 /// `detail` field (full error, no sanitization) to ease debugging.
-pub fn build_payload(
+pub(crate) fn build_payload(
     session_id: &str,
     key: &(McpServerName, McpClientEventKind),
     event: &McpClientEvent,
@@ -472,7 +472,7 @@ pub fn build_payload(
 /// `gateway` is a [`xai_acp_lib::AcpAgentGatewaySender`] (forwarded
 /// fire-and-forget). Failures are logged and dropped — the
 /// dispatcher must not block the session actor.
-pub fn flush_window(
+pub(crate) fn flush_window(
     session_id: &str,
     buf: HashMap<(McpServerName, McpClientEventKind), McpClientEvent>,
     shutdown: &SharedShutdownState,
@@ -528,7 +528,7 @@ pub fn flush_window(
 /// [`drop_dead_clients`], which decides per-candidate whether the
 /// registered client is actually dead (id match) or a live replacement.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeadClient {
+pub(crate) struct DeadClient {
     pub server: McpServerName,
     /// Every `TransportClosed` client id observed for this server in
     /// the window. Eviction fires when the registered client's id is
@@ -551,7 +551,7 @@ pub struct DeadClient {
 ///   synchronously *before* the event is emitted — so an entry still
 ///   present at flush time can only be a freshly-handshook replacement
 ///   from a remove+re-add.
-pub fn collect_close_candidates(
+pub(crate) fn collect_close_candidates(
     win: &CoalescedWindow,
     http_servers: &HashSet<McpServerName>,
 ) -> Vec<DeadClient> {
@@ -572,7 +572,7 @@ pub fn collect_close_candidates(
 /// If the two predicates diverge, a disabled HTTP server still present in
 /// `configs` is kept here (not evicted) yet rejected by the gate (not
 /// recovered) — orphaning a dead client in `owned_clients`.
-pub fn recoverable_http_servers(
+pub(crate) fn recoverable_http_servers(
     configs: &[acp::McpServer],
     disabled: &HashSet<String>,
 ) -> HashSet<McpServerName> {
@@ -593,7 +593,7 @@ pub fn recoverable_http_servers(
 /// Server names with a `TransportClosed` event whose transport is HTTP —
 /// the candidates for in-place HTTP recovery (kept, not evicted, by
 /// [`collect_close_candidates`]).
-pub fn collect_http_transport_closed(
+pub(crate) fn collect_http_transport_closed(
     buf: &HashMap<(McpServerName, McpClientEventKind), McpClientEvent>,
     http_servers: &HashSet<McpServerName>,
 ) -> Vec<McpServerName> {
@@ -617,7 +617,7 @@ pub fn collect_http_transport_closed(
 /// client exists and no closed id matches it). The caller must strip
 /// those buffered entries so a stale event is fully inert: no
 /// `unavailable` push, no disconnect span, no spurious restart.
-pub async fn drop_dead_clients(
+pub(crate) async fn drop_dead_clients(
     mcp_state: &Arc<TokioMutex<McpState>>,
     dead: &[DeadClient],
 ) -> Vec<McpServerName> {
@@ -673,7 +673,7 @@ pub async fn drop_dead_clients(
 ///    [`crate::session::mcp_restart`] gate decides whether to spawn
 ///    an `auto_restart_stdio` task. Skipped entirely when
 ///    `restart_actions` is `None` (e.g. `mcp.auto_restart=false`).
-pub async fn run_dispatcher(
+pub(crate) async fn run_dispatcher(
     session_id: String,
     mut rx: UnboundedReceiver<McpClientEvent>,
     gateway: xai_acp_lib::AcpAgentGatewaySender,

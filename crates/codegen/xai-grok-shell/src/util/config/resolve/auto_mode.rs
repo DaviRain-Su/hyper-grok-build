@@ -46,7 +46,7 @@ fn coerce_remote_auto_mode(
 /// Coerce a `RemoteSettings`' raw `auto_mode` JSON down to just the gate
 /// `enabled` bool, for the shell→pager `SettingsUpdateNotification` (the pager
 /// only needs the kill-switch, not the full config).
-pub fn remote_auto_mode_enabled(remote: Option<&RemoteSettings>) -> Option<bool> {
+pub(crate) fn remote_auto_mode_enabled(remote: Option<&RemoteSettings>) -> Option<bool> {
     coerce_remote_auto_mode(remote).and_then(|c| c.enabled)
 }
 
@@ -178,7 +178,7 @@ fn merge_auto_mode_config(
 /// (unset fields stay `None`; the wire fn applies the built-in defaults). No env
 /// layer (mirrors goal's model resolvers); the gate's own env layer is handled by
 /// the disk gate reader.
-pub fn resolve_auto_mode_config_from_disk() -> crate::agent::config::AutoModeConfig {
+pub(crate) fn resolve_auto_mode_config_from_disk() -> crate::agent::config::AutoModeConfig {
     let effective = crate::config::load_effective_config().ok();
     let config = auto_mode_config_from_toml(effective.as_ref()).unwrap_or_default();
     let remote = REMOTE_AUTO_MODE_CONFIG
@@ -189,7 +189,7 @@ pub fn resolve_auto_mode_config_from_disk() -> crate::agent::config::AutoModeCon
     merge_auto_mode_config(config, remote)
 }
 
-pub fn auto_mode_classify_timeout(
+pub(crate) fn auto_mode_classify_timeout(
     cfg: &crate::agent::config::AutoModeConfig,
 ) -> std::time::Duration {
     let configured = cfg
@@ -219,7 +219,7 @@ pub fn auto_mode_classify_timeout(
 /// when the effective model supports reasoning effort (else stays `None` —
 /// provider default). Explicit config/remote values always win. Returns the
 /// `(prompt_type, reasoning_effort)` the classifier wiring should use.
-pub fn auto_mode_classifier_defaults(
+pub(crate) fn auto_mode_classifier_defaults(
     cfg: &crate::agent::config::AutoModeConfig,
     effective_supports_reasoning_effort: bool,
 ) -> (

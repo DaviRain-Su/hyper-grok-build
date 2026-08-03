@@ -2514,10 +2514,7 @@ fn format_session_info_session_auth_ignores_api_key_env() {
     let info = make_session_info("auto", None, 1000, 10000);
     let text = format_session_info(&info, None, false, false, true);
     assert!(text.contains("Auth method: OAuth"), "{text}");
-    assert!(
-            text.contains("Manage account and credits: https://grok.com/?_s=billing"),
-            "{text}"
-        );
+    assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
     assert!(!text.contains("console.x.ai"), "{text}");
     assert!(!text.contains("grok login"), "{text}");
@@ -2528,10 +2525,7 @@ fn format_session_info_api_key_without_env() {
     let text = format_session_info(&info, None, false, true, false);
     assert!(text.contains("Auth method: API key\n"), "{text}");
     assert!(!text.contains("XAI_API_KEY"), "{text}");
-    assert!(
-            text.contains("Manage account and credits: console.x.ai"),
-            "{text}"
-        );
+    assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(
             text.contains("Run `grok login` to use your SuperGrok subscription instead."),
             "{text}"
@@ -2539,30 +2533,25 @@ fn format_session_info_api_key_without_env() {
     assert!(!text.contains("grok.com"), "{text}");
 }
 #[test]
-fn format_session_info_api_key_auth_notes_console_billing() {
+fn format_session_info_api_key_auth_suggests_grok_login() {
     let info = make_session_info("auto", None, 1000, 10000);
     let text = format_session_info(&info, None, false, true, true);
     assert!(text.contains("Auth method: API key (XAI_API_KEY)"), "{text}");
-    assert!(
-            text.contains("Manage account and credits: console.x.ai"),
-            "{text}"
-        );
+    assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(
             text.contains("Run `grok login` to use your SuperGrok subscription instead."),
             "{text}"
         );
     assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
+    assert!(!text.contains("console.x.ai"), "{text}");
     assert!(!text.contains("grok.com"), "{text}");
 }
 #[test]
-fn format_session_info_session_only_manage_at_grok_com() {
+fn format_session_info_session_only_shows_oauth() {
     let info = make_session_info("auto", None, 1000, 10000);
     let text = format_session_info(&info, None, false, false, false);
     assert!(text.contains("Auth method: OAuth"), "{text}");
-    assert!(
-            text.contains("Manage account and credits: https://grok.com/?_s=billing"),
-            "{text}"
-        );
+    assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
     assert!(!text.contains("console.x.ai"), "{text}");
     assert!(!text.contains("grok login"), "{text}");

@@ -20,7 +20,7 @@ use toml::Value as TomlValue;
 ///
 /// Returns the resolved boolean (the `Resolved::source` is discarded
 /// for this call site — session-actor only needs the value).
-pub fn resolve_mcp_liveness_watchers(
+pub(crate) fn resolve_mcp_liveness_watchers(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
     managed: Option<&TomlValue>,
@@ -58,7 +58,7 @@ pub fn resolve_mcp_liveness_watchers(
 ///
 /// Returns the resolved boolean (the `Resolved::source` is discarded
 /// for this call site — session-actor only needs the value).
-pub fn resolve_mcp_auto_restart(
+pub(crate) fn resolve_mcp_auto_restart(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
     managed: Option<&TomlValue>,
@@ -136,7 +136,7 @@ pub fn resolve_mcp_push_server_status(
 /// Returns the resolved boolean (the `Resolved::source` is discarded
 /// for this call site — the leader's watcher-spawn only needs the
 /// value).
-pub fn resolve_mcp_recursive_config_watch(
+pub(crate) fn resolve_mcp_recursive_config_watch(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
     managed: Option<&TomlValue>,
@@ -174,7 +174,7 @@ static REMOTE_MCP_STARTUP_TIMEOUT_SECS: std::sync::atomic::AtomicU64 =
 
 /// Record the remote settings `mcp_startup_timeout_secs` for the free-function
 /// resolver. Call wherever `RemoteSettings` is applied. `0` is treated as unset.
-pub fn cache_remote_mcp_startup_timeout_secs(value: Option<u64>) {
+pub(crate) fn cache_remote_mcp_startup_timeout_secs(value: Option<u64>) {
     REMOTE_MCP_STARTUP_TIMEOUT_SECS.store(value.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -189,7 +189,7 @@ fn cached_remote_mcp_startup_timeout_secs() -> Option<u64> {
 /// remote tier. Global fallback only — a per-server
 /// `startup_timeout_sec` / `_meta.startupTimeoutMs` still wins (see
 /// `session::mcp_servers`).
-pub fn resolved_mcp_startup_timeout_secs() -> u64 {
+pub(crate) fn resolved_mcp_startup_timeout_secs() -> u64 {
     resolve_mcp_startup_timeout_secs(cached_remote_mcp_startup_timeout_secs())
 }
 
@@ -197,7 +197,7 @@ pub fn resolved_mcp_startup_timeout_secs() -> u64 {
 /// requirements.toml `[mcp].startup_timeout_sec` > env (`MCP_TIMEOUT` ms /
 /// `GROK_MCP_STARTUP_TIMEOUT_SECS` secs) > effective `config.toml [mcp]` >
 /// remote settings `remote` > [`DEFAULT_MCP_STARTUP_TIMEOUT_SECS`].
-pub fn resolve_mcp_startup_timeout_secs(remote: Option<u64>) -> u64 {
+pub(crate) fn resolve_mcp_startup_timeout_secs(remote: Option<u64>) -> u64 {
     fn extract(v: &toml::Value) -> Option<u64> {
         v.get("mcp")?
             .get("startup_timeout_sec")?
@@ -281,7 +281,7 @@ pub const DEFAULT_MAX_MCP_OUTPUT_BYTES: usize = xai_grok_tools::MCP_MAX_OUTPUT_B
 /// caches the remote tier for a free-function resolver still living in shell —
 /// this pushes the *fully resolved* value into tools (tools cannot re-read
 /// config/requirements on every use).
-pub fn cache_remote_max_mcp_output_bytes(remote: Option<u64>) {
+pub(crate) fn cache_remote_max_mcp_output_bytes(remote: Option<u64>) {
     xai_grok_tools::set_mcp_max_output_bytes(resolve_max_mcp_output_bytes(remote));
 }
 
@@ -304,7 +304,7 @@ fn max_mcp_output_bytes_from_toml(v: &toml::Value) -> Option<usize> {
 ///   3. effective `config.toml [mcp] max_output_bytes`
 ///   4. remote settings `RemoteSettings.max_mcp_output_bytes`
 ///   5. [`DEFAULT_MAX_MCP_OUTPUT_BYTES`] (20_000)
-pub fn resolve_max_mcp_output_bytes(remote: Option<u64>) -> usize {
+pub(crate) fn resolve_max_mcp_output_bytes(remote: Option<u64>) -> usize {
     let remote_usize = remote
         .and_then(|n| usize::try_from(n).ok())
         .filter(|n| *n > 0);
@@ -358,7 +358,7 @@ fn project_max_mcp_output_bytes(cwd: &std::path::Path) -> Option<usize> {
 /// The project tier only wins when requirements and env are absent (it sits
 /// above user config / remote settings / default), so `Some` here is simply
 /// "requirements and env unset, project value present".
-pub fn resolve_max_mcp_output_bytes_for_cwd(cwd: &std::path::Path) -> Option<usize> {
+pub(crate) fn resolve_max_mcp_output_bytes_for_cwd(cwd: &std::path::Path) -> Option<usize> {
     let requirements = crate::config::load_merged_requirements()
         .as_ref()
         .and_then(max_mcp_output_bytes_from_toml);

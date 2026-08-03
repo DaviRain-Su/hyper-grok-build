@@ -162,6 +162,11 @@ pub struct SamplingErrorInfo {
     pub message: String,
     pub is_retryable: bool,
     pub retry_after_secs: Option<u64>,
+    /// Parsed `x-should-retry` response header. `Some(false)` = the server
+    /// says the failure is request-content-caused; never retry. `None` =
+    /// header absent, or payload from an older peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub should_retry: Option<bool>,
     pub model_metadata: Option<ResponseModelMetadata>,
     /// Present only when `kind == EmptyResponse`. Carries the structured
     /// context from the L2 stream so downstream consumers can distinguish
@@ -287,6 +292,7 @@ impl From<&SamplingError> for SamplingErrorInfo {
             kind,
             status_code,
             message,
+            should_retry: err.should_retry_header(),
             is_retryable,
             retry_after_secs,
             model_metadata,
@@ -302,6 +308,26 @@ impl From<&SamplingError> for SamplingErrorInfo {
 mod tests {
     use super::*;
     use reqwest::StatusCode;
+
+    #[test]
+    fn from_sampling_error_carries_should_retry_header() {
+        let err = SamplingError::Api {
+            status: StatusCode::from_u16(529).expect("valid status"),
+            message: "Overloaded".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: Some(false),
+        };
+        let info = SamplingErrorInfo::from(&err);
+        assert_eq!(info.should_retry, Some(false));
+
+        // Non-Api variants have no header — stays None.
+        let stream_err = SamplingError::StreamError {
+            error_type: "overloaded_error".into(),
+            message: "Overloaded".into(),
+        };
+        assert_eq!(SamplingErrorInfo::from(&stream_err).should_retry, None);
+    }
 
     #[test]
     fn auth_variant_classified_as_auth() {

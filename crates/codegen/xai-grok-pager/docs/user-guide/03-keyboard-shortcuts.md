@@ -93,9 +93,31 @@ Switch between the prompt input and scrollback pane.
 |-----|---------|---------|--------|
 | `Tab` | `Space` (and `i` in vim mode) | Scrollback focused | Focus the prompt input |
 | `Tab` | | Prompt focused | Focus the scrollback (both simple and vim scrollback modes) |
+| `Tab` | `Shift+Tab` (backwards) | Question card focused | Walk the card's answers, wrapping round at the ends. Focus stays in the card |
 | `Enter` | | Prompt focused | Send the current prompt |
 
 **Esc is not a focus key.** It follows the cancel / clear / rewind semantics below. The mid-turn cancel is the only branch gated on `[ui].vim_mode` (scrollback nav); nothing depends on `[ui].simple_mode` (prompt editor). Overlays, modals, slash/file dropdowns, voice, search, and selection still steal Esc first.
+
+## Question card (`ask_user_question`)
+
+While the agent is waiting on an answer, the card owns the keyboard.
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓`, `j` / `k` | Move between answers (clamped at the ends) |
+| `Tab` / `Shift+Tab` | Walk the answers in a loop: every answer of this question, then the next question's, and off the last answer back to the first |
+| `←` / `→`, `h` / `l`, `[` / `]` | Previous / next question |
+| `1`–`9`, `a`–`f` | Pick that answer directly |
+| `z` | Jump to the free-text row and start typing |
+| `Space` | Toggle the focused answer (multi-select), or start typing on the free-text row |
+| `Enter` | Select and advance, submit on the last question, or edit the free-text row |
+| `Esc` | Unselect this question's answer. It does not move focus |
+| `y` | Copy the focused answer |
+| `Shift+X` | Dismiss the question (the agent continues without an answer) |
+| `Ctrl+F` | Fullscreen the card |
+
+While typing a free-text answer, `Enter` submits and `Esc` returns to the
+answer rows; every other key goes to the text field.
 
 ## Escape
 

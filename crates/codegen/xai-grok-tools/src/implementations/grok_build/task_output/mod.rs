@@ -1045,6 +1045,7 @@ pub(crate) mod test_helpers {
             owner_session_id: None,
             description: None,
             is_backgrounded: false,
+            output_total_bytes: 0,
         }
     }
 

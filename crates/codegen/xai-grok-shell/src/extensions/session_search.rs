@@ -21,7 +21,7 @@ use super::ExtResult;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SearchSessionsRequest {
+pub(crate) struct SearchSessionsRequest {
     /// The search query string.
     pub query: String,
     /// Optional workspace directory to scope results to.
@@ -44,7 +44,7 @@ fn default_limit() -> usize {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SearchSessionsResponse {
+pub(crate) struct SearchSessionsResponse {
     pub results: Vec<SearchSessionHit>,
     pub next_offset: Option<usize>,
     pub total_estimate: Option<usize>,

@@ -209,7 +209,7 @@ impl HeapProfileMonitor {
         self.upload_in_flight
     }
 
-    pub fn clear_upload_in_flight(&mut self) {
+    pub(crate) fn clear_upload_in_flight(&mut self) {
         self.upload_in_flight = false;
     }
 
@@ -256,7 +256,7 @@ impl HeapProfileMonitor {
 
     /// Start a dump when a threshold is crossed. Deferred paths return `None`
     /// without latching.
-    pub fn begin_tick(&mut self) -> Option<PendingDump> {
+    pub(crate) fn begin_tick(&mut self) -> Option<PendingDump> {
         if !self.config.enabled || self.upload_in_flight {
             if self.upload_in_flight {
                 tracing::debug!(reason = "in_flight", "heap_profile: skipped");
@@ -298,7 +298,7 @@ impl HeapProfileMonitor {
         })
     }
 
-    pub fn finish_tick(&mut self, threshold: u64, outcome: DumpAttemptOutcome) {
+    pub(crate) fn finish_tick(&mut self, threshold: u64, outcome: DumpAttemptOutcome) {
         if should_latch(outcome) {
             self.latched.insert(threshold);
         }
@@ -357,7 +357,7 @@ impl HeapProfileMonitor {
 }
 
 /// Work item produced by [`HeapProfileMonitor::begin_tick`].
-pub struct PendingDump {
+pub(crate) struct PendingDump {
     pub threshold: u64,
     stats: super::JemallocStats,
     session_id: Arc<str>,
@@ -389,6 +389,16 @@ impl PendingDump {
             rss_peak_bytes = rss_peak,
             session_id,
             "heap_profile: threshold_crossed"
+        );
+
+        xai_grok_telemetry::session_ctx::log_event(
+            xai_grok_telemetry::events::HeapThresholdCrossed {
+                threshold_bytes: threshold,
+                resident_bytes: stats.resident,
+                allocated_bytes: stats.allocated,
+                // The sampler reports 0 when the platform has no cheap read.
+                rss_peak_bytes: (rss_peak > 0).then_some(rss_peak),
+            },
         );
 
         let temp_dir = match PrivateTempDir::create() {

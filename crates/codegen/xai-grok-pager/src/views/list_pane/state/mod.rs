@@ -2775,4 +2775,42 @@ mod tests {
         assert!(state.handle_paste("a\nb", &items));
         assert_eq!(state.input_text(), "a\nb");
     }
+
+    #[test]
+    fn content_down_clears_stale_scrollbar_drag_latch() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        use ratatui::layout::Rect;
+
+        let items: Vec<TestItem> = (0..40).map(TestItem::new).collect();
+        let mut state = ListPaneState::new(WrapMode::NoWrap, false);
+        let pane = Rect::new(0, 0, 80, 10);
+        let track = Rect::new(79, 0, 1, 10);
+        state.prepare_layout(&items, pane.width, pane.height);
+        state.set_scrollbar_area(Some(track));
+
+        assert!(state.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            track.x,
+            5,
+            pane,
+            &items,
+        ));
+        assert!(
+            state.is_scrollbar_dragging(),
+            "press on the track must latch a thumb drag"
+        );
+
+        // Lost Up, then a content press — latch must not stick.
+        assert!(state.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            10,
+            4,
+            pane,
+            &items,
+        ));
+        assert!(
+            !state.is_scrollbar_dragging(),
+            "a later content Down must clear a stale scrollbar latch"
+        );
+    }
 }

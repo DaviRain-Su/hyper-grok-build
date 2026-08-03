@@ -2,7 +2,7 @@ pub mod auth;
 pub(crate) mod auth_gate;
 pub mod billing;
 pub mod bundle;
-pub mod chat_conversation_history;
+pub(crate) mod chat_conversation_history;
 pub mod code_nav;
 pub mod debug;
 pub mod feedback;
@@ -27,9 +27,9 @@ pub mod rewind;
 pub mod rollout;
 pub mod routing;
 pub mod search;
-pub mod session_admin;
+pub(crate) mod session_admin;
 pub mod session_search;
-pub mod session_state;
+pub(crate) mod session_state;
 pub mod session_updates;
 pub mod share;
 pub mod skills;
@@ -44,13 +44,13 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 pub type ExtResult = Result<acp::ExtResponse, acp::Error>;
-pub fn parse_params<T: DeserializeOwned>(args: &acp::ExtRequest) -> Result<T, acp::Error> {
+pub(crate) fn parse_params<T: DeserializeOwned>(args: &acp::ExtRequest) -> Result<T, acp::Error> {
     parse_params_str(args.params.get())
 }
 /// Deserialize ACP params from their raw JSON string, mapping a parse failure
 /// to `invalid_params`. Used by [`parse_params`] and the bridge `encode` hooks,
 /// which hold the params `RawValue` directly.
-pub fn parse_params_str<T: DeserializeOwned>(raw: &str) -> Result<T, acp::Error> {
+pub(crate) fn parse_params_str<T: DeserializeOwned>(raw: &str) -> Result<T, acp::Error> {
     serde_json::from_str(raw)
         .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {}", e)))
 }
@@ -66,13 +66,13 @@ pub fn to_ext_response<T: Serialize>(result: anyhow::Result<T>) -> ExtResult {
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 /// Wrap a serializable value as an `ExtResponse` without the `ExtMethodResult` envelope.
-pub fn to_raw_response<T: Serialize>(v: &T) -> ExtResult {
+pub(crate) fn to_raw_response<T: Serialize>(v: &T) -> ExtResult {
     serde_json::value::to_raw_value(v)
         .map(|raw| acp::ExtResponse::new(Arc::from(raw)))
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 /// Convert a result with optional warning to an ExtResponse.
-pub fn to_ext_response_partial<T: Serialize>(
+pub(crate) fn to_ext_response_partial<T: Serialize>(
     result: anyhow::Result<T>,
     warning: Option<String>,
 ) -> ExtResult {

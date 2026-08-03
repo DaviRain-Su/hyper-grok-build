@@ -293,7 +293,7 @@ async fn handle_session_list(
 /// Build sessions in exactly the requested directory. A page walk cannot reach
 /// past `over_fetch(limit)` rows per cwd: the local lane re-scans that window
 /// each page instead of seeking to the cursor.
-pub async fn handle_list_sessions(
+pub(crate) async fn handle_list_sessions(
     agent: &MvpAgent,
     args: acp::ListSessionsRequest,
 ) -> Result<acp::ListSessionsResponse, acp::Error> {

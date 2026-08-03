@@ -8,7 +8,7 @@ use crate::scrollback::selection::SelectionBox;
 use crate::scrollback::types::DisplayMode;
 use crate::theme::Theme;
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
-use crate::views::file_search::line_viewer::LineViewerState;
+use crate::views::file_search::line_viewer::{LineViewerState, PlanViewerItem};
 use crate::views::list_pane::ListItem;
 use crate::views::plan_approval_view::PlanApprovalFocus;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -415,6 +415,47 @@ impl AgentView {
         let is_plan_preview =
             viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
 
+        let scrollbar_owns_gesture = match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                viewer.list_state.scrollbar_hit(mouse.column, mouse.row)
+            }
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
+                viewer.list_state.is_scrollbar_dragging()
+            }
+            _ => false,
+        };
+        if scrollbar_owns_gesture {
+            viewer.list_state.handle_mouse_event(
+                mouse.kind,
+                mouse.column,
+                mouse.row,
+                popup_area.unwrap_or_default(),
+                &viewer.lines,
+            );
+            if is_plan_preview {
+                viewer.plan_mut().gutter_drag_start = None;
+                viewer.plan_mut().gutter_drag_end = None;
+            }
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let was_commenting = self
+                    .plan_approval_view
+                    .as_ref()
+                    .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
+                if let Some(ref mut pav) = self.plan_approval_view {
+                    pav.focus = PlanApprovalFocus::Preview;
+                    if was_commenting {
+                        pav.commenting_range = None;
+                        pav.editing_comment_id = None;
+                        pav.stashed_feedback_prompt = None;
+                    }
+                }
+                if was_commenting {
+                    self.prompt.set_text("");
+                }
+            }
+            return InputOutcome::Changed;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // Click on close button -> cancel.
@@ -470,6 +511,19 @@ impl AgentView {
                     }
                     return self.send_casual_plan_comments();
                 }
+                // Mermaid buttons before click-to-comment (early return ends
+                // the `viewer` borrow so `handle_inline_media_click` can take
+                // `&mut self`).
+                let mermaid_hit = self
+                    .inline_media_hits
+                    .mermaid_buttons
+                    .iter()
+                    .any(|(rect, _, _)| rect.contains((mouse.column, mouse.row).into()));
+                if mermaid_hit {
+                    return self
+                        .handle_inline_media_click(mouse.column, mouse.row)
+                        .unwrap_or(InputOutcome::Changed);
+                }
                 if modal_area.is_none_or(|a| !a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some()
                         && self
@@ -509,6 +563,20 @@ impl AgentView {
             }
             MouseEventKind::Moved => {
                 let mut changed = false;
+                // Redraw only when mermaid button hover would change.
+                if self.last_mouse_pos != (mouse.column, mouse.row) {
+                    let old = self.last_mouse_pos;
+                    self.last_mouse_pos = (mouse.column, mouse.row);
+                    let hits = |col: u16, row: u16| {
+                        self.inline_media_hits
+                            .mermaid_buttons
+                            .iter()
+                            .any(|(rect, _, _)| rect.contains((col, row).into()))
+                    };
+                    if hits(old.0, old.1) || hits(mouse.column, mouse.row) {
+                        changed = true;
+                    }
+                }
                 let close_hover =
                     close_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
                 if close_hover != viewer.close_hovered {
@@ -684,10 +752,21 @@ impl AgentView {
                 // edit-comment) for that row. Same shortcut as
                 // selecting + pressing `c` / Enter. Works for both
                 // plan-approval and casual plan-preview modes.
+                // Skip Mermaid affordance rows (button hits handled above).
                 let on_list_row = mouse.row >= area.y && {
                     let ry = (mouse.row - area.y) as usize;
                     let vy = viewer.list_state.scroll_offset() + ry;
-                    viewer.list_state.layout().item_at_y(vy).is_some()
+                    viewer
+                        .list_state
+                        .layout()
+                        .item_at_y(vy)
+                        .map(|vi| {
+                            let pi = viewer.list_state.to_physical(vi);
+                            viewer.lines.get(pi).is_some_and(|item| {
+                                !matches!(item, PlanViewerItem::MermaidAffordance(_))
+                            })
+                        })
+                        .unwrap_or(false)
                 };
                 // Skip the click-to-comment trigger if the user is
                 // already composing a comment. Without this guard, any
@@ -1009,3 +1088,7 @@ impl AgentView {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "viewer_tests.rs"]
+mod tests;

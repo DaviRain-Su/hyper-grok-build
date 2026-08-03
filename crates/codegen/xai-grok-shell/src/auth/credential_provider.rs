@@ -35,7 +35,7 @@ impl xai_grok_sampler::BearerResolver for WireValidBearerResolver {
 }
 /// Production impl: wraps the live `AuthManager`. 401 recovery
 /// delegates to `AuthManager::unauthorized_recovery`.
-pub struct ShellAuthCredentialProvider {
+pub(crate) struct ShellAuthCredentialProvider {
     auth_manager: Arc<AuthManager>,
     static_credentials: GrokAuthCredentials,
 }
@@ -250,7 +250,7 @@ impl xai_file_utils::storage_client::Auth401AttributionCallback for StorageClien
 ///
 /// Before upgrade, the bootstrap manager provides disk-read-only
 /// behavior (equivalent to the pre-consolidation OTel path).
-pub struct OtelAuthCredentialProvider {
+pub(crate) struct OtelAuthCredentialProvider {
     /// Bootstrap manager used before the live one is available.
     bootstrap: Arc<AuthManager>,
     /// Swapped to the agent's live `AuthManager` via `set_live()`.
@@ -271,10 +271,10 @@ impl OtelAuthCredentialProvider {
     /// `snapshot()` reads from the live manager (proactive refresh
     /// keeps it hot) and `refresh_after_unauthorized()` drives the
     /// full recovery state machine.
-    pub fn set_live(&self, auth_manager: Arc<AuthManager>) {
+    pub(crate) fn set_live(&self, auth_manager: Arc<AuthManager>) {
         self.live.store(Arc::new(Some(auth_manager)));
     }
-    pub fn set_deployment_key(&self, key: String) {
+    pub(crate) fn set_deployment_key(&self, key: String) {
         self.deployment_key.store(Arc::new(Some(key)));
     }
     /// Single-load snapshot of the live/bootstrap state.
@@ -380,7 +380,7 @@ static OTEL_PROVIDER: std::sync::OnceLock<Arc<OtelAuthCredentialProvider>> =
 /// `AuthManager`. Call this once after the main `AuthManager` is
 /// constructed and has its refresher configured. No-ops if the OTel
 /// layer was never initialized (e.g. `InstrumentationMode::Disabled`).
-pub fn wire_otel_auth_manager(auth_manager: Arc<AuthManager>) {
+pub(crate) fn wire_otel_auth_manager(auth_manager: Arc<AuthManager>) {
     if let Some(provider) = OTEL_PROVIDER.get() {
         provider.set_live(auth_manager);
         tracing::debug!("otel: upgraded credential provider to live AuthManager");
@@ -392,7 +392,7 @@ pub fn wire_otel_auth_manager(auth_manager: Arc<AuthManager>) {
 /// stamps per-export, so both pipelines attribute identically. No-op when
 /// the OTel provider was never initialized or the external stream is
 /// dormant.
-pub fn sync_external_otel_identity() {
+pub(crate) fn sync_external_otel_identity() {
     if let Some(provider) = OTEL_PROVIDER.get() {
         let snapshot = provider.snapshot();
         xai_grok_telemetry::external::set_identity(
@@ -401,7 +401,7 @@ pub fn sync_external_otel_identity() {
     }
 }
 /// No-ops if the OTel layer was never initialized.
-pub fn wire_otel_deployment_key(key: String) {
+pub(crate) fn wire_otel_deployment_key(key: String) {
     if let Some(provider) = OTEL_PROVIDER.get() {
         provider.set_deployment_key(key);
         tracing::debug!("otel: set deployment key on credential provider");

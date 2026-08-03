@@ -35,7 +35,7 @@ pub struct PersistenceContentChunk {
 }
 
 impl PersistenceContentChunk {
-    pub fn new(content_chunks: Vec<acp::ContentBlock>) -> Self {
+    pub(crate) fn new(content_chunks: Vec<acp::ContentBlock>) -> Self {
         Self { content_chunks }
     }
 }
@@ -482,7 +482,7 @@ pub enum LocalSessionResolutionKind {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ResolvedLocalSession {
+pub(crate) struct ResolvedLocalSession {
     pub session_id: String,
     pub cwd: String,
     pub resolution_kind: LocalSessionResolutionKind,
@@ -495,7 +495,7 @@ pub struct ResolvedLocalSession {
 /// and previously-restored children.
 ///
 /// Returns `None` when no local match exists in any candidate.
-pub fn resolve_local_session_for_repo(
+pub(crate) fn resolve_local_session_for_repo(
     session_id: &str,
     candidate_cwds: &[&str],
 ) -> Option<ResolvedLocalSession> {
@@ -503,7 +503,7 @@ pub fn resolve_local_session_for_repo(
     resolve_local_session_for_repo_in_root(session_id, candidate_cwds, &sessions_root)
 }
 
-pub fn resolve_local_session_for_repo_in_root(
+pub(crate) fn resolve_local_session_for_repo_in_root(
     session_id: &str,
     candidate_cwds: &[&str],
     sessions_root: &Path,
@@ -613,7 +613,7 @@ pub fn resolve_local_session_any_cwd(session_id: &str) -> Option<String> {
         .flatten()
 }
 
-pub fn resolve_local_session_any_cwd_result(session_id: &str) -> io::Result<Option<String>> {
+pub(crate) fn resolve_local_session_any_cwd_result(session_id: &str) -> io::Result<Option<String>> {
     resolve_local_session_any_cwd_in_root(session_id, &grok_home().join("sessions"))
         .map_err(io::Error::other)
 }
@@ -664,7 +664,7 @@ fn session_exists_in_root(session_id: &str, sessions_root: &Path) -> bool {
 }
 
 /// Find and read a session summary given only its ID (scans all CWD directories).
-pub fn find_summary_by_session_id(session_id: &str) -> Option<Summary> {
+pub(crate) fn find_summary_by_session_id(session_id: &str) -> Option<Summary> {
     find_summary_by_session_id_in_root(session_id, &grok_home().join("sessions"))
 }
 
@@ -811,7 +811,7 @@ fn resumed_session_sandbox_profile_in_root(
 /// Get file path for storing a large prompt.
 /// Creates the prompts subdirectory if it doesn't exist.
 /// Path format: `{session_dir}/prompts/prompt_{prompt_index}.txt`
-pub fn get_prompt_file_path(info: &Info, prompt_index: usize) -> PathBuf {
+pub(crate) fn get_prompt_file_path(info: &Info, prompt_index: usize) -> PathBuf {
     let prompts_dir = session_dir(info).join("prompts");
     std::fs::create_dir_all(&prompts_dir).ok();
     prompts_dir.join(format!("prompt_{}.txt", prompt_index))
@@ -954,7 +954,7 @@ pub struct Summary {
 }
 
 /// Current `grok_home` as a UTF-8 string, or `None` if the path isn't valid UTF-8.
-pub fn grok_home_string() -> Option<String> {
+pub(crate) fn grok_home_string() -> Option<String> {
     crate::util::grok_home::grok_home()
         .to_str()
         .map(String::from)
@@ -965,7 +965,7 @@ pub fn default_model_id() -> acp::ModelId {
 }
 
 impl Summary {
-    pub fn new(info: &Info, model_id: acp::ModelId) -> std::io::Result<Self> {
+    pub(crate) fn new(info: &Info, model_id: acp::ModelId) -> std::io::Result<Self> {
         let git_metadata =
             xai_grok_workspace::session::git::resolve_persisted_session_git_metadata_sync(
                 std::path::Path::new(&info.cwd),
@@ -1523,7 +1523,7 @@ fn actor_channel() -> (
 }
 
 #[derive(Debug)]
-pub enum DurableAppendError {
+pub(crate) enum DurableAppendError {
     NotCommitted(io::Error),
     Committed(io::Error),
     AcknowledgementLost(io::Error),
@@ -1571,7 +1571,7 @@ impl PersistenceHandle {
     /// [`DurableAppendError::NotCommitted`] is safe to retry; [`DurableAppendError::Committed`]
     /// means the replay line landed; [`DurableAppendError::AcknowledgementLost`] has unknown status.
     /// No-op handles return `Unsupported`.
-    pub async fn append_update_durably(
+    pub(crate) async fn append_update_durably(
         &self,
         update: SessionUpdate,
     ) -> Result<(), DurableAppendError> {
@@ -2556,7 +2556,7 @@ pub(crate) async fn new(
 /// - Skips remote sync (subagent sessions are not synced to cloud).
 /// - Skips relay sync (subagent sessions are not shared).
 /// - Skips gateway (lifecycle notifications are handled by the coordinator).
-pub async fn new_with_explicit_dir(
+pub(crate) async fn new_with_explicit_dir(
     info: &Info,
     target_dir: PathBuf,
     model_id: acp::ModelId,
@@ -3054,7 +3054,7 @@ const DEFAULT_CLEANUP_TTL_DAYS: u32 = 30;
 /// This is a **synchronous** function intended to be called via
 /// `tokio::task::spawn_blocking` so it runs on the thread pool and
 /// never competes with the agent's single-threaded `LocalSet`.
-pub fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
+pub(crate) fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
     CLEANUP_SESSIONS_ONCE.call_once(|| {
         let ttl_days = resolve_cleanup_ttl_days();
         let root = grok_home();

@@ -635,3 +635,218 @@
         );
     }
 
+    /// Base snapshot for the Completed-before-Backgrounded race tests; tweak
+    /// fields per test (the shared helpers hardcode output/description).
+    fn race_snapshot(
+        task_id: &str,
+        command: &str,
+        exit_code: Option<i32>,
+    ) -> xai_grok_tools::types::TaskSnapshot {
+        xai_grok_tools::types::TaskSnapshot {
+            task_id: task_id.into(),
+            command: command.into(),
+            display_command: None,
+            cwd: "/tmp".into(),
+            start_time: std::time::SystemTime::now(),
+            end_time: Some(std::time::SystemTime::now()),
+            output: String::new(),
+            output_file: "/tmp/out.log".into(),
+            truncated: false,
+            exit_code,
+            signal: None,
+            completed: true,
+            kind: Default::default(),
+            block_waited: false,
+            explicitly_killed: false,
+            owner_session_id: None,
+            description: None,
+            is_backgrounded: true,
+            output_total_bytes: 0,
+        }
+    }
+
+    fn completed_notif_from_snapshot(
+        session_id: &str,
+        task_snapshot: xai_grok_tools::types::TaskSnapshot,
+        replayed: bool,
+    ) -> acp::ExtNotification {
+        let notif = SessionNotification {
+            session_id: acp::SessionId::new(session_id),
+            update: XaiSessionUpdate::TaskCompleted {
+                task_snapshot,
+                will_wake: false,
+            },
+            meta: replayed.then(crate::acp::meta::ReplayMetaStamp::replayed),
+        };
+        let raw = serde_json::value::to_raw_value(&notif).unwrap();
+        acp::ExtNotification::new("x.ai/task_completed", std::sync::Arc::from(raw))
+    }
+
+    /// Short bg shells can exit — and `TaskCompleted` arrive — before their
+    /// `TaskBackgrounded`. The late `TaskBackgrounded` must not resurrect the
+    /// finished task as Running or push a stray "Task started" block.
+    #[test]
+    fn completed_before_backgrounded_does_not_resurrect_running() {
+        let mut app = make_app_with_agent("sess-1");
+
+        // TaskCompleted first, for a task the pager has never seen.
+        let mut snapshot = race_snapshot("task-race", "echo done", Some(0));
+        snapshot.output = "task output line".into();
+        let done = completed_notif_from_snapshot("sess-1", snapshot, false);
+        assert!(handle_task_completed(&done, &mut app));
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let task = agent
+                .session
+                .bg_tasks
+                .get("task-race")
+                .expect("unknown TaskCompleted must record terminal state");
+            assert_eq!(task.status, BgTaskStatus::Done);
+            assert_eq!(task.stdout, "task output line");
+            assert_eq!(agent.scrollback.len(), 1, "completed block rendered");
+            assert!(
+                task.scrollback_entry_id.is_some(),
+                "tombstone anchored to the completion block (viewer actions need an entry)"
+            );
+        }
+
+        // The late TaskBackgrounded (with a wire description) arrives.
+        let notif = SessionNotification {
+            session_id: acp::SessionId::new("sess-1"),
+            update: XaiSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-race".into(),
+                task_id: "task-race".into(),
+                command: "echo done".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/output.log".into(),
+                monitor_description: None,
+                description: Some("wait for build".into()),
+            },
+            meta: None,
+        };
+        let raw = serde_json::value::to_raw_value(&notif).unwrap();
+        let late = acp::ExtNotification::new("x.ai/task_backgrounded", std::sync::Arc::from(raw));
+        assert!(handle_task_backgrounded(&late, &mut app));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let task = &agent.session.bg_tasks["task-race"];
+        assert_eq!(
+            task.status,
+            BgTaskStatus::Done,
+            "late TaskBackgrounded must not overwrite a terminal status with Running"
+        );
+        assert_eq!(task.tool_call_id, "tc-race", "tool_call_id backfilled");
+        assert_eq!(
+            task.description.as_deref(),
+            Some("wait for build"),
+            "description backfilled from the late notification"
+        );
+        assert_eq!(task.stdout, "task output line", "snapshot stdout kept");
+        assert_eq!(
+            agent.session.bg_tool_call_to_task.get("tc-race"),
+            Some(&"task-race".to_string())
+        );
+        assert_eq!(
+            agent.scrollback.len(),
+            1,
+            "no stray 'Task started' block after the completion"
+        );
+        assert!(
+            !agent.scrollback.needs_animation(),
+            "nothing may animate as running for a finished task"
+        );
+    }
+
+    /// Same race on the demotion path (foreground Execute auto-backgrounded):
+    /// the pending Execute block is still demoted to a finished BgTask block
+    /// and the terminal status survives.
+    #[test]
+    fn completed_before_backgrounded_demotion_finishes_execute_block() {
+        let mut app = make_app_with_agent("sess-1");
+        let tc_id = "call-race-demote";
+
+        setup_pending_execute_tool(&mut app, tc_id);
+
+        let done = make_task_completed_notif("sess-1", "task-demote", "sleep 9999", Some(1));
+        assert!(handle_task_completed(&done, &mut app));
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(
+                agent.session.bg_tasks["task-demote"].status,
+                BgTaskStatus::Failed
+            );
+            assert_eq!(agent.scrollback.len(), 2, "Execute block + failed block");
+        }
+
+        let late = make_task_backgrounded_notif("sess-1", tc_id, "task-demote", "sleep 9999");
+        assert!(handle_task_backgrounded(&late, &mut app));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let task = &agent.session.bg_tasks["task-demote"];
+        assert_eq!(
+            task.status,
+            BgTaskStatus::Failed,
+            "terminal status survives the late demotion"
+        );
+        assert_eq!(agent.scrollback.len(), 2, "no extra block from the demotion");
+        let entry = agent.scrollback.get(0).unwrap();
+        assert!(
+            matches!(entry.block, RenderBlock::BgTask(_)),
+            "Execute block demoted to BgTask"
+        );
+        assert!(
+            !agent.scrollback.needs_animation(),
+            "the demoted entry must be finished, not animating"
+        );
+        assert!(
+            agent.session.tracker.pending_tool_entry_id(tc_id).is_none(),
+            "pending tool drained"
+        );
+    }
+
+    /// A completion tombstone prefers the snapshot's model-supplied
+    /// description, so the race renders the same label as the normal order.
+    #[test]
+    fn unknown_completed_prefers_snapshot_description() {
+        let mut app = make_app_with_agent("sess-1");
+
+        let mut snapshot = race_snapshot("task-desc", "cargo build", Some(0));
+        snapshot.description = Some("build the app".into());
+        let done = completed_notif_from_snapshot("sess-1", snapshot, false);
+        assert!(handle_task_completed(&done, &mut app));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.session.bg_tasks["task-desc"].description.as_deref(),
+            Some("build the app")
+        );
+    }
+
+    /// A monitor's completion tombstone keeps the Monitor rendering.
+    #[test]
+    fn unknown_completed_monitor_kind_marks_is_monitor() {
+        let mut app = make_app_with_agent("sess-1");
+
+        let mut snapshot = race_snapshot("task-mon", "tail -f x.log", Some(0));
+        snapshot.kind = xai_grok_tools::computer::types::TaskKind::Monitor;
+        let done = completed_notif_from_snapshot("sess-1", snapshot, false);
+        assert!(handle_task_completed(&done, &mut app));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.session.bg_tasks["task-mon"].is_monitor);
+    }
+
+    /// A tombstone from a replayed completion is historical context: it must
+    /// not read as new activity (mirrors restored `TaskBackgrounded`s).
+    #[test]
+    fn replayed_unknown_completed_marks_tombstone_restored() {
+        let mut app = make_app_with_agent("sess-1");
+
+        let snapshot = race_snapshot("task-replay", "echo hi", Some(0));
+        let done = completed_notif_from_snapshot("sess-1", snapshot, true);
+        assert!(handle_task_completed(&done, &mut app));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.session.bg_tasks["task-replay"].restored_from_replay);
+    }
+

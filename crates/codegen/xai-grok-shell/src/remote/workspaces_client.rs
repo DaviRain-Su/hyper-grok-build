@@ -75,7 +75,7 @@ impl WorkspacesClient {
         }
     }
 
-    pub async fn list_workspaces(&self, q: &WsQuery) -> Result<ListWorkspacesPage, WsError> {
+    pub(crate) async fn list_workspaces(&self, q: &WsQuery) -> Result<ListWorkspacesPage, WsError> {
         let auth = self.auth.auth().await.map_err(|_| WsError::NoOauth)?;
         if !auth.is_xai_auth() {
             return Err(WsError::NoOauth);

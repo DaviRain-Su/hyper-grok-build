@@ -4735,7 +4735,7 @@ fn format_session_info(
         "{title_line}  Shell version: {version_display}\n{auth_lines}  Session ID: {session_id}{conversation_line}\n  Working directory: {cwd}\n  Model: {model_display}{model_hash_line}{backend_line}{sandbox_line}{turn_line}\n  Context: {used} / {total} tokens ({pct}%)"
     )
 }
-/// Auth section for `/session-info` — login method + where to manage account/credits.
+/// Auth section for `/session-info` — active login method.
 ///
 /// This reflects the process login / ACP auth method, not per-model sampling
 /// credentials (a model `api_key`/`env_key` can still own the turn).
@@ -4747,12 +4747,10 @@ fn format_auth_lines(is_api_key_auth: bool, api_key_env_set: bool) -> String {
             "  Auth method: API key\n"
         };
         return format!(
-            "{method}  Manage account and credits: console.x.ai\n  Run `grok login` to use your SuperGrok subscription instead.\n"
+            "{method}  Run `grok login` to use your SuperGrok subscription instead.\n"
         );
     }
-    String::from(
-        "  Auth method: OAuth\n  Manage account and credits: https://grok.com/?_s=billing\n",
-    )
+    String::from("  Auth method: OAuth\n")
 }
 /// Build the single text content block for a plain `Effect::SendPrompt`.
 ///

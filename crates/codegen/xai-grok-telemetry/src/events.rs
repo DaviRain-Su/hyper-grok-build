@@ -1026,6 +1026,66 @@ pub struct NonGitDecisionEvent {
 // Prompt Latency (every turn)
 // ---------------------------------------------------------------------------
 
+/// Why a [`ProcessResourceUsage`] was sampled, so a mid-life reading is not
+/// read as a post-teardown one.
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceReportTrigger {
+    SessionClose,
+    Periodic,
+}
+
+/// The ceilings this process runs under. The denominator for
+/// `ProcessResourceUsage`: usage against limits is headroom.
+#[derive(Serialize)]
+pub struct ProcessResourceLimits {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nofile_soft: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nofile_hard: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nproc_soft: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nproc_hard: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_parallelism: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cgroup_pids_max: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cgroup_memory_max: Option<String>,
+}
+
+/// Emitted when the jemalloc heap monitor crosses a configured threshold.
+/// The acute signal that a build is growing without bound.
+#[derive(Serialize)]
+pub struct HeapThresholdCrossed {
+    pub threshold_bytes: u64,
+    pub resident_bytes: u64,
+    pub allocated_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rss_peak_bytes: Option<u64>,
+}
+
+/// What this process still holds just after a session was removed. Aggregated
+/// per release, a rising tail is a leak; `resident_sessions` separates leader
+/// mode, where one process serves many sessions and a leak compounds.
+#[derive(Serialize)]
+pub struct ProcessResourceUsage {
+    pub trigger: ResourceReportTrigger,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rss_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_rss_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footprint_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threads: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_files: Option<u64>,
+    pub resident_sessions: usize,
+    pub session_threads: usize,
+}
+
 #[derive(Serialize)]
 pub struct PromptLatency {
     pub turn_index: u32,
@@ -1617,6 +1677,9 @@ pub enum ManualAuthReason {
     RefreshTokenRejected,
     /// Token type has no refresh authority (API key / legacy / OIDC sans refresh token).
     NoRefreshAuthority,
+    /// The operator's auth-provider command could not mint a credential
+    /// unattended, so only an interactive run of it can restore the session.
+    ProviderInteractiveRequired,
     RecoveryExhausted,
     TokenExpiredNoRefresh,
     /// Recovered session violated the `force_login_team_uuid` pin.
@@ -1802,6 +1865,9 @@ telemetry_event!(MultiAgentDiscard, "multi_agent_discard");
 telemetry_event!(RepoChanges, "repo_changes");
 telemetry_event!(NonGitDecisionEvent, "non_git_decision");
 telemetry_event!(PromptLatency, "prompt_latency");
+telemetry_event!(HeapThresholdCrossed, "heap_threshold_crossed");
+telemetry_event!(ProcessResourceUsage, "process_resource_usage");
+telemetry_event!(ProcessResourceLimits, "process_resource_limits");
 telemetry_event!(
     TurnCompleted,
     "turn_completed",

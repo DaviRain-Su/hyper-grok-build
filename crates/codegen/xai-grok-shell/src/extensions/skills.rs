@@ -73,7 +73,7 @@ pub struct SkillsResetResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SkillsToggleRequest {
+pub(crate) struct SkillsToggleRequest {
     /// Skill name to toggle.
     pub name: String,
     /// Whether to enable (`true`) or disable (`false`) the skill.

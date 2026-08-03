@@ -30,7 +30,7 @@ pub struct CreateTerminalRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TerminalIdRequest {
+pub(crate) struct TerminalIdRequest {
     pub session_id: String,
     pub terminal_id: String,
 }
@@ -44,7 +44,7 @@ pub struct CreateTerminalResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PtyCreateRequest {
+pub(crate) struct PtyCreateRequest {
     pub shell: Option<String>,
     pub cwd: Option<String>,
     #[serde(default)]
@@ -60,7 +60,7 @@ pub struct PtyCreateRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PtyLoadRequest {
+pub(crate) struct PtyLoadRequest {
     pub terminal_id: String,
     #[serde(default, rename = "_meta")]
     pub meta: Option<RequestMeta>,
@@ -70,14 +70,14 @@ pub struct PtyLoadRequest {
 /// ignored for PTY terminals (looked up by `terminal_id` alone).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct KillTerminalRequest {
+pub(crate) struct KillTerminalRequest {
     pub terminal_id: String,
     pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PtyResizeRequest {
+pub(crate) struct PtyResizeRequest {
     pub terminal_id: String,
     pub rows: u16,
     pub cols: u16,
@@ -85,14 +85,14 @@ pub struct PtyResizeRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PtyInputNotification {
+pub(crate) struct PtyInputNotification {
     pub terminal_id: String,
     pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TerminalListResponse {
+pub(crate) struct TerminalListResponse {
     pub terminals: Vec<terminal::TerminalInfo>,
 }
 
@@ -348,7 +348,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 
-pub async fn handle_pty_input(params: &serde_json::Value) {
+pub(crate) async fn handle_pty_input(params: &serde_json::Value) {
     use base64::Engine as _;
 
     let Ok(input) = serde_json::from_value::<PtyInputNotification>(params.clone()) else {

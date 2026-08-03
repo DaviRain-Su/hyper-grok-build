@@ -842,6 +842,12 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     "dropping late auto SessionRecap; agent busy (turn or command in flight)"
                 );
                 false
+            } else if should_drop_duplicate_auto_recap(auto, meta.is_replay, &agent.scrollback) {
+                tracing::debug!(
+                    "dropping duplicate live auto SessionRecap; recap already shown since last user turn"
+                );
+                app.notification_service.focus_tracker.mark_recap_shown();
+                false
             } else {
                 app.notification_service.focus_tracker.mark_recap_shown();
                 let recap_block = RenderBlock::session_event(SessionEvent::Recap { summary, auto });

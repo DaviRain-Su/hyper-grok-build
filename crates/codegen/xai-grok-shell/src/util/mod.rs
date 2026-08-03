@@ -46,7 +46,7 @@ pub(crate) fn is_user_instruction_path(
 /// also tears down the helper instead of leaving it running detached.
 /// Aborting an already-finished task is a no-op, so this is safe to hold
 /// across normal scope exit too.
-pub struct AbortOnDrop(pub tokio::task::JoinHandle<()>);
+pub(crate) struct AbortOnDrop(pub tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {

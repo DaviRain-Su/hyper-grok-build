@@ -8,7 +8,7 @@
 # cargo check --all-targets --workspace
 # cargo clippy --all-targets --workspace
 # ```
-channel = "1.92.0"
+channel = "1.93.0"
 components = ["rustfmt", "clippy"]
 profile = "default" # this will override global preferred profile if such is set
 targets = [

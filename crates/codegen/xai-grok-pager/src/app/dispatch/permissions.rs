@@ -10,6 +10,104 @@ use agent_client_protocol as acp;
 // Permission dispatch
 // ---------------------------------------------------------------------------
 
+use crate::views::permission_view::{McpScope, PermissionFocus, PermissionViewState};
+use xai_grok_workspace::permission::{BashCommandSelectedTerms, McpScopeSelection};
+
+/// Free-form pattern taken from the editor on confirm.
+pub(super) struct EditedPattern {
+    pub pattern: String,
+    /// True when the buffer was mutated — routes to `allowed_bash_globs`.
+    pub is_glob: bool,
+}
+
+/// Take the free-form pattern-editor buffer, honoring it only when the resolved
+/// request was in `PatternEdit` focus (and always clearing it, so an abandoned
+/// edit can't leak into a later prompt).
+pub(super) fn take_edited_pattern(
+    agent: &mut AgentView,
+    perm: &PermissionViewState,
+) -> Option<EditedPattern> {
+    agent
+        .permission_pattern_edit
+        .take()
+        .filter(|_| perm.focus == PermissionFocus::PatternEdit)
+        .and_then(|e| {
+            e.trimmed().map(|s| EditedPattern {
+                pattern: s.to_owned(),
+                is_glob: e.is_dirty(),
+            })
+        })
+}
+
+/// Build the ACP response meta for a permission selection — the single source
+/// of truth shared by the main and dashboard dispatch paths. MCP scope wins for
+/// the `allow-always-mcp` id; otherwise a free-form edited pattern (glob when
+/// dirty) wins over the arrow word-scope (literal prefix). `None` when there is
+/// nothing to scope.
+pub(super) fn build_selection_meta(
+    perm: &PermissionViewState,
+    option_id: &acp::PermissionOptionId,
+    edited: Option<EditedPattern>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let obj = |v: serde_json::Value| v.as_object().cloned();
+
+    if let Some(scope) = perm
+        .mcp_scope
+        .as_ref()
+        .filter(|_| option_id.0.as_ref() == "allow-always-mcp")
+    {
+        let selection = match scope.selected {
+            McpScope::Tool => McpScopeSelection::Tool {
+                tool_name: scope.tool_name.clone(),
+            },
+            // Defensive: render disables Server when there is no prefix.
+            McpScope::Server => match &scope.server_prefix {
+                Some(prefix) => McpScopeSelection::Server {
+                    server: prefix.clone(),
+                },
+                None => McpScopeSelection::Tool {
+                    tool_name: scope.tool_name.clone(),
+                },
+            },
+        };
+        return serde_json::to_value(selection).ok().and_then(obj);
+    }
+
+    if let Some(edited) = edited.filter(|_| {
+        // The editor authors an *allow* pattern, so apply it only to the bash
+        // allow-always option. A different selection (reject-always, allow-once)
+        // made while the editor is open must fall through to the arrow word-scope
+        // — otherwise the allow text would land in the deny set.
+        option_id.0.as_ref() == "allow-always-command" && perm.bash_highlights.is_some()
+    }) {
+        // Glob only when the editor is dirty. Unedited save is a literal grant
+        // of the pre-filled command, so metacharacters that came from the
+        // command itself (e.g. `find . -name *.rs`) stay literal.
+        return serde_json::to_value(BashCommandSelectedTerms {
+            command_parts: vec![edited.pattern],
+            is_glob: edited.is_glob,
+        })
+        .ok()
+        .and_then(obj);
+    }
+
+    if let Some(h) = perm
+        .bash_highlights
+        .as_ref()
+        .filter(|_| perm.bash_selection_count > 0)
+    {
+        // Arrow word-scope: a literal command prefix, never a glob.
+        return serde_json::to_value(BashCommandSelectedTerms {
+            command_parts: h.highlighted_words[..perm.bash_selection_count].to_vec(),
+            is_glob: false,
+        })
+        .ok()
+        .and_then(obj);
+    }
+
+    None
+}
+
 /// Handle permission option selection (AllowOnce, AllowAlways, RejectAlways).
 ///
 /// Pops the front request, sends the response, and handles queue transitions
@@ -39,6 +137,8 @@ pub(super) fn dispatch_permission_select(
     let Some(perm) = agent.permission_queue.pop_front() else {
         return vec![];
     };
+
+    let edited_pattern = take_edited_pattern(agent, &perm);
 
     // Detect the "enable always-approve mode" id BEFORE moving option_id
     // into the response. Cheap str compare on the `Arc<str>` interior.
@@ -72,46 +172,7 @@ pub(super) fn dispatch_permission_select(
         );
     }
 
-    // Build response meta. MCP and bash flows are mutually exclusive at
-    // the per-request level; check MCP first because it owns the
-    // `allow-always-mcp` option id and the bash branch is the existing
-    // fallback.
-    let meta = if let Some(scope) = perm
-        .mcp_scope
-        .as_ref()
-        .filter(|_| option_id.0.as_ref() == "allow-always-mcp")
-    {
-        let selection = match scope.selected {
-            crate::views::permission_view::McpScope::Tool => {
-                xai_grok_workspace::permission::McpScopeSelection::Tool {
-                    tool_name: scope.tool_name.clone(),
-                }
-            }
-            crate::views::permission_view::McpScope::Server => match &scope.server_prefix {
-                Some(prefix) => xai_grok_workspace::permission::McpScopeSelection::Server {
-                    server: prefix.clone(),
-                },
-                // Defensive: render path should disable Server when no prefix.
-                None => xai_grok_workspace::permission::McpScopeSelection::Tool {
-                    tool_name: scope.tool_name.clone(),
-                },
-            },
-        };
-        serde_json::to_value(selection)
-            .ok()
-            .and_then(|v| v.as_object().cloned())
-    } else if let Some(ref h) = perm.bash_highlights
-        && perm.bash_selection_count > 0
-    {
-        let parts: Vec<String> = h.highlighted_words[..perm.bash_selection_count].to_vec();
-        serde_json::to_value(xai_grok_workspace::permission::BashCommandSelectedTerms {
-            command_parts: parts,
-        })
-        .ok()
-        .and_then(|v| v.as_object().cloned())
-    } else {
-        None
-    };
+    let meta = build_selection_meta(&perm, &option_id, edited_pattern);
 
     perm.request
         .response_tx
@@ -252,6 +313,9 @@ pub(super) fn drain_permission_queue(agent: &mut AgentView) {
 /// - Queue still has items → clear prompt text and reset next front to Options.
 pub(crate) fn resolve_permission_queue_transition(agent: &mut AgentView) {
     agent.last_permission_click = None;
+    // The pattern editor is front-request scoped: drop any buffer when the
+    // front request is resolved (covers cancel/followup/select paths).
+    agent.permission_pattern_edit = None;
     if agent.permission_queue.is_empty() {
         restore_permission_stashes(agent);
     } else {
@@ -267,6 +331,7 @@ pub(crate) fn resolve_permission_queue_transition(agent: &mut AgentView) {
 
 /// Restore composer + pane stashes when the permission queue empties.
 pub(super) fn restore_permission_stashes(agent: &mut AgentView) {
+    agent.permission_pattern_edit = None;
     if let Some(stashed) = agent.permission_stashed_prompt.take() {
         agent.prompt.restore(stashed);
     }

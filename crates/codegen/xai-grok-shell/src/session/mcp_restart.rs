@@ -135,7 +135,7 @@ pub const HTTP_RECOVERY_BACKOFF: [Duration; 7] = [
 /// the split is temporal (schedule time vs inside the backoff loop) so
 /// operators can tell "flipped off mid-restart" from "stale event".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkipReason {
+pub(crate) enum SkipReason {
     /// Server is in the dispatcher's `shutting_down` set
     /// ([`crate::session::mcp_dispatcher::ShutdownState`]).
     ShuttingDown,
@@ -180,7 +180,7 @@ impl SkipReason {
 /// session-actor pattern); any future `RestartActions` impl that
 /// claims `Send + Sync` does NOT relax this requirement.
 #[async_trait(?Send)]
-pub trait RestartActions {
+pub(crate) trait RestartActions {
     /// Returns `true` iff the server still has a stdio entry in
     /// `McpState::configs` AND is enabled (not on the disabled list).
     /// Used both at schedule time and at the top of each backoff loop.
@@ -265,7 +265,7 @@ pub trait RestartActions {
 ///
 /// Calls `tokio::task::spawn_local`, so it MUST run inside a `LocalSet`
 /// — in production the dispatcher's `run_dispatcher` task is.
-pub async fn maybe_schedule_restart(
+pub(crate) async fn maybe_schedule_restart(
     actions: Rc<dyn RestartActions>,
     session_id: String,
     server: McpServerName,
@@ -356,7 +356,7 @@ impl Drop for RestartInFlightGuard {
 /// mapping does not fire. On `Err` it emits `Reason::RestartFailed`
 /// and continues; after three failures the server is parked (recovery
 /// is via explicit Refresh).
-pub async fn auto_restart_stdio(
+pub(crate) async fn auto_restart_stdio(
     actions: Rc<dyn RestartActions>,
     session_id: String,
     server: McpServerName,
@@ -486,7 +486,7 @@ pub async fn auto_restart_stdio(
 /// Same guard rails as [`maybe_schedule_restart`] (shutting-down /
 /// configured / in-flight dedup). Returns `true` iff a task was spawned;
 /// must run inside a `LocalSet`.
-pub async fn maybe_schedule_http_recovery(
+pub(crate) async fn maybe_schedule_http_recovery(
     actions: Rc<dyn RestartActions>,
     server: McpServerName,
     cancel: tokio_util::sync::CancellationToken,
@@ -624,7 +624,7 @@ fn push(
 /// without reaching into private dispatcher internals. Uses
 /// [`crate::session::mcp_dispatcher::SERVER_STATUS_METHOD`] so pushes
 /// share the dispatcher's wire method name.
-pub fn forward_status(
+pub(crate) fn forward_status(
     gateway: &xai_acp_lib::AcpAgentGatewaySender,
     payload: &McpServerStatusPayload,
 ) {

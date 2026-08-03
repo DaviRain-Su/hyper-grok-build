@@ -82,7 +82,7 @@ impl RelayConfig {
     }
 }
 /// Callback type for first connection event.
-pub type FirstConnectCallback = Box<dyn FnOnce() + Send + 'static>;
+pub(crate) type FirstConnectCallback = Box<dyn FnOnce() + Send + 'static>;
 /// Handle to a running relay connection.
 ///
 /// The relay maintains a persistent WebSocket connection to grok.com with
@@ -130,7 +130,7 @@ pub fn spawn_relay_connection(
 ///
 /// Same as `spawn_relay_connection` but allows providing a callback that will be
 /// called once when the first successful connection is established.
-pub fn spawn_relay_connection_with_callback(
+pub(crate) fn spawn_relay_connection_with_callback(
     config: RelayConfig,
     to_agent_tx: mpsc::UnboundedSender<String>,
     parent_cancel: Option<CancellationToken>,

@@ -449,6 +449,9 @@ pub(crate) async fn spawn_session_actor(
         .filter(|item| matches!(item, ConversationItem::User(_)))
         .count();
     let initial_conversation_len = conversation.len();
+    let initial_last_recap_main_turn = crate::session::helpers::session_recap::load_recap_watermark(
+        &crate::session::persistence::session_dir(&session_info),
+    );
     let initial_user_count = initial_prompt_index.saturating_sub(1) as u32;
     let initial_assistant_count = conversation
         .iter()
@@ -1769,7 +1772,7 @@ pub(crate) async fn spawn_session_actor(
         ),
         observability_bridge: obs_bridge,
         current_turn_number: std::cell::Cell::new(0),
-        last_recap_main_turn: std::cell::Cell::new(0),
+        last_recap_main_turn: std::cell::Cell::new(initial_last_recap_main_turn),
         recap_in_flight: std::cell::Cell::new(false),
         recap_epoch: std::cell::Cell::new(0),
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),

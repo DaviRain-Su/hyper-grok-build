@@ -323,7 +323,7 @@ impl SessionRegistryClient {
     }
 
     /// GET /v1/sessions/{id}/download — returns a signed GCS URL without downloading.
-    pub async fn get_download_url(
+    pub(crate) async fn get_download_url(
         &self,
         session_id: &str,
         file: &str,

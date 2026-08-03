@@ -568,3 +568,214 @@ fn permission_select_reject_does_not_steer_sticky_cursor() {
         "reject selection must not steer the sticky cursor"
     );
 }
+
+/// Push a bash "Always allow" prompt (id `allow-always-command`) whose
+/// arrow-scope covers `gh api`, returning the response receiver.
+fn push_bash_allow_always(
+    agent: &mut crate::app::agent_view::AgentView,
+    focus: crate::views::permission_view::PermissionFocus,
+) -> tokio::sync::oneshot::Receiver<Result<acp::RequestPermissionResponse, acp::Error>> {
+    use crate::views::permission_view::PermissionViewState;
+    use std::sync::Arc;
+    use xai_grok_workspace::permission::bash_command_splitting::BashCommandHighlights;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let request = acp::RequestPermissionRequest::new(
+        acp::SessionId::new(Arc::from("sess")),
+        acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("tc")),
+            acp::ToolCallUpdateFields::default(),
+        ),
+        vec![
+            acp::PermissionOption::new(
+                acp::PermissionOptionId::new(Arc::from("allow-always-command")),
+                "Always allow",
+                acp::PermissionOptionKind::AllowAlways,
+            ),
+            acp::PermissionOption::new(
+                acp::PermissionOptionId::new(Arc::from("reject-always-command")),
+                "Never allow",
+                acp::PermissionOptionKind::RejectAlways,
+            ),
+        ],
+    );
+    let options = request.options.clone();
+    agent.permission_queue.push_back(PermissionViewState {
+        request: xai_acp_lib::AcpArgs {
+            request,
+            response_tx: tx,
+        },
+        id: 1,
+        focus,
+        options,
+        active_idx: 0,
+        bash_highlights: Some(BashCommandHighlights {
+            prefix: vec![],
+            highlighted_words: vec!["gh".into(), "api".into()],
+            suffix: vec![],
+        }),
+        bash_selection_count: 2,
+        bash_command_raw: Some("gh api repos/owner/repo/pulls".into()),
+        mcp_scope: None,
+        title: "Allow command?".into(),
+        description: vec![],
+        args_expanded: false,
+        desc_scroll: 0,
+        subagent_label: None,
+        options_area_height: 0,
+        options_scroll_offset: 0,
+    });
+    rx
+}
+
+fn selected_terms(
+    resp: acp::RequestPermissionResponse,
+) -> xai_grok_workspace::permission::BashCommandSelectedTerms {
+    let meta = resp.meta.expect("bash selection meta");
+    serde_json::from_value(serde_json::Value::Object(meta)).expect("selection terms")
+}
+
+/// An edit abandoned before dispatch (focus back to `Options`, e.g. via a
+/// mouse click) must not persist its buffer: the resolved rule uses the
+/// arrow-scope words, and the buffer is cleared.
+#[test]
+fn abandoned_pattern_edit_is_not_persisted() {
+    use crate::views::permission_view::{PatternEditState, PermissionFocus};
+    use std::sync::Arc;
+
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let mut rx = push_bash_allow_always(agent, PermissionFocus::Options);
+    agent.permission_pattern_edit = Some(PatternEditState::new("rm -rf /"));
+
+    let _ = dispatch(
+        Action::PermissionSelect(acp::PermissionOptionId::new(Arc::from(
+            "allow-always-command",
+        ))),
+        &mut app,
+    );
+
+    assert!(app.agents[&AgentId(0)].permission_pattern_edit.is_none());
+    let terms = selected_terms(rx.try_recv().expect("response").expect("ok"));
+    assert_eq!(terms.command_parts, vec!["gh", "api"]);
+    assert!(!terms.is_glob, "arrow-scope grant is literal, not a glob");
+}
+
+/// Seed a dirty editor buffer with the given text (insert+undo marks dirty).
+fn dirty_pattern_edit(text: &str) -> crate::views::permission_view::PatternEditState {
+    let mut e = crate::views::permission_view::PatternEditState::new(text);
+    e.insert_char('x');
+    e.backspace();
+    debug_assert_eq!(e.buffer, text);
+    debug_assert!(e.is_dirty());
+    e
+}
+
+/// A pattern confirmed from `PatternEdit` focus is persisted verbatim as a glob
+/// when the editor is dirty.
+#[test]
+fn confirmed_pattern_edit_is_persisted() {
+    use crate::views::permission_view::PermissionFocus;
+    use std::sync::Arc;
+
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let mut rx = push_bash_allow_always(agent, PermissionFocus::PatternEdit);
+    agent.permission_pattern_edit = Some(dirty_pattern_edit("gh api repos/owner/*"));
+
+    let _ = dispatch(
+        Action::PermissionSelect(acp::PermissionOptionId::new(Arc::from(
+            "allow-always-command",
+        ))),
+        &mut app,
+    );
+
+    assert!(app.agents[&AgentId(0)].permission_pattern_edit.is_none());
+    let terms = selected_terms(rx.try_recv().expect("response").expect("ok"));
+    assert_eq!(terms.command_parts, vec!["gh api repos/owner/*"]);
+    assert!(terms.is_glob, "dirty editor routes to the glob set");
+}
+
+/// A non-allow selection (e.g. reject-always) made while the editor is open
+/// must not carry the edited *allow* text — it falls back to the arrow scope, so
+/// the allow pattern can never land in the deny set.
+#[test]
+fn edited_pattern_not_applied_to_reject_option() {
+    use crate::views::permission_view::PermissionFocus;
+    use std::sync::Arc;
+
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let mut rx = push_bash_allow_always(agent, PermissionFocus::PatternEdit);
+    agent.permission_pattern_edit = Some(dirty_pattern_edit("gh api repos/owner/*"));
+
+    let _ = dispatch(
+        Action::PermissionSelect(acp::PermissionOptionId::new(Arc::from(
+            "reject-always-command",
+        ))),
+        &mut app,
+    );
+
+    let terms = selected_terms(rx.try_recv().expect("response").expect("ok"));
+    assert_eq!(
+        terms.command_parts,
+        vec!["gh", "api"],
+        "reject must use arrow scope, not the edited allow pattern"
+    );
+    assert!(!terms.is_glob);
+}
+
+/// Opening the editor and saving without edits is an exact grant, not a glob —
+/// so a metacharacter that came from the command itself is not a wildcard.
+#[test]
+fn unedited_pattern_edit_is_literal_not_glob() {
+    use crate::views::permission_view::{PatternEditState, PermissionFocus};
+    use std::sync::Arc;
+
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let mut rx = push_bash_allow_always(agent, PermissionFocus::PatternEdit);
+    // Clean pre-fill (dirty=false); content may even contain metacharacters.
+    agent.permission_pattern_edit = Some(PatternEditState::new("gh api"));
+
+    let _ = dispatch(
+        Action::PermissionSelect(acp::PermissionOptionId::new(Arc::from(
+            "allow-always-command",
+        ))),
+        &mut app,
+    );
+
+    let terms = selected_terms(rx.try_recv().expect("response").expect("ok"));
+    assert!(
+        !terms.is_glob,
+        "unedited (clean) save is an exact grant, not a glob"
+    );
+}
+
+/// Editing then restoring the original text still counts as glob intent —
+/// routing follows dirty, not string equality with the pre-fill.
+#[test]
+fn retyped_same_text_is_still_glob() {
+    use crate::views::permission_view::PermissionFocus;
+    use std::sync::Arc;
+
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let mut rx = push_bash_allow_always(agent, PermissionFocus::PatternEdit);
+    // Pre-fill is `gh api`; dirty but buffer equals pre-fill.
+    agent.permission_pattern_edit = Some(dirty_pattern_edit("gh api"));
+
+    let _ = dispatch(
+        Action::PermissionSelect(acp::PermissionOptionId::new(Arc::from(
+            "allow-always-command",
+        ))),
+        &mut app,
+    );
+
+    let terms = selected_terms(rx.try_recv().expect("response").expect("ok"));
+    assert_eq!(terms.command_parts, vec!["gh api"]);
+    assert!(
+        terms.is_glob,
+        "dirty editor is a glob even when text matches pre-fill"
+    );
+}

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExtMethodError {
+pub(crate) struct ExtMethodError {
     pub code: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]

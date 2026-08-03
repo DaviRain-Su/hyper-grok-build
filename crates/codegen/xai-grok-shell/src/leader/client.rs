@@ -284,7 +284,7 @@ impl LeaderClient {
     ///
     /// Like [`into_channels()`](Self::into_channels) but also returns the
     /// disconnect watch so the caller can observe why the connection ended.
-    pub fn into_channels_with_disconnect(
+    pub(crate) fn into_channels_with_disconnect(
         self,
     ) -> (
         mpsc::UnboundedSender<String>,

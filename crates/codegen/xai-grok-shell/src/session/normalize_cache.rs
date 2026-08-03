@@ -21,7 +21,7 @@ const CACHE_TTI: Duration = Duration::from_secs(15 * 60);
 /// Cacheable normalize outcome. [`bytes::Bytes`] keeps cache-hit
 /// clones O(1) (refcount bump, no memcpy).
 #[derive(Debug, Clone)]
-pub enum NormalizedEntry {
+pub(crate) enum NormalizedEntry {
     Unchanged {
         bytes: Bytes,
         mime: Cow<'static, str>,
@@ -44,18 +44,18 @@ pub enum NormalizedEntry {
 /// do not pin a sticky failure slot in front of a future success.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{0}")]
-pub struct NormalizeError(pub String);
+pub(crate) struct NormalizeError(pub String);
 
 /// Cache-key namespace per harness profile. Enum (not `bool`) so
 /// future variants land in a fresh slot rather than colliding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum HarnessVariant {
+pub(crate) enum HarnessVariant {
     Default,
     Cursor,
 }
 
 impl HarnessVariant {
-    pub fn from_is_cursor(is_cursor: bool) -> Self {
+    pub(crate) fn from_is_cursor(is_cursor: bool) -> Self {
         if is_cursor {
             Self::Cursor
         } else {
@@ -77,7 +77,7 @@ fn cache_key(raw_bytes: &[u8], harness: HarnessVariant) -> CacheKey {
     }
 }
 
-pub struct NormalizeCache {
+pub(crate) struct NormalizeCache {
     inner: Cache<CacheKey, NormalizedEntry>,
     enabled: AtomicBool,
 }
@@ -115,7 +115,7 @@ impl NormalizeCache {
     /// share one computation; `Err` leaves the slot empty for retry.
     /// When the cache is disabled (the default), bypasses moka entirely
     /// and calls `compute` directly.
-    pub async fn get_or_try_insert_with<F, Fut>(
+    pub(crate) async fn get_or_try_insert_with<F, Fut>(
         &self,
         raw_bytes: Vec<u8>,
         harness: HarnessVariant,

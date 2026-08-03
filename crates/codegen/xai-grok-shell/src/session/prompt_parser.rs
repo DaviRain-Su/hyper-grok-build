@@ -37,13 +37,6 @@ impl ParsedPrompt {
             self.is_cursor,
         )
     }
-    /// Assemble context and query into the final message string.
-    ///
-    /// Legacy entry point — delegates to [`assemble_parts_with_skills`] with
-    /// no skill information.
-    pub fn assemble_parts(context: &str, query: &str, is_cursor: bool) -> String {
-        Self::assemble_parts_with_skills(context, query, "", is_cursor)
-    }
     /// Assemble context, query, and skill information into the final message string.
     ///
     /// Layout:
@@ -101,7 +94,7 @@ pub async fn parse_prompt(
 ///
 /// This is the full-featured entry point. `parse_prompt` delegates here with
 /// an empty `skill_information` string for backward compatibility.
-pub async fn parse_prompt_with_skills(
+pub(crate) async fn parse_prompt_with_skills(
     prompt: &[acp::ContentBlock],
     working_directory: PathBuf,
     _session_info: &crate::session::info::Info,

@@ -622,6 +622,14 @@ pub(crate) fn unwrap_wrappers(words: &[String]) -> &[String] {
     unwrap_wrappers_checked(words).words
 }
 
+/// Peel wrapper commands (`timeout`, `nice`, `env`, …) from a command's words,
+/// exposing the same normalization the permission enforcer applies before
+/// matching session grants. The pager's "Always allow" pattern editor uses this
+/// so its pre-fill and match preview agree with enforcement on wrapped commands.
+pub fn unwrap_command_wrappers(words: &[String]) -> &[String] {
+    unwrap_wrappers(words)
+}
+
 /// Result of peeling shell-transparent prefixes (`exec` / `command` / `builtin`).
 /// Not part of the canonical wrapper set — used only by security gates.
 pub(crate) enum TransparentPrefixPeel<'a> {

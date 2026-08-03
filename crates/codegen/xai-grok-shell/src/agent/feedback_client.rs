@@ -42,7 +42,7 @@ const CLIENT_VERSION_HEADER: &str = "x-grok-client-version";
 ///   measurement (e.g. IDs, timestamps, client type).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionTurnDelta {
+pub(crate) struct SessionTurnDelta {
     // ── Context fields ──────────────────────────────────────────────────
     /// **[context]** Which client surface produced this record (e.g. CLI, TUI).
     pub client_type: ClientType,
@@ -284,7 +284,7 @@ pub struct SessionTurnDelta {
 /// Response from the turn-deltas endpoint.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionTurnDeltaResponse {
+pub(crate) struct SessionTurnDeltaResponse {
     pub session_id: String,
     pub turn_number: i64,
     pub recorded_at: chrono::DateTime<chrono::Utc>,
@@ -296,7 +296,7 @@ pub struct SessionTurnDeltaResponse {
 /// without fragile string matching on error messages.
 #[derive(Debug, thiserror::Error)]
 #[error("{context} failed with status {status}: {body}")]
-pub struct FeedbackApiError {
+pub(crate) struct FeedbackApiError {
     pub status: reqwest::StatusCode,
     pub context: &'static str,
     pub body: String,
@@ -304,12 +304,12 @@ pub struct FeedbackApiError {
 
 impl FeedbackApiError {
     /// Returns `true` if this is a 401 Unauthorized response.
-    pub fn is_unauthorized(&self) -> bool {
+    pub(crate) fn is_unauthorized(&self) -> bool {
         self.status == reqwest::StatusCode::UNAUTHORIZED
     }
 
     /// Returns `true` if this is a 403 Forbidden response.
-    pub fn is_forbidden(&self) -> bool {
+    pub(crate) fn is_forbidden(&self) -> bool {
         self.status == reqwest::StatusCode::FORBIDDEN
     }
 }
@@ -384,7 +384,7 @@ impl FeedbackClient {
     /// Whether this client can refresh credentials on a 401: requires both an
     /// attached `AuthManager` and a wired `TokenRefresher` (e.g. static
     /// deployment-key sessions return false).
-    pub fn has_token_refresher(&self) -> bool {
+    pub(crate) fn has_token_refresher(&self) -> bool {
         self.credentials
             .auth_manager()
             .is_some_and(|am| am.has_refresher_attached())
@@ -459,7 +459,7 @@ impl FeedbackClient {
         }
     }
 
-    pub async fn try_refresh_credentials(&self) -> bool {
+    pub(crate) async fn try_refresh_credentials(&self) -> bool {
         let Some(manager) = self.credentials.auth_manager() else {
             return false;
         };
@@ -672,7 +672,7 @@ impl FeedbackClient {
     ///
     /// Called at the end of every turn to stream time-series data for
     /// regression tracking and session analytics.
-    pub async fn send_turn_delta(
+    pub(crate) async fn send_turn_delta(
         &self,
         session_id: &str,
         delta: &SessionTurnDelta,
@@ -779,7 +779,7 @@ pub fn signals_to_update(
 /// `loc_tracking_enabled` indicates whether the LOC attribution hunk tracker
 /// was active for this session. When `false`, LOC delta fields are zeros
 /// because the tracker was never spawned — not because no code changed.
-pub fn snapshot_to_turn_delta(
+pub(crate) fn snapshot_to_turn_delta(
     snapshot: &crate::session::signals::TurnDeltaSnapshot,
     client_type: ClientType,
     request_id: Option<String>,

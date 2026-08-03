@@ -226,6 +226,7 @@ rand = "0.9"
 ratatui = { version = "0.29" }
 ratatui-core = "0.1"
 rayon = "1"
+rcgen = { version = "0.13", features = ["pem"] }
 reflink-copy = "0.1"
 regex = "1"
 reqwest = { version = "0.12", features = ["rustls-tls", "stream", "json", "multipart", "http2", "blocking", "socks"], default-features = false }
@@ -236,6 +237,7 @@ ring = "0.17"
 rsa = "0.9"
 runfiles = "0.1"
 rustc-hash = "2"
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
 schemars = "1"
 scraper = "0.23"
 semver = "1"
@@ -298,6 +300,7 @@ webbrowser = { version = "1.0.4" }
 # WebRTC peer + Opus media for the Codex Live subsystem (OMP port). Pinned to
 # match the OMP native media stack (v17.1.1, commit e9c8a35) for ABI parity.
 webrtc = "0.17.2"
+webpki-roots = "0.26"
 which = "8"
 whoami = "1.4"
 wildmatch = "2"

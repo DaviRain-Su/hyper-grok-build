@@ -421,7 +421,7 @@ fn build_server_provider(client: OtelClientInfo, config: OtelLayerConfig) -> Sdk
             .exporter
             .timeout
             .unwrap_or(std::time::Duration::from_secs(10));
-        let http_client = match crate::otlp_http::build_blocking_client(timeout) {
+        let http_client = match crate::otlp_http::build_blocking_client(timeout, &[]) {
             Ok(client) => client,
             Err(err) => {
                 tracing::warn!(error = %err, "otel: OTLP HTTP client build failed; span export disabled");
@@ -554,9 +554,10 @@ mod tests {
             static_headers: Arc::new(std::collections::HashMap::new()),
             credentials: provider,
             last_token: parking_lot::Mutex::new(last_token.to_string()),
-            http_client: crate::otlp_http::build_blocking_client(std::time::Duration::from_secs(
-                30,
-            ))
+            http_client: crate::otlp_http::build_blocking_client(
+                std::time::Duration::from_secs(30),
+                &[],
+            )
             .expect("test OTLP HTTP client must build"),
             resource: parking_lot::Mutex::new(opentelemetry_sdk::Resource::builder().build()),
             token_header_value: Arc::from("xai-grok-cli"),

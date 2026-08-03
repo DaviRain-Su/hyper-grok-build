@@ -302,6 +302,7 @@ This is transparent — you don't need to do anything. Grok handles it in the ba
 
 - **Before expiry:** If your binary returned `expires_in` in its JSON output, or you set `auth_token_ttl` in config, Grok re-runs the binary ~5 minutes before the token expires, so you never see an auth error.
 - **On auth error:** If the server rejects a request with 401/403 (e.g. token was revoked or expired), Grok re-runs the binary and retries the request once.
+- **When the refresh run can't mint:** refreshes are headless (no stdin, short timeout), so a binary that needs you to complete an SSO flow cannot succeed there. Grok then stops treating the stored credential as usable and runs your binary in its interactive mode instead — at startup that is the same sign-in flow a machine with no credentials gets; mid-session the turn fails with a re-auth prompt and `/login` re-runs the binary.
 - **OIDC:** If you're using OIDC and have a `refresh_token`, Grok silently refreshes via your IdP without re-opening the browser.
 
 **Tuning the refresh buffer:**
@@ -333,7 +334,7 @@ Common log messages:
 | `auth: running external auth provider` | Your binary is being called (includes the command and whether it's a refresh) |
 | `auth: external auth provider returned fresh token` | Success — token was parsed and stored |
 | `auth: external auth provider failed` | Binary exited non-zero, or exited 0 but stdout was empty/unparseable (the `error` field has details) |
-| `auth: external auth provider timed out (likely needs interactive auth), killing` | Binary didn't exit before the timeout (60s initial, 5s mid-session refresh) and was killed |
+| `auth: external auth provider timed out (likely needs interactive auth), killing` | Binary didn't exit before the timeout (60s initial, 7s mid-session refresh) and was killed |
 | `auth: failed to start external auth provider` | The command couldn't be spawned (e.g. binary not found) |
 
 ### Per-Model Auth Providers
@@ -1350,12 +1351,6 @@ output_byte_limit = 65536              # max output size (64KB)
 [toolset.web_fetch]
 proxy_endpoint = "https://proxy.example.com"   # egress proxy URL (all requests routed through it)
 allowed_domains = ["docs.rs", "x.ai"]           # override the built-in ~84-domain allowlist
-
-[shortcuts]
-send = ["Enter"]
-newline = ["Shift+Enter", "Alt+Enter"]
-quit = ["Ctrl+D", "Ctrl+Q"]
-confirm_quit = true
 ```
 
 ### Telemetry
@@ -2031,7 +2026,7 @@ args = ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]
 
 If you also have a `linear` server in `~/.grok/config.toml`, the project version replaces it entirely.
 
-> **Note:** Only `[mcp_servers]` is supported in project-scoped `.grok/config.toml`. Other config sections (models, shortcuts, etc.) are only read from `~/.grok/config.toml`.
+> **Note:** Only `[mcp_servers]` is supported in project-scoped `.grok/config.toml`. Other config sections (models, etc.) are only read from `~/.grok/config.toml`.
 
 ### Tool Naming
 

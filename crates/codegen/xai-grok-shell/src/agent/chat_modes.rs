@@ -33,7 +33,7 @@ struct CachedModes {
 }
 /// Thread-safe, cheaply-cloneable manager. Cloning bumps the inner `Arc`.
 #[derive(Clone)]
-pub struct ChatModesManager {
+pub(crate) struct ChatModesManager {
     inner: Arc<Inner>,
 }
 struct Inner {
@@ -151,7 +151,7 @@ impl ChatModesManager {
     }
     /// Kick a background `/rest/modes` fill when auth is already present so
     /// `--chat` initialize / first `session/new` hit a warm cache.
-    pub fn warm_in_background(&self) {
+    pub(crate) fn warm_in_background(&self) {
         let Some(user_id) = self.current_user_id() else {
             return;
         };
@@ -164,7 +164,7 @@ fn empty_state() -> acp::SessionModelState {
 /// Maps grok.com modes → `SessionModelState`: keeps only `available` modes,
 /// reconciles `current_model_id` (default → first available → empty, never
 /// out-of-set), and stashes `badgeText`/`iconHint`/`tags` in `_meta`.
-pub fn modes_to_model_state(resp: &ListModesResponse) -> acp::SessionModelState {
+pub(crate) fn modes_to_model_state(resp: &ListModesResponse) -> acp::SessionModelState {
     let available_models: Vec<acp::ModelInfo> = resp
         .modes
         .iter()

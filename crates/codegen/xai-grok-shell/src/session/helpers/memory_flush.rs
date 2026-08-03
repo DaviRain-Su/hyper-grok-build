@@ -195,39 +195,6 @@ pub fn process_flush_response(response: &str, config: &MemoryFlushConfig) -> Flu
     FlushResult::Accepted(content)
 }
 
-/// Check if content is substantially similar to any existing memory chunk.
-///
-/// Returns `true` if an exact blake3 hash match is found (should skip write).
-/// Uses open-per-query to avoid `!Send` issues with `rusqlite::Connection`.
-pub fn is_duplicate(content: &str, db_path: &std::path::Path) -> bool {
-    let content_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-
-    // Journal-mode-aware open: never mmap a legacy WAL -shm on network
-    // mounts (SIGBUS); see xai_sqlite_journal::JournalMode::open_readonly.
-    let conn = match xai_sqlite_journal::JournalMode::for_db_path(db_path).open_readonly(db_path) {
-        Ok(c) => c,
-        Err(_) => {
-            tracing::debug!(target: LOG, "MEMORY_FLUSH_DEDUP: can't open DB, allowing write");
-            return false;
-        }
-    };
-
-    let exact_match: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM chunks WHERE hash = ?1)",
-            rusqlite::params![content_hash],
-            |r| r.get(0),
-        )
-        .unwrap_or(false);
-
-    tracing::info!(target: LOG,
-        "MEMORY_FLUSH_DEDUP: hash={hash} duplicate={exact_match}",
-        hash = &content_hash[..12],
-    );
-
-    exact_match
-}
-
 /// Cosine similarity threshold above which flush content is considered a
 /// semantic duplicate of an existing memory chunk. A value of 0.92 is
 /// conservative — it catches near-identical rephrasings while allowing

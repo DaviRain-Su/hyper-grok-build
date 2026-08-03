@@ -536,7 +536,7 @@ static MARKER_CACHE: std::sync::RwLock<Option<bool>> = std::sync::RwLock::new(No
 /// on the marker (so users see one log line indicating the cutoff fired).
 /// Use the bare version for read-time display logic that already has its own
 /// path (e.g. UI listings in `extensions/skills.rs` and `inspect.rs`).
-pub fn is_claude_import_marked() -> bool {
+pub(crate) fn is_claude_import_marked() -> bool {
     if let Some(v) = *MARKER_CACHE.read().expect("MARKER_CACHE poisoned") {
         return v;
     }
@@ -551,7 +551,7 @@ pub fn is_claude_import_marked() -> bool {
 /// Called from the slash command after `apply_import` writes the marker so
 /// that subsequent in-process gate checks reflect the new state without
 /// waiting for restart.
-pub fn refresh_marker_cache(value: bool) {
+pub(crate) fn refresh_marker_cache(value: bool) {
     *MARKER_CACHE.write().expect("MARKER_CACHE poisoned") = Some(value);
 }
 
@@ -570,7 +570,7 @@ pub(crate) fn reset_marker_cache_for_test() {
 /// Call sites are runtime fallback paths in `claude_compat.rs`,
 /// `util/config.rs`, `util/hooks.rs`, and `agent/config.rs` that previously
 /// read `.claude/`.
-pub fn is_claude_import_marked_with_log(gate_name: &'static str) -> bool {
+pub(crate) fn is_claude_import_marked_with_log(gate_name: &'static str) -> bool {
     static LOGGED: OnceLock<()> = OnceLock::new();
     let marked = is_claude_import_marked();
     if marked {
@@ -585,7 +585,7 @@ pub fn is_claude_import_marked_with_log(gate_name: &'static str) -> bool {
 }
 
 /// Testable variant of [`is_claude_import_marked`] that reads from the given path.
-pub fn is_claude_import_marked_at(config_path: &Path) -> bool {
+pub(crate) fn is_claude_import_marked_at(config_path: &Path) -> bool {
     let content = match std::fs::read_to_string(config_path) {
         Ok(s) => s,
         Err(_) => return false,

@@ -19,7 +19,7 @@ struct ListRequest {
 }
 
 /// Convert a `LoadedPlugin` to a `PluginInfo` DTO.
-pub fn loaded_plugin_to_info(plugin: &xai_grok_agent::plugins::LoadedPlugin) -> PluginInfo {
+pub(crate) fn loaded_plugin_to_info(plugin: &xai_grok_agent::plugins::LoadedPlugin) -> PluginInfo {
     use xai_grok_agent::plugins::discovery::PluginScope as AgentScope;
 
     let scope = match plugin.scope {

@@ -5,7 +5,7 @@ mod config;
 pub mod credential_provider;
 #[path = "devbox_login_stub.rs"]
 pub(crate) mod devbox_login;
-pub mod device_code;
+pub(crate) mod device_code;
 pub mod error;
 mod external_auth;
 mod flow;
@@ -51,6 +51,7 @@ pub use jwt::{is_jwt_expired_or_near, parse_jwt_expiration};
 mod meta;
 pub use error::{AuthError, RefreshTokenError, RefreshTokenFailedReason};
 pub use manager::{AuthManager, shared_api_key_provider};
+pub(crate) use manager::{AuthRemedy, SilentRefresh};
 pub use meta::{AuthMeta, GateInfo};
 pub use model::{
     AMAZON_BEDROCK_AUTH_SCOPE, ANTHROPIC_CLAUDE_OAUTH_SCOPE, AuthMode, GITHUB_COPILOT_OAUTH_SCOPE,

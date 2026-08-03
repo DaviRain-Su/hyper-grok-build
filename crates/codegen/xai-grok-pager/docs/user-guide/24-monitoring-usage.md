@@ -66,6 +66,7 @@ without the master switch.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` for HTTP, `http://localhost:4317` for gRPC | Base endpoint. For `http/protobuf`, `/v1/logs` and `/v1/metrics` are appended per the OTLP spec; for `grpc`, the collector endpoint is used as-is. |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` / `..._METRICS_ENDPOINT` | — | Signal-specific overrides, used verbatim. For gRPC these should normally be collector endpoints without `/v1/...` paths. |
 | `OTEL_EXPORTER_OTLP_HEADERS` (+ signal-specific variants) | — | Collector auth (`k=v,k2=v2`). The **only** headers the external exporters send, and the only supported collector-auth mechanism (no config-file headers key — tokens never live on disk). |
+| `OTEL_EXPORTER_OTLP_CERTIFICATE` (+ signal-specific variants) | — | Path to a PEM bundle with additional trusted CA certificate(s) for verifying the collector — for collectors behind a private/corporate CA. Additive to the default trust roots (system store and embedded Mozilla roots). |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` (ms) | Export timeout. |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `60000` (ms) | Metric export interval. |
 | `OTEL_BLRP_SCHEDULE_DELAY` (or alias `OTEL_LOGS_EXPORT_INTERVAL`) | `5000` (ms) | Log batch interval. |
@@ -114,6 +115,30 @@ Managed deployments can additionally enable org-wide telemetry by distributing
 the `[telemetry]` `otel_*` keys through `grok setup` managed config /
 requirements pins, or force-disable it fleet-wide with the same local config
 layers (`external_otel_disabled`, content-gate locks).
+
+## Startup suppression (why nothing arrives for the first few seconds)
+
+Because xAI can force-disable this stream fleet-wide, the CLI holds emission
+closed at startup until it knows whether that switch is set — it fetches the
+fleet policy from `/v1/settings` and only then starts exporting. In a healthy
+setup that is well under a second and invisible.
+
+**The wait is bounded**, so a deployment that cannot reach xAI still exports:
+
+- If no fleet policy can apply at all — `[features] remote_fetch = false`, or
+  `[endpoints] cli_chat_proxy_base_url` points somewhere other than xAI — the
+  stream starts immediately, governed by your local configuration.
+- If the policy fetch fails or never completes (firewalled host, offline
+  laptop), emission starts anyway once the attempt is exhausted, and in all
+  cases no later than 30 seconds after startup.
+
+A fleet policy that arrives afterwards still applies; it can only ever
+*tighten* (disable the stream or force the content gates off), never enable
+something your local configuration did not.
+
+If your collector receives nothing at all, check the debug log
+(`grok --debug`) for `external otel:` lines — they record whether the stream
+resolved its configuration, and whether it is exporting or suppressed.
 
 ## Resource attributes
 

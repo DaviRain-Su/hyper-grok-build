@@ -2390,41 +2390,10 @@ pub(super) fn dispatch_dashboard_permission_select(
         return vec![];
     };
 
-    let meta = if let Some(scope) = perm
-        .mcp_scope
-        .as_ref()
-        .filter(|_| option_id.0.as_ref() == "allow-always-mcp")
-    {
-        let selection = match scope.selected {
-            crate::views::permission_view::McpScope::Tool => {
-                xai_grok_workspace::permission::McpScopeSelection::Tool {
-                    tool_name: scope.tool_name.clone(),
-                }
-            }
-            crate::views::permission_view::McpScope::Server => match &scope.server_prefix {
-                Some(prefix) => xai_grok_workspace::permission::McpScopeSelection::Server {
-                    server: prefix.clone(),
-                },
-                None => xai_grok_workspace::permission::McpScopeSelection::Tool {
-                    tool_name: scope.tool_name.clone(),
-                },
-            },
-        };
-        serde_json::to_value(selection)
-            .ok()
-            .and_then(|v| v.as_object().cloned())
-    } else if let Some(ref h) = perm.bash_highlights
-        && perm.bash_selection_count > 0
-    {
-        let parts: Vec<String> = h.highlighted_words[..perm.bash_selection_count].to_vec();
-        serde_json::to_value(xai_grok_workspace::permission::BashCommandSelectedTerms {
-            command_parts: parts,
-        })
-        .ok()
-        .and_then(|v| v.as_object().cloned())
-    } else {
-        None
-    };
+    // Share the main dispatch's meta logic so dashboard peek honors an edited
+    // pattern (and the glob routing) identically instead of dropping it.
+    let edited_pattern = super::permissions::take_edited_pattern(agent, &perm);
+    let meta = super::permissions::build_selection_meta(&perm, &option_id, edited_pattern);
 
     perm.request
         .response_tx

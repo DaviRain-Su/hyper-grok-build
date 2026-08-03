@@ -861,7 +861,7 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
                 message: info.message.clone(),
                 model_metadata: info.model_metadata.clone(),
                 retry_after_secs: info.retry_after_secs,
-                should_retry: None,
+                should_retry: info.should_retry,
             }
         }
         SamplingErrorKind::EmptyResponse => {
@@ -978,6 +978,7 @@ fn handle_cancellation(
         message: "request cancelled".to_string(),
         is_retryable: false,
         retry_after_secs: None,
+        should_retry: None,
         model_metadata: None,
         empty_response_context: None,
         doom_loop_triggers: None,
@@ -1016,6 +1017,7 @@ mod tests {
             message: "inference idle timeout after 240s with no chunks".to_string(),
             is_retryable: false,
             retry_after_secs: None,
+            should_retry: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
@@ -1037,6 +1039,7 @@ mod tests {
             message: "boom".to_string(),
             is_retryable: true,
             retry_after_secs: None,
+            should_retry: Some(false),
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
@@ -1046,10 +1049,14 @@ mod tests {
         let err = synthesize_from_info(&info);
         match err {
             SamplingError::Api {
-                status, message, ..
+                status,
+                message,
+                should_retry,
+                ..
             } => {
                 assert_eq!(status.as_u16(), 500);
                 assert_eq!(message, "boom");
+                assert_eq!(should_retry, Some(false), "server veto must survive");
             }
             other => panic!("expected Api, got {other:?}"),
         }
@@ -1063,6 +1070,7 @@ mod tests {
             message: "slow down".to_string(),
             is_retryable: true,
             retry_after_secs: Some(7),
+            should_retry: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,

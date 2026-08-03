@@ -137,6 +137,7 @@ fn task_completed_round_trip() {
         signal: None,
         completed: true,
         kind: TaskKind::Bash,
+        output_total_bytes: 0,
     };
     assert!((snap.duration_secs() - 1.0).abs() < 0.001);
     let n = ToolNotification::TaskCompleted(snap);
@@ -296,6 +297,7 @@ fn variant_count_matches_variant_name() {
             signal: None,
             completed: false,
             kind: TaskKind::Bash,
+            output_total_bytes: 0,
         }),
         ToolNotification::PlanModeEntered(PlanModeEntered {
             tool_call_id: String::new(),

@@ -3703,9 +3703,10 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 None => return InputOutcome::Changed,
             },
             PickerOutcome::SubmitQuery => {
-                let query = ctx.sp_state.query().trim().to_string();
-                if !query.is_empty() {
-                    return InputOutcome::Action(Action::LoadSession(query, None, false));
+                if let Some(sid) =
+                    crate::views::session_picker::session_id_for_direct_load(ctx.sp_state.query())
+                {
+                    return InputOutcome::Action(Action::LoadSession(sid.to_string(), None, false));
                 }
                 return InputOutcome::Unchanged;
             }

@@ -24,7 +24,7 @@ use xai_tool_types::{KillTaskOutput, TaskOutputOutput};
 /// directory (e.g., `/root/.grok/worktrees/project/fork-019cb252-...`). The
 /// client UI should instead see the original project path (the `display_cwd`).
 #[derive(Clone, Debug)]
-pub struct PathRewriter {
+pub(crate) struct PathRewriter {
     /// The real worktree path (what tools actually see).
     real_cwd: String,
     /// The display path (what the client UI should see).
@@ -67,7 +67,7 @@ impl PathRewriter {
     }
 
     /// Rewrite a `PathBuf` if it starts with the real worktree path.
-    pub fn rewrite_path(&self, path: &Path) -> PathBuf {
+    pub(crate) fn rewrite_path(&self, path: &Path) -> PathBuf {
         match path.strip_prefix(&self.real_cwd) {
             Ok(relative) => PathBuf::from(&self.display_cwd).join(relative),
             Err(_) => path.to_path_buf(),
@@ -80,7 +80,7 @@ impl PathRewriter {
     /// paths embedded anywhere in the JSON tree without needing to walk the
     /// structure. Reuses `rewrite()` so both plain and encoded replacements
     /// are applied consistently.
-    pub fn rewrite_json(&self, value: serde_json::Value) -> serde_json::Value {
+    pub(crate) fn rewrite_json(&self, value: serde_json::Value) -> serde_json::Value {
         let serialized = value.to_string();
         let rewritten = self.rewrite(&serialized);
         if rewritten == serialized {
@@ -110,7 +110,7 @@ fn maybe_rewrite_path(rewriter: Option<&PathRewriter>, path: PathBuf) -> PathBuf
 ///
 /// Uses serde directly — ToolOutput derives Serialize with `#[serde(tag = "type")]`,
 /// so the JSON round-trips cleanly with the TUI's deserialization.
-pub fn raw_output_json(
+pub(crate) fn raw_output_json(
     output: &ToolOutput,
     rewriter: Option<&PathRewriter>,
 ) -> Option<serde_json::Value> {
@@ -129,7 +129,7 @@ pub fn raw_output_json(
 /// `tool_meta` is attached as `_meta` on the update for MCP tools that have
 /// MCP Apps UI metadata (e.g., `_meta.ui.resourceUri`). This allows clients
 /// to render interactive UIs without maintaining a separate metadata store.
-pub fn acp_tool_update(
+pub(crate) fn acp_tool_update(
     output: &ToolOutput,
     tool_call_id: &str,
     rewriter: Option<&PathRewriter>,
@@ -644,7 +644,7 @@ pub fn acp_tool_update(
 /// This converts `xai-grok-tools`' TodoItem (which has `id`, `content: Option<String>`,
 /// `status: Option<String>`) to `acp::PlanEntry` (which has `content`, `priority`, `status`).
 /// The `id` is not directly represented in `PlanEntry` but the ordering is preserved.
-pub fn acp_plan_update(output: &ToolOutput) -> Option<acp::Plan> {
+pub(crate) fn acp_plan_update(output: &ToolOutput) -> Option<acp::Plan> {
     use crate::tools::todo::plan_entry_from_todo_item;
     use xai_grok_tools::types::output::TodoWriteOutput;
     match output {

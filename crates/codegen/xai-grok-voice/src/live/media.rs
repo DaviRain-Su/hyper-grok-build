@@ -1379,7 +1379,7 @@ mod tests {
         // 30ms deadline: real wall clock, fast enough for CI.
         let deadline = Duration::from_millis(30);
         let close_fut = Arc::clone(&core).run_close_once_with_peer_close(Some(pending), deadline);
-        let _ = tokio::time::timeout(Duration::from_secs(2), close_fut)
+        tokio::time::timeout(Duration::from_secs(2), close_fut)
             .await
             .expect("close owner must finish after peer-close deadline");
 

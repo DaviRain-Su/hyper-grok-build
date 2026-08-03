@@ -872,6 +872,7 @@ impl AgentView {
                                     perm.active_idx = idx;
                                     perm.focus =
                                         crate::views::permission_view::PermissionFocus::Options;
+                                    self.permission_pattern_edit = None;
                                     if is_double_click {
                                         self.last_permission_click = None;
                                         if let Some(opt) = perm.options.get(idx) {
@@ -899,13 +900,20 @@ impl AgentView {
                     }
                 }
                 Event::Paste(text) => {
-                    let in_followup = self.permission_queue.front().is_some_and(|p| {
-                        p.focus == crate::views::permission_view::PermissionFocus::FollowupInput
-                    });
-                    if in_followup {
-                        self.route_popup_paste(text)
-                    } else {
-                        InputOutcome::Changed
+                    let front_focus = self.permission_queue.front().map(|p| p.focus);
+                    match front_focus {
+                        Some(crate::views::permission_view::PermissionFocus::FollowupInput) => {
+                            self.route_popup_paste(text)
+                        }
+                        Some(crate::views::permission_view::PermissionFocus::PatternEdit) => {
+                            if let Some(edit) = self.permission_pattern_edit.as_mut() {
+                                for ch in text.chars().filter(|c| *c != '\n' && *c != '\r') {
+                                    edit.insert_char(ch);
+                                }
+                            }
+                            InputOutcome::Changed
+                        }
+                        _ => InputOutcome::Changed,
                     }
                 }
                 _ => InputOutcome::Changed,
@@ -1042,7 +1050,7 @@ impl AgentView {
                 _ => InputOutcome::Unchanged,
             };
         }
-        if self.question_view.is_some() && self.active_pane != AgentPane::Scrollback {
+        if self.is_question_focused() {
             return match ev {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if key!('q', CONTROL).matches(key) {
@@ -1417,6 +1425,10 @@ impl AgentView {
             }
             other => resolve_action(Some(other)).unwrap_or(InputOutcome::Unchanged),
         }
+    }
+    /// Whether an open `ask_user_question` card owns the keyboard.
+    pub(crate) fn is_question_focused(&self) -> bool {
+        self.question_view.is_some() && self.active_pane != AgentPane::Scrollback
     }
     /// Returns `true` if the switch happened immediately, `false` if blocked.
     pub(crate) fn set_active_pane(&mut self, target: AgentPane, force: bool) -> bool {

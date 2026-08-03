@@ -73,7 +73,7 @@ fn normalize_query(query: &str) -> String {
 
 /// Metadata for a single MCP tool, used to build BM25 documents.
 #[derive(Debug, Clone)]
-pub struct ToolMetadata {
+pub(crate) struct ToolMetadata {
     /// Canonical name (e.g., `"linear__save_issue"` or a managed gateway `{connector_id}__{tool_id}`).
     pub qualified_name: String,
     /// Server, source, or grouping name (e.g., `"linear"`).
@@ -119,7 +119,7 @@ impl ToolMetadata {
 /// (which are unregistered from the bridge before the snapshot is
 /// rebuilt) are excluded by construction.
 #[derive(Debug, Clone)]
-pub struct ServerMetadata {
+pub(crate) struct ServerMetadata {
     pub name: String,
     pub description: Option<String>,
 }
@@ -128,7 +128,7 @@ pub struct ServerMetadata {
 ///
 /// Updated when MCP tools are registered or re-initialized.
 #[derive(Debug, Clone, Default)]
-pub struct ToolMetadataSnapshot {
+pub(crate) struct ToolMetadataSnapshot {
     pub tools: Vec<ToolMetadata>,
     pub servers: Vec<ServerMetadata>,
     pub mcp_initialized: bool,
@@ -141,7 +141,7 @@ pub struct ToolMetadataSnapshot {
 /// - The lock is held only to clone the snapshot (fast, no I/O)
 /// - `search_snapshot()` is a sync trait method called from async context
 /// - `TokioMutex::blocking_lock()` panics on single-threaded runtimes
-pub struct Bm25ToolSearchIndex {
+pub(crate) struct Bm25ToolSearchIndex {
     snapshot: Arc<Mutex<ToolMetadataSnapshot>>,
 }
 
@@ -257,7 +257,7 @@ impl ToolSearchIndex for Bm25ToolSearchIndex {
 }
 
 /// Extract parameter names from a JSON Schema `properties` object.
-pub fn extract_parameter_names(schema: &serde_json::Value) -> Vec<String> {
+pub(crate) fn extract_parameter_names(schema: &serde_json::Value) -> Vec<String> {
     schema
         .get("properties")
         .and_then(|p| p.as_object())
@@ -266,7 +266,7 @@ pub fn extract_parameter_names(schema: &serde_json::Value) -> Vec<String> {
 }
 
 /// Split a qualified MCP tool name (`"server__tool"`) into `(server, tool)`.
-pub fn split_qualified_name(qualified: &str) -> (&str, &str) {
+pub(crate) fn split_qualified_name(qualified: &str) -> (&str, &str) {
     qualified
         .split_once(MCP_TOOL_NAME_DELIMITER)
         .unwrap_or(("", qualified))

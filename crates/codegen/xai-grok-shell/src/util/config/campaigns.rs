@@ -51,11 +51,11 @@ fn cached_remote_campaigns() -> Vec<CampaignEntry> {
 }
 
 /// Fail-open dismissed campaign ids from `campaigns_state.json`.
-pub fn load_dismissed_ids() -> HashSet<String> {
+pub(crate) fn load_dismissed_ids() -> HashSet<String> {
     load_dismissed_ids_from_home()
 }
 
-pub fn dismiss_campaign_ids(ids: impl IntoIterator<Item = String>) {
+pub(crate) fn dismiss_campaign_ids(ids: impl IntoIterator<Item = String>) {
     let Some(home) = user_grok_home() else {
         return;
     };
@@ -123,7 +123,7 @@ fn dismiss_campaign_ids_at(
 /// kill switch). Invalid JSON also resolves to none: the var's intent is "replace
 /// campaigns with exactly this", so a typo must not silently fall back to the
 /// real sources it was meant to replace.
-pub fn campaigns_override() -> Option<Vec<CampaignEntry>> {
+pub(crate) fn campaigns_override() -> Option<Vec<CampaignEntry>> {
     let json = std::env::var("GROK_CAMPAIGNS_OVERRIDE").ok()?;
     match serde_json::from_str::<Vec<CampaignOverride>>(&json) {
         Ok(list) => Some(
@@ -176,7 +176,7 @@ pub fn remote_campaigns_from_settings(remote: Option<&RemoteSettings>) -> Vec<Ca
 /// sources and beats the kill switch) → kill switch → layer+remote merge →
 /// dismiss. `base` is the pre-campaign effective config, used only for the
 /// kill-switch check.
-pub fn resolve_active_campaigns_from_layers(
+pub(crate) fn resolve_active_campaigns_from_layers(
     layers: &ConfigLayers,
     base: &toml::Value,
     remote_entries: &[CampaignEntry],

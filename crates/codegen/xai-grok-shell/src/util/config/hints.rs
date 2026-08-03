@@ -31,14 +31,6 @@ impl WorktreeHintMode {
         }
     }
 
-    pub fn as_config_str(self) -> &'static str {
-        match self {
-            Self::Ask => "ask",
-            Self::Always => "always",
-            Self::Never => "never",
-        }
-    }
-
     /// Returns `(new_session_worktree_mode, fork_worktree_mode)`.
     ///
     /// - `/new`: `new_session_worktree_mode`, else legacy `worktree_mode`, else `Never`.
@@ -191,20 +183,6 @@ pub fn resolve_hints(
         .cloned()
         .unwrap_or_else(|| merge_hints_config_layers(requirements, user, managed));
     ResolvedHints::from_hints_table(root.get("hints"))
-}
-
-/// Load config from disk and resolve `[hints]`.
-pub fn resolve_hints_from_disk() -> ResolvedHints {
-    let effective = crate::config::load_effective_config().ok();
-    let requirements = crate::config::load_merged_requirements();
-    let user = crate::config::load_from_disk().ok();
-    let managed = crate::config::load_managed_config().ok();
-    resolve_hints(
-        effective.as_ref(),
-        requirements.as_ref(),
-        user.as_ref(),
-        managed.as_ref(),
-    )
 }
 
 #[cfg(test)]

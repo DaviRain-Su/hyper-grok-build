@@ -660,7 +660,7 @@ fn announcements_refresh_interval() -> std::time::Duration {
 /// gates fails.  Used in `x.ai/code/status` responses and to generate
 /// clear error messages on code-nav requests from ineligible clients.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodeNavEligibility {
+pub(crate) enum CodeNavEligibility {
     /// Client type is not web (web-only for initial rollout).
     ClientNotWeb,
     /// Client did not advertise `x.ai/codeNavigation.enabled`.
@@ -1342,6 +1342,7 @@ impl Drop for SessionLoadGuard<'_> {
 mod code_nav;
 mod folder_trust_prompt;
 mod heap_profile;
+mod resource_telemetry;
 mod session_registry;
 mod session_lifecycle;
 mod subagent_coordinator;
@@ -1384,150 +1385,6 @@ pub(crate) struct OrphanedTask {
     cwd: String,
 }
 impl MvpAgent {
-    /// Forward one raw JSONL replay line and collect its completion receiver.
-    ///
-    /// Dispatches by on-disk method name:
-    /// - ACP updates (`"session/update"`) → typed `SessionNotification` for correct
-    ///   TUI dispatch (direct dispatch preserves Rust types, not method strings).
-    /// - xAI updates (`"_x.ai/session/update"`) → `ExtNotification`.
-    ///
-    /// When `mark_replay` is true, the notification is tagged with
-    /// `_meta.isReplay: true` so the client knows it's historical data.
-    /// Cursor-based reconnects set this to false for events after the cursor
-    /// so the client processes them as live updates.
-    fn forward_raw_replay_line(
-        &self,
-        line: &str,
-        persist_data: Option<&serde_json::Value>,
-        target_client_id: Option<&serde_json::Value>,
-        completions: &mut Vec<
-            tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<()>>,
-        >,
-        mark_replay: bool,
-        pending_tool_calls: &mut std::collections::HashMap<
-            acp::ToolCallId,
-            acp::ToolCall,
-        >,
-    ) {
-        use crate::session::storage::RawLinePeek;
-        let env = match serde_json::from_str::<RawLinePeek<'_>>(line) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::debug!(?e, "replay: skipping unparseable JSONL line");
-                return;
-            }
-        };
-        let method = env.method.unwrap_or("session/update");
-        let Some(raw_params) = env.params else {
-            tracing::debug!("replay: skipping JSONL line with no params");
-            return;
-        };
-        let is_xai = method == "_x.ai/session/update";
-        if is_xai {
-            if target_client_id.is_none() && !mark_replay {
-                if let Ok(owned) = serde_json::value::RawValue::from_string(
-                    raw_params.get().to_owned(),
-                ) {
-                    completions
-                        .push(
-                            self
-                                .gateway
-                                .forward_with_completion(
-                                    acp::ExtNotification::new(
-                                        "x.ai/session/update",
-                                        std::sync::Arc::from(owned),
-                                    ),
-                                ),
-                        );
-                }
-            } else {
-                let Ok(mut params) = serde_json::from_str::<
-                    serde_json::Value,
-                >(raw_params.get()) else {
-                    tracing::debug!("replay: skipping xAI update with unparseable params");
-                    return;
-                };
-                if let Some(obj) = params.as_object_mut() {
-                    let meta = obj
-                        .entry("_meta")
-                        .or_insert_with(|| serde_json::json!({}));
-                    if let Some(m) = meta.as_object_mut() {
-                        if mark_replay {
-                            m.insert("isReplay".to_string(), serde_json::json!(true));
-                        }
-                        if let Some(pd) = persist_data {
-                            m.insert("x.ai/persist".to_string(), pd.clone());
-                        }
-                        if let Some(tid) = target_client_id {
-                            m.insert("x.ai/leaderClientId".to_string(), tid.clone());
-                        }
-                    }
-                }
-                if let Ok(raw_val) = serde_json::value::to_raw_value(&params) {
-                    completions
-                        .push(
-                            self
-                                .gateway
-                                .forward_with_completion(
-                                    acp::ExtNotification::new(
-                                        "x.ai/session/update",
-                                        std::sync::Arc::from(raw_val),
-                                    ),
-                                ),
-                        );
-                }
-            }
-        } else {
-            let Ok(mut notification) = serde_json::from_str::<
-                acp::SessionNotification,
-            >(raw_params.get()) else {
-                tracing::debug!("replay: skipping ACP update with unparseable params");
-                return;
-            };
-            match &mut notification.update {
-                acp::SessionUpdate::ToolCall(tc) => {
-                    let is_pre_completed = matches!(
-                        tc.status,
-                        acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
-                    );
-                    if is_pre_completed {} else {
-                        pending_tool_calls.insert(tc.tool_call_id.clone(), tc.clone());
-                        return;
-                    }
-                }
-                acp::SessionUpdate::ToolCallUpdate(u) => {
-                    match u.fields.status {
-                        Some(acp::ToolCallStatus::Completed)
-                        | Some(acp::ToolCallStatus::Failed) => {
-                            if let Some(mut base) = pending_tool_calls
-                                .remove(&u.tool_call_id)
-                            {
-                                base.update(std::mem::take(&mut u.fields));
-                                notification.update = acp::SessionUpdate::ToolCall(base);
-                            }
-                        }
-                        None => {
-                            if let Some(base) = pending_tool_calls
-                                .get_mut(&u.tool_call_id)
-                            {
-                                base.update(std::mem::take(&mut u.fields));
-                            }
-                            return;
-                        }
-                        _ => return,
-                    }
-                }
-                _ => {}
-            }
-            if mark_replay {
-                mark_as_replay(&mut notification.meta, persist_data);
-            }
-            if let Some(tid) = target_client_id {
-                stamp_meta_value(&mut notification.meta, "x.ai/leaderClientId", tid);
-            }
-            completions.push(self.gateway.forward_with_completion(notification));
-        }
-    }
     /// Replay updates from disk and drain completions.
     /// Returns `(initial_total_tokens, end_offset)`.
     pub(super) async fn replay_session_updates(
@@ -1774,8 +1631,9 @@ impl MvpAgent {
                 owner_session_id: None,
                 description: None,
                 is_backgrounded: true,
+                output_total_bytes: 0,
             };
-            let notification = crate::extensions::notification::SessionNotification {
+            let mut notification = crate::extensions::notification::SessionNotification {
                 session_id: session_id.clone(),
                 update: crate::extensions::notification::SessionUpdate::TaskCompleted {
                     task_snapshot: snapshot,
@@ -1783,9 +1641,9 @@ impl MvpAgent {
                 },
                 meta: None,
             };
-            if let Ok(params) = serde_json::to_value(&notification)
-                .and_then(|v| serde_json::value::to_raw_value(&v))
-            {
+            if let Some(params) = crate::tools::task_completed_frame::encode(
+                &mut notification,
+            ) {
                 completions
                     .push(
                         self
@@ -1793,7 +1651,7 @@ impl MvpAgent {
                             .forward_with_completion(
                                 acp::ExtNotification::new(
                                     "x.ai/task_completed",
-                                    params.into(),
+                                    params.into_inner().into(),
                                 ),
                             ),
                     );
@@ -1930,7 +1788,8 @@ impl MvpAgent {
                 ),
             );
             let remote_was_absent = self.cfg.borrow().remote_settings.is_none();
-            if let Some(auth) = self.auth_manager.current()
+            if crate::util::config::resolve_remote_fetch_enabled()
+                && let Some(auth) = self.auth_manager.current()
                 && let Some(settings) = self.fetch_settings_resolving_gate(&auth).await
             {
                 self.install_remote_settings(settings);
@@ -2708,6 +2567,9 @@ pub(crate) fn settings_allow_access(
 ) -> bool {
     !matches!(rs.and_then(|s| s.allow_access), Some(false))
 }
+mod replay;
+#[cfg(test)]
+mod replay_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

@@ -1734,16 +1734,13 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
     #[test]
     fn compress_output_never_exceeds_payload_limit() {
         let png = make_noisy_png(4096, 3072);
-        match compress_image_for_conversation(png, "image/png".into()) {
-            Ok((buf, mime)) => {
-                assert_eq!(mime, "image/jpeg");
-                let b64_len = (buf.len() * 4).div_ceil(3);
-                assert!(
-                    b64_len <= MAX_IMAGE_PAYLOAD_BYTES,
-                    "JPEG output ({b64_len} B b64) must fit within {MAX_IMAGE_PAYLOAD_BYTES} B"
-                );
-            }
-            Err(_) => {}
+        if let Ok((buf, mime)) = compress_image_for_conversation(png, "image/png".into()) {
+            assert_eq!(mime, "image/jpeg");
+            let b64_len = (buf.len() * 4).div_ceil(3);
+            assert!(
+                b64_len <= MAX_IMAGE_PAYLOAD_BYTES,
+                "JPEG output ({b64_len} B b64) must fit within {MAX_IMAGE_PAYLOAD_BYTES} B"
+            );
         }
     }
     /// Wrapper-level user-visible message: prefix matches the caller's

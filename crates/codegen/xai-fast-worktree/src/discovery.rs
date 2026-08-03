@@ -173,11 +173,25 @@ pub fn rebuild_worktree_db(
     db: &crate::db::WorktreeDb,
     grok_home: &Path,
 ) -> anyhow::Result<RebuildReport> {
+    let (result, _) = rebuild_worktree_db_with_registered_paths(db, grok_home);
+    result
+}
+
+/// Rebuild the DB while retaining the exact paths inserted by this attempt.
+///
+/// The paths are returned even when a later DB operation fails. Auto-GC uses
+/// them as same-pass guards so a partial rebuild cannot immediately reclaim a
+/// worktree it just registered.
+pub(crate) fn rebuild_worktree_db_with_registered_paths(
+    db: &crate::db::WorktreeDb,
+    grok_home: &Path,
+) -> (anyhow::Result<RebuildReport>, Vec<PathBuf>) {
     let discovery = discover_worktrees(grok_home);
     let mut report = RebuildReport {
         discovered: discovery.found.len() as u64,
         ..Default::default()
     };
+    let mut registered_paths = Vec::new();
     let now = now_epoch_secs();
     let roots = managed_worktree_roots(grok_home);
 
@@ -193,18 +207,31 @@ pub fn rebuild_worktree_db(
         }
         let id = id_from_path(&path);
         let path_str = path.to_string_lossy();
-        if db.get_by_id(&id)?.is_some() || db.get(&path_str)?.is_some() {
+        let already_tracked = match db.get_by_id(&id) {
+            Ok(Some(_)) => true,
+            Ok(None) => match db.get(&path_str) {
+                Ok(record) => record.is_some(),
+                Err(error) => return (Err(error), registered_paths),
+            },
+            Err(error) => return (Err(error), registered_paths),
+        };
+        if already_tracked {
             report.already_tracked += 1;
             continue;
         }
         let mut rec = wt.into_record();
-        // Touch so same-pass age GC does not reclaim solely from old FS mtime.
+        // Keep the timestamp for normal age semantics. The caller also protects
+        // this exact path for the current GC pass because second-resolution
+        // clocks can roll over between registration and age evaluation.
         rec.last_accessed_at = Some(now);
-        db.register(&rec)?;
+        if let Err(error) = db.register(&rec) {
+            return (Err(error), registered_paths);
+        }
+        registered_paths.push(rec.path.clone());
         report.registered += 1;
     }
 
-    Ok(report)
+    (Ok(report), registered_paths)
 }
 
 #[cfg(test)]
@@ -297,6 +324,34 @@ mod tests {
         assert_eq!(r2.discovered, 1);
         assert_eq!(r2.registered, 0);
         assert_eq!(r2.already_tracked, 1);
+    }
+
+    #[test]
+    fn rebuild_tracking_paths_retains_partial_success_on_late_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let grok_home = tmp.path();
+        make_fake_standalone_worktree(&grok_home.join("worktrees/repo/wt-a"));
+        make_fake_standalone_worktree(&grok_home.join("worktrees/repo/wt-b"));
+
+        let db = crate::db::WorktreeDb::open_in_memory().unwrap();
+        db.execute_batch_for_test(
+            "CREATE TRIGGER block_second_worktree_insert BEFORE INSERT ON worktrees
+             WHEN (SELECT COUNT(*) FROM worktrees) >= 1 BEGIN
+               SELECT RAISE(ABORT, 'second registration blocked');
+             END;",
+        )
+        .unwrap();
+
+        let (result, registered_paths) = rebuild_worktree_db_with_registered_paths(&db, grok_home);
+        assert!(result.is_err(), "the second registration must fail");
+        assert_eq!(
+            registered_paths.len(),
+            1,
+            "the successful prefix must remain available to same-pass GC guards"
+        );
+        let records = db.list(&crate::db::ListFilter::default()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(registered_paths[0], records[0].path);
     }
 
     #[test]

@@ -292,6 +292,9 @@ pub struct TaskSnapshot {
     /// Distinguishes monitor tasks from regular bash tasks.
     #[serde(default)]
     pub kind: TaskKind,
+    /// Total bytes the task has written, when the source tracks it.
+    #[serde(default)]
+    pub output_total_bytes: usize,
 }
 
 impl TaskSnapshot {

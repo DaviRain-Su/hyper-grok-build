@@ -21,7 +21,7 @@ struct ListRequest {
     session_id: String,
 }
 
-pub fn hook_spec_to_info(spec: &xai_grok_hooks::config::HookSpec) -> HookInfo {
+pub(crate) fn hook_spec_to_info(spec: &xai_grok_hooks::config::HookSpec) -> HookInfo {
     use xai_grok_hooks::event::HookEventName;
 
     let event = match spec.event {
@@ -92,7 +92,7 @@ pub struct ClientHookGroup {
     pub timeout: Option<std::time::Duration>,
 }
 
-pub type ClientHooks = HashMap<HookEventName, Vec<ClientHookGroup>>;
+pub(crate) type ClientHooks = HashMap<HookEventName, Vec<ClientHookGroup>>;
 
 /// One hook dispatched to a client callback: the shared [`HookEventEnvelope`]
 /// (flattened, camelCase) plus the `hookCallbackId` it targets. The same shape is sent

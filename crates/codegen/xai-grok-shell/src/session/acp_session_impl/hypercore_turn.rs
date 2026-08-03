@@ -739,6 +739,7 @@ impl SessionActor {
             message: message.clone(),
             is_retryable: true,
             retry_after_secs: None,
+            should_retry: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
@@ -1289,8 +1290,6 @@ fn trailing_assistant_matches(conversation: &[ConversationItem], assistant_text:
         _ => false,
     }
 }
-
-#[cfg(test)]
 
 /// Pure outer-loop decision for Hypercore auth recovery (mirrors the shell
 /// turn's `match core_result / AuthRetrySchedule / continue` without SessionActor).

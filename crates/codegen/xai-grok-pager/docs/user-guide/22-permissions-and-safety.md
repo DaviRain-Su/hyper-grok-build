@@ -161,6 +161,8 @@ After splitting chained commands (on `&&`, `||`, `;`, and pipes), the following 
 
 **Git (read-only):**
 - `git status`, `git branch`, `git log`, `git diff`, `git ls-files`, `git show`, `git rev-parse`
+- `git blame`, `git describe`, `git merge-base`, `git shortlog`
+- `git check-ignore`, `git check-attr`, `git cat-file`, `git ls-tree`, `git show-ref`, `git for-each-ref`, `git rev-list`, `git name-rev`, `git count-objects`
 
 **Search and inspection:**
 - `grep`, `rg` (not `rg --pre` / `rg --pre=…`, which spawn a preprocessor per file)
@@ -337,15 +339,15 @@ A built-in list (`rm`, `chmod`, `chown`, `chgrp`, `chattr`, `pkill`, `kill`, `ki
 
 ### Read, Edit, and Grep Rules
 
-Path patterns are globs matched against the path string the tool was called with:
+Path patterns are globs matched against the tool path after lexical normalization (`.`/`..` collapsed; relative paths joined with the session working directory). A `~`-prefixed tool path is matched literally — never joined with the working directory — because tools expand `~` to the home directory only after the permission check:
 
 - `*` and `?` do not cross `/`; `**` does. `Read(src/*)` matches `src/main.rs` but not `src/nested/mod.rs`; use `Read(src/**)` for the whole tree.
 - A bare filename matches only that exact string. Use `**/.env` to match `.env` at any depth.
 - There are no anchor prefixes: a leading `//` or `~/` in a pattern is treated as literal glob text. Write absolute-path patterns or `**/` patterns instead.
-- Paths are matched as given, without canonicalization. Whether a path is absolute or relative depends on how the tool was invoked, so patterns intended as boundaries should cover both forms (for example both `/repo/secrets/**` and `secrets/**`).
+- Because `.`/`..` are collapsed before matching, rooted patterns cannot be escaped by traversal: `Read(./**)` scopes to the working directory (bare relatives like `src/main.rs` match; `./../../etc/passwd` does not), and `Read(src/**)` stays under `src/`. Unrooted patterns (`*`, or a leading `**` as in `**/*.rs`) intentionally match at any depth, anywhere.
 - `Read` rules also govern `grep` searches; `Grep(...)` rules match only grep.
 
-`Read` and `Edit` deny rules additionally apply to file paths that shell commands touch (for example `cat` or `sed` on a denied path), including literal inline scripts passed to `bash`, `sh`, `dash`, `zsh`, or `ksh` with `-c`; that shell-level check also resolves symlinks. The direct `read_file`/`search_replace` tool checks do not resolve symlinks. For OS-level enforcement that covers every process, combine deny rules with the sandbox ([18-sandbox.md](18-sandbox.md)).
+`Read` and `Edit` deny rules additionally apply to file paths that shell commands touch (for example `cat` or `sed` on a denied path), including literal inline scripts passed to `bash`, `sh`, `dash`, `zsh`, or `ksh` with `-c`; that shell-level check uses the same working-directory-aware normalization (an absolute operand under the working directory also matches rooted rules like `Read(src/**)`) and also resolves symlinks. The direct `read_file`/`search_replace` tool checks do not resolve symlinks. For OS-level enforcement that covers every process, combine deny rules with the sandbox ([18-sandbox.md](18-sandbox.md)).
 
 ### MCP Rules
 

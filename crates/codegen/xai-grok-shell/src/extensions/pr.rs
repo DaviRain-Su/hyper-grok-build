@@ -6,21 +6,21 @@ use crate::agent::MvpAgent;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PrStatusRequest {
+pub(crate) struct PrStatusRequest {
     pub cwd: String,
     pub branch: String,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PrStatusResponse {
+pub(crate) struct PrStatusResponse {
     pub pr: Option<PrData>,
     pub updated_session_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PrData {
+pub(crate) struct PrData {
     pub url: String,
     pub state: String,
     pub is_in_merge_queue: bool,

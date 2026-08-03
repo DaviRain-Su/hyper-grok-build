@@ -9,6 +9,9 @@ const TMUX_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// into a drain timeout. The main process wait still uses only
 /// [`TMUX_QUERY_TIMEOUT`].
 const POST_EXIT_CLEANUP_GRACE: Duration = Duration::from_millis(300);
+/// How long a signalled process group may take to empty before it is killed.
+const GROUP_EXIT_GRACE: Duration = Duration::from_millis(100);
+const GROUP_EXIT_POLL: Duration = Duration::from_millis(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TmuxCommand<'a> {
@@ -16,6 +19,7 @@ enum TmuxCommand<'a> {
     OptionValue(&'a str),
     OptionSupport(&'a str),
     ControlMode,
+    ClientFeatures,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -131,10 +135,24 @@ fn terminate_tmux_tree(group: &xai_tty_utils::ProcessGroup, child: &mut std::pro
     let _ = child.wait();
 }
 
+/// SIGTERM the group, then escalate to SIGKILL only if it outlives the grace.
+///
+/// Callers reach this with the leader already reaped, so the group is usually
+/// empty on the first check.
 fn terminate_owned_group(group: &xai_tty_utils::ProcessGroup) {
     let _ = group.terminate();
-    std::thread::sleep(Duration::from_millis(100));
-    // KILL is unconditional because leader state says nothing about descendants.
+    let deadline = std::time::Instant::now() + GROUP_EXIT_GRACE;
+    loop {
+        if group.has_live_members() == Some(false) {
+            // `return`, not `break`: the reaped leader's pid may already
+            // belong to an unrelated group, so an empty group gets no SIGKILL.
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(GROUP_EXIT_POLL);
+    }
     let _ = group.kill();
 }
 
@@ -186,6 +204,25 @@ fn query_option_support_with(runner: &dyn TmuxCommandRunner, option: &str) -> Tm
     }
 }
 
+/// The attached client's resolved terminal features, as a comma-separated list
+/// (`RGB`, `clipboard`, `focus`, …).
+///
+/// tmux resolves this once per client at attach time from the outer terminal's
+/// terminfo plus `terminal-features` / `terminal-overrides`, and it decides
+/// whether 24-bit SGR survives the multiplexer. `COLORTERM` inside the pane
+/// describes only what the pane's program emits, so it cannot answer that.
+///
+/// Empty output means the answer is unknown rather than negative: tmux before
+/// 3.2 has no `terminal-features` and renders the unknown format as an empty
+/// string, and a server with no attached client has nothing to report.
+pub fn query_client_features() -> TmuxQueryResult<String> {
+    query_client_features_with(&LiveTmuxCommandRunner)
+}
+
+fn query_client_features_with(runner: &dyn TmuxCommandRunner) -> TmuxQueryResult<String> {
+    parse_value(runner.run(TmuxCommand::ClientFeatures))
+}
+
 pub fn query_control_mode() -> TmuxQueryResult<bool> {
     query_control_mode_with(&LiveTmuxCommandRunner)
 }
@@ -218,6 +255,11 @@ fn build_tmux_command(command: TmuxCommand<'_>) -> Command {
         }
         TmuxCommand::ControlMode => {
             cmd.args(["display-message", "-p", "#{client_flags}"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        }
+        TmuxCommand::ClientFeatures => {
+            cmd.args(["display-message", "-p", "#{client_termfeatures}"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
         }
@@ -283,6 +325,7 @@ mod tests {
                 TmuxCommand::OptionValue(option) => format!("value:{option}"),
                 TmuxCommand::OptionSupport(option) => format!("support:{option}"),
                 TmuxCommand::ControlMode => "control-mode".to_owned(),
+                TmuxCommand::ClientFeatures => "client-features".to_owned(),
             });
             self.output.clone()
         }
@@ -303,6 +346,10 @@ mod tests {
             (
                 TmuxCommand::ControlMode,
                 vec!["display-message", "-p", "#{client_flags}"],
+            ),
+            (
+                TmuxCommand::ClientFeatures,
+                vec!["display-message", "-p", "#{client_termfeatures}"],
             ),
         ];
         for (request, args) in cases {
@@ -435,5 +482,68 @@ mod tests {
             .expect("near-deadline success must not become a drain error");
         assert!(output.status_success, "expected successful status");
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "tmux 3.4");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_group_teardown_does_not_wait_out_the_grace() {
+        let group = xai_tty_utils::ProcessGroup::new().expect("group");
+        let started = std::time::Instant::now();
+        terminate_owned_group(&group);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < GROUP_EXIT_GRACE / 2,
+            "an empty group must not wait out the grace, took {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_that_ignores_sigterm_waits_the_grace_and_is_killed() {
+        let mut group = xai_tty_utils::ProcessGroup::new().expect("group");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("trap '' TERM; sleep 1000")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        xai_tty_utils::detach_std_command(&mut cmd);
+        #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
+        let mut child = cmd.spawn().expect("spawn sigterm-ignoring child");
+        group.attach_std(&child).expect("attach");
+        // The shell installs its trap ~0.3ms after exec. Signal before that
+        // and it dies to the default SIGTERM, leaving a zombie that still
+        // reports live — the test then passes without exercising SIGKILL.
+        std::thread::sleep(Duration::from_millis(250));
+
+        let started = std::time::Instant::now();
+        terminate_owned_group(&group);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= GROUP_EXIT_GRACE,
+            "an occupied group must still get the full grace, took {elapsed:?}"
+        );
+
+        // Bounded: without SIGKILL this fails in seconds rather than blocking
+        // the run on `sleep 1000`.
+        let reap_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            match child.try_wait().expect("poll child") {
+                Some(status) => break status,
+                None if std::time::Instant::now() < reap_deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("the child survived teardown, so SIGKILL never escalated");
+                }
+            }
+        };
+        assert!(
+            !status.success(),
+            "the child must have been killed, got {status:?}"
+        );
     }
 }

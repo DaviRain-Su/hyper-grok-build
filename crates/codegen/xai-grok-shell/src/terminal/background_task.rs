@@ -236,15 +236,6 @@ impl BackgroundTaskRegistry {
         Some(entry.snapshot.read().await.clone())
     }
 
-    /// Get a cloneable notification handle for a specific task.
-    ///
-    /// Used by multi-wait to select across multiple task exit notifications.
-    /// Returns `None` if the task is not registered.
-    pub async fn get_exit_notify(&self, task_id: &str) -> Option<Arc<Notify>> {
-        let tasks = self.tasks.lock().await;
-        tasks.get(task_id).map(|e| Arc::clone(&e.exit_notify))
-    }
-
     /// List all tasks in the registry.
     pub async fn list(&self) -> Vec<TaskSnapshot> {
         let tasks = self.tasks.lock().await;

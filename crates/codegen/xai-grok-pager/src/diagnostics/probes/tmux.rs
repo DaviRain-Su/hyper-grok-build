@@ -8,6 +8,10 @@ pub trait TmuxOptionQuery {
     fn option_support(&self, option: &str) -> TmuxProbeResult<()>;
 
     fn control_mode(&self) -> TmuxProbeResult<bool>;
+
+    /// The attached client's resolved terminal features, which decide whether
+    /// tmux forwards 24-bit color or reduces it to the client terminfo palette.
+    fn client_features(&self) -> TmuxProbeResult<String>;
 }
 
 pub struct LiveTmuxProbe;
@@ -23,5 +27,9 @@ impl TmuxOptionQuery for LiveTmuxProbe {
 
     fn control_mode(&self) -> TmuxProbeResult<bool> {
         tmux_probe::query_control_mode()
+    }
+
+    fn client_features(&self) -> TmuxProbeResult<String> {
+        tmux_probe::query_client_features()
     }
 }

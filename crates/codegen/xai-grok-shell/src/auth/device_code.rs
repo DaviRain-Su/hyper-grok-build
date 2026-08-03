@@ -27,7 +27,7 @@ const MIN_DEVICE_CODE_EXPIRY_FALLBACK_SECS: i64 = 10 * 60;
 /// variant hides the `reqwest::Error` the login funnel classifies, because
 /// transparent forwards `source()` past the error it wraps.
 #[derive(Debug, Error)]
-pub enum DeviceCodeError {
+pub(crate) enum DeviceCodeError {
     #[error(
         "Device-code login is not available for this deployment. \
          Try `grok login` or set XAI_API_KEY instead."
@@ -44,7 +44,7 @@ pub enum DeviceCodeError {
 /// consent page — the traffic that otherwise pollutes the device-flow
 /// conversion denominator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClientSurface {
+pub(crate) enum ClientSurface {
     /// An interactive front-end (TUI / IDE) renders the URL + code to a human.
     Ui,
     /// CLI attached to an interactive terminal (stderr is a TTY).
@@ -79,7 +79,7 @@ fn detect_cli_surface() -> ClientSurface {
 /// Callers display `verification_uri` + `user_code` to the user,
 /// then pass this struct to `complete_device_code_login`.
 #[derive(Debug, Clone)]
-pub struct DeviceCode {
+pub(crate) struct DeviceCode {
     pub verification_uri: String,
     pub verification_uri_complete: Option<String>,
     pub user_code: String,
@@ -129,7 +129,7 @@ struct IdTokenClaims {
 /// This is a single HTTP POST. The caller is responsible for displaying
 /// `DeviceCode::verification_uri` and `DeviceCode::user_code` to the user
 /// before calling `complete_device_code_login`.
-pub async fn request_device_code(
+pub(crate) async fn request_device_code(
     issuer: &str,
     client_id: &str,
     scopes: &[String],
@@ -203,7 +203,7 @@ pub async fn request_device_code(
 ///
 /// Callers should have already displayed `device_code.verification_uri`
 /// and `device_code.user_code` to the user before calling this.
-pub async fn complete_device_code_login(
+pub(crate) async fn complete_device_code_login(
     issuer: &str,
     client_id: &str,
     device_code: DeviceCode,
@@ -290,7 +290,7 @@ pub async fn complete_device_code_login(
 ///
 /// Takes `channels` by `&mut`, consuming it only after the device code is
 /// obtained, so callers can reuse it for a loopback fallback on `NotEnabled`.
-pub async fn run_device_code_login_channels(
+pub(crate) async fn run_device_code_login_channels(
     issuer: &str,
     client_id: &str,
     scopes: &[String],

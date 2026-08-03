@@ -14,7 +14,7 @@ use crate::session::persistence::PersistenceMsg;
 
 /// Transport layer for delivering session notifications to the client
 /// and persistence layer.
-pub struct NotificationSender {
+pub(crate) struct NotificationSender {
     /// Gateway handle for forwarding notifications to the client.
     pub gateway: GatewaySender,
     /// When false, notifications are persisted but NOT forwarded to the

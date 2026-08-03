@@ -1093,6 +1093,9 @@ pub struct AgentView {
     pub hit_plan_button: HitArea,
     pub hit_plan_approval_status: HitArea,
     pub hit_follow_indicator: HitArea,
+    /// ▲ jump-to-response-top indicator in the sticky header's gap row
+    /// (click snaps the answer's first line to the top, same as `K`).
+    pub hit_response_top_indicator: HitArea,
     /// CWD / worktree path in the status bar (click to copy).
     pub hit_cwd: HitArea,
     /// Cancel button in turn status line (`[stop]`).
@@ -1332,6 +1335,10 @@ pub struct AgentView {
     pub permission_stashed_prompt: Option<StashedPrompt>,
     /// Scrollback focus stolen for a permission prompt; restored when the queue empties.
     pub permission_stashed_pane: Option<AgentPane>,
+    /// Free-form "Always allow" pattern editor buffer for the front request.
+    /// `Some` only in `PermissionFocus::PatternEdit`; cleared when the request
+    /// resolves or the edit is cancelled.
+    pub permission_pattern_edit: Option<crate::views::permission_view::PatternEditState>,
     /// Active plan approval view (from `exit_plan_mode` ext_method). When `Some`,
     /// the prompt area shows the plan approval overlay and input is modal.
     pub(crate) plan_approval_view: Option<PlanApprovalViewState>,

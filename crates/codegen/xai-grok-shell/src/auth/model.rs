@@ -251,7 +251,7 @@ impl GrokAuth {
     /// qualify; external-provider credentials qualify only when first-party
     /// (`is_xai_auth`), matching the built-in devbox login they replace.
     /// Plain API keys never do.
-    pub fn is_session_auth(&self) -> bool {
+    pub(crate) fn is_session_auth(&self) -> bool {
         match self.auth_mode {
             AuthMode::WebLogin | AuthMode::Oidc => true,
             AuthMode::External => self.is_xai_auth(),
@@ -282,7 +282,7 @@ impl GrokAuth {
     /// retention. Use this for trace-upload and research-data gates.
     /// Product analytics (`telemetry_enabled`) and user-facing sync
     /// features should use `is_zdr_team()` directly.
-    pub fn is_data_collection_disabled(&self) -> bool {
+    pub(crate) fn is_data_collection_disabled(&self) -> bool {
         self.is_zdr_team() || self.coding_data_retention_opt_out
     }
 
@@ -350,7 +350,7 @@ impl GrokAuth {
     /// ```ignore
     /// GrokAuth { key: "my-key".into(), ..GrokAuth::test_default() }
     /// ```
-    pub fn test_default() -> Self {
+    pub(crate) fn test_default() -> Self {
         Self {
             key: "test-key".into(),
             user_id: "test-user".into(),

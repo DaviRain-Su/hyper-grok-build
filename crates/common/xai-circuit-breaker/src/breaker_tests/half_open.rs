@@ -2,7 +2,7 @@
 //! abandoned-probe lease reclaim, and CAS-loss recovery on the
 //! Open → HalfOpen transition.
 
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -131,8 +131,133 @@ fn repeatedly_abandoned_probes_keep_recovery_alive() {
     assert_eq!(cb.state(), BreakerState::Closed);
 }
 
-/// Race two threads attempting the Open → HalfOpen CAS. Only one
-/// should win the CAS; the loser must observe `HalfOpen` and
+/// Probe reservation holds the generation lock, so trip cannot clear accounting
+/// mid-admission. After the paused reservation completes and trip lands, the
+/// next Open→HalfOpen generation must admit exactly `half_open_max_probes`.
+#[test]
+fn paused_reservation_does_not_contaminate_next_generation() {
+    let (cb, clock) = breaker_with_mock(fast_config(|c| {
+        c.min_samples = 1;
+        c.open_duration = Duration::from_millis(50);
+        c.half_open_max_probes = 1;
+    }));
+    cb.force_half_open();
+
+    let cb = Arc::new(cb);
+    let (reserved_tx, reserved_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let reserver = {
+        let cb = cb.clone();
+        thread::spawn(move || {
+            cb.try_half_open_probe_after_reservation(|| {
+                reserved_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .is_ok()
+        })
+    };
+
+    reserved_rx.recv().unwrap();
+    // Trip blocks until the in-flight reservation finishes under the probe lock.
+    let tripper = {
+        let cb = cb.clone();
+        thread::spawn(move || {
+            cb.record(Outcome::Failure);
+            cb.state()
+        })
+    };
+
+    // Give the tripper a moment to block on the probe lock.
+    thread::sleep(Duration::from_millis(20));
+    assert_eq!(
+        cb.state(),
+        BreakerState::HalfOpen,
+        "trip must wait for the in-flight reservation"
+    );
+
+    release_tx.send(()).unwrap();
+    assert!(
+        reserver.join().unwrap(),
+        "paused reservation must still admit"
+    );
+    assert_eq!(tripper.join().unwrap(), BreakerState::Open);
+
+    clock.advance(Duration::from_millis(50));
+    assert!(
+        cb.check().is_ok(),
+        "next generation must admit exactly one fresh probe"
+    );
+    assert!(
+        cb.check().is_err(),
+        "next generation must not inherit stale probe slots"
+    );
+}
+
+#[test]
+fn paused_reservation_respects_max_probes_two_on_next_generation() {
+    let (cb, clock) = breaker_with_mock(fast_config(|c| {
+        c.min_samples = 1;
+        c.open_duration = Duration::from_millis(50);
+        c.half_open_max_probes = 2;
+    }));
+    cb.force_half_open();
+
+    let cb = Arc::new(cb);
+    let (reserved_tx, reserved_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let reserver = {
+        let cb = cb.clone();
+        thread::spawn(move || {
+            cb.try_half_open_probe_after_reservation(|| {
+                reserved_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .is_ok()
+        })
+    };
+
+    reserved_rx.recv().unwrap();
+    let tripper = {
+        let cb = cb.clone();
+        thread::spawn(move || {
+            cb.record(Outcome::Failure);
+            cb.state()
+        })
+    };
+
+    thread::sleep(Duration::from_millis(20));
+    release_tx.send(()).unwrap();
+    assert!(reserver.join().unwrap());
+    assert_eq!(tripper.join().unwrap(), BreakerState::Open);
+
+    clock.advance(Duration::from_millis(50));
+    assert!(cb.check().is_ok());
+    assert!(cb.check().is_ok());
+    assert!(cb.check().is_err());
+}
+
+#[test]
+fn zero_elapsed_probe_claim_reclaims_only_after_lease() {
+    let (cb, clock) = breaker_with_mock(fast_config(|c| {
+        c.min_samples = 1;
+        c.open_duration = Duration::from_millis(50);
+        c.half_open_max_probes = 1;
+    }));
+    cb.force_half_open();
+
+    assert!(cb.check().is_ok());
+    assert!(cb.check().is_err());
+    clock.advance(Duration::from_millis(49));
+    assert!(cb.check().is_err());
+    clock.advance(Duration::from_millis(1));
+    assert!(
+        cb.check().is_ok(),
+        "elapsed time zero is a valid published claim and must expire normally"
+    );
+}
+
+/// Race many threads attempting the Open → HalfOpen CAS. Only one
+/// should win the CAS; the losers must observe `HalfOpen` and
 /// take the same probe-counting path so the half_open_probes
 /// counter is consistent.
 #[test]

@@ -9,7 +9,7 @@ pub const DEFAULT_SYSTEM_PROMPT_LABEL: &str = xai_grok_agent::DEFAULT_SYSTEM_PRO
 /// Per-model TOML is looked up by session catalog id, then routing slug
 /// (`ModelInfo.model`). Do not use CLI `-m` alone — it may outlive a mid-session
 /// model switch.
-pub fn resolve_system_prompt_label(
+pub(crate) fn resolve_system_prompt_label(
     cfg: &crate::agent::config::Config,
     model_id: &str,
     model: Option<&crate::agent::config::ModelInfo>,
@@ -32,7 +32,7 @@ pub fn resolve_system_prompt_label(
     )
 }
 
-pub fn resolve_system_prompt_label_from_tiers(
+pub(crate) fn resolve_system_prompt_label_from_tiers(
     user_per_model: Option<String>,
     user_global: Option<String>,
     gb_per_model: Option<String>,

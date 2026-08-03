@@ -415,7 +415,7 @@ pub async fn background_terminal(session_id: &str, terminal_id: &str) {
     entry.exit_notify.notify_waiters();
 }
 
-pub async fn list_piped_terminals() -> Vec<TerminalInfo> {
+pub(crate) async fn list_piped_terminals() -> Vec<TerminalInfo> {
     let entries: Vec<(TerminalKey, Arc<TerminalEntry>)> = {
         let reg = registry().lock().await;
         reg.iter()

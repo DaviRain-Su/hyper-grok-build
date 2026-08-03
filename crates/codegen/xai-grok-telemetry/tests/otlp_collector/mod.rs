@@ -174,6 +174,87 @@ async fn start_grpc_collector(collected: Collected, addr_tx: std::sync::mpsc::Se
         .expect("collector serve");
 }
 
+/// A freshly generated CA plus a `localhost` server certificate signed by it,
+/// all PEM-encoded — for the TLS collector variants.
+pub struct TestTlsMaterial {
+    pub ca_cert_pem: String,
+    pub server_cert_pem: String,
+    pub server_key_pem: String,
+}
+
+/// Generate a self-signed CA and a `localhost`/`127.0.0.1` server certificate
+/// signed by it.
+pub fn generate_tls_material() -> TestTlsMaterial {
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+
+    let ca_key = KeyPair::generate().expect("generate CA key");
+    let mut ca_params = CertificateParams::new(Vec::new()).expect("CA params");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca_cert = ca_params.self_signed(&ca_key).expect("self-sign CA");
+
+    let server_key = KeyPair::generate().expect("generate server key");
+    let server_params =
+        CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+            .expect("server params");
+    let server_cert = server_params
+        .signed_by(&server_key, &ca_cert, &ca_key)
+        .expect("sign server cert");
+
+    TestTlsMaterial {
+        ca_cert_pem: ca_cert.pem(),
+        server_cert_pem: server_cert.pem(),
+        server_key_pem: server_key.serialize_pem(),
+    }
+}
+
+/// Start a **TLS** gRPC collector presenting `server_cert_pem`; returns its
+/// base URL (`https://localhost:PORT`).
+pub fn start_grpc_tls_collector(
+    collected: Collected,
+    server_cert_pem: String,
+    server_key_pem: String,
+) -> String {
+    use opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::LogsServiceServer;
+    use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
+
+    // The test binary links both ring and aws-lc-rs, so rustls cannot pick a
+    // process default on its own; the server-side acceptor needs one pinned.
+    // (The production client is unaffected: tonic passes a provider
+    // explicitly.)
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("collector runtime");
+        rt.block_on(async move {
+            let incoming = tonic::transport::server::TcpIncoming::bind(
+                "127.0.0.1:0".parse().expect("collector bind addr"),
+            )
+            .expect("bind gRPC TLS collector");
+            addr_tx
+                .send(incoming.local_addr().expect("collector addr"))
+                .expect("send addr");
+            let identity = tonic::transport::Identity::from_pem(server_cert_pem, server_key_pem);
+            let service = GrpcCollector { collected };
+            tonic::transport::Server::builder()
+                .tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))
+                .expect("collector TLS config")
+                .add_service(LogsServiceServer::new(service.clone()))
+                .add_service(MetricsServiceServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("collector serve");
+        });
+    });
+    let addr = addr_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("collector must start");
+    format!("https://localhost:{}", addr.port())
+}
+
 pub fn decode_logs(
     collected: &Collected,
 ) -> Vec<opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest> {

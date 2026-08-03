@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use xai_grok_workspace::permission::claude_settings::find_claude_settings_paths;
 
@@ -18,7 +18,7 @@ use xai_grok_workspace::permission::claude_settings::find_claude_settings_paths;
 
 /// Persistent import state, loaded from / saved to `~/.grok/claude_import_state.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImportState {
+pub(crate) struct ImportState {
     /// Schema version for forward compatibility.
     pub version: u32,
     /// Hash of global Claude settings (`~/.claude/settings*.json`, `~/.claude.json`).
@@ -31,7 +31,7 @@ pub struct ImportState {
 
 /// Import state for a single scope (global or one project).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScopeState {
+pub(crate) struct ScopeState {
     /// SHA-256 hex digest of the concatenated Claude settings file contents.
     pub last_hash: String,
     /// RFC 3339 timestamp of when the hash was last recorded.
@@ -56,7 +56,7 @@ fn state_path() -> PathBuf {
 }
 
 /// Load the import state from disk. Returns default if missing or unreadable.
-pub fn load_import_state() -> ImportState {
+pub(crate) fn load_import_state() -> ImportState {
     let path = state_path();
     match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
@@ -80,7 +80,7 @@ pub fn load_import_state() -> ImportState {
 }
 
 /// Save the import state to disk (atomic write via tmp + rename).
-pub fn save_import_state(state: &ImportState) -> std::io::Result<()> {
+pub(crate) fn save_import_state(state: &ImportState) -> std::io::Result<()> {
     let path = state_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -180,61 +180,6 @@ fn compute_project_hash(cwd: &Path) -> (String, Vec<PathBuf>) {
 }
 
 // Change Detection
-
-/// Check if any Claude settings files have changed since the last import/dismiss.
-///
-/// Returns `true` if:
-/// - Global settings exist and have a different hash than last recorded
-/// - Project settings exist and have a different hash than last recorded
-/// - No import state exists yet but Claude settings files are present
-pub fn has_new_changes(cwd: &Path) -> bool {
-    let state = load_import_state();
-
-    // Check global scope.
-    let (global_hash, global_paths) = compute_global_hash();
-    let global_files_exist = global_paths.iter().any(|p| p.exists());
-    if global_files_exist {
-        match &state.global {
-            None => {
-                debug!("Claude import: global settings found, no previous import state");
-                return true;
-            }
-            Some(s) if s.last_hash != global_hash => {
-                debug!(
-                    old = %s.last_hash,
-                    new = %global_hash,
-                    "Claude import: global settings changed since last import"
-                );
-                return true;
-            }
-            _ => {}
-        }
-    }
-
-    // Check project scope.
-    let (project_hash, project_paths) = compute_project_hash(cwd);
-    let project_files_exist = project_paths.iter().any(|p| p.exists());
-    if project_files_exist {
-        let cwd_key = cwd.to_string_lossy().to_string();
-        match state.projects.get(&cwd_key) {
-            None => {
-                debug!("Claude import: project settings found, no previous import state");
-                return true;
-            }
-            Some(s) if s.last_hash != project_hash => {
-                debug!(
-                    old = %s.last_hash,
-                    new = %project_hash,
-                    "Claude import: project settings changed since last import"
-                );
-                return true;
-            }
-            _ => {}
-        }
-    }
-
-    false
-}
 
 // State Updates
 

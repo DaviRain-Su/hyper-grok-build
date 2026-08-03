@@ -1079,6 +1079,7 @@ mod tests {
             owner_session_id: None,
             description: None,
             is_backgrounded: false,
+            output_total_bytes: 0,
         })
     }
     fn started_id(n: &ToolNotification) -> &str {

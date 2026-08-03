@@ -555,7 +555,7 @@ impl AgentView {
         }
         if let Some(ref mut viewer) = self.line_viewer {
             if let Some(area) = viewer.last_popup_area
-                && area.contains((col, row).into())
+                && (area.contains((col, row).into()) || viewer.list_state.scrollbar_hit(col, row))
             {
                 viewer
                     .list_state

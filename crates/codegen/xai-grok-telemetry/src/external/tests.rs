@@ -998,6 +998,40 @@ fn settings_gate_suppresses_until_resolved() {
     );
 }
 
+#[test]
+fn settings_gate_opens_when_the_bounded_window_expires() {
+    let _serial = GATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    struct RestoreGate(std::time::Duration);
+    impl Drop for RestoreGate {
+        fn drop(&mut self) {
+            super::set_settings_gate_max_wait(self.0);
+            super::mark_external_otel_settings_resolved();
+        }
+    }
+    let _restore = RestoreGate(super::settings_gate_max_wait());
+
+    super::set_settings_gate_max_wait(std::time::Duration::from_secs(600));
+    super::suppress_external_otel_until_settings();
+    assert!(
+        !super::is_settings_gate_open(),
+        "inside the window the gate stays fail-closed"
+    );
+
+    super::set_settings_gate_max_wait(std::time::Duration::ZERO);
+    assert!(
+        super::is_settings_gate_open(),
+        "an expired window must resolve the gate open onto local policy"
+    );
+
+    super::set_settings_gate_max_wait(std::time::Duration::from_secs(600));
+    super::suppress_external_otel_until_settings();
+    assert!(
+        !super::is_settings_gate_open(),
+        "re-closing must restart the window, not stay open"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Metric increment derivation
 // ─────────────────────────────────────────────────────────────────────────────

@@ -2223,6 +2223,7 @@ fn gate_refreshed_no_effect_when_already_unblocked() {
 /// deferred for live verification instead of painting the paywall directly:
 /// the gate is held out of `app.gate` and a `CheckSubscription` +
 /// verify-timeout pair is emitted.
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn gate_refreshed_newly_blocked_defers_gate_for_verification() {
     let mut app = test_app();
@@ -2258,6 +2259,29 @@ fn gate_refreshed_newly_blocked_defers_gate_for_verification() {
     );
 }
 
+/// Community builds keep consumer gates soft so users can switch providers or
+/// credentials instead of being trapped behind a SuperGrok-only paywall.
+#[cfg(feature = "community-build")]
+#[test]
+fn gate_refreshed_newly_blocked_is_ignored_for_community_consumer() {
+    let mut app = test_app();
+    let settings = xai_grok_shell::util::config::RemoteSettings {
+        gate_message: Some("Subscribe".into()),
+        ..Default::default()
+    };
+
+    let effects = dispatch_task_result(
+        TaskResult::GateRefreshed {
+            settings: Some(settings),
+        },
+        &mut app,
+    );
+
+    assert!(app.has_access());
+    assert!(app.pending_gate_verification.is_none());
+    assert!(effects.is_empty());
+}
+
 // ── Stale-gate verification resolution ──────────────────────────
 
 fn test_gate() -> xai_grok_shell::auth::GateInfo {
@@ -2268,12 +2292,24 @@ fn test_gate() -> xai_grok_shell::auth::GateInfo {
     }
 }
 
+/// Seed the deferred-gate state directly so resolution tests exercise the
+/// generation machinery under both upstream and `community-build` semantics.
+/// Community builds intentionally ignore consumer paywalls at the
+/// [`AppView::impose_gate`] boundary, but an already-pending verification can
+/// still exist after a feature transition or restored state and must resolve
+/// safely.
+fn seed_pending_gate_verification(app: &mut AppView) -> u64 {
+    app.pending_gate_verification = Some(test_gate());
+    app.gate_verify_gen = app.gate_verify_gen.wrapping_add(1);
+    app.gate_verify_gen
+}
+
 /// The live check confirmed access (meta without a gate): the deferred
 /// stale gate is dropped and the paywall never shows.
 #[test]
 fn verify_check_with_meta_resolves_pending_gate() {
     let mut app = test_app();
-    let _effs = app.impose_gate(test_gate());
+    let _generation = seed_pending_gate_verification(&mut app);
     assert!(app.has_access());
 
     let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta::default()).unwrap();
@@ -2294,7 +2330,7 @@ fn verify_check_with_meta_resolves_pending_gate() {
 #[test]
 fn verify_check_with_gated_meta_shows_gate() {
     let mut app = test_app();
-    let _effs = app.impose_gate(test_gate());
+    let _generation = seed_pending_gate_verification(&mut app);
 
     let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta {
         gate: Some(test_gate()),
@@ -2318,7 +2354,7 @@ fn verify_check_with_gated_meta_shows_gate() {
 #[test]
 fn verify_check_failure_promotes_pending_gate() {
     let mut app = test_app();
-    let _effs = app.impose_gate(test_gate());
+    let _generation = seed_pending_gate_verification(&mut app);
 
     let effects = dispatch_task_result(
         TaskResult::CheckSubscriptionComplete {
@@ -2342,11 +2378,10 @@ fn verify_check_failure_promotes_pending_gate() {
 /// must never promote a deferred gate: only the deferral's own
 /// generation-scoped check or timeout may (a superseded or unrelated check
 /// failing is not evidence about the current verification).
-#[cfg(not(feature = "community-build"))]
 #[test]
 fn check_subscription_complete_failure_leaves_pending_gate_untouched() {
     let mut app = test_app();
-    let _effs = app.impose_gate(test_gate());
+    let _generation = seed_pending_gate_verification(&mut app);
 
     let effects = dispatch_task_result(
         TaskResult::CheckSubscriptionComplete {
@@ -2372,10 +2407,10 @@ fn check_subscription_complete_failure_leaves_pending_gate_untouched() {
 #[test]
 fn verify_check_stale_generation_failure_is_ignored() {
     let mut app = test_app();
-    let _effs = app.impose_gate(test_gate());
+    let _generation = seed_pending_gate_verification(&mut app);
     let stale_gen = app.gate_verify_gen;
     // Second deferral supersedes the first (its check is in flight).
-    let _effs = app.impose_gate(test_gate());
+    let _generation = seed_pending_gate_verification(&mut app);
 
     let effects = dispatch_task_result(
         TaskResult::CheckSubscriptionComplete {
@@ -2414,7 +2449,7 @@ fn check_subscription_complete_failure_without_pending_gate_is_noop() {
 #[test]
 fn gate_verify_timeout_promotes_pending_gate() {
     let mut app = test_app();
-    let _effs = app.impose_gate(test_gate());
+    let _generation = seed_pending_gate_verification(&mut app);
     assert!(app.has_access());
 
     let effects = dispatch_task_result(
@@ -2442,7 +2477,7 @@ fn gate_verify_timeout_promotes_pending_gate() {
 #[test]
 fn gate_verify_timeout_noop_when_already_resolved() {
     let mut app = test_app();
-    let _effs = app.impose_gate(test_gate());
+    let _generation = seed_pending_gate_verification(&mut app);
     let generation = app.gate_verify_gen;
     // Live check resolved first (access confirmed).
     let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta::default()).unwrap();
@@ -2467,7 +2502,7 @@ fn gate_verify_timeout_noop_when_already_resolved() {
 fn gate_verify_timeout_stale_generation_is_ignored() {
     let mut app = test_app();
     // First deferral resolves (access confirmed) ...
-    let _effs = app.impose_gate(test_gate());
+    let _generation = seed_pending_gate_verification(&mut app);
     let stale_gen = app.gate_verify_gen;
     let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta::default()).unwrap();
     dispatch_task_result(
@@ -2478,7 +2513,7 @@ fn gate_verify_timeout_stale_generation_is_ignored() {
         &mut app,
     );
     // ... then a SECOND gate is deferred (check in flight).
-    let _effs = app.impose_gate(test_gate());
+    let _generation = seed_pending_gate_verification(&mut app);
     assert!(app.has_access());
 
     // The FIRST deferral's timer fires now — it must not promote the
@@ -2507,7 +2542,7 @@ fn gate_verify_timeout_stale_generation_is_ignored() {
 #[test]
 fn verified_gate_via_check_complete_starts_paywall_chain() {
     let mut app = test_app();
-    let _effs = app.impose_gate(test_gate());
+    let _generation = seed_pending_gate_verification(&mut app);
 
     let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta {
         gate: Some(test_gate()),
@@ -2562,7 +2597,7 @@ fn verified_gate_via_check_complete_starts_paywall_chain() {
 #[test]
 fn gate_refreshed_without_gate_clears_pending_verification() {
     let mut app = test_app();
-    let _effs = app.impose_gate(test_gate());
+    let _generation = seed_pending_gate_verification(&mut app);
     let generation = app.gate_verify_gen;
 
     let settings = xai_grok_shell::util::config::RemoteSettings::default();
@@ -2592,7 +2627,7 @@ fn gate_refreshed_without_gate_clears_pending_verification() {
 #[test]
 fn logout_clears_pending_gate_verification() {
     let mut app = test_app();
-    let _effs = app.impose_gate(test_gate());
+    let _generation = seed_pending_gate_verification(&mut app);
 
     dispatch_task_result(TaskResult::LogoutComplete, &mut app);
 

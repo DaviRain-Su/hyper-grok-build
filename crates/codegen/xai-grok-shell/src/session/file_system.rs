@@ -25,7 +25,7 @@ pub const ERROR_CODE_FILE_SIZE_EXCEEDED: &str = "FILE_SIZE_EXCEEDED";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FileSizeExceededError {
+pub(crate) struct FileSizeExceededError {
     pub path: String,
     pub size_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -162,7 +162,7 @@ pub async fn read_file(abs_path: &Path) -> Result<FsReadFileData> {
 /// max_bytes, cap))` with the full file `size`. `lineCount` is omitted and
 /// the MIME `type` is a coarse text/binary tag (mid-file chunks defeat
 /// magic-byte sniffing).
-pub async fn read_file_ranged(
+pub(crate) async fn read_file_ranged(
     abs_path: &Path,
     offset: u64,
     length: u64,
@@ -196,7 +196,7 @@ pub async fn read_file_ranged(
     })
 }
 
-pub fn check_file_size_limits(
+pub(crate) fn check_file_size_limits(
     data: &FsReadFileData,
     path: &str,
     max_bytes: Option<usize>,

@@ -633,7 +633,7 @@ gap_right = 0                         # gap between scrollbar and screen edge
 [scrollback.scroll]
 margin = 0                            # minimum context lines above/below selection
 min_page_fraction = 0                 # minimum scroll as % of viewport (0-100)
-follow_indicator = "center"           # follow indicator: "center" or "none"
+follow_indicator = "center"           # ▼/▲ scroll indicators: "center" or "none"
 follow_auto_select = true             # auto-select latest entry in follow mode
 follow_by_overscroll = true           # scrolling past bottom engages follow mode
 anchor_on_fold = true                 # keep block position when folding

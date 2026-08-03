@@ -8,7 +8,7 @@ use anyhow::Result;
 use crate::CleanupReport;
 use crate::api::gc::{GcOptions, GcReport, age_path_enabled, gc_worktrees};
 use crate::db::{ListFilter, WorktreeDb, WorktreeKind, now_epoch_secs, resolve_grok_home};
-use crate::discovery::{RebuildReport, rebuild_worktree_db};
+use crate::discovery::{RebuildReport, rebuild_worktree_db_with_registered_paths};
 
 pub const META_LAST_AUTO_GC_AT: &str = "last_auto_gc_at";
 /// Independent throttle stamp for optional DB rebuild (not shared with GC).
@@ -414,7 +414,11 @@ pub fn maybe_auto_gc(db: &WorktreeDb, auto_opts: &AutoGcOptions) -> Result<AutoG
     // Rebuild meta is **not** stamped here: if GC fails after a successful
     // rebuild, we must leave rebuild unthrottled so the next pass can pick up
     // worktrees created between this rebuild and the failed GC.
-    let (rebuild, rebuild_due_to_stamp) = maybe_run_rebuild(
+    let RebuildRun {
+        report: rebuild,
+        registered_paths: mut protect_paths,
+        due_to_stamp: rebuild_due_to_stamp,
+    } = maybe_run_rebuild(
         db,
         include_rebuild,
         dry_run,
@@ -428,7 +432,6 @@ pub fn maybe_auto_gc(db: &WorktreeDb, auto_opts: &AutoGcOptions) -> Result<AutoG
         BTreeSet::new()
     };
 
-    let mut protect_paths = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         protect_paths.push(cwd);
     }
@@ -564,20 +567,31 @@ fn classify_rebuild_meta(
     }
 }
 
+#[derive(Debug, Default)]
+struct RebuildRun {
+    report: Option<RebuildReport>,
+    /// Exact DB rows inserted during this attempt, including partial success.
+    registered_paths: Vec<PathBuf>,
+    due_to_stamp: bool,
+}
+
 /// Optional rebuild; never fails the GC pass.
 ///
-/// Returns `(report, due_to_stamp)`. Stamp is applied by the caller **only
-/// after** GC succeeds — stamping here would throttle rebuild while GC can
-/// still `Err` and leave `last_auto_gc_at` unstamped.
+/// The caller protects `registered_paths` from age expiry for this invocation.
+/// This is required even after a successful timestamp touch because the DB and
+/// GC clocks have only second resolution and can cross a boundary mid-pass.
+/// The rebuild stamp is applied by the caller **only after** GC succeeds —
+/// stamping here would throttle rebuild while GC can still `Err` and leave
+/// `last_auto_gc_at` unstamped.
 fn maybe_run_rebuild(
     db: &WorktreeDb,
     include_rebuild: bool,
     dry_run: bool,
     rebuild_min_interval_secs: i64,
     now: i64,
-) -> (Option<RebuildReport>, bool) {
+) -> RebuildRun {
     if !include_rebuild || dry_run {
-        return (None, false);
+        return RebuildRun::default();
     }
 
     match classify_rebuild_meta(
@@ -586,18 +600,21 @@ fn maybe_run_rebuild(
         rebuild_min_interval_secs,
     ) {
         RebuildMetaClass::Due => {}
-        RebuildMetaClass::Throttled | RebuildMetaClass::SkipFailed => return (None, false),
+        RebuildMetaClass::Throttled | RebuildMetaClass::SkipFailed => {
+            return RebuildRun::default();
+        }
     }
 
     let home = match resolve_grok_home() {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(error = %e, "auto worktree rebuild skipped: grok home unresolved");
-            return (None, false);
+            return RebuildRun::default();
         }
     };
 
-    match rebuild_worktree_db(db, &home) {
+    let (result, registered_paths) = rebuild_worktree_db_with_registered_paths(db, &home);
+    match result {
         Ok(report) => {
             tracing::info!(
                 discovered = report.discovered,
@@ -606,11 +623,18 @@ fn maybe_run_rebuild(
                 "auto worktree db rebuild complete"
             );
             // Defer META_LAST_AUTO_REBUILD_AT until after GC succeeds.
-            (Some(report), true)
+            RebuildRun {
+                report: Some(report),
+                registered_paths,
+                due_to_stamp: true,
+            }
         }
         Err(e) => {
             tracing::warn!(error = %e, "auto worktree rebuild failed; continuing GC");
-            (None, false)
+            RebuildRun {
+                registered_paths,
+                ..Default::default()
+            }
         }
     }
 }
@@ -1832,6 +1856,54 @@ mod tests {
             "dead-record GC must still run when rebuild fails"
         );
         assert!(report.stamped, "GC Ok must still stamp last_auto_gc_at");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn partial_rebuild_paths_remain_protected_after_rebuild_error() {
+        let _g = env_guard();
+        let _cwd_lock = crate::api::cwd_test_guard();
+        clear_auto_gc_env();
+        let fx = crate::db::GrokHomeFixture::new();
+        let db = WorktreeDb::open(&fx.home).unwrap();
+        for name in ["partial-a", "partial-b"] {
+            std::fs::create_dir_all(fx.home.join("worktrees/repo").join(name).join(".git"))
+                .unwrap();
+        }
+        db.execute_batch_for_test(
+            "CREATE TRIGGER block_second_worktree_insert BEFORE INSERT ON worktrees
+             WHEN (SELECT COUNT(*) FROM worktrees) >= 1 BEGIN
+               SELECT RAISE(ABORT, 'second registration blocked');
+             END;",
+        )
+        .unwrap();
+
+        let run = maybe_run_rebuild(&db, true, false, 0, now_epoch_secs());
+        assert!(
+            run.report.is_none(),
+            "partial rebuild still reports failure"
+        );
+        assert!(!run.due_to_stamp, "failed rebuild must stay unthrottled");
+        assert_eq!(run.registered_paths.len(), 1);
+        let protected = run.registered_paths[0].clone();
+
+        // Make the partial success unambiguously expired; its exact path must
+        // still survive the immediately following GC pass.
+        db.execute_batch_for_test("UPDATE worktrees SET created_at = 0, last_accessed_at = 0;")
+            .unwrap();
+        let opts = AutoGcOptions {
+            max_age_secs: 0,
+            min_interval_secs: 0,
+            include_orphan_snapshots: false,
+            ..AutoGcOptions::default()
+        };
+        let gc_opts = build_auto_gc_options(&opts, run.registered_paths);
+        let report = gc_worktrees(&db, &gc_opts).unwrap();
+
+        assert!(protected.exists());
+        assert!(db.get(&protected.to_string_lossy()).unwrap().is_some());
+        assert_eq!(report.expired_removed, 0);
+        assert!(report.skipped_alive >= 1);
     }
 
     #[test]

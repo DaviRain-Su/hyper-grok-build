@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use http::{HeaderMap, HeaderName, HeaderValue};
 use opentelemetry_otlp::{
-    Protocol, WithExportConfig, WithHttpConfig, WithTonicConfig, tonic_types::metadata::MetadataMap,
+    Protocol, WithExportConfig, WithHttpConfig, WithTonicConfig,
+    tonic_types::metadata::MetadataMap,
+    tonic_types::transport::{Certificate, ClientTlsConfig},
 };
 use opentelemetry_sdk::logs::{
     BatchConfig, BatchConfigBuilder, BatchLogProcessor as ThreadBatchLogProcessor,
@@ -254,6 +256,117 @@ pub(crate) struct BuiltProviders {
     pub meter_provider: Option<SdkMeterProvider>,
 }
 
+/// TLS configurations to try, in order, when building a gRPC exporter.
+///
+/// `opentelemetry-otlp` 0.32 must be handed an explicit `ClientTlsConfig` for
+/// `https://` endpoints: its own fallback is `ClientTlsConfig::new()`, whose
+/// root store is **empty** in tonic 0.14 (`Endpoint::from_shared` never
+/// auto-enables roots), so every handshake would fail with `UnknownIssuer`.
+///
+/// For https endpoints this returns two candidates:
+/// 1. system CA store + embedded webpki roots (+ the customer CA, if any);
+/// 2. embedded webpki roots only (+ the customer CA, if any) — the fallback
+///    for hosts whose native store is missing or unreadable, where tonic
+///    fails candidate 1 at build time (`NativeCertsNotFound`). This keeps
+///    parity with the HTTP transport's embedded-roots reqwest client.
+///
+/// For plain `http://` endpoints it returns a single `None` (no TLS).
+/// `true` when the bytes contain at least one PEM certificate block.
+///
+/// The emptiness gate for fail-closed CA handling: a readable but cert-less
+/// bundle must fail exporter construction, not silently fall back to the
+/// default roots. Malformed blocks are caught later by the TLS stack's own
+/// parser (also fail-closed, at exporter build).
+pub(crate) fn pem_contains_certificate(pem: &[u8]) -> bool {
+    const MARKER: &[u8] = b"-----BEGIN CERTIFICATE-----";
+    pem.windows(MARKER.len()).any(|window| window == MARKER)
+}
+
+/// Re-encode validated DER roots as one multi-block PEM string (tonic's
+/// `Certificate::from_pem` parses every block in a single certificate).
+/// `None` when `ders` is empty.
+fn ders_to_pem_bundle(ders: &[Vec<u8>]) -> Option<String> {
+    use base64::Engine as _;
+    if ders.is_empty() {
+        return None;
+    }
+    let mut pem = String::new();
+    for der in ders {
+        pem.push_str("-----BEGIN CERTIFICATE-----\n");
+        pem.push_str(&base64::engine::general_purpose::STANDARD.encode(der));
+        pem.push_str("\n-----END CERTIFICATE-----\n");
+    }
+    Some(pem)
+}
+
+fn grpc_tls_candidates(
+    endpoint: &str,
+    ca_certificate_path: Option<&str>,
+) -> BuildResult<Vec<Option<ClientTlsConfig>>> {
+    // Mirror opentelemetry-otlp's own `is_https` detection exactly (parsed
+    // URI scheme == https, tonic/mod.rs) so its empty-root-store
+    // `ClientTlsConfig::new()` fallback for https endpoints is unreachable:
+    // every endpoint it treats as https gets an explicit config from us.
+    // Schemeless or non-http(s) endpoints get no TLS config here and fail
+    // fail-closed inside the exporter ("invalid URL, scheme is missing").
+    let is_https = endpoint
+        .parse::<http::Uri>()
+        .ok()
+        .and_then(|uri| uri.scheme().cloned())
+        .is_some_and(|scheme| scheme == http::uri::Scheme::HTTPS);
+    if !is_https {
+        return Ok(vec![None]);
+    }
+    let mut base =
+        ClientTlsConfig::new().trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    // Process-wide `GROK_EXTRA_CA_BUNDLE` roots (fail-open by that crate's
+    // contract), matching what the HTTP transport applies via
+    // `with_extra_root_certificates_blocking` — the same corporate/MITM CA
+    // must work on both transports.
+    if let Some(extra_pem) = ders_to_pem_bundle(xai_grok_extra_ca::extra_root_ders()) {
+        base = base.ca_certificate(Certificate::from_pem(extra_pem));
+    }
+    let base = match ca_certificate_path {
+        // Fail closed on an unreadable or certificate-less customer CA (the
+        // caller warns and disables the stream): silently exporting without
+        // the configured trust anchor would be worse than not exporting.
+        Some(path) => {
+            let pem = std::fs::read(path).map_err(|e| {
+                opentelemetry_otlp::ExporterBuildError::InternalFailure(format!(
+                    "reading OTEL_EXPORTER_OTLP_CERTIFICATE {path:?}: {e}"
+                ))
+            })?;
+            if !pem_contains_certificate(&pem) {
+                return Err(opentelemetry_otlp::ExporterBuildError::InternalFailure(
+                    format!("OTEL_EXPORTER_OTLP_CERTIFICATE {path:?} contains no certificates"),
+                ));
+            }
+            base.ca_certificate(Certificate::from_pem(pem))
+        }
+        None => base,
+    };
+    Ok(vec![Some(base.clone().with_native_roots()), Some(base)])
+}
+
+/// Run `build` with each TLS candidate in order, returning the first success.
+fn build_with_tls_fallback<T>(
+    candidates: Vec<Option<ClientTlsConfig>>,
+    mut build: impl FnMut(Option<ClientTlsConfig>) -> BuildResult<T>,
+) -> BuildResult<T> {
+    debug_assert!(!candidates.is_empty());
+    let mut last_err = None;
+    for candidate in candidates {
+        match build(candidate) {
+            Ok(exporter) => return Ok(exporter),
+            Err(e) => {
+                tracing::debug!(error = %e, "external otel: gRPC exporter TLS candidate failed");
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.expect("at least one TLS candidate is always supplied"))
+}
+
 enum OtlpExportTransport<'a> {
     HttpProtobuf(&'a crate::otlp_http::BlockingOtlpClient),
     Grpc(&'a DedicatedRuntime),
@@ -293,13 +406,20 @@ impl OtlpExportFactory for OtlpLogExporterBuilder<'_> {
                 let endpoint = self.cfg.logs_endpoint.clone();
                 let timeout = self.cfg.timeout;
                 let metadata = customer_metadata(&self.cfg.logs_headers);
+                let tls_candidates =
+                    grpc_tls_candidates(&endpoint, self.cfg.logs_ca_certificate.as_deref())?;
                 runtime.run(move || {
-                    opentelemetry_otlp::LogExporter::builder()
-                        .with_tonic()
-                        .with_endpoint(endpoint)
-                        .with_timeout(timeout)
-                        .with_metadata(metadata)
-                        .build()
+                    build_with_tls_fallback(tls_candidates, |tls| {
+                        let mut builder = opentelemetry_otlp::LogExporter::builder()
+                            .with_tonic()
+                            .with_endpoint(endpoint.clone())
+                            .with_timeout(timeout)
+                            .with_metadata(metadata.clone());
+                        if let Some(tls) = tls {
+                            builder = builder.with_tls_config(tls);
+                        }
+                        builder.build()
+                    })
                 })
             }
         }
@@ -333,14 +453,21 @@ impl OtlpExportFactory for OtlpMetricExporterBuilder<'_> {
                 let timeout = self.cfg.timeout;
                 let metadata = customer_metadata(&self.cfg.metrics_headers);
                 let temporality = self.temporality;
+                let tls_candidates =
+                    grpc_tls_candidates(&endpoint, self.cfg.metrics_ca_certificate.as_deref())?;
                 runtime.run(move || {
-                    opentelemetry_otlp::MetricExporter::builder()
-                        .with_tonic()
-                        .with_endpoint(endpoint)
-                        .with_timeout(timeout)
-                        .with_metadata(metadata)
-                        .with_temporality(temporality)
-                        .build()
+                    build_with_tls_fallback(tls_candidates, |tls| {
+                        let mut builder = opentelemetry_otlp::MetricExporter::builder()
+                            .with_tonic()
+                            .with_endpoint(endpoint.clone())
+                            .with_timeout(timeout)
+                            .with_metadata(metadata.clone())
+                            .with_temporality(temporality);
+                        if let Some(tls) = tls {
+                            builder = builder.with_tls_config(tls);
+                        }
+                        builder.build()
+                    })
                 })
             }
         }
@@ -473,7 +600,25 @@ pub(crate) fn build(
         && (cfg.logs_exporter == ExporterSelection::Otlp
             || cfg.metrics_exporter == ExporterSelection::Otlp);
     let http_client = needs_http_client
-        .then(|| crate::otlp_http::build_blocking_client(cfg.timeout))
+        .then(|| {
+            // One client serves both signals, so trust the union of the
+            // per-signal customer CA bundles (additive roots) — but only for
+            // signals actually exporting over OTLP: a bad CA override on an
+            // inactive signal must not fail-closed the active one.
+            let mut ca_files: Vec<&str> = [
+                (cfg.logs_exporter == ExporterSelection::Otlp)
+                    .then_some(cfg.logs_ca_certificate.as_deref())
+                    .flatten(),
+                (cfg.metrics_exporter == ExporterSelection::Otlp)
+                    .then_some(cfg.metrics_ca_certificate.as_deref())
+                    .flatten(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            ca_files.dedup();
+            crate::otlp_http::build_blocking_client(cfg.timeout, &ca_files)
+        })
         .transpose()
         .map_err(opentelemetry_otlp::ExporterBuildError::InternalFailure)?;
 
@@ -589,6 +734,160 @@ mod tests {
                 .get("Authorization")
                 .map(String::as_str),
             Some("Bearer customer")
+        );
+    }
+
+    /// Regression test for GB-4580: with the opentelemetry-otlp 0.32 bump,
+    /// the `tls-roots` feature stopped implying a TLS provider feature and
+    /// every `https://` gRPC endpoint was rejected at exporter build time
+    /// ("uses HTTPS but no TLS feature is enabled"), silently disabling the
+    /// external stream. The exporters must build for https endpoints.
+    #[test]
+    fn grpc_exporters_build_for_https_endpoints() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            |name| match name {
+                "GROK_EXTERNAL_OTEL" => Some("1".into()),
+                "OTEL_LOGS_EXPORTER" | "OTEL_METRICS_EXPORTER" => Some("otlp".into()),
+                "OTEL_EXPORTER_OTLP_PROTOCOL" => Some("grpc".into()),
+                // Nothing listens here: gRPC channels connect lazily, so
+                // exporter construction must still succeed.
+                "OTEL_EXPORTER_OTLP_ENDPOINT" => Some("https://localhost:1".into()),
+                _ => None,
+            },
+            None,
+        )
+        .expect("config must resolve");
+        let gates: SharedGates = Arc::new(parking_lot::RwLock::new(Default::default()));
+        let health = Arc::new(ExportHealth::default());
+        let built = super::build(&cfg, gates, health)
+            .expect("https gRPC exporters must build (GB-4580 regression)");
+        assert!(built.logger_provider.is_some());
+        assert!(built.meter_provider.is_some());
+    }
+
+    #[test]
+    fn grpc_tls_candidates_plain_http_has_no_tls() {
+        let candidates =
+            grpc_tls_candidates("http://localhost:4317", None).expect("http must resolve");
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].is_none());
+    }
+
+    #[test]
+    fn grpc_tls_candidates_https_tries_native_then_embedded_roots() {
+        let candidates =
+            grpc_tls_candidates("https://collector.corp.example:4317", None).expect("https");
+        assert_eq!(
+            candidates.len(),
+            2,
+            "native-roots candidate + embedded fallback"
+        );
+        assert!(candidates.iter().all(Option::is_some));
+    }
+
+    /// Endpoints without a scheme must not get a TLS config: they agree with
+    /// opentelemetry-otlp's own https detection (parsed scheme), and the
+    /// exporter rejects them at connect time ("scheme is missing") rather
+    /// than handshaking with an empty root store.
+    #[test]
+    fn grpc_tls_candidates_schemeless_endpoint_gets_no_tls() {
+        let candidates =
+            grpc_tls_candidates("collector.corp.example:4317", None).expect("schemeless");
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].is_none());
+    }
+
+    /// Scheme detection is on the parsed URI, so case differences cannot
+    /// diverge from the exporter's own https check.
+    #[test]
+    fn grpc_tls_candidates_uppercase_https_scheme_detected() {
+        let candidates =
+            grpc_tls_candidates("HTTPS://collector.corp.example:4317", None).expect("https");
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(Option::is_some));
+    }
+
+    /// A CA override on an *inactive* signal must not take down the shared
+    /// HTTP client (and with it the whole stream) for the active signal.
+    #[test]
+    fn inactive_signal_ca_does_not_disable_http_stream() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            |name| match name {
+                "GROK_EXTERNAL_OTEL" => Some("1".into()),
+                // Only metrics export; logs are off but carry a broken CA.
+                "OTEL_METRICS_EXPORTER" => Some("otlp".into()),
+                "OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE" => {
+                    Some("/nonexistent/inactive-signal-ca.pem".into())
+                }
+                _ => None,
+            },
+            None,
+        )
+        .expect("config must resolve");
+        assert_eq!(cfg.logs_exporter, ExporterSelection::None);
+        let gates: SharedGates = Arc::new(parking_lot::RwLock::new(Default::default()));
+        let health = Arc::new(ExportHealth::default());
+        let built = super::build(&cfg, gates, health)
+            .expect("inactive signal's CA must not fail the active stream");
+        assert!(built.logger_provider.is_none());
+        assert!(built.meter_provider.is_some());
+    }
+
+    /// A readable but certificate-less CA bundle must fail closed, not build
+    /// exporters that verify without the configured trust anchor.
+    #[test]
+    fn grpc_tls_candidates_fail_closed_on_empty_ca_file() {
+        let file = tempfile::NamedTempFile::new().expect("temp CA file");
+        std::fs::write(file.path(), "# readable, but no PEM certificate blocks\n")
+            .expect("write empty bundle");
+        let err = grpc_tls_candidates(
+            "https://collector.corp.example:4317",
+            Some(file.path().to_str().expect("utf-8 path")),
+        )
+        .expect_err("certificate-less bundle must fail exporter construction");
+        assert!(err.to_string().contains("no certificates"), "{err}");
+    }
+
+    #[test]
+    fn pem_certificate_detection() {
+        assert!(pem_contains_certificate(
+            b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
+        ));
+        assert!(!pem_contains_certificate(b""));
+        // A non-certificate PEM block (CSR) must not count — note it does not
+        // contain the exact `-----BEGIN CERTIFICATE-----` marker.
+        assert!(!pem_contains_certificate(
+            b"-----BEGIN CERTIFICATE REQUEST-----\nAAAA\n-----END CERTIFICATE REQUEST-----\n"
+        ));
+    }
+
+    /// The DER→PEM re-encode used for `GROK_EXTRA_CA_BUNDLE` must produce a
+    /// bundle other PEM parsers can read back, one block per DER.
+    #[test]
+    fn ders_to_pem_bundle_roundtrips() {
+        assert!(ders_to_pem_bundle(&[]).is_none());
+        let key = rcgen::KeyPair::generate().expect("key");
+        let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("cert");
+        let der = cert.der().to_vec();
+        let pem = ders_to_pem_bundle(&[der.clone(), der]).expect("bundle");
+        let parsed = reqwest::Certificate::from_pem_bundle(pem.as_bytes()).expect("parse back");
+        assert_eq!(parsed.len(), 2);
+        assert!(pem_contains_certificate(pem.as_bytes()));
+    }
+
+    #[test]
+    fn grpc_tls_candidates_fail_closed_on_missing_ca_file() {
+        let err = grpc_tls_candidates(
+            "https://collector.corp.example:4317",
+            Some("/nonexistent/corp-ca.pem"),
+        )
+        .expect_err("missing CA bundle must fail exporter construction");
+        assert!(
+            err.to_string().contains("OTEL_EXPORTER_OTLP_CERTIFICATE"),
+            "{err}"
         );
     }
 

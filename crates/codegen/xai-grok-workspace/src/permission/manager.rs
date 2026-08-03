@@ -12,8 +12,9 @@ use crate::permission::bash_command_splitting::{
     is_setup_command, try_parse_shell, try_parse_word_only_commands_sequence, unwrap_wrappers,
 };
 use crate::permission::exec_risk::{
-    AmbientScanPlan, ambient_exec_risk_from_plan, ambient_scan_plan_from_segments,
-    script_may_invoke_git, segment_exec_facts,
+    AmbientScanPlan, SAFE_GIT_SUBCOMMANDS, ambient_exec_risk_from_plan,
+    ambient_scan_plan_from_segments, git_words_are_read_only_query,
+    git_words_have_unsafe_query_option, script_may_invoke_git, segment_exec_facts,
 };
 use crate::permission::gate_preflight::GatePreflight;
 use crate::permission::policy::{CompiledPolicy, ShellWord};
@@ -24,8 +25,8 @@ use crate::permission::shell_access::{
 };
 use crate::permission::state::{PermissionState, load_state_from_disk, persist_state};
 use crate::permission::types::{
-    AccessKind, ClientType, Decision, EditPathContext, EditPolicy, PermissionCommand,
-    PermissionEvent, PromptPolicy,
+    AccessKind, ClientType, Decision, EditPolicy, PermissionCommand, PermissionEvent, PromptPolicy,
+    RequestPathContext,
 };
 use xai_grok_mcp::servers::parse_mcp_qualified_name;
 use xai_grok_paths::AbsPathBuf;
@@ -350,6 +351,11 @@ fn is_safe_command_words(words: &[String]) -> bool {
     if ps_dumps_environment(words) {
         return false;
     }
+    // Git rides its own shared decision helper (verb allowlist + unsafe-option
+    // table in `exec_risk.rs`), not the string prefixes below.
+    if words.first().map(String::as_str) == Some("git") {
+        return git_words_are_read_only_query(words);
+    }
     let joined = words.join(" ");
     is_safe_command_words_str(&joined)
 }
@@ -358,19 +364,25 @@ fn matches_command_prefix(cmd: &str, pattern: &str) -> bool {
     cmd == pattern || (cmd.starts_with(pattern) && cmd.as_bytes().get(pattern.len()) == Some(&b' '))
 }
 
+/// `git <read-only verb>` prefix match, derived from the single
+/// [`SAFE_GIT_SUBCOMMANDS`] verb table. String-level only (whitelist scope /
+/// fallback) — the words paths decide via
+/// [`git_words_are_read_only_query`], which also rejects unsafe options.
+fn is_safe_git_query_prefix(cmd: &str) -> bool {
+    cmd.strip_prefix("git ").is_some_and(|rest| {
+        SAFE_GIT_SUBCOMMANDS
+            .iter()
+            .any(|verb| matches_command_prefix(rest, verb))
+    })
+}
+
 /// Shared prefix check used by both the tree-sitter path and the fallback path.
 fn is_safe_command_words_str(cmd: &str) -> bool {
     matches_command_prefix(cmd, "ls")
         || matches_command_prefix(cmd, "cat")
         || matches_command_prefix(cmd, "pwd")
         || matches_command_prefix(cmd, "date")
-        || matches_command_prefix(cmd, "git status")
-        || matches_command_prefix(cmd, "git branch")
-        || matches_command_prefix(cmd, "git log")
-        || matches_command_prefix(cmd, "git diff")
-        || matches_command_prefix(cmd, "git ls-files")
-        || matches_command_prefix(cmd, "git show")
-        || matches_command_prefix(cmd, "git rev-parse")
+        || is_safe_git_query_prefix(cmd)
         || matches_command_prefix(cmd, "whoami")
         || matches_command_prefix(cmd, "hostname")
         || matches_command_prefix(cmd, "uptime")
@@ -408,14 +420,9 @@ const ALWAYS_SAFE_COMMANDS: &[&str] = &[
     "hostname",
     "uptime",
     "ps",
-    // Git read-only commands
-    "git status",
-    "git branch",
-    "git log",
-    "git diff",
-    "git ls-files",
-    "git show",
-    "git rev-parse",
+    // Git read-only queries are NOT listed here: they go through the shared
+    // `exec_risk::git_words_are_read_only_query` helper (single verb table +
+    // unsafe-option table) in `is_always_safe_command_words`.
     // Search commands
     "grep",
     "rg",
@@ -445,6 +452,11 @@ fn is_always_safe_command_words(words: &[String]) -> bool {
     }
     if ps_dumps_environment(words) {
         return false;
+    }
+    // Git rides its own shared decision helper (verb allowlist + unsafe-option
+    // table in `exec_risk.rs`), not the prefix list below.
+    if words.first().map(String::as_str) == Some("git") {
+        return git_words_are_read_only_query(words);
     }
 
     let joined = words.join(" ");
@@ -516,9 +528,18 @@ fn is_dangerous_command_words(words: &[String]) -> bool {
 
 /// Whitelist matching helper. Uses `matches_command_prefix` so that user
 /// allow/deny entries enforce a word boundary after the prefix — preventing
-/// the "git" entry from matching "gitleaks" (CWE-183).
+/// the "git" entry from matching "gitleaks" (CWE-183). Metacharacters in a
+/// literal grant stay literal; glob patterns live in `allowed_bash_globs` and
+/// are matched separately (see [`matches_bash_glob`]).
 fn matches_whitelist_prefix(segment_str: &str, allowed_prefix: &str) -> bool {
     matches_command_prefix(segment_str, allowed_prefix)
+}
+
+/// Whether a user-authored glob grant (`allowed_bash_globs`) authorizes
+/// `segment_str`, using the same matcher as the config `[permission]` rules and
+/// the pattern-editor preview, so what the user previewed is what auto-allows.
+fn matches_bash_glob(segment_str: &str, pattern: &str) -> bool {
+    super::policy::bash_pattern_matches_command(pattern, segment_str)
 }
 
 /// Ordinary command-segment outcome, before script-level effect floors.
@@ -655,7 +676,11 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         let matched_grant = state
             .allowed_bash_commands
             .iter()
-            .any(|a| matches_whitelist_prefix(&s, a));
+            .any(|a| matches_whitelist_prefix(&s, a))
+            || state
+                .allowed_bash_globs
+                .iter()
+                .any(|g| matches_bash_glob(&s, g));
         all_segments_granted &= matched_grant;
 
         // 2. Dangerous commands must be prompted even if a whitelist prefix
@@ -667,14 +692,19 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             continue;
         }
 
-        // kubectl config/auth flags, `rg --pre`, and env-dumping `ps` (BSD
-        // `e`/`E`) must prompt even under a whitelist *prefix* grant. Always-allow
-        // persists only the verb prefix (e.g. "kubectl get", or a bare "ps" from
-        // approving `ps aux`), so it cannot be trusted to auto-allow these
-        // secret-exposing variants (H1 #3877754). An exact segment grant still
-        // auto-allows below. Do NOT set any_dangerous — that would also block
-        // exact grants.
-        if (kubectl_has_unsafe_flag(words) || rg_has_pre_flag(words) || ps_dumps_environment(words))
+        // kubectl config/auth flags, `rg --pre`, env-dumping `ps` (BSD
+        // `e`/`E`), and git driver/write options (`--textconv`, `--filters`,
+        // `--output`, `--ext-diff`, `grep -O`) must prompt even under a
+        // whitelist *prefix* grant. Always-allow persists only the verb prefix
+        // (e.g. "kubectl get", "git cat-file", or a bare "ps" from approving
+        // `ps aux`), so it cannot be trusted to auto-allow these
+        // secret-exposing / exec-capable variants (H1 #3877754). An exact
+        // segment grant still auto-allows below. Do NOT set any_dangerous —
+        // that would also block exact grants.
+        if (kubectl_has_unsafe_flag(words)
+            || rg_has_pre_flag(words)
+            || ps_dumps_environment(words)
+            || git_words_have_unsafe_query_option(words))
             && !state.allowed_bash_commands.contains(&s)
         {
             needs_prompt.push(s);
@@ -908,7 +938,7 @@ impl PermissionHandle {
         subagent_type: Option<String>,
         subagent_description: Option<String>,
     ) -> Decision {
-        self.request_with_edit_path_context(
+        self.request_with_path_context(
             access,
             tool_call_update,
             None,
@@ -919,13 +949,14 @@ impl PermissionHandle {
         .await
     }
 
-    /// Request permission with the edit tool's per-session execution cwd.
-    /// Shared parent/subagent managers must use this for `AccessKind::Edit`.
-    pub async fn request_with_edit_path_context(
+    /// Request permission with the requesting session's execution cwd.
+    /// Shared parent/subagent managers must use this for every path-bearing
+    /// access: path rules and edit-target resolution anchor to it.
+    pub async fn request_with_path_context(
         &self,
         access: AccessKind,
         tool_call_update: acp::ToolCallUpdate,
-        edit_path_context: Option<EditPathContext>,
+        path_context: Option<RequestPathContext>,
         session_id: Option<String>,
         subagent_type: Option<String>,
         subagent_description: Option<String>,
@@ -942,7 +973,7 @@ impl PermissionHandle {
                 let msg = PermissionCommand::Request {
                     access,
                     tool_call_update,
-                    edit_path_context,
+                    path_context,
                     respond_to: tx,
                     session_id,
                     subagent_type,
@@ -1024,12 +1055,30 @@ fn bash_request_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bo
         || bash_exec_floor_requires_prompt(evaluation)
 }
 
+/// Floors that consult the auto-mode classifier before prompting instead of
+/// hard-prompting: unvetted env assignments and real-file writes (auto mode
+/// already accepts the same mutations via the Edit tool, so a redirect like
+/// `printf … >> notes.md` gets the classifier's judgment rather than an
+/// unconditional prompt). Injection env, opaque shells, exec-risk flags, and
+/// dangerous segments (`rm`/`chmod`/`kill`/`git push`/… — whose operands also
+/// count as real-file writes, e.g. `rm -rf /`) never defer, and a deferred
+/// Block still prompts — never a silent deny.
 fn bash_request_floor_defers_to_classifier(evaluation: Option<&BashEvaluation>) -> bool {
     evaluation.is_some_and(|evaluation| {
-        !evaluation.writes_real_file
-            && !evaluation.has_opaque_shell
+        !evaluation.has_opaque_shell
             && !evaluation.exec_risk
-            && evaluation.env_risk == EnvRisk::Unvetted
+            && !matches!(
+                evaluation.segments,
+                SegmentEvaluation::NeedsPrompts {
+                    any_dangerous: true,
+                    ..
+                }
+            )
+            && match evaluation.env_risk {
+                EnvRisk::Safe => evaluation.writes_real_file,
+                EnvRisk::Unvetted => true,
+                EnvRisk::Injection => false,
+            }
     })
 }
 
@@ -1409,7 +1458,7 @@ fn spawn_permission_manager_with_pin(
                 PermissionCommand::Request {
                     access,
                     tool_call_update,
-                    edit_path_context,
+                    path_context,
                     mut respond_to,
                     session_id: request_session_id,
                     subagent_type: request_subagent_type,
@@ -1417,6 +1466,17 @@ fn spawn_permission_manager_with_pin(
                 } => {
                     // wait_ms timer; starts at dequeue so it excludes time queued behind others.
                     let request_received = std::time::Instant::now();
+                    // The requesting session's execution cwd. A shared
+                    // parent/subagent manager must anchor path rules, shell
+                    // gates, and ambient scans where the tool actually
+                    // resolves paths — not the manager cwd, where a child's
+                    // relative path would wrongly satisfy rooted allows like
+                    // `Read(./**)`. Direct callers without context keep the
+                    // manager cwd.
+                    let request_cwd = path_context
+                        .as_ref()
+                        .map(|context| context.real_cwd.as_path())
+                        .unwrap_or_else(|| cwd.as_path());
                     // Effective mode (yolo wins); stable for the arm (single-threaded actor).
                     let permission_mode = if yolo_mode {
                         xai_grok_telemetry::enums::PermissionMode::AlwaysApprove
@@ -1527,7 +1587,7 @@ fn spawn_permission_manager_with_pin(
                         AccessKind::Bash(cmd) => {
                             let mut evaluation = evaluate_bash(cmd, &state, true);
                             if let Some(raw) = evaluation.ambient_segments.take() {
-                                let session_cwd = cwd.as_path().to_path_buf();
+                                let session_cwd = request_cwd.to_path_buf();
                                 let plan = ambient_scan_plan_from_segments(&raw, &session_cwd);
                                 // FailClosed needs no git2; CheckDirs is blocking.
                                 let ambient_risk = match plan {
@@ -1562,7 +1622,7 @@ fn spawn_permission_manager_with_pin(
                         }
                         _ => None,
                     };
-                    let protected_edit = match (&access, edit_path_context.as_ref()) {
+                    let protected_edit = match (&access, path_context.as_ref()) {
                         (AccessKind::Edit(path), Some(context)) => {
                             let resolved = resolve_model_path(
                                 &context.real_cwd,
@@ -1588,7 +1648,7 @@ fn spawn_permission_manager_with_pin(
                     let preflight = GatePreflight::evaluate(
                         compiled_policy.as_ref(),
                         &access,
-                        cwd.as_path(),
+                        request_cwd,
                         auto_mode,
                     );
                     let policy_decision = preflight.policy_decision();
@@ -1671,7 +1731,8 @@ fn spawn_permission_manager_with_pin(
                     // fast-path/classifier allows. Policy Ask still prompts below
                     // unless auto fast-path/classifier decides first for non-forced
                     // paths; policy Asks and Bash request floors skip auto entirely
-                    // unless they defer (fail-closed gate Ask / unvetted-env floor).
+                    // unless they defer (fail-closed gate Ask / unvetted-env /
+                    // real-file write floors).
                     if auto_mode
                         && preflight.admits_auto_classifier()
                         && (!bash_request_floor_requires_prompt(bash_evaluation.as_ref())
@@ -2135,6 +2196,11 @@ fn spawn_permission_manager_with_pin(
                                     persist_state(&cwd, &state, client_id_ref).await;
                                     (Decision::Allow, "allow_always_bash")
                                 }
+                                PromptOutcome::AllowAlwaysBashGlob(pattern) => {
+                                    state.allowed_bash_globs.insert(pattern.clone());
+                                    persist_state(&cwd, &state, client_id_ref).await;
+                                    (Decision::Allow, "allow_always_bash_glob")
+                                }
                                 PromptOutcome::AllowAlwaysDomain(_)
                                 | PromptOutcome::AllowAlwaysMcpTool(_)
                                 | PromptOutcome::AllowAlwaysMcpServer(_)
@@ -2198,7 +2264,8 @@ fn spawn_permission_manager_with_pin(
                                     persist_state(&cwd, &state, client_id_ref).await;
                                     (Decision::Allow, "allow_always")
                                 }
-                                PromptOutcome::AllowAlwaysBashCommand(_) => {
+                                PromptOutcome::AllowAlwaysBashCommand(_)
+                                | PromptOutcome::AllowAlwaysBashGlob(_) => {
                                     // Not reachable for non-bash access; defensive.
                                     (Decision::Allow, "allow_always_bash")
                                 }
@@ -2617,7 +2684,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn shared_manager_uses_request_edit_path_context() {
+    async fn shared_manager_uses_request_path_context() {
         use std::os::unix::fs::symlink;
 
         let local = tokio::task::LocalSet::new();
@@ -2631,7 +2698,7 @@ mod tests {
                 let transport = fake_hub(serde_json::json!({ "outcome": "approve" }));
                 let (mgr, _events) = test_manager_with_hub(&parent_cwd, transport.clone());
                 mgr.set_auto_mode(true);
-                let context = EditPathContext {
+                let context = RequestPathContext {
                     real_cwd: child.path().to_path_buf(),
                     display_cwd: Some(display.path().to_path_buf()),
                 };
@@ -2641,7 +2708,7 @@ mod tests {
                     display.path().join("src.rs"),
                 ] {
                     assert_eq!(
-                        mgr.request_with_edit_path_context(
+                        mgr.request_with_path_context(
                             AccessKind::Edit(displayed.to_string_lossy().into_owned()),
                             tool_call(),
                             Some(context.clone()),
@@ -2657,6 +2724,78 @@ mod tests {
                     transport.seen.lock().unwrap().len(),
                     1,
                     "child protected target prompts; ordinary displayed child path stays auto"
+                );
+            })
+            .await;
+    }
+
+    /// Path rules anchor to the request's execution cwd, not the manager's:
+    /// a rule rooted at the parent workspace must key on file identity, so a
+    /// subagent's relative path (which resolves under the child cwd) must not
+    /// be normalized into the parent workspace and hit the parent's rule.
+    #[tokio::test]
+    async fn shared_manager_path_rules_anchor_to_request_cwd() {
+        use crate::permission::types::{
+            PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
+        };
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let parent = tempfile::tempdir().unwrap();
+                let child = tempfile::tempdir().unwrap();
+                let parent_cwd = AbsPathBuf::new(parent.path().to_path_buf()).unwrap();
+                let config = PermissionConfig::new(vec![PermissionRule {
+                    action: RuleAction::Ask,
+                    tool: ToolFilter::Read,
+                    pattern: Some(format!("{}/**", parent.path().display())),
+                    pattern_mode: PatternMode::Glob,
+                }]);
+                let tc = || {
+                    acp::ToolCallUpdate::new(
+                        acp::ToolCallId::new(Arc::from("tc")),
+                        acp::ToolCallUpdateFields::default(),
+                    )
+                };
+                let (mgr, _e) = test_manager_with_config(&parent_cwd, config, false);
+                let context = RequestPathContext {
+                    real_cwd: child.path().to_path_buf(),
+                    display_cwd: None,
+                };
+
+                // Absolute parent-workspace file: the rule keys on identity
+                // regardless of the request cwd.
+                let parent_file = parent.path().join("src/main.rs");
+                let d = mgr
+                    .request_with_path_context(
+                        AccessKind::Read(Some(parent_file.to_string_lossy().into_owned())),
+                        tc(),
+                        Some(context.clone()),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(
+                    !matches!(d, Decision::Allow),
+                    "parent-workspace read must hit the parent rule, got {d:?}"
+                );
+
+                // A bare relative from the child session resolves under the
+                // CHILD cwd — outside the parent workspace — so the parent
+                // rule must not match; the read keeps its default auto-allow.
+                let d = mgr
+                    .request_with_path_context(
+                        AccessKind::Read(Some("src/main.rs".into())),
+                        tc(),
+                        Some(context),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(
+                    matches!(d, Decision::Allow),
+                    "child-relative read must not be normalized into the parent workspace, got {d:?}"
                 );
             })
             .await;
@@ -5051,7 +5190,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_mode_write_floor_prompts_despite_classifier_allow() {
+    async fn auto_mode_write_floor_defers_to_classifier_allow() {
         use crate::permission::auto_mode::LlmPermissionClassifier;
         let local = tokio::task::LocalSet::new();
         local
@@ -5066,9 +5205,44 @@ mod tests {
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"thinking":"looks fine","shouldBlock":false,"reason":"ok"}"#,
                 )));
+                for cmd in ["V=1 cat payload > out", "printf 'done\\n' >> progress.md"] {
+                    let d = mgr
+                        .request(AccessKind::Bash(cmd.into()), tool_call(), None, None, None)
+                        .await;
+                    assert!(matches!(d, Decision::Allow), "{cmd}: {d:?}");
+                    let ev = events.try_recv().expect("event must be emitted");
+                    assert_eq!(
+                        ev.decision_reason.as_deref(),
+                        Some("auto_classifier_allow"),
+                        "{cmd}"
+                    );
+                }
+                assert_eq!(prompts.borrow().len(), 0);
+            })
+            .await;
+    }
+
+    /// A classifier Block on a deferred write floor stays prompt-binding:
+    /// the user is asked, never a silent deny.
+    #[tokio::test]
+    async fn auto_mode_write_floor_classifier_block_prompts() {
+        use crate::permission::auto_mode::LlmPermissionClassifier;
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, mut events) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                mgr.set_auto_mode(true);
+                mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
+                    r#"{"thinking":"risky sink","shouldBlock":true,"reason":"no"}"#,
+                )));
                 let d = mgr
                     .request(
-                        AccessKind::Bash("V=1 cat payload > out".into()),
+                        AccessKind::Bash("cat payload > out".into()),
                         tool_call(),
                         None,
                         None,
@@ -5077,7 +5251,7 @@ mod tests {
                     .await;
                 assert!(matches!(d, Decision::Reject(_)), "{d:?}");
                 let ev = events.try_recv().expect("event must be emitted");
-                assert_eq!(ev.decision_reason.as_deref(), Some("bash_request_floor"));
+                assert_eq!(ev.decision_reason.as_deref(), Some("auto_classifier_block"));
                 assert_eq!(prompts.borrow().len(), 1);
             })
             .await;
@@ -5246,7 +5420,7 @@ mod tests {
                     .send(PermissionCommand::Request {
                         access: AccessKind::Bash("curl http://example.com".into()),
                         tool_call_update: tool_call(),
-                        edit_path_context: None,
+                        path_context: None,
                         respond_to: tx,
                         session_id: None,
                         subagent_type: None,
@@ -5344,7 +5518,7 @@ mod tests {
                             input: serde_json::Value::Null,
                         },
                         tool_call_update: tool_call(),
-                        edit_path_context: None,
+                        path_context: None,
                         respond_to,
                         session_id: None,
                         subagent_type: None,
@@ -5410,7 +5584,7 @@ mod tests {
                     .send(PermissionCommand::Request {
                         access: AccessKind::Bash("curl http://example.com".into()),
                         tool_call_update: tool_call(),
-                        edit_path_context: None,
+                        path_context: None,
                         respond_to: tx,
                         session_id: None,
                         subagent_type: None,
@@ -5944,6 +6118,29 @@ mod tests {
         assert!(!is_safe_command(
             "rg --pre-glob '*.pdf' --pre pdftotext pattern"
         ));
+
+        // The shared unsafe-option table applies to EVERY read-only git verb:
+        // `--filters`/`--textconv` (and unique long-option abbreviations) run
+        // repo-configured content drivers, `--output` writes an arbitrary
+        // path, `--ext-diff` runs the external diff driver, `grep -O` runs a
+        // pager.
+        assert!(is_safe_command("git cat-file -p HEAD:src/main.rs"));
+        assert!(!is_safe_command("git cat-file --filters HEAD:data.bin"));
+        assert!(!is_safe_command("git cat-file --textconv HEAD:data.bin"));
+        assert!(!is_safe_command("git cat-file --filt HEAD:data.bin"));
+        assert!(!is_safe_command("git show --textconv HEAD:data.bin"));
+        assert!(!is_safe_command("git log --textconv -p"));
+        assert!(!is_safe_command("git log --ext-diff"));
+        assert!(!is_safe_command("git show --output=/tmp/out HEAD"));
+        assert!(!is_safe_command("git grep -Osh TODO"));
+        assert!(!is_safe_command("git grep --open-files-in-pager=sh TODO"));
+        // Read-only queries resolve through benign globals; exec/retarget or
+        // unmodeled globals fail closed.
+        assert!(is_safe_command("git -C sub status"));
+        assert!(is_safe_command("git --no-pager log --oneline"));
+        assert!(is_safe_command("git grep -n TODO src"));
+        assert!(!is_safe_command("git --exec-path=/evil status"));
+        assert!(!is_safe_command("git -p status"));
 
         // kubectl commands
         assert!(is_safe_command("kubectl get pods"));
@@ -7004,6 +7201,37 @@ mod tests {
         assert!(!bash_unsafe_env_floor_requires_prompt(Some(&granted)));
     }
 
+    /// Real-file writes defer to the auto-mode classifier on their own, but
+    /// never when combined with an injection env, opaque shell, exec risk, or
+    /// a dangerous segment.
+    #[test]
+    fn write_floor_defers_to_classifier_unless_other_floors() {
+        let state = PermissionState::default();
+        let write = evaluate_bash("printf 'done\\n' >> progress.md", &state, true);
+        assert!(write.writes_real_file);
+        assert!(bash_request_floor_requires_prompt(Some(&write)));
+        assert!(bash_request_floor_defers_to_classifier(Some(&write)));
+
+        // `rm` operands are real-file writes, but a dangerous command keeps
+        // the hard prompt floor (never rides the classifier).
+        let dangerous = evaluate_bash("rm -rf /", &state, true);
+        assert!(dangerous.writes_real_file);
+        assert!(bash_request_floor_requires_prompt(Some(&dangerous)));
+        assert!(!bash_request_floor_defers_to_classifier(Some(&dangerous)));
+
+        let injection = evaluate_bash("LD_PRELOAD=/tmp/e.so cat payload > out", &state, true);
+        assert_eq!(injection.env_risk, EnvRisk::Injection);
+        assert!(!bash_request_floor_defers_to_classifier(Some(&injection)));
+
+        let opaque = evaluate_bash("bash -c 'echo hi' > out", &state, true);
+        assert!(opaque.has_opaque_shell);
+        assert!(!bash_request_floor_defers_to_classifier(Some(&opaque)));
+
+        let exec = evaluate_bash("git -c core.fsmonitor=/x status > out", &state, true);
+        assert!(exec.exec_risk);
+        assert!(!bash_request_floor_defers_to_classifier(Some(&exec)));
+    }
+
     #[test]
     fn opaque_shell_floor_and_exact_grant() {
         let cmd = "bash -c 'GIT_CONFIG_COUNT=1 git status'";
@@ -7294,6 +7522,38 @@ mod tests {
         match evaluate_bash_segments("git status", &state) {
             SegmentEvaluation::AutoAllow { .. } => {}
             other => panic!("expected AutoAllow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_bash_glob_grant_matches_mid_command() {
+        // A pattern-editor grant (allowed_bash_globs) auto-allows the commands
+        // it previews as matching, and only those.
+        let mut state = PermissionState::default();
+        state
+            .allowed_bash_globs
+            .insert("gh api repos/owner/*".to_string());
+        match evaluate_bash_segments("gh api repos/owner/repo/pulls", &state) {
+            SegmentEvaluation::AutoAllow { via_session_grant } => assert!(via_session_grant),
+            other => panic!("expected AutoAllow, got {other:?}"),
+        }
+        match evaluate_bash_segments("gh api repos/other/repo/pulls", &state) {
+            SegmentEvaluation::NeedsPrompts { .. } => {}
+            other => panic!("expected NeedsPrompts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_literal_grant_metacharacters_are_not_wildcards() {
+        // A literal command grant containing shell metacharacters must NOT act
+        // as a glob (would silently widen the grant / regress on upgrade).
+        let mut state = PermissionState::default();
+        state
+            .allowed_bash_commands
+            .insert("find . -name *.rs".to_string());
+        match evaluate_bash_segments("find . -name Cargo.toml", &state) {
+            SegmentEvaluation::NeedsPrompts { .. } => {}
+            other => panic!("expected NeedsPrompts, got {other:?}"),
         }
     }
 
@@ -8171,7 +8431,7 @@ mod tests {
                     .send(PermissionCommand::Request {
                         access: access(),
                         tool_call_update: tool_call(),
-                        edit_path_context: None,
+                        path_context: None,
                         respond_to,
                         session_id: None,
                         subagent_type: None,

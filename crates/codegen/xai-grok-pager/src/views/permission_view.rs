@@ -54,6 +54,98 @@ pub enum PermissionFocus {
     /// Esc exits back to Options (prompt text is preserved).
     /// Enter submits the followup message.
     FollowupInput,
+    /// User is editing a free-form "Always allow" command pattern (a glob).
+    /// Entered with `e` on a bash prompt; the buffer is [`PatternEditState`].
+    /// Esc discards it and returns to Options; Enter persists the pattern.
+    PatternEdit,
+}
+
+/// Single-line editor buffer for a free-form "Always allow" command pattern.
+///
+/// `cursor` is a byte offset into `buffer`, kept on a `char` boundary by every
+/// mutation so slicing is always valid. Content mutations set `dirty`; cursor
+/// moves do not. A confirmed grant is a glob only when dirty — unedited save
+/// is a literal prefix of the pre-filled command.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PatternEditState {
+    pub buffer: String,
+    pub cursor: usize,
+    /// True after any content mutation (insert/delete/clear). Routes the grant
+    /// to `allowed_bash_globs` when the pattern is confirmed.
+    dirty: bool,
+}
+
+impl PatternEditState {
+    /// Start editing `initial` with the cursor at the end (clean).
+    pub fn new(initial: impl Into<String>) -> Self {
+        let buffer = initial.into();
+        let cursor = buffer.len();
+        Self {
+            buffer,
+            cursor,
+            dirty: false,
+        }
+    }
+
+    /// Whether the user has mutated the buffer since open.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// The trimmed pattern to persist, or `None` when blank.
+    pub fn trimmed(&self) -> Option<&str> {
+        let t = self.buffer.trim();
+        (!t.is_empty()).then_some(t)
+    }
+
+    pub fn insert_char(&mut self, ch: char) {
+        self.buffer.insert(self.cursor, ch);
+        self.cursor += ch.len_utf8();
+        self.dirty = true;
+    }
+
+    pub fn backspace(&mut self) {
+        if let Some(ch) = self.buffer[..self.cursor].chars().next_back() {
+            self.cursor -= ch.len_utf8();
+            self.buffer.remove(self.cursor);
+            self.dirty = true;
+        }
+    }
+
+    pub fn delete(&mut self) {
+        if self.cursor < self.buffer.len() {
+            self.buffer.remove(self.cursor);
+            self.dirty = true;
+        }
+    }
+
+    pub fn move_left(&mut self) {
+        if let Some(ch) = self.buffer[..self.cursor].chars().next_back() {
+            self.cursor -= ch.len_utf8();
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        if let Some(ch) = self.buffer[self.cursor..].chars().next() {
+            self.cursor += ch.len_utf8();
+        }
+    }
+
+    pub fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn move_end(&mut self) {
+        self.cursor = self.buffer.len();
+    }
+
+    pub fn clear(&mut self) {
+        if !self.buffer.is_empty() {
+            self.dirty = true;
+        }
+        self.buffer.clear();
+        self.cursor = 0;
+    }
 }
 
 /// Currently selected scope for an MCP "Always allow" prompt.
@@ -201,6 +293,19 @@ impl PermissionViewState {
                 .as_ref()
                 .is_some_and(|s| s.server_prefix.is_some())
     }
+
+    /// Whether this prompt offers the free-form bash pattern editor (`e`): a
+    /// bash command with an `AllowAlways` row to persist the pattern to. The
+    /// height reservation, the render/hint gates, and the `e` key handler must
+    /// all use this so they cannot drift (a stale copy would mis-size the
+    /// overlay or advertise a key that does nothing).
+    pub fn has_editable_bash_pattern(&self) -> bool {
+        self.bash_highlights.is_some()
+            && self
+                .options
+                .iter()
+                .any(|o| o.kind == acp::PermissionOptionKind::AllowAlways)
+    }
 }
 
 /// 1-based shortcut character for the given 0-based option index.
@@ -269,9 +374,11 @@ fn permission_chrome_height(state: &PermissionViewState, content_w: usize) -> u1
         .saturating_add(indicator as usize)
         .min(u16::MAX as usize) as u16;
     h = h.saturating_add(args_rows);
-    // Inline "← → choose permission scope" hint when there are highlighted
-    // words the user can narrow. Must match the render condition exactly.
-    if state.has_adjustable_scope() {
+    // Rows reserved for the hint / edit controls; must match the render below:
+    // two while editing (field + preview), else one when arrows or `e` show.
+    if state.focus == PermissionFocus::PatternEdit {
+        h = h.saturating_add(2);
+    } else if state.has_adjustable_scope() || state.has_editable_bash_pattern() {
         h = h.saturating_add(1);
     }
     h.saturating_add(1) // gap before options
@@ -419,6 +526,7 @@ pub fn render_permission_view(
     area: Rect,
     state: &PermissionViewState,
     followup_text: &str,
+    pattern_edit: Option<&PatternEditState>,
     hovered_item: Option<usize>,
     theme: &Theme,
     focused: bool,
@@ -430,6 +538,8 @@ pub fn render_permission_view(
     }
 
     let is_followup = state.focus == PermissionFocus::FollowupInput;
+    // Editor is only active while focus is PatternEdit *and* the buffer exists.
+    let pattern_edit = pattern_edit.filter(|_| state.focus == PermissionFocus::PatternEdit);
 
     // Fill background — same as the focused prompt (bg_light).
     let bg = Style::default().bg(theme.bg_light);
@@ -521,8 +631,17 @@ pub fn render_permission_view(
     }
 
     let show_scope_hint = state.has_adjustable_scope();
-    let scope_hint_h: u16 = if show_scope_hint { 1 } else { 0 };
-    let options_reserve = scope_hint_h + 1 + state.options.len() as u16 + 1;
+    // Editing needs two rows (field + preview); otherwise one hint row when the
+    // arrows or the `e` editor affordance is available.
+    let show_edit_hint = state.has_editable_bash_pattern();
+    let header_extra_h: u16 = if pattern_edit.is_some() {
+        2
+    } else if show_scope_hint || show_edit_hint {
+        1
+    } else {
+        0
+    };
+    let options_reserve = header_extra_h + 1 + state.options.len() as u16 + 1;
     let max_bash_y = (area.y + area.height).saturating_sub(options_reserve);
 
     let mut last_drawn_bash: Option<usize> = None;
@@ -547,19 +666,45 @@ pub fn render_permission_view(
             2,
         );
     }
-    if show_scope_hint && y < area.y + area.height {
-        // Readable secondary text, arrows highlighted in accent for
-        // scannability. Previously used `theme.gray` + `Modifier::DIM`,
-        // which was unreadable on several theme backgrounds.
+    if let Some(edit) = pattern_edit {
+        // ── Free-form pattern editor (two rows) ──
+        if y < area.y + area.height {
+            render_pattern_editor_line(buf, content_x, y, content_width, edit, theme);
+            y += 1;
+        }
+        if y < area.y + area.height {
+            let command = preview_command_text(state);
+            render_pattern_preview_line(buf, content_x, y, content_width, edit, &command, theme);
+            y += 1;
+        }
+    } else if (show_scope_hint || show_edit_hint) && y < area.y + area.height {
+        // Readable secondary text (accent-highlighted keys). Advertise the
+        // arrows only when there's a scope to move between, but always offer
+        // `e edit` on a bash prompt so the free-form option is discoverable.
         let hint_style = Style::default()
             .fg(theme.text_secondary)
             .add_modifier(Modifier::DIM);
-        let hint_line = Line::from(vec![
-            Span::styled(rust_i18n::t!("permission.scope_hint_a"), hint_style),
-            Span::styled("\u{2190} \u{2192}", hint_style),
-            Span::styled(rust_i18n::t!("permission.scope_hint_b"), hint_style),
-        ]);
-        buf.set_line(content_x, y, &hint_line, content_width);
+        let key_style = Style::default().fg(theme.accent_user);
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if show_scope_hint {
+            spans.push(Span::styled(
+                rust_i18n::t!("permission.scope_hint_a"),
+                hint_style,
+            ));
+            spans.push(Span::styled("\u{2190} \u{2192}", key_style));
+            spans.push(Span::styled(
+                rust_i18n::t!("permission.scope_hint_b"),
+                hint_style,
+            ));
+        }
+        if show_edit_hint {
+            if show_scope_hint {
+                spans.push(Span::styled("  \u{00b7}  ", hint_style));
+            }
+            spans.push(Span::styled("e", key_style));
+            spans.push(Span::styled(" edit pattern", hint_style));
+        }
+        buf.set_line(content_x, y, &Line::from(spans), content_width);
         y += 1;
     }
 
@@ -689,6 +834,123 @@ pub fn render_permission_view(
     PermissionRenderResult {
         inline_prompt: inline_prompt_result,
     }
+}
+
+/// The primary command text the session enforcer matches a bash grant against:
+/// the primary segment's words with wrappers (`timeout`/`nice`/`env`) peeled.
+/// Shared by the pattern editor's pre-fill and its live match preview so both
+/// agree with enforcement. Falls back to the raw command when untokenized.
+pub(crate) fn preview_command_text(state: &PermissionViewState) -> String {
+    match state.bash_highlights.as_ref() {
+        Some(h) => xai_grok_workspace::permission::bash_command_splitting::unwrap_command_wrappers(
+            &h.highlighted_words,
+        )
+        .join(" "),
+        None => state.bash_command_raw.clone().unwrap_or_default(),
+    }
+}
+
+/// Draw the single-line free-form pattern editor: an `❯ ` prompt followed by
+/// the buffer text with a block caret. Horizontally scrolls to keep the cursor
+/// visible so long patterns stay editable in a narrow overlay.
+fn render_pattern_editor_line(
+    buf: &mut Buffer,
+    content_x: u16,
+    y: u16,
+    content_width: u16,
+    edit: &PatternEditState,
+    theme: &Theme,
+) {
+    let prompt_style = Style::default().fg(theme.accent_user);
+    buf.set_span(content_x, y, &Span::styled("\u{276f} ", prompt_style), 2);
+
+    let text_x = content_x + 2;
+    let window = content_width.saturating_sub(2) as usize;
+    if window == 0 {
+        return;
+    }
+
+    let chars: Vec<char> = edit.buffer.chars().collect();
+    let cursor_idx = edit.buffer[..edit.cursor].chars().count();
+    // Reserve one column for the caret so an end-of-line cursor is visible.
+    let start = (cursor_idx + 1).saturating_sub(window);
+
+    let text_style = Style::default().fg(theme.text_primary);
+    let caret_style = Style::default().fg(theme.bg_light).bg(theme.accent_user);
+
+    let end = (start + window).min(chars.len());
+    let mut col: u16 = 0;
+    for (offset, ch) in chars[start..end].iter().enumerate() {
+        let idx = start + offset;
+        let style = if idx == cursor_idx {
+            caret_style
+        } else {
+            text_style
+        };
+        buf.set_span(text_x + col, y, &Span::styled(ch.to_string(), style), 1);
+        col += 1;
+    }
+    // Block caret past the final character (cursor at end of buffer).
+    if cursor_idx >= chars.len() && (col as usize) < window {
+        buf.set_span(text_x + col, y, &Span::styled(" ", caret_style), 1);
+    }
+}
+
+/// Draw the live preview line under the pattern editor: whether the edited
+/// pattern still matches the command being approved (reuses the real evaluator
+/// so it can't drift), a non-blocking "very broad" warning, and the key hints.
+fn render_pattern_preview_line(
+    buf: &mut Buffer,
+    content_x: u16,
+    y: u16,
+    content_width: u16,
+    edit: &PatternEditState,
+    command: &str,
+    theme: &Theme,
+) {
+    let dim = Style::default()
+        .fg(theme.text_secondary)
+        .add_modifier(Modifier::DIM);
+    let sep = Span::styled("  \u{00b7}  ", dim);
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    match edit.trimmed() {
+        None => {
+            spans.push(Span::styled(
+                "type a command pattern to allow (e.g. gh api repos/*)",
+                dim,
+            ));
+        }
+        Some(pattern) => {
+            if xai_grok_workspace::permission::bash_pattern_matches_command(pattern, command) {
+                spans.push(Span::styled(
+                    "\u{2713} matches this command",
+                    Style::default().fg(theme.accent_success),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    "\u{2717} won't match this command",
+                    Style::default().fg(theme.accent_error),
+                ));
+            }
+            if xai_grok_workspace::permission::bash_pattern_is_broad(pattern) {
+                spans.push(sep.clone());
+                spans.push(Span::styled(
+                    "\u{26a0} very broad",
+                    Style::default().fg(theme.warning),
+                ));
+            }
+            spans.push(sep);
+            spans.push(Span::styled(
+                "Enter",
+                Style::default().fg(theme.accent_user),
+            ));
+            spans.push(Span::styled(" save  ", dim));
+            spans.push(Span::styled("Esc", Style::default().fg(theme.accent_user)));
+            spans.push(Span::styled(" cancel", dim));
+        }
+    }
+    buf.set_line(content_x, y, &Line::from(spans), content_width);
 }
 
 /// Wrap + syntax-highlight a bash command the same way the permission
@@ -1828,6 +2090,38 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    #[test]
+    fn pattern_edit_edits_at_the_cursor() {
+        let mut e = PatternEditState::new("ghapi");
+        assert!(!e.is_dirty());
+        assert_eq!(e.cursor, "ghapi".len()); // new() starts at the end
+        e.move_home();
+        e.move_right();
+        e.move_right();
+        assert!(!e.is_dirty(), "cursor moves are not content mutations");
+        e.insert_char(' ');
+        assert!(e.is_dirty());
+        assert_eq!(e.buffer, "gh api");
+        e.delete();
+        assert_eq!(e.buffer, "gh pi");
+        e.move_home();
+        e.backspace(); // no-op at start
+        assert_eq!((e.buffer.as_str(), e.cursor), ("gh pi", 0));
+        e.clear();
+        assert_eq!(e.trimmed(), None);
+        assert!(e.is_dirty());
+    }
+
+    #[test]
+    fn pattern_edit_respects_char_boundaries() {
+        let mut e = PatternEditState::new("café");
+        e.backspace();
+        assert_eq!(e.buffer, "caf");
+        e.insert_char('é');
+        assert_eq!(e.buffer, "café");
+        assert!(e.is_dirty());
+    }
+
     fn mcp_state(tool: &str, server: Option<&str>, selected: McpScope) -> McpScopeState {
         McpScopeState {
             tool_name: tool.to_owned(),
@@ -1912,7 +2206,9 @@ mod tests {
                     let state = permission_state_with_title("Allow command?", 3);
                     let area = Rect::new(2, area_y, 145, area_h);
                     let mut buf = Buffer::empty(Rect::new(0, 0, 147, buf_h));
-                    let _ = render_permission_view(&mut buf, area, &state, "", None, &theme, true);
+                    let _ = render_permission_view(
+                        &mut buf, area, &state, "", None, None, &theme, true,
+                    );
                 }
             }
         }
@@ -1936,7 +2232,7 @@ mod tests {
                         let area = Rect::new(0, area_y, buf_w, area_h);
                         let mut buf = Buffer::empty(Rect::new(0, 0, buf_w.max(1), 10));
                         let _ = render_permission_view(
-                            &mut buf, area, &state, "follow", None, &theme, true,
+                            &mut buf, area, &state, "follow", None, None, &theme, true,
                         );
                     }
                 }
@@ -2227,7 +2523,7 @@ mod tests {
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 20);
         let mut buf = Buffer::empty(area);
-        let _ = render_permission_view(&mut buf, area, &state, "", None, &theme, true);
+        let _ = render_permission_view(&mut buf, area, &state, "", None, None, &theme, true);
 
         let text: String = (0..area.height)
             .map(|row| {
@@ -2268,7 +2564,7 @@ mod tests {
     fn render_to_text(state: &PermissionViewState, area: Rect) -> String {
         let theme = Theme::current();
         let mut buf = Buffer::empty(area);
-        let _ = render_permission_view(&mut buf, area, state, "", None, &theme, true);
+        let _ = render_permission_view(&mut buf, area, state, "", None, None, &theme, true);
         (0..area.height)
             .map(|row| {
                 (area.x..area.x + area.width)

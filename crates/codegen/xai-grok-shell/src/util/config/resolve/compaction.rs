@@ -22,7 +22,7 @@ impl std::str::FromStr for CompactionToolChoice {
 
 pub(crate) const ENV_COMPACTION_TOOL_CHOICE: &str = "GROK_COMPACTION_TOOL_CHOICE";
 
-pub fn resolve_compaction_tool_choice_from(
+pub(crate) fn resolve_compaction_tool_choice_from(
     env: Option<&str>,
     config: Option<&str>,
     remote: Option<&str>,
@@ -61,7 +61,7 @@ pub(crate) const ENV_AUTO_COMPACT_THRESHOLD_PERCENT: &str = "GROK_AUTO_COMPACT_T
 /// Values outside `0..=100` from the env var are ignored with a debug log and
 /// the resolver falls through to the next tier. TOML/remote fields are typed
 /// `u8` and so naturally constrained.
-pub fn resolve_auto_compact_threshold_percent(
+pub(crate) fn resolve_auto_compact_threshold_percent(
     cfg: &crate::agent::config::Config,
     model_id: &str,
     model: Option<&crate::agent::config::ModelInfo>,
@@ -87,7 +87,7 @@ pub fn resolve_auto_compact_threshold_percent(
 ///
 /// Precedence: env > `user_per_model` > `user_global` > `gb_per_model`
 /// > `gb_global` > `DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT`.
-pub fn resolve_auto_compact_threshold_percent_from_tiers(
+pub(crate) fn resolve_auto_compact_threshold_percent_from_tiers(
     user_per_model: Option<u8>,
     user_global: Option<u8>,
     gb_per_model: Option<u8>,
@@ -142,7 +142,7 @@ const ENV_COMPACTION_WALL_CLOCK_BUDGET_SECS: &str = "GROK_COMPACTION_WALL_CLOCK_
 /// `0` **disables** it. Low values are warned, not clamped — any "safe" clamp
 /// (e.g. 30s) would itself cut legit compactions, trading one silent failure for
 /// another; ops own the value.
-pub fn resolve_compaction_wall_clock_budget_secs(gb_global: Option<u64>) -> u64 {
+pub(crate) fn resolve_compaction_wall_clock_budget_secs(gb_global: Option<u64>) -> u64 {
     let from_env = std::env::var(ENV_COMPACTION_WALL_CLOCK_BUDGET_SECS)
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok());

@@ -125,7 +125,7 @@ impl PlanModeTracker {
     /// it is collapsed: `Pending` → `Inactive`, `ExitPending` → `Inactive`
     /// (with exit reminder set), since those states depend on in-flight
     /// client/turn interactions that don't survive a restart.
-    pub fn from_snapshot(session_dir: PathBuf, mut snapshot: PlanModeSnapshot) -> Self {
+    pub(crate) fn from_snapshot(session_dir: PathBuf, mut snapshot: PlanModeSnapshot) -> Self {
         match snapshot.state {
             PlanModeState::Pending => {
                 snapshot.state = PlanModeState::Inactive;
@@ -147,11 +147,11 @@ impl PlanModeTracker {
         }
     }
     /// Mark that the client is waiting on plan approval (`exit_plan_mode` parked).
-    pub fn set_awaiting_plan_approval(&mut self, awaiting: bool) {
+    pub(crate) fn set_awaiting_plan_approval(&mut self, awaiting: bool) {
         self.awaiting_plan_approval = awaiting;
     }
     /// Whether approval is outstanding (also true after resume from snapshot).
-    pub fn is_awaiting_plan_approval(&self) -> bool {
+    pub(crate) fn is_awaiting_plan_approval(&self) -> bool {
         self.awaiting_plan_approval
     }
     /// Capture the current lifecycle state as a persistable snapshot.
@@ -179,20 +179,20 @@ impl PlanModeTracker {
     /// Returns `true` if plan mode is active and the given edit path
     /// targets the plan file. Used to bypass the permission prompt for
     /// plan file edits during plan mode.
-    pub fn should_auto_approve_edit(&self, edit_path: &Path) -> bool {
+    pub(crate) fn should_auto_approve_edit(&self, edit_path: &Path) -> bool {
         self.is_active() && is_plan_file_write(edit_path, &self.plan_file_path)
     }
     /// Whether the next reminder should be the full variant.
     /// Even count = full, odd count = sparse.
-    pub fn should_use_full_reminder(&self) -> bool {
+    pub(crate) fn should_use_full_reminder(&self) -> bool {
         self.reminder_count.is_multiple_of(2)
     }
     /// Whether we need to inject an exit reminder on the next turn.
-    pub fn has_pending_exit_reminder(&self) -> bool {
+    pub(crate) fn has_pending_exit_reminder(&self) -> bool {
         self.pending_exit_reminder
     }
     /// Whether this is a reentry (was previously in plan mode this session).
-    pub fn is_reentry(&self) -> bool {
+    pub(crate) fn is_reentry(&self) -> bool {
         self.was_previously_active && self.state == PlanModeState::Pending
     }
     /// Client toggled plan mode ON.
@@ -200,7 +200,7 @@ impl PlanModeTracker {
     /// Returns true if state actually changed. Handles re-entry from
     /// `ExitPending` by cancelling the deferred exit and returning
     /// directly to `Active` (the model already has plan mode context).
-    pub fn enter_pending(&mut self) -> bool {
+    pub(crate) fn enter_pending(&mut self) -> bool {
         match self.state {
             PlanModeState::Inactive => {
                 self.state = PlanModeState::Pending;
@@ -234,7 +234,7 @@ impl PlanModeTracker {
     /// The reminder is recorded (alternation counter) at delivery
     /// ([`Self::take_pending_activation`]), not here, so a withdrawn or
     /// restart-lost buffer doesn't advance the full/sparse cycle.
-    pub fn activate_mid_turn(&mut self, rendered_reminder: String) -> bool {
+    pub(crate) fn activate_mid_turn(&mut self, rendered_reminder: String) -> bool {
         if self.state != PlanModeState::Pending {
             return false;
         }
@@ -251,7 +251,7 @@ impl PlanModeTracker {
     /// Take the buffered mid-turn activation reminder for delivery.
     /// The caller pushes it into the conversation and then calls
     /// [`Self::record_reminder_injected`].
-    pub fn take_pending_activation(&mut self) -> Option<String> {
+    pub(crate) fn take_pending_activation(&mut self) -> Option<String> {
         self.pending_activation.take().map(|p| p.text)
     }
     /// Whether a mid-turn activation reminder is buffered (undelivered).
@@ -260,7 +260,7 @@ impl PlanModeTracker {
     }
     /// Agent called EnterPlanMode tool \u{2014} go directly to Active.
     /// Returns true if state actually changed.
-    pub fn activate_from_tool(&mut self) -> bool {
+    pub(crate) fn activate_from_tool(&mut self) -> bool {
         if self.state != PlanModeState::Inactive {
             return false;
         }
@@ -278,7 +278,7 @@ impl PlanModeTracker {
     /// the exit, or by explicitly arming [`Self::queue_exit_reminder`] when the
     /// result text carries no such signal. A reminder armed here would only
     /// drain at the next turn start, arriving a turn late and stale.
-    pub fn deactivate_approved(&mut self) -> bool {
+    pub(crate) fn deactivate_approved(&mut self) -> bool {
         if self.state != PlanModeState::Active {
             return false;
         }
@@ -290,7 +290,7 @@ impl PlanModeTracker {
     }
     /// Client toggled plan mode OFF.
     /// `turn_in_flight`: whether a model turn is currently running.
-    pub fn user_exit(&mut self, turn_in_flight: bool) {
+    pub(crate) fn user_exit(&mut self, turn_in_flight: bool) {
         self.awaiting_plan_approval = false;
         if let Some(pending) = self.pending_activation.take()
             && self.state == PlanModeState::Active
@@ -315,7 +315,7 @@ impl PlanModeTracker {
         }
     }
     /// Current turn completed while in ExitPending.
-    pub fn complete_deferred_exit(&mut self) {
+    pub(crate) fn complete_deferred_exit(&mut self) {
         if self.state != PlanModeState::ExitPending {
             return;
         }
@@ -327,20 +327,20 @@ impl PlanModeTracker {
     /// For exit paths whose tool result carries no exit signal (the compat
     /// harness — policy and rationale live on the bridge's
     /// `queue_exit_reminder_on_approved_exit` flag).
-    pub fn queue_exit_reminder(&mut self) {
+    pub(crate) fn queue_exit_reminder(&mut self) {
         self.pending_exit_reminder = true;
     }
     /// Called after injecting a per-turn reminder. Advances the counter.
-    pub fn record_reminder_injected(&mut self) {
+    pub(crate) fn record_reminder_injected(&mut self) {
         self.reminder_count += 1;
     }
     /// Called after injecting the exit reminder. Clears the flag.
-    pub fn clear_pending_exit_reminder(&mut self) {
+    pub(crate) fn clear_pending_exit_reminder(&mut self) {
         self.pending_exit_reminder = false;
     }
     /// Called after compaction. Resets reminder counter so next
     /// injection is the full variant.
-    pub fn reset_after_compaction(&mut self) {
+    pub(crate) fn reset_after_compaction(&mut self) {
         if self.state == PlanModeState::Active {
             self.reminder_count = 0;
             self.pending_activation = None;
@@ -359,7 +359,7 @@ impl PlanModeTracker {
 ///
 /// Tool name placeholders (`${{ tools.by_kind.edit }}`, etc.) are resolved
 /// automatically from the registry's `ToolKind` \u{2192} client-facing name mapping.
-pub fn plan_mode_reminder_full_template() -> &'static str {
+pub(crate) fn plan_mode_reminder_full_template() -> &'static str {
     "\
 Plan mode is active. Do not make any edits or writes to the system.
 
@@ -383,7 +383,7 @@ requirements or ${{ tools.by_kind.exit_plan }} to present your plan to the user.
 /// Static string for alternating turns (when `reminder_count` is odd) to save
 /// tokens. No MiniJinja placeholders — plan path and tool names are only in the
 /// full reminder.
-pub fn plan_mode_reminder_sparse_template() -> &'static str {
+pub(crate) fn plan_mode_reminder_sparse_template() -> &'static str {
     "Plan mode is still active. Do not make any edits or writes to the system except for the plan file."
 }
 /// Reentry reminder template.
@@ -391,7 +391,7 @@ pub fn plan_mode_reminder_sparse_template() -> &'static str {
 /// Returns a MiniJinja template string injected when entering plan mode for
 /// the second+ time in the same session. Render via
 /// `TemplateRenderer::render_with_extra()` with `{ "plan_path": "..." }`.
-pub fn plan_mode_reentry_reminder_template() -> &'static str {
+pub(crate) fn plan_mode_reentry_reminder_template() -> &'static str {
     "\
 ## Returning to Plan Mode
 
@@ -406,14 +406,14 @@ Your turn should only end with either ${{ tools.by_kind.ask_user }} to clarify r
 ///
 /// Render via `TemplateRenderer::render_with_extra()` with
 /// `{ "plan_path": "..." }`.
-pub fn plan_mode_edit_rejected_template() -> &'static str {
+pub(crate) fn plan_mode_edit_rejected_template() -> &'static str {
     "Rejected: file edits are not allowed in plan mode - the only editable file is the plan file (${{ plan_path }})."
 }
 /// Exit reminder template.
 ///
 /// Returns a MiniJinja template string injected once after exiting plan mode
 /// (user-initiated exit via toggle). Contains no placeholders.
-pub fn plan_mode_exit_reminder_template() -> &'static str {
+pub(crate) fn plan_mode_exit_reminder_template() -> &'static str {
     "\
 You have exited plan mode. You can now make edits, run tools, and take actions."
 }
@@ -421,7 +421,7 @@ You have exited plan mode. You can now make edits, run tools, and take actions."
 ///
 /// `target_path` is the absolute path the tool is trying to write to.
 /// `plan_file` is the absolute path from [`PlanModeTracker::plan_file_path`].
-pub fn is_plan_file_write(target_path: &Path, plan_file: &Path) -> bool {
+pub(crate) fn is_plan_file_write(target_path: &Path, plan_file: &Path) -> bool {
     target_path == plan_file
 }
 /// Whether the path's final component ends with a markdown suffix (case-insensitive).
@@ -431,7 +431,7 @@ pub fn is_plan_file_write(target_path: &Path, plan_file: &Path) -> bool {
 ///
 /// In plan mode the shell rejects `Write` and `StrReplace` when this is
 /// false while plan mode is active (see `prepare_tool_call` in `acp_session.rs`).
-pub fn is_markdown_file_path(path: &Path) -> bool {
+pub(crate) fn is_markdown_file_path(path: &Path) -> bool {
     const MARKDOWN_SUFFIXES: &[&str] = &[".md", ".markdown", ".mdown", ".mkd", ".mkdn", ".mdx"];
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
@@ -477,7 +477,7 @@ pub enum PromptMode {
 }
 impl PromptMode {
     /// Parse from the `_meta.mode` string. Unknown values default to `Agent`.
-    pub fn from_meta_str(s: &str) -> Self {
+    pub(crate) fn from_meta_str(s: &str) -> Self {
         match s {
             "ask" => Self::Ask,
             "plan" => Self::Plan,

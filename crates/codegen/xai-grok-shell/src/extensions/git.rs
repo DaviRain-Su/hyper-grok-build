@@ -60,7 +60,7 @@ fn default_working() -> String {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitStatusRequest {
+pub(crate) struct GitStatusRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -72,7 +72,7 @@ pub struct GitStatusRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitFilesRequest {
+pub(crate) struct GitFilesRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -83,7 +83,7 @@ pub struct GitFilesRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitDiffsRequest {
+pub(crate) struct GitDiffsRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -107,7 +107,7 @@ pub struct GitDiffsRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitStageRequest {
+pub(crate) struct GitStageRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -116,7 +116,7 @@ pub struct GitStageRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitStageContentRequest {
+pub(crate) struct GitStageContentRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -126,7 +126,7 @@ pub struct GitStageContentRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitUnstageRequest {
+pub(crate) struct GitUnstageRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -152,7 +152,7 @@ impl From<GitDiscardScope> for DiscardScope {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitDiscardRequest {
+pub(crate) struct GitDiscardRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -165,7 +165,7 @@ pub struct GitDiscardRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitCommitRequest {
+pub(crate) struct GitCommitRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -182,7 +182,7 @@ pub struct GitCommitRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitStashRequest {
+pub(crate) struct GitStashRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -192,7 +192,7 @@ pub struct GitStashRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitCheckoutRequest {
+pub(crate) struct GitCheckoutRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -212,7 +212,7 @@ struct CheckoutSessionHeadRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitInfoRequest {
+pub(crate) struct GitInfoRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -220,7 +220,7 @@ pub struct GitInfoRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitBranchesRequest {
+pub(crate) struct GitBranchesRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -228,7 +228,7 @@ pub struct GitBranchesRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitCurrentCommitRequest {
+pub(crate) struct GitCurrentCommitRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -237,7 +237,7 @@ pub struct GitCurrentCommitRequest {
 /// Request for x.ai/git/checkout_commit extension method.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitCheckoutCommitRequest {
+pub(crate) struct GitCheckoutCommitRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]

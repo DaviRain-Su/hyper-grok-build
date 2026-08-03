@@ -42,7 +42,7 @@ impl TaskOutputTokenBudget {
         let state = self.inner.lock();
         state.total.map(|total| total.saturating_sub(state.spent))
     }
-    pub fn clamp_request(&self, configured: Option<u32>) -> Option<u32> {
+    pub(crate) fn clamp_request(&self, configured: Option<u32>) -> Option<u32> {
         let remaining = self.remaining()?;
         if remaining == 0 {
             return Some(0);
@@ -50,7 +50,7 @@ impl TaskOutputTokenBudget {
         let remaining = u32::try_from(remaining).unwrap_or(u32::MAX);
         Some(configured.map_or(remaining, |configured| configured.min(remaining)))
     }
-    pub fn record_reported_output(&self, output_tokens: u64) {
+    pub(crate) fn record_reported_output(&self, output_tokens: u64) {
         let mut state = self.inner.lock();
         state.spent = state.spent.saturating_add(output_tokens);
         if let Some(total) = state.total
@@ -60,7 +60,7 @@ impl TaskOutputTokenBudget {
             state.incomplete = true;
         }
     }
-    pub fn mark_incomplete_and_exhaust(&self) {
+    pub(crate) fn mark_incomplete_and_exhaust(&self) {
         let mut state = self.inner.lock();
         state.incomplete = true;
         if let Some(total) = state.total {
@@ -70,9 +70,6 @@ impl TaskOutputTokenBudget {
     pub fn usage(&self) -> (u64, bool) {
         let state = self.inner.lock();
         (state.spent, state.incomplete)
-    }
-    pub fn is_limited(&self) -> bool {
-        self.inner.lock().total.is_some()
     }
 }
 pub struct BlockingWaitState(std::sync::Mutex<BlockingWaitInner>);
@@ -289,7 +286,7 @@ impl ToolContext {
             process_scope: None,
         }
     }
-    pub fn with_preloaded_env(
+    pub(crate) fn with_preloaded_env(
         cwd: AbsPathBuf,
         gateway: Option<GatewaySender>,
         session_id: Option<acp::SessionId>,
@@ -330,17 +327,13 @@ impl ToolContext {
             process_scope: None,
         }
     }
-    pub fn with_file_state_handle(mut self, handle: FileStateHandle) -> Self {
+    pub(crate) fn with_file_state_handle(mut self, handle: FileStateHandle) -> Self {
         self.file_state_handle = Some(handle);
-        self
-    }
-    pub fn with_prompt_index(mut self, prompt_index: Arc<tokio::sync::Mutex<usize>>) -> Self {
-        self.prompt_index = prompt_index;
         self
     }
     /// Set whether hunk tracking is active. `false` pairs with a `noop()`
     /// `hunk_tracker_handle` so the fs-notify loop skips the per-event forward.
-    pub fn with_hunk_tracking_enabled(mut self, enabled: bool) -> Self {
+    pub(crate) fn with_hunk_tracking_enabled(mut self, enabled: bool) -> Self {
         self.hunk_tracking_enabled = enabled;
         self
     }
@@ -387,7 +380,7 @@ mod tests {
     use xai_grok_workspace::file_system::{AsyncFileSystem, AsyncFsWrapper};
     use xai_hunk_tracker::HunkTrackerHandle;
     impl ToolContext {
-        pub fn new_local_context(
+        pub(crate) fn new_local_context(
             cwd: AbsPathBuf,
             fs: Arc<dyn AsyncFileSystem>,
             terminal: Arc<dyn AsyncTerminalRunner>,

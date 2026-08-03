@@ -14,6 +14,9 @@ use tokio_util::sync::CancellationToken;
 mod enrichment;
 #[path = "manager/lock.rs"]
 pub(super) mod lock;
+#[path = "manager/remedy.rs"]
+mod remedy;
+pub(crate) use remedy::{AuthRemedy, SilentRefresh};
 #[path = "manager/sleep_gate.rs"]
 mod sleep_gate;
 
@@ -35,7 +38,8 @@ use super::model::{
 };
 use super::refresh::{RefreshOutcome, TokenRefresher, resolve_refresh_credential};
 use super::storage::{
-    AuthFileLock, read_auth_json, read_auth_json_or_empty_recovering_corrupt, write_auth_json,
+    AuthFileLock, read_auth_json, read_auth_json_or_empty_recovering_corrupt,
+    with_auth_json_scope_lock, write_auth_json,
 };
 
 #[cfg(test)]
@@ -64,8 +68,8 @@ pub(crate) enum RefreshReason {
 pub(crate) const AUTH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 
 /// Lock timeout for `refresh_chain`, held across the IdP call to prevent
-/// refresh-token reuse. Must exceed the external-auth refresh timeout
-/// (`EXTERNAL_AUTH_REFRESH_TIMEOUT`, 5 s) so followers wait rather than retry.
+/// refresh-token reuse. Must exceed the external-auth refresh budget
+/// (a single 7s run) so followers wait rather than retry.
 const REFRESH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(45);
 
 /// Long poll interval used by the proactive refresh task when no
@@ -909,26 +913,17 @@ impl AuthManager {
     /// needing the post-enrichment view re-read `current()`.
     pub(crate) async fn update(self: &Arc<Self>, auth: GrokAuth) -> std::io::Result<GrokAuth> {
         let update_started = std::time::Instant::now();
-        let map = match read_auth_json_or_empty_recovering_corrupt(&self.path) {
-            Ok(map) => map,
-            Err(e) => {
-                // Non-recoverable error (PermissionDenied, etc.) — keep conservative.
-                tracing::warn!(error = %e, "auth: read failed, updating in-memory only");
-                xai_grok_telemetry::unified_log::warn(
-                    "auth update skipped disk write (read failed)",
-                    None,
-                    Some(serde_json::json!({ "error": e.to_string() })),
-                );
-                self.with_inner_write(|inner| *inner = Some(auth.clone()));
-                self.spawn_user_info_enrichment(auth.clone());
-                return Ok(auth);
-            }
-        };
-        let mut map = map;
-        // One entry per scope (personal and team share the scope key).
+        // Whole-map RMW must share `auth.json.lock` with Kimi/Codex/Claude/etc.
+        // writers. An unlocked read-then-write after a third-party login can
+        // drop their scope and leave only the xAI entry — users experience
+        // this as "logging into Grok wiped OpenAI/Kimi".
         tracing::debug!(scope = %self.scope, "auth: storing token");
-        map.insert(self.scope.clone(), auth.clone());
-        let write_result = write_auth_json(&self.path, &map);
+        let write_result = with_auth_json_scope_lock(&self.path, || {
+            let mut map = read_auth_json_or_empty_recovering_corrupt(&self.path)?;
+            // One entry per scope (personal and team share the scope key).
+            map.insert(self.scope.clone(), auth.clone());
+            write_auth_json(&self.path, &map)
+        });
         let elapsed_ms = update_started.elapsed().as_millis() as u64;
         match &write_result {
             Ok(()) => xai_grok_telemetry::unified_log::info(
@@ -938,16 +933,22 @@ impl AuthManager {
                     "rt_prefix": auth.refresh_token.as_deref().map(token_suffix),
                     "key_prefix": token_suffix(&auth.key),
                     "elapsed_ms": elapsed_ms,
+                    "scope": self.scope,
                 })),
             ),
-            Err(e) => xai_grok_telemetry::unified_log::error(
-                "auth update disk write failed",
-                None,
-                Some(serde_json::json!({
-                    "error": e.to_string(),
-                    "elapsed_ms": elapsed_ms,
-                })),
-            ),
+            Err(e) => {
+                // Non-recoverable lock/IO error — keep conservative: memory only.
+                tracing::warn!(error = %e, "auth: disk update failed, updating in-memory only");
+                xai_grok_telemetry::unified_log::error(
+                    "auth update disk write failed",
+                    None,
+                    Some(serde_json::json!({
+                        "error": e.to_string(),
+                        "elapsed_ms": elapsed_ms,
+                        "scope": self.scope,
+                    })),
+                );
+            }
         }
         // Always update in-memory, even if disk write failed. This lets the
         // current session work with fresh credentials while the user fixes the
@@ -972,24 +973,13 @@ impl AuthManager {
         auth: GrokAuth,
     ) -> std::io::Result<GrokAuth> {
         let started = std::time::Instant::now();
-        let map = match read_auth_json_or_empty_recovering_corrupt(&self.path) {
-            Ok(map) => map,
-            Err(e) => {
-                // Non-recoverable error — keep conservative.
-                tracing::warn!(error = %e, "auth: read failed, updating in-memory only (no enrichment)");
-                xai_grok_telemetry::unified_log::warn(
-                    "auth update skipped disk write (read failed, no enrichment)",
-                    None,
-                    Some(serde_json::json!({ "error": e.to_string() })),
-                );
-                self.with_inner_write(|inner| *inner = Some(auth.clone()));
-                return Ok(auth);
-            }
-        };
-        let mut map = map;
         tracing::debug!(scope = %self.scope, "auth: storing token (no enrichment)");
-        map.insert(self.scope.clone(), auth.clone());
-        let write_result = write_auth_json(&self.path, &map);
+        // Same flock as third-party scope writers — see `update`.
+        let write_result = with_auth_json_scope_lock(&self.path, || {
+            let mut map = read_auth_json_or_empty_recovering_corrupt(&self.path)?;
+            map.insert(self.scope.clone(), auth.clone());
+            write_auth_json(&self.path, &map)
+        });
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match &write_result {
             Ok(()) => xai_grok_telemetry::unified_log::info(
@@ -999,16 +989,24 @@ impl AuthManager {
                     "rt_prefix": auth.refresh_token.as_deref().map(token_suffix),
                     "key_prefix": token_suffix(&auth.key),
                     "elapsed_ms": elapsed_ms,
+                    "scope": self.scope,
                 })),
             ),
-            Err(e) => xai_grok_telemetry::unified_log::error(
-                "auth update disk write failed (no enrichment)",
-                None,
-                Some(serde_json::json!({
-                    "error": e.to_string(),
-                    "elapsed_ms": elapsed_ms,
-                })),
-            ),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "auth: disk update failed, updating in-memory only (no enrichment)"
+                );
+                xai_grok_telemetry::unified_log::error(
+                    "auth update disk write failed (no enrichment)",
+                    None,
+                    Some(serde_json::json!({
+                        "error": e.to_string(),
+                        "elapsed_ms": elapsed_ms,
+                        "scope": self.scope,
+                    })),
+                );
+            }
         }
         // Always update in-memory, even if disk write failed (see update()).
         *self.permanent_failure.write() = None;
@@ -1046,7 +1044,7 @@ impl AuthManager {
     /// Used by [`ModelsManager`] to trigger model catalog recovery
     /// after sleep/wake, bypassing the FSEvents file watcher which
     /// can silently die on macOS after resume.
-    pub fn refresh_notifier(&self) -> Arc<tokio::sync::Notify> {
+    pub(crate) fn refresh_notifier(&self) -> Arc<tokio::sync::Notify> {
         self.refresh_notify.clone()
     }
 
@@ -1066,7 +1064,7 @@ impl AuthManager {
     /// to the primary refresh path instead of driving their own
     /// `ServerRejected` recovery, avoiding concurrent refresh storms that
     /// amplify 401 bursts at CCP.
-    pub async fn wait_for_token_refresh(&self, timeout: std::time::Duration) -> bool {
+    pub(crate) async fn wait_for_token_refresh(&self, timeout: std::time::Duration) -> bool {
         let pre_key = self.current().map(|a| a.key.clone());
         tokio::select! {
             _ = self.refresh_notify.notified() => {}
@@ -1431,6 +1429,9 @@ impl AuthManager {
         // Snapshot inner ONCE for dispatch atomicity (closes a TOCTOU
         // where a concurrent `clear()` raced `token_type()` + `inner.read()`).
         let snapshot: Option<GrokAuth> = self.with_inner_read(|inner| inner.cloned());
+        // Kept alongside `snapshot`, which the grace arm below consumes: the
+        // devbox arms still need to name the credential they gave up on.
+        let snapshot_key: Option<String> = snapshot.as_ref().map(|a| a.key.clone());
         let token_type = TokenType::from_auth(snapshot.as_ref());
         tracing::Span::current().record("token_type", tracing::field::debug(token_type));
 
@@ -1463,7 +1464,7 @@ impl AuthManager {
             // preferred_method=api_key forbids automatic OIDC mint.
             if !self.grok_com_config.blocks_automatic_oidc()
                 && self.is_devbox_environment()
-                && let Ok(auth) = self.try_devbox_recovery().await
+                && let Ok(auth) = self.try_devbox_recovery(snapshot_key.as_deref()).await
             {
                 return Ok(auth);
             }
@@ -1538,7 +1539,7 @@ impl AuthManager {
         if result.is_err()
             && !self.grok_com_config.blocks_automatic_oidc()
             && self.is_devbox_environment()
-            && let Ok(auth) = self.try_devbox_recovery().await
+            && let Ok(auth) = self.try_devbox_recovery(snapshot_key.as_deref()).await
         {
             return Ok(auth);
         }
@@ -1562,14 +1563,23 @@ impl AuthManager {
         *self.devbox_override.lock() = Some(is_devbox);
     }
 
-    /// Last-resort devbox auth recovery: purge existing auth.json entirely
-    /// and mint fresh OIDC credentials via the remote devbox login helper.
+    /// Last-resort devbox auth recovery: drop the broken xAI scopes and mint
+    /// fresh OIDC credentials via the remote devbox login helper. Third-party
+    /// OAuth / BYOK scopes in `auth.json` are preserved.
     /// Only callable on devboxes (where the local service-account token is
     /// available).
     ///
     /// Fail-closed under `preferred_method=api_key` (no automatic OIDC mint),
     /// including direct callers such as sampler 401 recovery.
-    pub(crate) async fn try_devbox_recovery(self: &Arc<Self>) -> Result<GrokAuth, AuthError> {
+    ///
+    /// `unusable` is the credential the caller has already established cannot
+    /// work — the bearer the server rejected, or the snapshot that failed to
+    /// refresh. It is what makes the wait-on-the-lock double-check below mean
+    /// "somebody else fixed this" instead of "the dead token is still here".
+    pub(crate) async fn try_devbox_recovery(
+        self: &Arc<Self>,
+        unusable: Option<&str>,
+    ) -> Result<GrokAuth, AuthError> {
         if self.grok_com_config.blocks_automatic_oidc() {
             tracing::debug!(
                 "auth: devbox recovery skipped (preferred_method=api_key blocks automatic OIDC)"
@@ -1584,8 +1594,15 @@ impl AuthManager {
 
         let _guard = self.refresh_lock.lock().await;
 
-        // Double-check: another task may have recovered while we waited.
-        if let Some(auth) = self.current() {
+        // Double-check: another task may have recovered while we waited. Only
+        // a credential that is not the caller's `unusable` one counts. Without
+        // that filter a 401 on a still-locally-valid bearer reports recovery
+        // with the very token the server just rejected, and the caller
+        // resubmits it until its retry budget runs out.
+        if let Some(auth) = self
+            .current()
+            .filter(|auth| unusable != Some(auth.key.as_str()))
+        {
             return Ok(auth);
         }
 
@@ -1600,9 +1617,13 @@ impl AuthManager {
                 AuthError::transient_source(e)
             })?;
 
-        // Purge auth.json so we start clean — removes any corrupted,
-        // revoked, or legacy entries that caused the failure.
-        let _ = tokio::fs::remove_file(&self.path).await;
+        // Drop only the broken xAI scopes (current + legacy). Preserve
+        // third-party OAuth / BYOK scopes so a devbox remint does not
+        // force re-login to OpenAI Codex, Kimi, Claude, etc.
+        if let Err(e) = self.remove_scope(&self.scope) {
+            tracing::warn!(error = %e, "auth: devbox recovery failed to clear current scope");
+        }
+        let _ = self.remove_scope(LEGACY_SCOPE);
         self.clear_inner();
 
         let auth = self.save_without_enrichment(new_auth).await.map_err(|e| {
@@ -2238,10 +2259,8 @@ impl AuthManager {
     /// decision.
     pub(crate) fn requires_manual_reauth(&self) -> bool {
         use crate::auth::error::RefreshTokenError;
-        // Sticky IdP rejection of the credential a refresh would send:
-        // no retry can fix it.
         if let Some(AuthError::Refresh(RefreshTokenError::Permanent(e))) = self.permanent_failure()
-            && e.reason.is_sticky()
+            && e.reason.blocks_unattended_retry()
         {
             return true;
         }
@@ -2257,6 +2276,11 @@ impl AuthManager {
             .read_disk_auth_silent()
             .is_some_and(|a| a.refresh_token.is_some());
         !(mem_refreshable || disk_refreshable)
+    }
+
+    fn is_external_provider_refresh_authority(&self) -> bool {
+        self.grok_com_config.auth_provider_command.is_some()
+            && self.token_type() == TokenType::ExternalBinary
     }
 
     /// `true` iff a [`TokenRefresher`] is wired in. `false` for static-key
@@ -2747,7 +2771,7 @@ impl AuthManager {
     }
 
     /// Set the process model key (empty clears). Not for session tokens.
-    pub fn set_process_static_api_key(&self, key: Option<String>) {
+    pub(crate) fn set_process_static_api_key(&self, key: Option<String>) {
         let key = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
         *self.process_static_api_key.write() = key;
     }

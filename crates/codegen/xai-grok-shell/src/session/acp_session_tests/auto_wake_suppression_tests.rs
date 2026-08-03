@@ -515,6 +515,7 @@ async fn genuine_user_start_consumes_deferred_completions_without_notification_t
                     owner_session_id: None,
                     description: None,
                     is_backgrounded: false,
+                    output_total_bytes: 0,
                 },
                 Some("get_command_or_subagent_output"),
             );
@@ -1669,6 +1670,7 @@ fn completed_bash_task(id: &str) -> xai_grok_tools::computer::types::TaskSnapsho
         owner_session_id: None,
         description: None,
         is_backgrounded: false,
+        output_total_bytes: 0,
     }
 }
 /// Real-actor coverage for the `SessionCommand::IsBusy` predicate

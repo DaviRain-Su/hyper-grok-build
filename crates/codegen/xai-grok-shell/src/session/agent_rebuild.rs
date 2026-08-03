@@ -147,7 +147,7 @@ impl AgentRebuildSpec {
     /// `#[deny(unused_variables)]` ensures any newly added spec field is
     /// used here, otherwise compilation fails.
     #[deny(unused_variables)]
-    pub async fn build_agent(
+    pub(crate) async fn build_agent(
         self: &Arc<Self>,
         definition: AgentDefinition,
     ) -> Result<Agent, AgentBuildError> {
@@ -164,7 +164,7 @@ impl AgentRebuildSpec {
     ///
     /// Both are consumed once — the rebuild path (`build_agent`) passes
     /// `None` for both so zero-turn model switches get fresh discovery.
-    pub async fn build_agent_with_initial_overrides(
+    pub(crate) async fn build_agent_with_initial_overrides(
         self: &Arc<Self>,
         definition: AgentDefinition,
         persisted_skill_names: Option<std::collections::HashSet<String>>,

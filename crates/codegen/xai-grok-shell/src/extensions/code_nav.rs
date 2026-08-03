@@ -57,7 +57,7 @@ type ExtResult = Result<acp::ExtResponse, acp::Error>;
 /// receive `reason: sessionRequired` in the error response.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GotoRequest {
+pub(crate) struct GotoRequest {
     /// Session ID — required for code navigation.
     pub session_id: Option<acp::SessionId>,
     /// Working directory (optional when session_id is provided).
@@ -75,7 +75,7 @@ pub struct GotoRequest {
 /// **`sessionId` is required** — same contract as [`GotoRequest`].
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FindSymbolRequest {
+pub(crate) struct FindSymbolRequest {
     /// Session ID — required for code navigation.
     pub session_id: Option<acp::SessionId>,
     /// Working directory (optional when session_id is provided).
@@ -91,7 +91,7 @@ pub struct FindSymbolRequest {
 /// **`sessionId` is required** — same contract as [`GotoRequest`].
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StatusRequest {
+pub(crate) struct StatusRequest {
     /// Session ID — required for code navigation.
     pub session_id: Option<acp::SessionId>,
     /// Working directory (optional when session_id is provided).
@@ -134,7 +134,7 @@ pub struct SymbolLocation {
 /// Serialised as a camelCase string so clients can pattern-match on it.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub enum IndexStatusReason {
+pub(crate) enum IndexStatusReason {
     /// Index is running and ready.
     Active,
     /// Index is eligible but has not been started yet (first code-nav request
@@ -155,7 +155,7 @@ pub enum IndexStatusReason {
 /// Response for status query.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StatusResponse {
+pub(crate) struct StatusResponse {
     /// Whether an index is currently active for this cwd.
     pub indexed: bool,
     /// Whether this client is eligible to use codebase indexing.

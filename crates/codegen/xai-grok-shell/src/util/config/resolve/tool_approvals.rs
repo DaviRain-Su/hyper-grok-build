@@ -51,7 +51,7 @@ static REMOTE_REMEMBER_TOOL_APPROVALS: std::sync::RwLock<Option<bool>> =
 
 /// Record the remote settings value; called when the agent applies `RemoteSettings`
 /// (`agent::init` at startup, `MvpAgent` on refresh).
-pub fn cache_remote_remember_tool_approvals(value: Option<bool>) {
+pub(crate) fn cache_remote_remember_tool_approvals(value: Option<bool>) {
     if let Ok(mut guard) = REMOTE_REMEMBER_TOOL_APPROVALS.write() {
         *guard = value;
     }
@@ -64,7 +64,7 @@ fn cached_remote_remember_tool_approvals() -> Option<bool> {
 /// Free-function form of [`resolve_remember_tool_approvals`] for the
 /// permission-manager spawn (no live `RemoteSettings`): env + requirements +
 /// effective `config.toml` + cached remote tier. Defaults `false`.
-pub fn remember_tool_approvals_from_disk() -> bool {
+pub(crate) fn remember_tool_approvals_from_disk() -> bool {
     let requirements = crate::config::load_merged_requirements();
     let effective = crate::config::load_effective_config().ok();
     resolve_remember_tool_approvals_layers(

@@ -381,6 +381,7 @@ mod notification_hook_filter_tests {
                 owner_session_id: None,
                 description: None,
                 is_backgrounded: false,
+                output_total_bytes: 0,
             },
             will_wake: false,
         };

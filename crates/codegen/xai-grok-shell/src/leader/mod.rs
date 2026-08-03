@@ -868,7 +868,7 @@ impl LeaderConnection {
     /// Like [`into_channels()`](Self::into_channels) but also returns a
     /// [`watch::Receiver<DisconnectReason>`] so the caller can observe
     /// why the connection ended (e.g., `LeaderShutdown` vs `ConnectionLost`).
-    pub fn into_channels_with_disconnect(
+    pub(crate) fn into_channels_with_disconnect(
         self,
     ) -> (
         mpsc::UnboundedSender<String>,

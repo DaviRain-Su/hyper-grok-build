@@ -187,6 +187,40 @@
     }
 
     #[test]
+    fn duplicate_live_auto_recap_dropped_after_existing_recap() {
+        let mut agent = make_agent(Some("s1"));
+        agent.scrollback.push_block(recap_block("first"));
+        assert!(should_drop_duplicate_auto_recap(
+            true,
+            false,
+            &agent.scrollback
+        ));
+        assert!(
+            !should_drop_duplicate_auto_recap(true, true, &agent.scrollback),
+            "replay must still paint stored recaps"
+        );
+        assert!(
+            !should_drop_duplicate_auto_recap(false, false, &agent.scrollback),
+            "manual /recap still allowed"
+        );
+    }
+
+    #[test]
+    fn duplicate_auto_recap_allowed_after_new_user_prompt() {
+        let mut agent = make_agent(Some("s1"));
+        agent.scrollback.push_block(recap_block("old"));
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::user_prompt(
+                "next question",
+            ));
+        assert!(
+            !should_drop_duplicate_auto_recap(true, false, &agent.scrollback),
+            "new user turn re-arms auto recap"
+        );
+    }
+
+    #[test]
     fn enqueue_while_scrollback_steals_focus_to_prompt() {
         use crate::app::agent_view::AgentPane;
 

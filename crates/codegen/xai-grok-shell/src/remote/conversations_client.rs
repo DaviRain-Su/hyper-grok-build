@@ -223,7 +223,10 @@ impl ConversationsClient {
     }
 
     /// `DELETE /rest/app-chat/conversations/soft/{conversation_id}` — soft-delete.
-    pub async fn soft_delete_conversation(&self, conversation_id: &str) -> Result<(), ConvError> {
+    pub(crate) async fn soft_delete_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<(), ConvError> {
         let auth = self.require_xai_auth().await?;
         let url = format!(
             "{}/rest/app-chat/conversations/soft/{}",

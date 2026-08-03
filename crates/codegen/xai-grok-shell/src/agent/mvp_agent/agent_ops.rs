@@ -208,7 +208,7 @@ impl MvpAgent {
         self.cfg.borrow().managed_mcp_gateway_tools_enabled
             && self.has_managed_mcp_auth()
     }
-    pub async fn get_managed_mcp_configs(
+    pub(crate) async fn get_managed_mcp_configs(
         &self,
     ) -> Vec<crate::session::managed_mcp::ManagedMcpConfig> {
         if !self.can_fetch_managed_mcps() {
@@ -222,7 +222,7 @@ impl MvpAgent {
             )
             .await
     }
-    pub async fn get_managed_mcp_gateway_tool_catalog(
+    pub(crate) async fn get_managed_mcp_gateway_tool_catalog(
         &self,
     ) -> Option<crate::session::managed_mcp::GatewayToolCatalog> {
         if !self.can_fetch_managed_mcp_gateway_tools() {
@@ -244,7 +244,7 @@ impl MvpAgent {
             )
             .await
     }
-    pub fn managed_mcp_cache(
+    pub(crate) fn managed_mcp_cache(
         &self,
     ) -> &crate::session::managed_mcp::ManagedMcpStateHandle {
         &self.managed_mcp_cache
@@ -465,7 +465,7 @@ impl MvpAgent {
             }
         });
     }
-    pub fn agent_mcp_state(
+    pub(crate) fn agent_mcp_state(
         &self,
     ) -> std::sync::Arc<tokio::sync::Mutex<crate::session::mcp_servers::McpState>> {
         self.agent_mcp_state.clone()
@@ -496,23 +496,38 @@ impl MvpAgent {
             "lazily populated plugin registry snapshot"
         );
     }
-    /// Fetch managed configs, merge with client servers, return merged list + earliest expiry.
+    /// Fetch managed configs, admit client servers under a post-await compat
+    /// snapshot, merge, and return `(admitted_seed, merged, earliest_expiry)`.
+    ///
+    /// Compat is read **after** the managed-config await so admit + merge share
+    /// one snapshot; a settings reapply during the await cannot make the
+    /// retained seed and the spawned set disagree.
     pub(super) async fn resolve_mcp_servers(
         &self,
         client_servers: Vec<acp::McpServer>,
         cwd: &std::path::Path,
-    ) -> (Vec<acp::McpServer>, Option<chrono::DateTime<chrono::Utc>>) {
+    ) -> (
+        Vec<acp::McpServer>,
+        Vec<acp::McpServer>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) {
         self.ensure_plugin_registry();
         let managed = self.get_managed_mcp_configs().await;
         let expires_at = managed.iter().filter_map(|c| c.token_expires_at).min();
-        let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
+        let compat = self.cfg.borrow().compat_resolved;
+        let admitted = crate::session::managed_mcp::admit_client_mcp_servers(
             client_servers,
+            cwd,
+            &compat,
+        );
+        let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
+            admitted.clone(),
             cwd,
             &managed,
             self.plugin_registry_handle.snapshot().as_deref(),
-            &self.cfg.borrow().compat_resolved,
+            &compat,
         );
-        (merged, expires_at)
+        (admitted, merged, expires_at)
     }
     /// Set the memory configuration (called from TUI after config resolution).
     pub fn set_memory_config(&mut self, config: crate::config::MemoryConfig) {
@@ -524,7 +539,10 @@ impl MvpAgent {
     ///
     /// Must be called right after construction: entries registered on the
     /// constructor-created default instance are NOT migrated.
-    pub fn set_activity(&mut self, activity: crate::agent::activity::AgentActivity) {
+    pub(crate) fn set_activity(
+        &mut self,
+        activity: crate::agent::activity::AgentActivity,
+    ) {
         self.activity = activity;
     }
     /// Send [`SessionCommand::Shutdown`] to every live session actor and wait
@@ -542,7 +560,7 @@ impl MvpAgent {
     /// the watcher is constructed in `agent/app.rs`. In simple /
     /// non-leader mode the channel is never wired and
     /// `notify_session_cwd_for_watch` is a no-op.
-    pub fn set_config_watcher_path_tx(
+    pub(crate) fn set_config_watcher_path_tx(
         &mut self,
         tx: tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>,
     ) {
@@ -1627,7 +1645,11 @@ impl MvpAgent {
         auth: &crate::auth::GrokAuth,
     ) -> Option<crate::util::config::RemoteSettings> {
         let identity = auth.user_id.clone();
-        self.otel_gate.rearm_on_switch(&identity);
+        let channel = {
+            let proxy_url = self.cfg.borrow().endpoints.proxy_url();
+            crate::agent::otel_gate::policy_channel_for(&proxy_url)
+        };
+        self.otel_gate.rearm_on_switch(&identity, channel);
         let outcome = self.fetch_settings_self_healing_401(auth).await;
         let live = self.auth_manager.current_or_expired().map(|a| a.user_id);
         self.otel_gate.resolve(&identity, outcome, live.as_deref())
@@ -2816,12 +2838,12 @@ impl MvpAgent {
         self.storage_mode.get()
     }
     /// Returns the background copy context for managing background file copy tasks.
-    pub fn background_copy_context(&self) -> BackgroundCopyContext {
+    pub(crate) fn background_copy_context(&self) -> BackgroundCopyContext {
         self.background_copy_context.clone()
     }
     /// Move a foreground bash command to background.
     /// Routes through the session's tool bridge to unblock the agent loop.
-    pub async fn background_foreground_command(
+    pub(crate) async fn background_foreground_command(
         &self,
         session_id: &str,
         tool_call_id: &str,
@@ -2835,7 +2857,7 @@ impl MvpAgent {
     }
     /// Kill a background task by task_id.
     /// Routes through the session's tool bridge to the TerminalBackend.
-    pub async fn kill_background_task(
+    pub(crate) async fn kill_background_task(
         &self,
         session_id: &str,
         task_id: &str,
@@ -2847,7 +2869,7 @@ impl MvpAgent {
             Err("session not found".to_string())
         }
     }
-    pub async fn delete_scheduled_task(
+    pub(crate) async fn delete_scheduled_task(
         &self,
         session_id: &str,
         task_id: &str,
@@ -2862,7 +2884,7 @@ impl MvpAgent {
     /// Cancel a subagent by id, returning a typed outcome that backs the pager's
     /// `x.ai/subagent/cancel`. Active/pending → cancelled (a finish follows);
     /// already-finished → its terminal status; unknown id → `NotFound`.
-    pub async fn cancel_subagent(
+    pub(crate) async fn cancel_subagent(
         &self,
         subagent_id: &str,
     ) -> xai_grok_tools::implementations::grok_build::task::types::SubagentCancelOutcome {
@@ -3063,13 +3085,16 @@ impl MvpAgent {
     }
     /// Get a session's cwd by session_id.
     /// Returns None if the session is not found.
-    pub fn get_session_cwd(&self, session_id: &acp::SessionId) -> Option<PathBuf> {
+    pub(crate) fn get_session_cwd(
+        &self,
+        session_id: &acp::SessionId,
+    ) -> Option<PathBuf> {
         let sessions = self.sessions.borrow();
         sessions.get(session_id).map(|handle| PathBuf::from(&handle.info.cwd))
     }
     /// Get a session handle by session_id.
     /// Returns None if the session is not found.
-    pub fn get_session_handle(
+    pub(crate) fn get_session_handle(
         &self,
         session_id: &acp::SessionId,
     ) -> Option<crate::session::SessionHandle> {
@@ -3077,7 +3102,7 @@ impl MvpAgent {
         sessions.get(session_id).cloned()
     }
     /// Get hooks list for a session (for `x.ai/hooks/list` extension).
-    pub async fn list_hooks(
+    pub(crate) async fn list_hooks(
         &self,
         session_id: &acp::SessionId,
     ) -> Option<xai_hooks_plugins_types::HooksListResponse> {
@@ -3085,7 +3110,7 @@ impl MvpAgent {
         handle.get_hooks_list().await
     }
     /// Execute a hooks management action (for `x.ai/hooks/action`).
-    pub async fn execute_hooks_action(
+    pub(crate) async fn execute_hooks_action(
         &self,
         session_id: &acp::SessionId,
         action: xai_hooks_plugins_types::HooksAction,
@@ -3101,7 +3126,7 @@ impl MvpAgent {
         handle.execute_hooks_action(action).await
     }
     /// Execute a plugins management action (for `x.ai/plugins/action`).
-    pub async fn execute_plugins_action(
+    pub(crate) async fn execute_plugins_action(
         &self,
         session_id: &acp::SessionId,
         action: xai_hooks_plugins_types::PluginsAction,
@@ -3119,7 +3144,7 @@ impl MvpAgent {
         outcome
     }
     /// Get a snapshot of the shared plugin registry (for `x.ai/plugins/list`).
-    pub fn plugin_registry_snapshot(
+    pub(crate) fn plugin_registry_snapshot(
         &self,
     ) -> Option<std::sync::Arc<xai_grok_agent::plugins::PluginRegistry>> {
         self.plugin_registry_handle.snapshot()
@@ -3127,7 +3152,7 @@ impl MvpAgent {
     /// Run content search at agent level.
     /// This allows content search to work with just a cwd, without requiring a session.
     /// Returns an upload method, or `None` when trace uploads are disabled.
-    pub async fn trace_upload_config(
+    pub(crate) async fn trace_upload_config(
         &self,
     ) -> Option<crate::session::repo_changes::UploadMethod> {
         let (method, _reason) = self.trace_upload_config_with_reason().await;

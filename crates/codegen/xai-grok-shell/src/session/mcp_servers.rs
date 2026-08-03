@@ -38,7 +38,7 @@ fn resolve_overrides(
 }
 
 /// Build the config-resolved event data from a list of MCP server configs.
-pub fn build_config_resolved_event(
+pub(crate) fn build_config_resolved_event(
     configs: &[acp::McpServer],
     cwd: &Path,
 ) -> xai_file_utils::events::Event {
@@ -63,7 +63,7 @@ pub fn build_config_resolved_event(
     xai_file_utils::events::Event::McpConfigResolved { servers, disabled }
 }
 
-pub async fn start_mcp_server(
+pub(crate) async fn start_mcp_server(
     mcp_server: acp::McpServer,
     cwd: Option<&Path>,
     meta_config: Option<&inner::McpServerMetaConfig>,
@@ -79,7 +79,7 @@ pub async fn start_mcp_server(
 /// servers (built under a brief lock via `McpState::build_pending_acp_clients`). SDK clients
 /// never fail to build, so they enter as `Ok`. One entry point so the init batch doesn't
 /// invoke two builders.
-pub async fn build_pending_clients(
+pub(crate) async fn build_pending_clients(
     mcp_state: &tokio::sync::Mutex<inner::McpState>,
     configs_to_start: Vec<acp::McpServer>,
     cwd: Option<&Path>,
@@ -114,7 +114,7 @@ pub async fn build_pending_clients(
     results
 }
 
-pub async fn start_mcp_servers(
+pub(crate) async fn start_mcp_servers(
     mcp_servers: Vec<acp::McpServer>,
     cwd: Option<&Path>,
     meta_config_map: &inner::McpMetaConfigMap,

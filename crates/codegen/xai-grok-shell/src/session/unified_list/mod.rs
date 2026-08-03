@@ -39,12 +39,12 @@ impl PartialReason {
     }
 }
 static FACET_REGISTRY: LazyLock<FacetRegistry> = LazyLock::new(build_facet_registry);
-pub fn facet_registry() -> &'static FacetRegistry {
+pub(crate) fn facet_registry() -> &'static FacetRegistry {
     &FACET_REGISTRY
 }
 /// Hard-off in release builds so they can't enable the
 /// conversations lane via env.
-pub fn conversations_lane_enabled() -> bool {
+pub(crate) fn conversations_lane_enabled() -> bool {
     false
 }
 /// Env lane (desktop `GROK_SESSION_LIST_CONVERSATIONS`) OR process-wide
@@ -201,12 +201,12 @@ fn value_list(v: &serde_json::Value) -> Vec<serde_json::Value> {
 /// `kind` facet (see [`parse_list_req`]). Welcome history sends an explicit
 /// `kind` (`chat` / `build`) that must not be rewritten. Other facet filters
 /// and `_meta` keys are left untouched.
-pub fn force_kind_chat(req: &mut ListReq) {
+pub(crate) fn force_kind_chat(req: &mut ListReq) {
     force_kind(req, SessionKind::Chat);
 }
 /// REPLACES any client-sent `kind` allow-list (a union would re-enable the
 /// excluded lanes); every other facet filter and `_meta` key is untouched.
-pub fn force_kind(req: &mut ListReq, kind: SessionKind) {
+pub(crate) fn force_kind(req: &mut ListReq, kind: SessionKind) {
     let mut meta = match req.meta.take() {
         Some(serde_json::Value::Object(map)) => map,
         _ => serde_json::Map::new(),
@@ -489,7 +489,7 @@ fn excludes_build(filters: &BTreeMap<String, Vec<serde_json::Value>>) -> bool {
     }
 }
 #[derive(Debug, Clone, Serialize)]
-pub struct ExtListResponse {
+pub(crate) struct ExtListResponse {
     pub sessions: Vec<ExtSupersetRow>,
     #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
@@ -497,7 +497,7 @@ pub struct ExtListResponse {
     pub meta: ExtListResponseMeta,
 }
 #[derive(Debug, Clone, Serialize)]
-pub struct ExtListResponseMeta {
+pub(crate) struct ExtListResponseMeta {
     #[serde(rename = "x.ai/facets")]
     pub facets: FacetSummary,
     #[serde(rename = "x.ai/partial")]
@@ -507,7 +507,7 @@ pub struct ExtListResponseMeta {
     pub list_scope: Option<&'static str>,
 }
 #[derive(Debug, Clone, Serialize)]
-pub struct PartialInfo {
+pub(crate) struct PartialInfo {
     pub conversations: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
@@ -522,7 +522,7 @@ fn list_response_meta(result: &UnifiedListResult) -> ExtListResponseMeta {
         list_scope: result.scope.is_relaxed().then_some(result.scope.as_str()),
     }
 }
-pub fn ext_list_response(result: UnifiedListResult) -> ExtListResponse {
+pub(crate) fn ext_list_response(result: UnifiedListResult) -> ExtListResponse {
     let meta = list_response_meta(&result);
     ExtListResponse {
         sessions: result
@@ -534,7 +534,7 @@ pub fn ext_list_response(result: UnifiedListResult) -> ExtListResponse {
         meta,
     }
 }
-pub fn acp_response_meta(result: &UnifiedListResult) -> Option<acp::Meta> {
+pub(crate) fn acp_response_meta(result: &UnifiedListResult) -> Option<acp::Meta> {
     to_meta(serde_json::to_value(list_response_meta(result)))
 }
 pub(super) fn to_meta<E: std::fmt::Display>(

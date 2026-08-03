@@ -13,6 +13,7 @@ use super::bash_command_splitting::{
     PlainCommand, is_wrapper_command, strip_wrapper_command, try_parse_shell,
     try_parse_word_only_commands_sequence, unwrap_wrappers,
 };
+use super::exec_risk::{git_words_are_read_only_query, git_words_have_unsafe_query_option};
 use super::shell_access::{
     command_words_write_paths, command_write_paths_in_tree, is_safe_write_sink,
 };
@@ -453,10 +454,10 @@ impl HeuristicPermissionClassifier {
 /// queries.
 const ROUTINE_PREFIXES: &[&str] = &[
     "cargo ",
-    "git status",
-    "git diff",
-    "git log",
-    "git branch",
+    // Read-only git queries are NOT listed here: they go through the shared
+    // `exec_risk::git_words_are_read_only_query` helper (single verb table +
+    // unsafe-option table) in `bash_command_is_routine`. Only the local
+    // write-workflow verbs stay prefix-matched.
     "git add",
     "git commit",
     "git checkout",
@@ -464,13 +465,6 @@ const ROUTINE_PREFIXES: &[&str] = &[
     "git stash",
     "git pull",
     "git fetch",
-    "git show",
-    "git blame",
-    "git grep",
-    "git ls-files",
-    "git rev-parse",
-    "git describe",
-    "git merge-base",
     "git worktree list",
     "pytest",
     "python ",
@@ -648,20 +642,19 @@ fn bash_command_is_routine(words: &[String]) -> bool {
     if head == "find" {
         return find_is_read_only(inner);
     }
-    // `git grep -O<cmd>`/`--open-files-in-pager` executes <cmd>; the write
-    // model treats `-O` as a read-only order-file (true for diff/log only).
-    // Git accepts uniquely-abbreviated long options, so any `--o*` word whose
-    // pre-`=` part prefixes the full option (`--op`, `--open`, ...) blocks too;
-    // `--or`/`--only-matching` diverge at the 4th char and stay routine.
-    if head == "git"
-        && inner.get(1).is_some_and(|s| s.eq_ignore_ascii_case("grep"))
-        && inner.iter().any(|w| {
-            let flag = w.split('=').next().unwrap_or(w);
-            w.starts_with("-O")
-                || (flag.starts_with("--o") && "--open-files-in-pager".starts_with(flag))
-        })
-    {
-        return false;
+    // Git: read-only queries decide via the shared helper (one verb table +
+    // one unsafe-option table with the manager safe lists — `--filters` /
+    // `--textconv` content drivers, `--output` write sink, `--ext-diff`,
+    // `grep -O` pager exec, with long-option abbreviations failing closed).
+    // The local write-workflow verbs (`git add`/`commit`/…) fall through to
+    // ROUTINE_PREFIXES, still subject to the same unsafe-option table.
+    if head == "git" {
+        if git_words_are_read_only_query(inner) {
+            return true;
+        }
+        if git_words_have_unsafe_query_option(inner) {
+            return false;
+        }
     }
     // `tree -o <file>` writes an arbitrary path outside the write model; short
     // flags group (`-ao`), so reject any short-flag word containing `o`.
@@ -2922,6 +2915,7 @@ mod tests {
             "find /repo/templates -name '*boostback*' 2>/dev/null; grep -rn boostback_burn /repo/templates --include '*.template'",
             "cd crates && cargo build",
             "git status && git diff | head -50",
+            "cd /repo && cat .gitignore | grep -n vendored ; git check-ignore -v docs/report.md; echo \"---template---\"; cat templates/commit.txt",
         ] {
             assert_eq!(
                 v(block_all.clone(), cmd).await,
@@ -3027,6 +3021,16 @@ mod tests {
             "git rev-parse --show-toplevel",
             "git merge-base HEAD origin/main",
             "git worktree list",
+            "git check-ignore -v docs/report.md",
+            "git check-attr -a src/main.rs",
+            "git cat-file -p HEAD:src/main.rs",
+            "git ls-tree -r HEAD src",
+            "git show-ref --heads",
+            "git for-each-ref refs/heads",
+            "git rev-list --count HEAD",
+            "git name-rev HEAD",
+            "git count-objects -v",
+            "git shortlog -sn",
             "kubectl get pods -n prod",
             "kubectl logs my-pod",
             "kubectl describe deploy my-app",
@@ -3050,6 +3054,8 @@ mod tests {
         for cmd in [
             "git worktree remove ../x",
             "git remote add origin evil",
+            "git cat-file --filters HEAD:data.bin",
+            "git cat-file --textconv HEAD:data.bin",
             "git push --force",
             "kubectl delete pod my-pod",
             "kubectl apply -f x.yaml",

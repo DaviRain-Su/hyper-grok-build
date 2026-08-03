@@ -16,7 +16,7 @@ const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(1000);
 /// reload's own reads schedule the next reload, a ~1/sec self-sustaining loop.
 /// Dropping `Access` is safe: writes still emit `Modify`/`Create` and chmod
 /// emits `Modify(Metadata)`; only reads are `Access`-only.
-pub struct AccessFilteredWatcher(notify::RecommendedWatcher);
+pub(crate) struct AccessFilteredWatcher(notify::RecommendedWatcher);
 
 impl notify::Watcher for AccessFilteredWatcher {
     fn new<F: notify::EventHandler>(
@@ -585,7 +585,7 @@ fn plan_skills_watch_targets(
 ///
 /// After a [`DiscoveryChange`], call [`Self::refresh_new_dirs`] so newly created
 /// seed dirs get watches attached.
-pub struct ProjectDiscoveryWatcher {
+pub(crate) struct ProjectDiscoveryWatcher {
     debouncer: Debouncer<AccessFilteredWatcher>,
     refresh_dirs: Vec<(PathBuf, RecursiveMode)>,
     refreshed_dirs: HashSet<PathBuf>,
@@ -651,7 +651,7 @@ impl ProjectDiscoveryWatcher {
     }
 
     /// Attach watches for seed dirs that now exist (call after a discovery event).
-    pub fn refresh_new_dirs(&mut self) {
+    pub(crate) fn refresh_new_dirs(&mut self) {
         attach_new_refresh_dirs(
             &mut self.debouncer,
             &self.refresh_dirs,

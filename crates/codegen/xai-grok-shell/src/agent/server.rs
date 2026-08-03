@@ -83,7 +83,7 @@ struct NewConnectionChannels {
 
 /// Query parameters for WebSocket connection.
 #[derive(Debug, serde::Deserialize, Default)]
-pub struct WsQueryParams {
+pub(crate) struct WsQueryParams {
     #[serde(rename = "server-key")]
     pub server_key: Option<String>,
 }
@@ -307,9 +307,6 @@ async fn run_persistent_agent(
     // Restore managed policy right before bootstrap reads it — the agent is created lazily here,
     // so an earlier restore could go stale before the gate.
     crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
-    // Fail-closed external-OTEL gate: suppress until settings resolve, opening
-    // now only for a pure env-API-key user (no remote policy). Matches the
-    // stdio/leader boot; per-connection settings reopen it via `initialize`.
     crate::agent::app::apply_otel_config(&auth_manager, &agent_config.grok_com_config);
     let agent = Rc::new(
         MvpAgent::new(gateway, &agent_config, auth_manager, prefetched_models)

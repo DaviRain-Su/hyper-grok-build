@@ -75,7 +75,7 @@ const STRICT_NORMALIZE_PARAMS: ReEncodeParams = ReEncodeParams {
     filter: DOWNSCALE_FILTER,
 };
 #[derive(Debug, Clone, Copy)]
-pub struct ImageCompressionInfo {
+pub(crate) struct ImageCompressionInfo {
     pub index: usize,
     pub original_bytes: usize,
     pub compressed_bytes: usize,
@@ -120,7 +120,7 @@ impl ImageCompressionInfo {
     }
 }
 #[derive(Default)]
-pub struct NormalizeResult {
+pub(crate) struct NormalizeResult {
     pub images: Vec<ImageContent>,
     pub compressed: Vec<ImageCompressionInfo>,
     pub re_encode_fallbacks: Vec<String>,
@@ -128,7 +128,10 @@ pub struct NormalizeResult {
     /// Surfaced via [`render_image_dropped_notice`].
     pub dropped: Vec<String>,
 }
-pub async fn normalize_images(images: Vec<ImageContent>, is_cursor: bool) -> NormalizeResult {
+pub(crate) async fn normalize_images(
+    images: Vec<ImageContent>,
+    is_cursor: bool,
+) -> NormalizeResult {
     normalize_images_in(images, is_cursor, NormalizeCache::global()).await
 }
 /// [`normalize_images`] with an injected cache (tests use a fresh
@@ -200,7 +203,7 @@ fn render_notice(notes: &[String], is_cursor: bool, inner_tag: &str) -> String {
     )
 }
 /// System-reminder for images dropped entirely before send.
-pub fn render_image_dropped_notice(notes: &[String], is_cursor: bool) -> String {
+pub(crate) fn render_image_dropped_notice(notes: &[String], is_cursor: bool) -> String {
     render_notice(notes, is_cursor, "image_dropped_notice")
 }
 /// Build the (system-reminder, owned-notes) pair for a
@@ -217,11 +220,14 @@ pub(crate) fn dropped_to_envelope(
     Some((notice, dropped))
 }
 /// System-reminder when oversized attachments were kept after re-encode failure.
-pub fn render_re_encode_fallback_notice(notes: &[String], is_cursor: bool) -> String {
+pub(crate) fn render_re_encode_fallback_notice(notes: &[String], is_cursor: bool) -> String {
     render_notice(notes, is_cursor, "image_re_encode_fallback")
 }
 /// System-reminder listing images that were re-encoded under the cap.
-pub fn render_compression_notice(compressed: &[ImageCompressionInfo], is_cursor: bool) -> String {
+pub(crate) fn render_compression_notice(
+    compressed: &[ImageCompressionInfo],
+    is_cursor: bool,
+) -> String {
     let notes: Vec<String> = compressed
         .iter()
         .map(|c| {

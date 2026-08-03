@@ -44,6 +44,5 @@ pub mod terminal;
 pub(crate) mod test_support;
 pub mod tier;
 pub mod tools;
-pub mod trace_classifier;
 pub mod upload;
 pub mod util;

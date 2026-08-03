@@ -53,7 +53,7 @@ pub fn todo_item_from_plan_entry(entry: acp::PlanEntry) -> TodoItem {
 /// Convert a `TodoItem` to an ACP `PlanEntry`.
 ///
 /// Cancelled items become `Completed` with `{"cancelled": true}` in meta.
-pub fn plan_entry_from_todo_item(item: TodoItem) -> acp::PlanEntry {
+pub(crate) fn plan_entry_from_todo_item(item: TodoItem) -> acp::PlanEntry {
     let status = match item.status {
         TodoStatus::Pending => acp::PlanEntryStatus::Pending,
         TodoStatus::InProgress => acp::PlanEntryStatus::InProgress,

@@ -413,6 +413,16 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "community-build")]
+    #[test]
+    fn impose_gate_ignores_consumer_paywall_in_community_build() {
+        let mut app = test_app();
+
+        assert!(app.impose_gate(watch_gate()).is_empty());
+        assert!(app.has_access());
+        assert!(app.pending_gate_verification.is_none());
+    }
+
     #[test]
     fn impose_gate_direct_for_non_consumer_and_already_gated() {
         // Team session: no live verification possible — show directly.
@@ -504,7 +514,8 @@ mod tests {
     #[test]
     fn apply_auth_meta_drops_pending_gate_verification() {
         let mut app = test_app();
-        let _effs = app.impose_gate(watch_gate());
+        app.pending_gate_verification = Some(watch_gate());
+        app.gate_verify_gen = 1;
 
         app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
 

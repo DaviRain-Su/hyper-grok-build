@@ -152,7 +152,8 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
         // agent) passes through here, so diagnostic uploads always carry
         // the version stamp and the resource ceilings in effect.
         xai_grok_telemetry::unified_log::set_version(xai_grok_version::VERSION);
-        crate::util::limits::log_effective_limits();
+        let limits = crate::util::limits::ProcessLimits::read();
+        limits.log();
 
         if !cfg!(test) {
             // Clear a logged-out team's files before the background sync runs.
@@ -196,6 +197,8 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
             );
         }
         update_telemetry_config(cfg, auth_manager);
+        // Emitted here: the event needs the client update_telemetry_config installs.
+        xai_grok_telemetry::session_ctx::log_event(limits.into_event());
     });
 }
 

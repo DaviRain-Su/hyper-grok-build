@@ -15,8 +15,8 @@ const LEADER_VERSION: &str = match option_env!("VERSION_WITH_COMMIT") {
 };
 use super::protocol::{
     ClientCapabilities, ClientId, ClientMessage, ClientMode, ControlCommand, ControlPayload,
-    LEADER_PROTOCOL_VERSION, LeaderCapabilities, ProtocolError, ServerMessage, read_message,
-    write_message,
+    InternalMethod, LEADER_PROTOCOL_VERSION, LeaderCapabilities, ProtocolError, ServerMessage,
+    internal_notification, read_message, write_message,
 };
 use super::transport::{LeaderListener, LeaderStream};
 use crate::agent::activity::AgentActivity;
@@ -145,7 +145,7 @@ impl LeaderServerControlState {
             workspace: Arc::new(WorkspaceControl::new(None)),
         }
     }
-    pub fn with_default_hub_url(mut self, default_hub_url: Option<String>) -> Self {
+    pub(crate) fn with_default_hub_url(mut self, default_hub_url: Option<String>) -> Self {
         self.workspace = Arc::new(WorkspaceControl::new(default_hub_url));
         self
     }
@@ -184,7 +184,7 @@ impl WorkspaceControl {
     }
     /// Wire the hub credential to the leader's shared `AuthManager` (sole
     /// owner of refresh + persistence).
-    pub fn set_auth_manager(&self, auth_manager: Arc<AuthManager>) {
+    pub(crate) fn set_auth_manager(&self, auth_manager: Arc<AuthManager>) {
         self.auth.send_replace(Some(Arc::new(LeaderAuthProvider {
             auth_manager,
             refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1749,12 +1749,10 @@ pub async fn run_leader_server(
                         last_active_client = None;
                     }
                     if !detached_sessions.is_empty() {
-                        let evict_notification = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "method": "x.ai/internal/evict_sessions",
-                            "params": { "sessionIds": detached_sessions }
-                        });
-                        let _ = acp_tx.send(evict_notification.to_string());
+                        let _ = acp_tx.send(internal_notification(
+                            InternalMethod::EvictSessions,
+                            serde_json::json!({ "sessionIds": detached_sessions }),
+                        ));
                         info!(
                             client_id = id.0,
                             session_count = detached_sessions.len(),
@@ -5305,7 +5303,10 @@ mod tests {
             .expect("channel should not be closed");
         let json: serde_json::Value =
             serde_json::from_str(&eviction_msg).expect("should be valid JSON");
-        assert_eq!(json["method"], "x.ai/internal/evict_sessions");
+        assert_eq!(
+            json["method"].as_str().and_then(|m| m.strip_prefix('_')),
+            Some(InternalMethod::EvictSessions.name()),
+        );
         let session_ids = json["params"]["sessionIds"]
             .as_array()
             .expect("sessionIds should be an array");

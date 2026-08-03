@@ -107,7 +107,10 @@ impl ChatModelsClient {
     /// Gated only on a valid grok.com bearer — deliberately NOT `is_xai_auth()`
     /// (unlike workspaces/conversations), since `/rest/modes` is the public chat
     /// endpoint and that gate would exclude API-key / cached-token chat users.
-    pub async fn list_modes(&self, locale: &str) -> Result<ListModesResponse, ChatModelsError> {
+    pub(crate) async fn list_modes(
+        &self,
+        locale: &str,
+    ) -> Result<ListModesResponse, ChatModelsError> {
         let auth = self
             .auth
             .auth()

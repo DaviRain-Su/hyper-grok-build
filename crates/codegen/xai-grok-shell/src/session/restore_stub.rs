@@ -122,12 +122,12 @@ impl SessionStateRestoreResult {
         Self::default()
     }
 
-    pub fn is_skipped(&self) -> bool {
+    pub(crate) fn is_skipped(&self) -> bool {
         self.files_copied == 0
     }
 }
 
-pub async fn restore_session(
+pub(crate) async fn restore_session(
     _client: &SessionRegistryClient,
     _session_id: &str,
     _target_cwd: &str,
@@ -157,7 +157,7 @@ pub async fn restore_session_with_storage(
     bail!(UNAVAILABLE)
 }
 
-pub fn resolve_restore_turn(record: &SessionRecord, turn_override: Option<i32>) -> i32 {
+pub(crate) fn resolve_restore_turn(record: &SessionRecord, turn_override: Option<i32>) -> i32 {
     turn_override.unwrap_or_else(|| {
         record
             .restorable_turn_number
@@ -165,7 +165,7 @@ pub fn resolve_restore_turn(record: &SessionRecord, turn_override: Option<i32>) 
     })
 }
 
-pub async fn download_to_tempfile(
+pub(crate) async fn download_to_tempfile(
     _client: &SessionRegistryClient,
     _session_id: &str,
     _filename: &str,
@@ -174,14 +174,14 @@ pub async fn download_to_tempfile(
     bail!(UNAVAILABLE)
 }
 
-pub async fn apply_memory_download(
+pub(crate) async fn apply_memory_download(
     _download: anyhow::Result<tempfile::NamedTempFile>,
     _target_cwd: &str,
 ) -> MemoryRestoreResult {
     MemoryRestoreResult::skipped(UNAVAILABLE)
 }
 
-pub async fn apply_session_state_download(
+pub(crate) async fn apply_session_state_download(
     _download: anyhow::Result<tempfile::NamedTempFile>,
     _session_id: &str,
     _target_cwd: &str,
@@ -205,7 +205,7 @@ pub fn format_search_results(sessions: &[SessionRecord]) -> String {
     }
 }
 
-pub async fn apply_session_state_in_place(
+pub(crate) async fn apply_session_state_in_place(
     _download: anyhow::Result<tempfile::NamedTempFile>,
     _session_id: &str,
     _target_cwd: &str,

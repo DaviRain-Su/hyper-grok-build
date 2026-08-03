@@ -82,9 +82,15 @@ impl Scenario {
 /// Wait for the pager to render the initial welcome screen. All scenarios
 /// that prompt / stream content rely on the pager being past startup.
 pub(crate) async fn wait_for_welcome(harness: &mut PtyHarness) -> Result<()> {
-    // Menu label on the normal welcome (and gate menus): capital Q — see
-    // `xai-grok-pager` `views/welcome/mod.rs` (`"Quit"` in `render_menu`).
+    // English chrome is forced by ContentController config, but accept a few
+    // common quit labels as belt-and-suspenders for host-locale leakage.
+    // See `xai-grok-pager` `views/welcome/mod.rs` / `welcome.quit` i18n key.
+    const WELCOME_MARKERS: &[&str] = &["Quit", "退出", "終了", "Beenden", "Salir", "Quitter"];
     harness
-        .wait_for_text("Quit", Duration::from_secs(15))
+        .wait_until(
+            "welcome menu (Quit / localized equivalent)",
+            Duration::from_secs(15),
+            |h| WELCOME_MARKERS.iter().any(|m| h.contains_text(m)),
+        )
         .map_err(|e| anyhow::anyhow!("pager failed to reach welcome screen: {e}"))
 }

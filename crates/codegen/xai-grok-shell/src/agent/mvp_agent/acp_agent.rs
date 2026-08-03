@@ -3,6 +3,8 @@
 //! [`acp::Agent`] trait implementation for [`MvpAgent`].
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
+use crate::auth::SilentRefresh;
+use crate::leader::protocol::InternalMethod;
 /// Which `x_search` sub-tools enforce the date cutoff, sent in `initialize`. `x_user_search` and
 /// `x_thread_fetch` are `false`: they don't honor it yet.
 #[derive(serde::Serialize)]
@@ -318,45 +320,10 @@ impl acp::Agent for MvpAgent {
         );
         let mut has_cached_token = init_has_current;
         if !init_has_current && init_is_expired {
-            let refreshed = matches!(
-                tokio::time::timeout(
-                    crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-                    self.auth_manager.auth(),
-                )
-                .await,
-                Ok(Ok(_))
-            );
-            if refreshed {
-                tracing::debug!(
-                    auth_type = ?self.auth_type(),
-                    "auth: initialize() silent refresh succeeded",
-                );
-                xai_grok_telemetry::unified_log::info(
-                    "auth: initialize() silent refresh succeeded",
-                    None,
-                    Some(
-                        serde_json::json!({ "auth_type": format!("{:?}", self.auth_type()) }),
-                    ),
-                );
-                has_cached_token = true;
-            } else if !self.auth_manager.requires_manual_reauth() {
-                tracing::info!("auth: silent refresh failed transiently; advertising cached_token");
-                xai_grok_telemetry::unified_log::info(
-                    "auth: initialize() silent refresh failed transiently, keeping cached_token",
-                    None,
-                    None,
-                );
-                has_cached_token = true;
-            } else {
-                tracing::warn!(
-                    "auth: token expired, silent refresh failed - re-authentication required"
-                );
-                xai_grok_telemetry::unified_log::warn(
-                    "auth: token expired, silent refresh failed - re-authentication required",
-                    None,
-                    None,
-                );
-            }
+            has_cached_token = match self.auth_manager.silent_refresh().await {
+                SilentRefresh::Renewed(_) => true,
+                SilentRefresh::Failed(remedy) => remedy.is_self_healing(),
+            };
         }
         let (
             login_label,
@@ -738,43 +705,19 @@ impl acp::Agent for MvpAgent {
                         }
                     }
                 }
-                if self.auth_manager.current().is_none()
-                    && self.auth_manager.is_expired()
-                {
-                    let am = self.auth_manager.clone();
-                    let refresh = tokio::spawn(async move { am.auth().await });
-                    match tokio::time::timeout(
-                            crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-                            refresh,
-                        )
-                        .await
-                    {
-                        Ok(Ok(Ok(_))) => {}
-                        outcome => {
-                            tracing::debug!(
-                            timed_out = outcome.is_err(),
-                            "auth: cached_token pre-check refresh did not produce a token (yet)"
-                        )
+                let resolved = match self.auth_manager.current() {
+                    Some(auth) => Some(auth),
+                    None if !self.auth_manager.is_expired() => None,
+                    None => {
+                        match self.auth_manager.silent_refresh().await {
+                            SilentRefresh::Renewed(auth) => Some(*auth),
+                            SilentRefresh::Failed(remedy) if remedy.is_self_healing() => {
+                                self.auth_manager.current_or_expired()
+                            }
+                            SilentRefresh::Failed(_) => None,
                         }
                     }
-                }
-                let resolved = self
-                    .auth_manager
-                    .current()
-                    .or_else(|| {
-                        if self.auth_manager.is_expired()
-                            && !self.auth_manager.requires_manual_reauth()
-                        {
-                            xai_grok_telemetry::unified_log::info(
-                                "auth cached_token: accepting expired-but-refreshable session",
-                                None,
-                                None,
-                            );
-                            self.auth_manager.current_or_expired()
-                        } else {
-                            None
-                        }
-                    });
+                };
                 let Some(auth) = resolved else {
                     let message = if self.auth_manager.is_expired() {
                         "Session expired, re-authentication required"
@@ -1345,8 +1288,7 @@ impl acp::Agent for MvpAgent {
             .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
         let remote_settings = self.cfg.borrow().remote_settings.clone();
         folder_trust::resolve_and_record(cwd.as_path(), remote_settings.as_ref(), false);
-        let initial_client_mcp_servers = arguments.mcp_servers.clone();
-        let (mcp_servers, managed_mcp_expires_at) = self
+        let (initial_client_mcp_servers, mcp_servers, managed_mcp_expires_at) = self
             .resolve_mcp_servers(arguments.mcp_servers, cwd.as_path())
             .await;
         let mcp_meta_config_map = parse_mcp_meta_config(arguments.meta.as_ref());
@@ -1839,8 +1781,7 @@ impl acp::Agent for MvpAgent {
             .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
         let remote_settings = self.cfg.borrow().remote_settings.clone();
         folder_trust::resolve_and_record(cwd.as_path(), remote_settings.as_ref(), false);
-        let initial_client_mcp_servers = client_mcp_servers.clone();
-        let (mcp_servers, managed_mcp_expires_at) = self
+        let (initial_client_mcp_servers, mcp_servers, managed_mcp_expires_at) = self
             .resolve_mcp_servers(client_mcp_servers, cwd.as_path())
             .await;
         let mcp_meta_config_map = parse_mcp_meta_config(request_meta.as_ref());
@@ -2223,7 +2164,7 @@ impl acp::Agent for MvpAgent {
                 )
                 .await?;
             drop(spawn_timer);
-        } else if !mcp_servers.is_empty() {
+        } else {
             tracing::info!(
                 session_id = %session_id.0,
                 mcp_server_count = mcp_servers.len(),
@@ -2239,11 +2180,6 @@ impl acp::Agent for MvpAgent {
                         respond_to: tx,
                     });
             }
-        } else {
-            tracing::info!(
-                session_id = %session_id.0,
-                "load_session: reconnecting to existing session (feedback manager already initialized)"
-            );
         }
         {
             let init_meta = self
@@ -3916,6 +3852,9 @@ impl acp::Agent for MvpAgent {
             | "x.ai/commands/list" => {
                 crate::extensions::session_admin::handle(self, &args).await
             }
+            m if InternalMethod::from_name(m).is_some() => {
+                crate::extensions::session_admin::handle(self, &args).await
+            }
             "x.ai/session/repair" => crate::extensions::repair::handle(self, &args).await,
             "x.ai/session/usage" => crate::extensions::usage::handle(self, &args).await,
             "x.ai/memory/flush" | "x.ai/memory/rewrite" => {
@@ -4334,7 +4273,7 @@ impl acp::Agent for MvpAgent {
                 "Permission state reset for matching sessions"
             );
         }
-        if args.method.as_ref() == "x.ai/internal/evict_sessions" {
+        if args.method.as_ref() == InternalMethod::EvictSessions.name() {
             self.handle_evict_sessions(&args.params).await;
         }
         if args.method.as_ref() == "x.ai/toggle_plan_mode"

@@ -179,6 +179,7 @@ fn findings_have_stable_semantic_ids_and_dispositions() {
             allow_passthrough_support: TmuxProbeResult::Available(()),
             allow_passthrough: TmuxProbeResult::Available("on".to_owned()),
             control_mode: TmuxProbeResult::Available(false),
+            client_features: TmuxProbeResult::Unavailable,
         },
         available_runtime(),
         false,
@@ -250,6 +251,7 @@ fn all_tmux_finding_metadata_uses_stable_automatic_fix_ids_without_schema_change
             allow_passthrough_support: TmuxProbeResult::Available(()),
             allow_passthrough: TmuxProbeResult::Available("off".to_owned()),
             control_mode: TmuxProbeResult::Available(false),
+            client_features: TmuxProbeResult::Unavailable,
         },
         available_runtime(),
         false,
@@ -288,6 +290,7 @@ fn all_tmux_finding_metadata_uses_stable_automatic_fix_ids_without_schema_change
             allow_passthrough_support: TmuxProbeResult::Available(()),
             allow_passthrough: TmuxProbeResult::Available("all".to_owned()),
             control_mode: TmuxProbeResult::Available(false),
+            client_features: TmuxProbeResult::Unavailable,
         },
         available_runtime(),
         false,
@@ -318,6 +321,7 @@ fn unavailable_runtime_evidence_is_honest_and_fail_open() {
             allow_passthrough_support: TmuxProbeResult::Available(()),
             allow_passthrough: TmuxProbeResult::Available("on".to_owned()),
             control_mode: TmuxProbeResult::Available(true),
+            client_features: TmuxProbeResult::Unavailable,
         },
         DiagnosticRuntimeEvidence {
             fullscreen_active: RuntimeEvidence::Unavailable,
@@ -369,6 +373,7 @@ fn unavailable_and_error_probe_evidence_is_retained_without_findings() {
             allow_passthrough_support: TmuxProbeResult::Unsupported,
             allow_passthrough: TmuxProbeResult::Unavailable,
             control_mode: TmuxProbeResult::Unavailable,
+            client_features: TmuxProbeResult::Unavailable,
         },
         available_runtime(),
         true,
@@ -384,7 +389,7 @@ fn unavailable_and_error_probe_evidence_is_retained_without_findings() {
         report.facts.clipboard.delivery,
         crate::clipboard::ClipboardDelivery::Confirmed
     );
-    assert_eq!(report.probe_notes.len(), 6);
+    assert_eq!(report.probe_notes.len(), 7);
     assert_eq!(report.probe_notes[0].probe, "tmux.version");
     assert_eq!(report.probe_notes[1].probe, "tmux.extended-keys");
     assert_eq!(report.probe_notes[2].status, ProbeStatus::Error);
@@ -394,7 +399,8 @@ fn unavailable_and_error_probe_evidence_is_retained_without_findings() {
     );
     assert_eq!(report.probe_notes[3].status, ProbeStatus::Unsupported);
     assert_eq!(report.probe_notes[4].probe, "tmux.control-mode");
-    assert_eq!(report.probe_notes[5].probe, "wayland.data-control");
+    assert_eq!(report.probe_notes[5].probe, "tmux.client-features");
+    assert_eq!(report.probe_notes[6].probe, "wayland.data-control");
 }
 
 fn plain_tmux() -> TmuxProbeFacts {
@@ -405,6 +411,7 @@ fn plain_tmux() -> TmuxProbeFacts {
         allow_passthrough_support: TmuxProbeResult::Available(()),
         allow_passthrough: TmuxProbeResult::Available("on".to_owned()),
         control_mode: TmuxProbeResult::Available(false),
+        client_features: TmuxProbeResult::Unavailable,
     }
 }
 
@@ -711,4 +718,54 @@ fn keyboard_fact_and_formatter_use_snapshot_host() {
         assert!(keyboard.is_none());
         assert!(!output.contains("  keyboard     "));
     }
+}
+
+/// `RGB` in the resolved feature list is the only signal that 24-bit color
+/// survives tmux. Empty output means the answer is unknown rather than
+/// negative: tmux before 3.2 renders the unknown format as an empty string.
+#[test]
+fn client_features_decide_color_passthrough() {
+    let cases = [
+        (
+            TmuxProbeResult::Available(
+                "bpaste,ccolour,clipboard,cstyle,focus,RGB,title".to_owned(),
+            ),
+            TmuxColorPassthrough::Forwarded,
+        ),
+        (
+            TmuxProbeResult::Available("RGB".to_owned()),
+            TmuxColorPassthrough::Forwarded,
+        ),
+        (
+            TmuxProbeResult::Available("bpaste,ccolour,clipboard,cstyle,focus,title".to_owned()),
+            TmuxColorPassthrough::Reduced,
+        ),
+        (
+            TmuxProbeResult::Available(String::new()),
+            TmuxColorPassthrough::Unknown,
+        ),
+        (
+            TmuxProbeResult::Available("   ".to_owned()),
+            TmuxColorPassthrough::Unknown,
+        ),
+        (TmuxProbeResult::Unsupported, TmuxColorPassthrough::Unknown),
+        (TmuxProbeResult::Unavailable, TmuxColorPassthrough::Unknown),
+        (
+            TmuxProbeResult::Error("tmux unreachable".to_owned()),
+            TmuxColorPassthrough::Unknown,
+        ),
+    ];
+
+    let actual = cases
+        .iter()
+        .map(|(result, _)| tmux_color_passthrough(result))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        actual,
+        cases
+            .iter()
+            .map(|(_, expected)| *expected)
+            .collect::<Vec<_>>()
+    );
 }

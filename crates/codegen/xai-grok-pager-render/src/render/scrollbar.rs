@@ -125,6 +125,23 @@ pub fn needs_scrollbar(total_lines: u16, viewport_lines: u16) -> bool {
     total_lines > viewport_lines
 }
 
+/// The scrollbar's mouse grab zone: the track plus one column of slop on
+/// each side.
+///
+/// Users read a thumb drawn flush against a modal border as one
+/// two-column widget and press the border half (reported on macOS
+/// Terminal.app and ghostty over SSH), so near-miss presses must still
+/// grab the thumb.
+pub fn scrollbar_grab_zone(track: Rect) -> Rect {
+    let x = track.x.saturating_sub(SCROLLBAR_GAP_COLS);
+    Rect {
+        x,
+        y: track.y,
+        width: (track.x - x).saturating_add(track.width).saturating_add(1),
+        height: track.height,
+    }
+}
+
 /// Whether the view is at the bottom (following mode position).
 #[allow(dead_code)] // Useful helper, kept for future use
 pub fn is_at_bottom(total_lines: u16, viewport_lines: u16, offset: u16) -> bool {
@@ -217,53 +234,26 @@ pub fn render_scrollbar(
     offset: u16,
     is_following: bool,
 ) {
-    if SCROLLBARS_HIDDEN.load(Ordering::Relaxed) {
-        return;
-    }
-
-    let Some(scrollbar_area) = scrollbar_area else {
-        return;
-    };
-
-    if scrollbar_area.width == 0 || scrollbar_area.height == 0 {
-        return;
-    }
-
-    if !needs_scrollbar(total_lines, viewport_lines) {
-        return;
-    }
-
-    let lengths = ScrollLengths {
-        content_len: total_lines as usize,
-        viewport_len: viewport_lines as usize,
-    };
-
-    let scrollbar = ScrollBar::vertical(lengths).offset(offset as usize);
-
-    // Render into ratatui-core scratch buffer
-    let core_area = CoreRect {
-        x: scrollbar_area.x,
-        y: scrollbar_area.y,
-        width: scrollbar_area.width,
-        height: scrollbar_area.height,
-    };
-    let mut scratch = CoreBuffer::empty(core_area);
-    (&scrollbar).render(core_area, &mut scratch);
-
-    // Copy to ratatui buffer with follow-aware styling
     let (track_style, thumb_style) = scrollbar_styles(is_following);
-    for row in 0..scrollbar_area.height {
-        let x = scrollbar_area.x;
-        let y = scrollbar_area.y + row;
-        let src = &scratch[(x, y)];
-        let dst = &mut buf[(x, y)];
-        if src.symbol() == " " {
-            dst.set_symbol(" ");
-            dst.set_style(track_style);
-        } else {
-            dst.set_symbol("\u{2588}");
-            dst.set_style(thumb_style);
-        }
+    render_scrollbar_styled(
+        buf,
+        scrollbar_area,
+        total_lines,
+        viewport_lines,
+        offset,
+        track_style,
+        thumb_style,
+    );
+}
+
+/// Some emulators (notably macOS Terminal.app) do not stretch the `█`
+/// glyph over the cell's line-gap pixels, so a foreground-only thumb
+/// renders striped with dark bars; the background fill covers the whole
+/// cell box.
+fn thumb_fill_style(thumb_style: Style) -> Style {
+    match thumb_style.fg {
+        Some(fg) => thumb_style.bg(fg),
+        None => thumb_style,
     }
 }
 
@@ -332,6 +322,7 @@ pub fn render_scrollbar_styled(
     (&scrollbar).render(core_area, &mut scratch);
 
     // Copy to ratatui buffer with custom styling
+    let thumb_fill = thumb_fill_style(thumb_style);
     for row in 0..scrollbar_area.height {
         let x = scrollbar_area.x;
         let y = scrollbar_area.y + row;
@@ -342,7 +333,7 @@ pub fn render_scrollbar_styled(
             dst.set_style(track_style);
         } else {
             dst.set_symbol("\u{2588}");
-            dst.set_style(thumb_style);
+            dst.set_style(thumb_fill);
         }
     }
 }
@@ -396,6 +387,21 @@ mod tests {
         let (content, scrollbar) = maybe_split_for_scrollbar(area, 5);
         assert_eq!(content.width, 40); // Full width
         assert!(scrollbar.is_none());
+    }
+
+    #[test]
+    fn test_scrollbar_grab_zone() {
+        let zone = scrollbar_grab_zone(Rect::new(39, 2, 1, 10));
+        assert_eq!(zone, Rect::new(38, 2, 3, 10));
+        assert!(zone.contains((38, 2).into()), "gap column grabs");
+        assert!(zone.contains((39, 11).into()), "track grabs");
+        assert!(zone.contains((40, 5).into()), "border column grabs");
+        assert!(!zone.contains((37, 5).into()), "two columns left is out");
+        assert!(!zone.contains((41, 5).into()), "two columns right is out");
+        assert!(!zone.contains((39, 12).into()), "rows are bounded");
+
+        let zone = scrollbar_grab_zone(Rect::new(0, 0, 1, 4));
+        assert_eq!(zone, Rect::new(0, 0, 2, 4));
     }
 
     #[test]
@@ -471,6 +477,36 @@ mod tests {
         if crate::theme::color_support::get().has_256() {
             assert_ne!(following_style.bg, not_following_style.bg);
         }
+    }
+
+    /// macOS Terminal.app leaves line-gap pixels unpainted under a
+    /// foreground-only `█`, striping the thumb with dark bars.
+    #[test]
+    fn test_thumb_cells_fill_background() {
+        let area = Rect::new(0, 0, 10, 10);
+        let (_, scrollbar_area) = split_area_for_scrollbar(area);
+        let sb = scrollbar_area.unwrap();
+
+        let track = Style::new().bg(Color::Black);
+        let thumb = Style::new().fg(Color::White).bg(Color::Black);
+        let mut buf = Buffer::empty(area);
+        render_scrollbar_styled(&mut buf, scrollbar_area, 100, 10, 50, track, thumb);
+
+        let mut thumb_cells = 0;
+        for y in 0..sb.height {
+            let cell = &buf[(sb.x, sb.y + y)];
+            if cell.symbol() == "\u{2588}" {
+                thumb_cells += 1;
+                assert_eq!(
+                    cell.style().bg,
+                    cell.style().fg,
+                    "thumb cell background must match the glyph color"
+                );
+            } else {
+                assert_eq!(cell.style().bg, Some(Color::Black), "track keeps its bg");
+            }
+        }
+        assert!(thumb_cells > 0, "a thumb must be rendered");
     }
 
     #[test]

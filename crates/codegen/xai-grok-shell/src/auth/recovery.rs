@@ -29,6 +29,7 @@ pub(crate) fn manual_auth_reason(err: &AuthError) -> Option<ManualAuthReason> {
     Some(match err {
         AuthError::Refresh(RefreshTokenError::Permanent(e)) => match e.reason {
             RefreshTokenFailedReason::RefreshTokenRejected => R::RefreshTokenRejected,
+            RefreshTokenFailedReason::ProviderInteractiveRequired => R::ProviderInteractiveRequired,
             // Self-healing via the TTL, not a manual re-auth.
             RefreshTokenFailedReason::ClientRejected | RefreshTokenFailedReason::Other => {
                 return None;
@@ -217,7 +218,7 @@ enum RecoveryStep {
 }
 
 /// State machine that walks through recovery strategies after a 401.
-pub struct UnauthorizedRecovery {
+pub(crate) struct UnauthorizedRecovery {
     auth_manager: Arc<AuthManager>,
     /// The token that was rejected by the server.
     rejected_token: String,
@@ -324,7 +325,10 @@ impl UnauthorizedRecovery {
                     // preferred_method=api_key forbids automatic OIDC mint.
                     if !self.auth_manager.grok_com_config().blocks_automatic_oidc()
                         && self.auth_manager.is_devbox_environment()
-                        && let Ok(auth) = self.auth_manager.try_devbox_recovery().await
+                        && let Ok(auth) = self
+                            .auth_manager
+                            .try_devbox_recovery(Some(&self.rejected_token))
+                            .await
                     {
                         return Ok(auth);
                     }

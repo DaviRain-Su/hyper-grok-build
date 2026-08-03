@@ -25,13 +25,15 @@ pub(crate) struct GatePreflight {
 }
 
 impl GatePreflight {
+    /// `cwd` is the requesting session's execution cwd (not necessarily the
+    /// manager's): path rules and shell-file operands anchor to it.
     pub(crate) fn evaluate(
         policy: Option<&CompiledPolicy>,
         access: &AccessKind,
         cwd: &Path,
         auto_mode: bool,
     ) -> Self {
-        let direct = policy.and_then(|policy| policy.evaluate(access));
+        let direct = policy.and_then(|policy| policy.evaluate_with_cwd(access, Some(cwd)));
         let (bash_command, shell_file) = match (policy, access) {
             (Some(policy), AccessKind::Bash(cmd)) => (
                 policy.evaluate_bash_command_gate(cmd),

@@ -436,6 +436,37 @@ pub(super) fn should_drop_late_auto_recap(auto: bool, is_replay: bool, agent_idl
     auto && !is_replay && !agent_idle
 }
 
+/// Live auto recap when scrollback already has a recap after the last user
+/// prompt. Replay still rebuilds history as stored.
+pub(super) fn should_drop_duplicate_auto_recap(
+    auto: bool,
+    is_replay: bool,
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> bool {
+    auto && !is_replay && scrollback_has_recap_since_last_user(scrollback)
+}
+
+fn scrollback_has_recap_since_last_user(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> bool {
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::blocks::SessionEvent;
+
+    let mut recap_since_user = false;
+    for (_, entry) in scrollback.iter_entries() {
+        if entry.block.is_user_prompt() {
+            recap_since_user = false;
+            continue;
+        }
+        if let RenderBlock::SessionEvent(b) = &entry.block
+            && matches!(b.event, SessionEvent::Recap { .. })
+        {
+            recap_since_user = true;
+        }
+    }
+    recap_since_user
+}
+
 /// Land a `SessionRecap` block: fill a manual `/recap`'s in-flight loading
 /// spinner in place (and stop its animation) when one is showing, otherwise
 /// append a fresh block. An automatic recap never consumes the manual loading

@@ -228,6 +228,62 @@ async fn update_preserves_other_scope_entries() {
     assert!(store.contains_key(&cfg.auth_scope()));
 }
 
+/// xAI login/refresh must not drop third-party OAuth scopes that users keep
+/// for multi-provider coexistence (Codex + Kimi + xAI).
+#[tokio::test]
+async fn update_preserves_openai_codex_and_kimi_scopes() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    let mgr = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg.clone()));
+    let home = dir.path();
+
+    let codex = GrokAuth {
+        key: "codex-access".into(),
+        auth_mode: AuthMode::OpenAiCodex,
+        refresh_token: Some("codex-rt".into()),
+        email: Some("user@chatgpt.com".into()),
+        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
+    };
+    let kimi = GrokAuth {
+        key: "kimi-access".into(),
+        auth_mode: AuthMode::KimiCode,
+        refresh_token: Some("kimi-rt".into()),
+        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
+    };
+    crate::auth::storage::store_openai_codex_auth(home, &codex).unwrap();
+    crate::auth::storage::store_kimi_code_auth(home, &kimi).unwrap();
+
+    let xai = GrokAuth {
+        key: "xai-access".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("xai-rt".into()),
+        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
+    };
+    mgr.update(xai).await.unwrap();
+
+    let store = read_auth_json(&home.join("auth.json")).unwrap();
+    assert!(
+        store.contains_key(&cfg.auth_scope()),
+        "xAI scope must be present after update"
+    );
+    assert!(
+        store.contains_key(crate::auth::model::OPENAI_CODEX_OAUTH_SCOPE),
+        "OpenAI Codex scope must survive xAI update"
+    );
+    assert!(
+        store.contains_key(crate::auth::model::KIMI_CODE_OAUTH_SCOPE),
+        "Kimi Code scope must survive xAI update"
+    );
+    assert_eq!(
+        crate::auth::storage::read_openai_codex_auth(home).map(|a| a.key),
+        Some("codex-access".into())
+    );
+    assert_eq!(
+        crate::auth::storage::read_kimi_code_auth(home).map(|a| a.key),
+        Some("kimi-access".into())
+    );
+}
+
 /// Regression: when auth.json contains corrupt JSON, update() must not
 /// clobber the file with a single-entry map. Instead it should update
 /// in-memory only and leave the file untouched.
@@ -4905,6 +4961,12 @@ fn manual_auth_reason_maps_terminal_and_skips_non_forcing() {
         }),
         Some(R::WrongTeam)
     );
+    // Before this reason existed these lockouts hid under the self-healing
+    // `Other` bucket and never surfaced in the KPI at all.
+    assert_eq!(
+        permanent(Reason::ProviderInteractiveRequired),
+        Some(R::ProviderInteractiveRequired)
+    );
     // Self-healing (TTL) reasons, transient / no-credential, and API-key
     // lockouts (out of scope for this KPI) don't count.
     assert_eq!(permanent(Reason::ClientRejected), None);
@@ -4938,6 +5000,10 @@ fn relay_should_cancel_gives_up_only_on_terminal_failures() {
     // Cancelled even though it never emits the KPI (a kill-switched API key
     // means rotate the key, not `/login`).
     assert!(relay_should_cancel(&AuthError::ApiKeyAuthDisabled));
+    // Reconnecting would replay the same 401 until the user signs in.
+    assert!(relay_should_cancel(&AuthError::permanent(
+        Reason::ProviderInteractiveRequired
+    )));
 
     // Recoverable: fall through and reconnect.
     assert!(!relay_should_cancel(&AuthError::transient("network blip")));
@@ -5148,6 +5214,55 @@ async fn requires_manual_reauth_true_for_sticky_verdict_and_no_refresher() {
         mgr.requires_manual_reauth(),
         "a sticky RefreshTokenRejected verdict must demand /login"
     );
+}
+
+/// Treating a failed provider run as self-healing is what let an expired
+/// credential in and then 401'd every turn. The verdict still ages out, so a
+/// later launch gets to retry the provider.
+#[tokio::test]
+async fn requires_manual_reauth_true_after_external_provider_refresh_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new_test_isolated(
+        dir.path(),
+        external_provider_config(),
+    ));
+    mgr.hot_swap(GrokAuth {
+        key: "expired-external".into(),
+        auth_mode: AuthMode::External,
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    mgr.set_refresher(Arc::new(FailingRefresher {
+        call_count: Arc::new(AtomicU32::new(0)),
+    }));
+
+    assert!(
+        !mgr.requires_manual_reauth(),
+        "before any attempt the provider may still mint silently"
+    );
+
+    record_permanent_failure(
+        &mgr,
+        crate::auth::error::RefreshTokenFailedReason::ProviderInteractiveRequired,
+    );
+    assert!(
+        mgr.requires_manual_reauth(),
+        "a failed headless provider run leaves only the interactive flow"
+    );
+
+    mgr.force_permanent_failure_aged_out();
+    assert!(
+        !mgr.requires_manual_reauth(),
+        "the verdict is non-sticky: past its TTL the provider gets another chance"
+    );
+}
+
+/// Config for a deployment that mints sessions with an external binary.
+fn external_provider_config() -> GrokComConfig {
+    GrokComConfig {
+        auth_provider_command: Some("acme-auth".to_owned()),
+        ..GrokComConfig::default()
+    }
 }
 
 // ── proactive_failure_backoff ────────────────────────────────────────
@@ -5436,4 +5551,67 @@ async fn production_new_persistence_uses_resolved_auth_path() {
         !dir.path().join("auth.json").exists(),
         "must not create default home auth.json when GROK_AUTH_PATH is set"
     );
+}
+
+// ── try_devbox_recovery: the wait-on-the-lock double-check ───────────
+
+/// Seed a credential that is locally valid but that the caller has been told
+/// the server rejects — the shape that made the double-check lie.
+fn devbox_manager(dir: &std::path::Path, key: &str) -> Arc<AuthManager> {
+    let mgr = Arc::new(AuthManager::new_test_isolated(
+        dir,
+        GrokComConfig::default(),
+    ));
+    mgr.set_devbox_env_for_test(true);
+    mgr.hot_swap(GrokAuth {
+        key: key.into(),
+        auth_mode: AuthMode::External,
+        expires_at: Some(Utc::now() + Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    mgr
+}
+
+/// The credential the caller already knows is dead can never be the answer.
+///
+/// `try_devbox_recovery` short-circuits on whatever `current()` holds, to
+/// catch a sibling task that refreshed while we waited on `refresh_lock`.
+/// Told nothing about the rejected bearer it used to return that bearer, so
+/// on a devbox every 401 against a still-locally-valid token reported
+/// "recovered" and the turn resubmitted it until its retry budget ran out.
+#[tokio::test]
+async fn devbox_recovery_never_re_serves_the_credential_it_was_given_up_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = devbox_manager(dir.path(), "rejected-but-locally-valid");
+    assert!(
+        mgr.current().is_some(),
+        "precondition: the rejected bearer is still locally valid"
+    );
+
+    // Asserted as "not this credential" rather than as an error: on a real
+    // devbox the mint can genuinely succeed, and a *different* credential is
+    // exactly the outcome we want. Everywhere else there is no mint endpoint
+    // and this is an error.
+    let outcome = mgr
+        .try_devbox_recovery(Some("rejected-but-locally-valid"))
+        .await;
+    assert!(
+        !matches!(&outcome, Ok(auth) if auth.key == "rejected-but-locally-valid"),
+        "recovery must not report success with the rejected bearer, got {outcome:?}"
+    );
+}
+
+/// The double-check still does its job: a credential that is *not* the one
+/// the caller gave up on means a sibling task refreshed, so take it and skip
+/// the mint.
+#[tokio::test]
+async fn devbox_recovery_short_circuits_on_a_credential_someone_else_landed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = devbox_manager(dir.path(), "landed-by-a-sibling-task");
+
+    let auth = mgr
+        .try_devbox_recovery(Some("the-bearer-the-server-rejected"))
+        .await
+        .expect("a different live credential is a recovery");
+    assert_eq!(auth.key, "landed-by-a-sibling-task");
 }

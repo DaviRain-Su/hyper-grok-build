@@ -4442,13 +4442,9 @@ async fn post_auth_settings_non_xai_keeps_local_but_still_emits() {
         "settings arrival must push x.ai/settings/update for non-xai auth too"
     );
 }
-/// A failed post-auth fetch must re-close the gate and leave it closed. Guards
-/// two behaviors a passing-on-`Fetched` test can't: the account-switch
-/// re-suppress fires (gate was open, identity not yet resolved), and a
-/// transient/4xx outcome (`Retry`) does not reopen it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
-async fn post_auth_settings_retry_re_suppresses_and_stays_closed() {
+async fn post_auth_settings_failure_resolves_gate_onto_local_policy() {
     use crate::agent::config::AgentMode;
     use crate::auth::{GrokAuth, XAI_OAUTH2_ISSUER};
     let _restore = RestoreOtelGate;
@@ -4460,12 +4456,16 @@ async fn post_auth_settings_retry_re_suppresses_and_stays_closed() {
         ..GrokAuth::test_default()
     };
     let (agent, _rx) = build_agent_with_auth_and_proxy(xai_auth, server.url(), AgentMode::Leader);
-    xai_grok_telemetry::external::mark_external_otel_settings_resolved();
-    assert!(xai_grok_telemetry::external::is_settings_gate_open());
+    xai_grok_telemetry::external::suppress_external_otel_until_settings();
+    assert!(!xai_grok_telemetry::external::is_settings_gate_open());
     agent.maybe_fetch_post_auth_settings().await;
     assert!(
-        !xai_grok_telemetry::external::is_settings_gate_open(),
-        "a Retry (failed) post-auth fetch must re-close the gate and keep it closed"
+        xai_grok_telemetry::external::is_settings_gate_open(),
+        "an exhausted fetch is a definitive answer: open on local policy"
+    );
+    assert!(
+        agent.cfg.borrow().remote_settings.is_none(),
+        "opening the gate must not fabricate settings; none were fetched"
     );
 }
 /// A same-credential refresh must NOT re-suppress a gate already resolved for

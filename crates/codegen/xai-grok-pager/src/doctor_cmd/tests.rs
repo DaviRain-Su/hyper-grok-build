@@ -76,6 +76,7 @@ fn tmux_facts(
         allow_passthrough_support: TmuxProbeResult::Available(()),
         allow_passthrough: TmuxProbeResult::Available("on".to_owned()),
         control_mode,
+        client_features: TmuxProbeResult::Unavailable,
     }
 }
 
@@ -87,6 +88,7 @@ fn unavailable_tmux_facts() -> TmuxProbeFacts {
         allow_passthrough_support: TmuxProbeResult::Unavailable,
         allow_passthrough: TmuxProbeResult::Unavailable,
         control_mode: TmuxProbeResult::Unavailable,
+        client_features: TmuxProbeResult::Unavailable,
     }
 }
 
@@ -103,6 +105,7 @@ fn healthy_report() -> DiagnosticReport {
                 set_clipboard: crate::diagnostics::TmuxOptionFact::Unavailable,
                 allow_passthrough_support: crate::diagnostics::TmuxSupportFact::Unavailable,
                 allow_passthrough: crate::diagnostics::TmuxOptionFact::Unavailable,
+                color_passthrough: crate::diagnostics::TmuxColorPassthrough::Unknown,
             },
             color: ColorFacts {
                 level: RuntimeFact::Available(ColorLevel::TrueColor),
@@ -411,6 +414,7 @@ fn standalone_runtime_and_tmux_are_unavailable_without_false_wezterm_finding() {
             "tmux.set-clipboard",
             "tmux.allow-passthrough-support",
             "tmux.control-mode",
+            "tmux.client-features",
         ]
     );
     let runtime_notes = report
@@ -474,47 +478,50 @@ fn human_healthy_fixture_is_exact() {
 fn human_mixed_fixture_is_exact() {
     assert_eq!(
         human::format(&mixed_report()),
-        concat!(
-            "Grok Doctor\n",
-            "\n",
-            "Environment\n",
-            "  · terminal                     Ghostty\n",
-            "  · terminal version             Ghostty 1.2.3\n",
-            "  · multiplexer                  tmux\n",
-            "  · byobu                        tmux\n",
-            "  · ssh                          yes\n",
-            "  · color                        256\n",
-            "  · themes                       2/5: groknight, grokday\n",
-            "  · keyboard                     cmd=dropped, opt=native (OS rescue active)\n",
-            "  · newline                      Alt+Enter (Cursor: xterm.js cannot distinguish Shift+Enter)\n",
-            "\n",
-            "Clipboard\n",
-            "  · native                       local (pbcopy)\n",
-            "  · tmux                         on\n",
-            "  · osc 52                       supported\n",
-            "  · SSH wrap                     off\n",
-            "  · status                       confirmed\n",
-            "\n",
-            "Findings\n",
-            "  ! terminal.tmux-clipboard      OSC 52 clipboard passthrough is disabled\n",
-            "    → Automatic setup: `grok doctor fix tmux-clipboard`\n",
-            "    → Add `set -g set-clipboard on` to ~/.tmux.conf\n",
-            "      Reload tmux after editing.\n",
-            "  i terminal.ssh-wrap            Use local SSH wrapping\n",
-            "    → Automatic setup: `grok doctor fix ssh-wrap`\n",
-            "    → One-off: `grok wrap ssh <host>`\n",
-            "\n",
-            "Checks not completed\n",
-            "  ? tmux.version                 unavailable\n",
-            "  ? tmux.extended-keys           unavailable\n",
-            "  ? tmux.allow-passthrough-support unsupported\n",
-            "  ? runtime.fullscreen-active    unavailable\n",
-            "  ? tmux.control-mode            error: server unavailable\n",
-            "\n",
-            "Needs a running session\n",
-            "  Some checks only run in Grok. Start Grok and run /doctor.\n",
-            "\n",
-            "1 issue, 1 recommendation\n",
+        format!(
+            concat!(
+                "Grok Doctor\n",
+                "\n",
+                "Environment\n",
+                "  · terminal                     Ghostty\n",
+                "  · terminal version             Ghostty 1.2.3\n",
+                "  · multiplexer                  tmux\n",
+                "  · byobu                        tmux\n",
+                "  · ssh                          yes\n",
+                "  · color                        256\n",
+                "  · themes                       2/{}: groknight, grokday\n",
+                "  · keyboard                     cmd=dropped, opt=native (OS rescue active)\n",
+                "  · newline                      Alt+Enter (Cursor: xterm.js cannot distinguish Shift+Enter)\n",
+                "\n",
+                "Clipboard\n",
+                "  · native                       local (pbcopy)\n",
+                "  · tmux                         on\n",
+                "  · osc 52                       supported\n",
+                "  · SSH wrap                     off\n",
+                "  · status                       confirmed\n",
+                "\n",
+                "Findings\n",
+                "  ! terminal.tmux-clipboard      OSC 52 clipboard passthrough is disabled\n",
+                "    → Automatic setup: `grok doctor fix tmux-clipboard`\n",
+                "    → Add `set -g set-clipboard on` to ~/.tmux.conf\n",
+                "      Reload tmux after editing.\n",
+                "  i terminal.ssh-wrap            Use local SSH wrapping\n",
+                "    → Automatic setup: `grok doctor fix ssh-wrap`\n",
+                "    → One-off: `grok wrap ssh <host>`\n",
+                "\n",
+                "Checks not completed\n",
+                "  ? tmux.version                 unavailable\n",
+                "  ? tmux.extended-keys           unavailable\n",
+                "  ? tmux.allow-passthrough-support unsupported\n",
+                "  ? runtime.fullscreen-active    unavailable\n",
+                "  ? tmux.control-mode            error: server unavailable\n",
+                "\n",
+                "Needs a running session\n",
+                "  Some checks only run in Grok. Start Grok and run /doctor.\n",
+                "\n",
+                "1 issue, 1 recommendation\n",
+            ),
+            ThemeKind::ALL.len()
         )
     );
 }
@@ -684,7 +691,7 @@ fn json_empty_fixture_pins_null_policy() {
                 "color": {
                     "level": {"status": "unavailable", "value": null},
                     "availableThemes": [],
-                    "totalThemes": 5
+                    "totalThemes": ThemeKind::ALL.len()
                 },
                 "keyboard": null,
                 "newline": null,
@@ -732,7 +739,7 @@ fn json_contract_is_structural_stable_ordered_and_ansi_free() {
                 "color": {
                     "level": {"status": "available", "value": "256"},
                     "availableThemes": ["groknight", "grokday"],
-                    "totalThemes": 5
+                    "totalThemes": ThemeKind::ALL.len()
                 },
                 "keyboard": {"cmd": "dropped", "opt": "native", "os": "macos"},
                 "newline": {"kind": "xterm_js", "terminalName": "cursor"},

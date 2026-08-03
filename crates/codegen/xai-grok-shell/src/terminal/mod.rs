@@ -19,7 +19,7 @@ pub use adapter::AcpTerminalAdapter;
 mod exit_watcher;
 mod output_recorder;
 
-pub mod pty_session;
+pub(crate) mod pty_session;
 
 pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub const DEFAULT_OUTPUT_BYTE_LIMIT: usize = 30_000; // 30k characters
@@ -29,7 +29,7 @@ pub const DEFAULT_OUTPUT_BYTE_LIMIT: usize = 30_000; // 30k characters
 /// `/bin/bash`) and is cached process-wide. On non-Unix returns `"/bin/bash"`
 /// — but every caller in this crate is gated behind `#[cfg(unix)]`, so the
 /// non-Unix value should not be observed in practice.
-pub fn default_shell_path() -> &'static str {
+pub(crate) fn default_shell_path() -> &'static str {
     #[cfg(unix)]
     {
         xai_grok_config::shell::unix_shell_path(xai_grok_config::shell::UnixShellKind::Bash)
@@ -115,7 +115,7 @@ impl<T: serde::Serialize> From<TerminalExtError> for crate::session::result::Ext
     }
 }
 
-pub async fn list_terminals() -> Vec<TerminalInfo> {
+pub(crate) async fn list_terminals() -> Vec<TerminalInfo> {
     let mut terminals = pty_session::list_ptys().await;
     let mut piped = streaming_local_terminal::list_piped_terminals().await;
     terminals.append(&mut piped);
@@ -128,7 +128,7 @@ pub use xai_grok_tools::util::pager_env;
 
 /// Returns environment variables that encourage CLI tools to emit colored output
 /// and show progress bars/spinners even when running through pipes (non-TTY).
-pub fn color_env() -> std::collections::HashMap<String, String> {
+pub(crate) fn color_env() -> std::collections::HashMap<String, String> {
     std::collections::HashMap::from([
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("COLORTERM".to_string(), "truecolor".to_string()),
@@ -199,7 +199,7 @@ use std::sync::Arc;
 /// Terminal runner that routes requests based on the `stream` flag:
 /// - `stream: true` → StreamingLocalTerminalRunner (updates, killable)
 /// - `stream: false` → LocalTerminalRunner (silent, fire-and-forget)
-pub struct TerminalRunner {
+pub(crate) struct TerminalRunner {
     notifier: Arc<dyn SessionNotificationSender>,
     session_id: agent_client_protocol::SessionId,
 }

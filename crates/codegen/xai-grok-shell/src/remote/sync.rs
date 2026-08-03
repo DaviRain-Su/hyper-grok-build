@@ -80,7 +80,7 @@ impl RemoteSync {
         let _ = self.tx.send(SyncMsg::SetTitle(title));
     }
 
-    pub fn set_model_id(&self, model_id: String) {
+    pub(crate) fn set_model_id(&self, model_id: String) {
         let _ = self.tx.send(SyncMsg::SetModelId(model_id));
     }
 }

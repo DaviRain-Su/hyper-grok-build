@@ -27,7 +27,7 @@ pub(crate) const SUPPRESS_AUTH: u8 = 4;
 
 /// Model slug and context window from the previous turn.
 #[derive(Clone, Debug)]
-pub struct PreviousModelInfo {
+pub(crate) struct PreviousModelInfo {
     pub model_slug: String,
     pub context_window: u64,
 }
@@ -36,7 +36,7 @@ pub struct PreviousModelInfo {
 /// two-pass compaction. Held on the session actor between the background
 /// pass-1 and the synchronous pass-2 apply at compaction time.
 #[derive(Clone, Debug)]
-pub struct AsyncCompactionCache {
+pub(crate) struct AsyncCompactionCache {
     /// The successor-usable NOTE₁ text (extracted `<summary>` or full pass-1 output).
     pub note1: String,
     /// Number of leading conversation items pass-1 summarized (the prefix
@@ -60,13 +60,13 @@ pub struct AsyncCompactionCache {
 /// `enter` installs a token; nested enters reuse it; `in_flight` stays true
 /// until the last scope drops. A normal turn stop is a no-op when idle.
 #[derive(Default)]
-pub struct CompactCancelGate {
+pub(crate) struct CompactCancelGate {
     token: RefCell<tokio_util::sync::CancellationToken>,
     holders: AtomicUsize,
 }
 
 /// Decrements the holder count when a compact/prefire scope ends.
-pub struct CompactCancelScope<'a>(&'a CompactCancelGate);
+pub(crate) struct CompactCancelScope<'a>(&'a CompactCancelGate);
 
 impl Drop for CompactCancelScope<'_> {
     fn drop(&mut self) {
@@ -95,7 +95,7 @@ impl CompactCancelGate {
         self.holders.fetch_sub(1, Ordering::AcqRel);
     }
 
-    pub fn request_cancel(&self) {
+    pub(crate) fn request_cancel(&self) {
         if self.holders.load(Ordering::Acquire) > 0 {
             self.token.borrow().cancel();
         }
@@ -114,7 +114,7 @@ impl CompactCancelGate {
 /// `RefCell`s need no locking (the `JoinHandle` is from `spawn_local`, so it is
 /// local to this LocalSet and never crosses threads).
 #[derive(Default)]
-pub struct PrefireState {
+pub(crate) struct PrefireState {
     /// Set while a background pass-1 sample is running, so the per-turn trigger
     /// never spawns a second concurrent job.
     in_flight: AtomicBool,
@@ -130,7 +130,7 @@ impl PrefireState {
     /// Try to claim the single in-flight slot. Returns `true` iff this caller
     /// won the race and should spawn pass-1 (the caller must later call
     /// [`Self::finish`]).
-    pub fn try_begin(&self) -> bool {
+    pub(crate) fn try_begin(&self) -> bool {
         self.in_flight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
@@ -141,19 +141,19 @@ impl PrefireState {
         self.in_flight.store(false, Ordering::Release);
     }
 
-    pub fn is_in_flight(&self) -> bool {
+    pub(crate) fn is_in_flight(&self) -> bool {
         self.in_flight.load(Ordering::Acquire)
     }
 
     /// Stash the spawned pass-1 task handle so pass-2 can await it if it is
     /// still running when compaction fires.
-    pub fn set_handle(&self, handle: tokio::task::JoinHandle<()>) {
+    pub(crate) fn set_handle(&self, handle: tokio::task::JoinHandle<()>) {
         self.handle.replace(Some(handle));
     }
 
     /// Take the pass-1 task handle, if any, so the caller can await completion
     /// before reading the cache. Leaves `None`.
-    pub fn take_handle(&self) -> Option<tokio::task::JoinHandle<()>> {
+    pub(crate) fn take_handle(&self) -> Option<tokio::task::JoinHandle<()>> {
         self.handle.borrow_mut().take()
     }
 
@@ -177,7 +177,7 @@ impl PrefireState {
     }
 }
 
-pub struct CompactionConfig {
+pub(crate) struct CompactionConfig {
     /// Context window usage percentage (0-100) at which auto-compact triggers.
     ///
     /// `Cell` so the value can be re-resolved at model-switch time without

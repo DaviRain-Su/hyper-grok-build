@@ -15,6 +15,11 @@ pub struct PermissionState {
     pub allow_bash_execute: bool,
     pub allowed_bash_commands: HashSet<String>,
     pub disallowed_bash_commands: HashSet<String>,
+    /// Glob patterns the user authored via the "Always allow" pattern editor
+    /// (e.g. `gh api repos/owner/*`). Matched with glob semantics, unlike the
+    /// literal-prefix [`Self::allowed_bash_commands`]; kept separate so a command
+    /// grant that happens to contain shell metacharacters is never a wildcard.
+    pub allowed_bash_globs: HashSet<String>,
     /// Domains the user has approved for `web_fetch`
     /// during this session.
     pub allowed_web_fetch_domains: HashSet<String>,
@@ -56,6 +61,7 @@ impl Default for PermissionState {
             allow_bash_execute: false,
             allowed_bash_commands: HashSet::new(),
             disallowed_bash_commands: HashSet::new(),
+            allowed_bash_globs: HashSet::new(),
             allowed_web_fetch_domains: HashSet::new(),
             allowed_mcp_tools: HashSet::new(),
             allowed_mcp_servers: HashSet::new(),

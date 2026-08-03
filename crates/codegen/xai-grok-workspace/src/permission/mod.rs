@@ -36,7 +36,7 @@ pub use manager::{
     PermissionHandle, default_always_allow_scope, spawn_permission_manager,
     spawn_permission_manager_with_hub,
 };
-pub use policy::CompiledPolicy;
+pub use policy::{CompiledPolicy, bash_pattern_is_broad, bash_pattern_matches_command};
 pub use prompter::{
     ALLOW_EDITS_SESSION_OPTION_ID, AcpPrompter, BashCommandPermission, BashCommandSelectedTerms,
     ENABLE_ALWAYS_APPROVE_OPTION_ID, MCP_TOOL_NAME_DELIMITER, McpScopeSelection, McpToolPermission,

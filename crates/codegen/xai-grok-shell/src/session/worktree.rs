@@ -146,7 +146,7 @@ pub(crate) fn build_worktree_restore_outcome(
 use crate::session::persistence::{ResolvedLocalSession, resolve_local_session_for_repo};
 /// Combined backend helper: resolve a session across all worktree roots
 /// belonging to the same repo as `current_cwd`.
-pub fn resolve_session_repo_wide(
+pub(crate) fn resolve_session_repo_wide(
     session_id: &str,
     current_cwd: &std::path::Path,
 ) -> Result<Option<ResolvedLocalSession>> {
@@ -159,7 +159,7 @@ pub fn resolve_session_repo_wide(
 /// Shell-side orchestration: composes client ops (session persistence,
 /// auth, registry) with server ops (worktree creation, git, fetch+extract)
 /// dispatched through `WorkspaceOps`.
-pub async fn resume_session_in_worktree(
+pub(crate) async fn resume_session_in_worktree(
     req: &ResumeSessionInWorktreeRequest,
     ops: &xai_grok_workspace::WorkspaceOps,
     worktree_type_default: ShellWorktreeType,
@@ -419,7 +419,7 @@ async fn resume_local_session_in_worktree(
 /// Orchestrate session rehydration: recreate the git worktree at the exact
 /// path and restore all session state using the original session ID.
 ///
-pub async fn rehydrate_session_in_worktree(
+pub(crate) async fn rehydrate_session_in_worktree(
     req: &RehydrateSessionRequest,
     #[allow(unused_variables)] ops: &xai_grok_workspace::WorkspaceOps,
     registry_client: Option<&crate::agent::session_registry_client::SessionRegistryClient>,

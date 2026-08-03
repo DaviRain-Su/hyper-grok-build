@@ -56,6 +56,19 @@ pub enum QuestionSelection {
     Multi(HashSet<usize>),
 }
 
+/// A cursor move within one question's answer rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorMotion {
+    Next,
+    Prev,
+    HalfPageDown,
+    HalfPageUp,
+    PageDown,
+    PageUp,
+    First,
+    Last,
+}
+
 /// Focus mode within the question view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionFocus {
@@ -330,6 +343,53 @@ impl QuestionViewState {
             .get(self.active_tab)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Move the cursor within the active question, clamped at both ends.
+    pub fn move_cursor(&mut self, motion: CursorMotion) {
+        let last = self.total_items(self.active_tab).saturating_sub(1);
+        let cursor = self.cursor();
+        let target = match motion {
+            CursorMotion::Next => cursor + 1,
+            CursorMotion::Prev => cursor.saturating_sub(1),
+            CursorMotion::HalfPageDown => cursor + (last / 2).max(1),
+            CursorMotion::HalfPageUp => cursor.saturating_sub((last.max(1) / 2).max(1)),
+            CursorMotion::PageDown => cursor + last.max(1),
+            CursorMotion::PageUp => cursor.saturating_sub(last.max(1)),
+            CursorMotion::First => 0,
+            CursorMotion::Last => last,
+        };
+        self.set_cursor(target.min(last));
+    }
+
+    pub fn is_on_first_row(&self) -> bool {
+        self.cursor() == 0
+    }
+
+    pub fn is_on_last_row(&self) -> bool {
+        self.cursor() + 1 >= self.total_items(self.active_tab)
+    }
+
+    /// Whether the question at `q_idx` has any answer marked.
+    pub fn has_selection(&self, q_idx: usize) -> bool {
+        let option_selected = !self.selected_labels(q_idx).is_empty();
+        let freeform_selected = self
+            .per_question_freeform_selected
+            .get(q_idx)
+            .copied()
+            .unwrap_or(false);
+        option_selected || freeform_selected
+    }
+
+    pub fn clear_selection(&mut self, q_idx: usize) {
+        match self.selections.get_mut(q_idx) {
+            Some(QuestionSelection::Multi(selected)) => selected.clear(),
+            Some(QuestionSelection::Single(selected)) => *selected = None,
+            None => {}
+        }
+        if let Some(freeform_selected) = self.per_question_freeform_selected.get_mut(q_idx) {
+            *freeform_selected = false;
+        }
     }
 
     /// Set cursor position for the active question, clamped to valid range.
@@ -813,14 +873,7 @@ impl QuestionViewState {
     /// nothing is selected, `Esc` (which only clears the selection) has
     /// nothing to do, so it can fall through to the dashboard back-out.
     pub fn active_tab_has_selection(&self) -> bool {
-        let idx = self.active_tab;
-        let option_selected = !self.selected_labels(idx).is_empty();
-        let freeform_selected = self
-            .per_question_freeform_selected
-            .get(idx)
-            .copied()
-            .unwrap_or(false);
-        option_selected || freeform_selected
+        self.has_selection(self.active_tab)
     }
 }
 
@@ -951,6 +1004,24 @@ impl QuestionViewState {
     /// Go to the previous question (clamped, no wrap).
     pub fn prev_question(&mut self) {
         self.active_tab = self.active_tab.saturating_sub(1);
+    }
+
+    /// Advance to the next question (wraps past the last, back to the first).
+    pub fn wrapping_next_question(&mut self) {
+        let last = self.questions.len().saturating_sub(1);
+        self.active_tab = if self.active_tab < last {
+            self.active_tab + 1
+        } else {
+            0
+        };
+    }
+
+    /// Go to the previous question (wraps before the first, round to the last).
+    pub fn wrapping_prev_question(&mut self) {
+        self.active_tab = match self.active_tab.checked_sub(1) {
+            Some(prev) => prev,
+            None => self.questions.len().saturating_sub(1),
+        };
     }
 }
 
@@ -2360,6 +2431,39 @@ mod tests {
         assert_eq!(state.active_tab, 0);
         state.prev_question();
         assert_eq!(state.active_tab, 0); // clamped at start
+    }
+
+    #[test]
+    fn wrapping_question_cycling_loops_at_boundaries() {
+        let qs = vec![
+            make_question("Q1?", &["A"], false),
+            make_question("Q2?", &["B"], false),
+        ];
+        let mut state = QuestionViewState::new("tc".into(), qs, StashedPrompt::default());
+
+        state.wrapping_next_question();
+        assert_eq!(state.active_tab, 1);
+        state.wrapping_next_question();
+        assert_eq!(
+            state.active_tab, 0,
+            "past the last question, back to the first"
+        );
+
+        state.wrapping_prev_question();
+        assert_eq!(
+            state.active_tab, 1,
+            "before the first question, round to the last"
+        );
+
+        let mut single = QuestionViewState::new(
+            "tc".into(),
+            vec![make_question("Only?", &["A"], false)],
+            StashedPrompt::default(),
+        );
+        single.wrapping_next_question();
+        assert_eq!(single.active_tab, 0);
+        single.wrapping_prev_question();
+        assert_eq!(single.active_tab, 0);
     }
 
     // ── compute_max_label_w ────────────────────────────────────────────

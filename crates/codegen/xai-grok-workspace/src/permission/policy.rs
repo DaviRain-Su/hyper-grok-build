@@ -1,3 +1,5 @@
+use std::path::{Component, Path, PathBuf};
+
 use crate::permission::bash_command_splitting::{
     MAX_INLINE_SHELL_DEPTH, all_commands_from_script, env_split_string_script,
     normalize_command_words,
@@ -5,6 +7,7 @@ use crate::permission::bash_command_splitting::{
 use crate::permission::types::{
     AccessKind, Decision, PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
 };
+use xai_grok_paths::normalize_lexically;
 use xai_grok_tools::implementations::grok_build::web_fetch::domain::normalize_domain;
 
 /// A security-gate escalation with `Ask` provenance. The bash-command and
@@ -218,7 +221,16 @@ impl CompiledPolicy {
     }
 
     /// Evaluate using deny > ask > allow precedence (order-independent).
+    ///
+    /// Path rules use lexical collapse only (no session cwd). Prefer
+    /// [`Self::evaluate_with_cwd`] for Read/Edit/Grep when a workspace cwd is known.
     pub fn evaluate(&self, access: &AccessKind) -> Option<Decision> {
+        self.evaluate_with_cwd(access, None)
+    }
+
+    /// Like [`Self::evaluate`], cwd-joining relative tool paths before the
+    /// path-glob match.
+    pub fn evaluate_with_cwd(&self, access: &AccessKind, cwd: Option<&Path>) -> Option<Decision> {
         let mut matched_ask = false;
         let mut matched_allow = false;
 
@@ -230,7 +242,7 @@ impl CompiledPolicy {
                 rule,
                 matcher: matcher.as_ref(),
             };
-            if !pattern_matches(access, &cr) {
+            if !pattern_matches(access, &cr, cwd) {
                 continue;
             }
             match rule.action {
@@ -517,26 +529,75 @@ fn matches_command_prefix(cmd: &str, pattern: &str) -> bool {
     cmd == pattern || (cmd.starts_with(pattern) && cmd.as_bytes().get(pattern.len()) == Some(&b' '))
 }
 
+/// Shared bash allow match: word-boundary prefix OR freeform glob.
+///
+/// Used by config `[permission]` rules, session `allowed_bash_globs`, and the
+/// pattern-editor live preview so the three paths cannot drift. `precompiled`
+/// is the matcher from [`CompiledPolicy`] when available; otherwise the
+/// pattern is compiled on the fly (session grants / preview).
+fn bash_command_matches_pattern(
+    command: &str,
+    pattern: &str,
+    precompiled: Option<&glob::Pattern>,
+) -> bool {
+    let command = command.trim_start();
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return false;
+    }
+    if pattern == "*" {
+        return true;
+    }
+    if matches_command_prefix(command, pattern) {
+        return true;
+    }
+    match precompiled {
+        Some(p) => glob_matches(command, MatchContext::Freeform, Some(p)),
+        None => match glob::Pattern::new(pattern) {
+            Ok(p) => glob_matches(command, MatchContext::Freeform, Some(&p)),
+            Err(_) => false,
+        },
+    }
+}
+
 fn bash_allow_pattern_matches(
     cmd: &str,
     rule: &PermissionRule,
     matcher: Option<&glob::Pattern>,
 ) -> bool {
-    let cmd = cmd.trim_start();
     match rule.pattern.as_deref() {
+        // No pattern (tool-filter only) or `*` → unrestricted for this rule.
         None | Some("*") => true,
-        Some(pattern) => {
-            matches_command_prefix(cmd, pattern)
-                || glob_matches(cmd, MatchContext::Freeform, matcher)
-        }
+        Some(pattern) => bash_command_matches_pattern(cmd, pattern, matcher),
     }
 }
 
-fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>) -> bool {
+/// Would a `Bash(pattern)` allow rule match `command`?
+///
+/// Same semantics as config `[permission]` bash allow rules and session glob
+/// grants: word-boundary prefix or freeform glob. `*` matches everything;
+/// blank after trim matches nothing.
+pub fn bash_pattern_matches_command(pattern: &str, command: &str) -> bool {
+    bash_command_matches_pattern(command, pattern, None)
+}
+
+/// Whether a pattern grants an unscoped range of commands, for the editor's
+/// non-blocking "very broad" warning: a bare `*`, or a single token with no
+/// argument boundary (`gh`, `gh*`) that covers every invocation of a program.
+pub fn bash_pattern_is_broad(pattern: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return false;
+    }
+    pattern == "*" || !pattern.contains(char::is_whitespace)
+}
+
+fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path>) -> bool {
     let pattern = match cr.rule.pattern.as_deref() {
         Some(p) => p,
         None => return true,
     };
+    // Intentional tool-wide open: matches regardless of path spelling.
     if pattern == "*" {
         return true;
     }
@@ -548,13 +609,13 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>) -> bool {
             let cmd = cmd.trim_start();
             cmd.starts_with(pattern) || glob_matches(cmd, MatchContext::Freeform, cr.matcher)
         }
-        AccessKind::Edit(path) => glob_matches(path, MatchContext::Path, cr.matcher),
+        AccessKind::Edit(path) => path_context_matches(path, cr, cwd),
         AccessKind::Read(path) => match path {
-            Some(p) => glob_matches(p, MatchContext::Path, cr.matcher),
+            Some(p) => path_context_matches(p, cr, cwd),
             None => false,
         },
         AccessKind::Grep { path, .. } => match path {
-            Some(p) => glob_matches(p, MatchContext::Path, cr.matcher),
+            Some(p) => path_context_matches(p, cr, cwd),
             None => false,
         },
         AccessKind::MCPTool { name, .. } => glob_matches(name, MatchContext::Freeform, cr.matcher),
@@ -566,6 +627,81 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>) -> bool {
             glob_matches(query, MatchContext::Freeform, cr.matcher) || query.starts_with(pattern)
         }
     }
+}
+
+/// Match Read/Edit/Grep after lexical normalize (+ cwd-join). Rooted patterns
+/// are self-containing: `..` never survives normalization, and the
+/// cwd-relative spellings are generated only for paths genuinely under the
+/// cwd, so `Read(./**)` / `Read(src/**)` cannot be escaped via traversal.
+/// Unrooted patterns (`*`, leading `**`) keep their documented any-depth
+/// meaning.
+fn path_context_matches(path: &str, cr: &CompiledRule<'_>, cwd: Option<&Path>) -> bool {
+    path_match_forms(path, cwd)
+        .iter()
+        .any(|text| glob_matches(text, MatchContext::Path, cr.matcher))
+}
+
+/// Normalized absolute form, plus cwd-relative and `./`-prefixed spellings when
+/// the path stays under cwd (so `Read(./**)` matches bare `src/main.rs`).
+/// Normalization never leaves `.`/`..` in the forms, so a relative spelling is
+/// produced only for paths genuinely under the cwd. Tilde paths are matched
+/// literally only (see [`is_tilde_path`]).
+fn path_match_forms(path: &str, cwd: Option<&Path>) -> Vec<String> {
+    let abs = absolute_normalized_path(path, cwd);
+    let mut forms = vec![path_match_string(&abs)];
+
+    if let Some(cwd) = cwd {
+        if let Ok(rel) = abs.strip_prefix(normalize_lexically(cwd)) {
+            let rel_s = path_match_string(rel);
+            if rel_s.is_empty() || rel_s == "." {
+                forms.extend([".".to_owned(), "./".to_owned()]);
+            } else {
+                forms.push(format!("./{rel_s}"));
+                forms.push(rel_s);
+            }
+        }
+    } else if abs.is_relative() && !path_has_parent_dir(&abs) && !is_tilde_path(&abs) {
+        // No session cwd: still offer `./form` so `./**` matches bare relatives.
+        let lex_s = path_match_string(&abs);
+        if lex_s != "." && !lex_s.is_empty() {
+            forms.push(format!("./{lex_s}"));
+        }
+    }
+    forms
+}
+
+fn absolute_normalized_path(path: &str, cwd: Option<&Path>) -> PathBuf {
+    let raw = Path::new(path);
+    if is_tilde_path(raw) {
+        // Kept raw: no cwd-join, and no collapse either — `~/../x` collapsing
+        // to `x` would mint a false workspace-relative identity.
+        return raw.to_path_buf();
+    }
+    let joined = match cwd {
+        Some(cwd) if !raw.is_absolute() => cwd.join(raw),
+        _ => raw.to_path_buf(),
+    };
+    normalize_lexically(&joined)
+}
+
+/// A leading `~` component is expanded to the home directory by the tools
+/// (`resolve_model_path`) *after* this gate runs, so such a path must never be
+/// treated as cwd-relative: a manufactured `./~/…` spelling would satisfy
+/// workspace allows like `./**` while the tool escapes to the real home.
+/// Tilde paths are matched literally instead, exactly as patterns treat `~`.
+fn is_tilde_path(path: &Path) -> bool {
+    matches!(
+        path.components().next(),
+        Some(Component::Normal(first)) if first.to_string_lossy().starts_with('~')
+    )
+}
+
+fn path_match_string(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn path_has_parent_dir(path: &Path) -> bool {
+    path.components().any(|c| matches!(c, Component::ParentDir))
 }
 
 fn domain_matches(pattern: &str, url: &str) -> bool {
@@ -643,7 +779,7 @@ pub(crate) fn rule_is_catchall(rule: &PermissionRule) -> bool {
         rule,
         matcher: matcher.as_ref(),
     };
-    let opens_all = |probes: Vec<AccessKind>| probes.iter().all(|a| pattern_matches(a, &cr));
+    let opens_all = |probes: Vec<AccessKind>| probes.iter().all(|a| pattern_matches(a, &cr, None));
     match rule.tool {
         ToolFilter::Bash => opens_all(bash_probes()),
         ToolFilter::Mcp => opens_all(mcp_probes()),
@@ -681,12 +817,16 @@ mod tests {
     }
 
     fn matches(access: &AccessKind, rule: &PermissionRule) -> bool {
+        matches_at(access, rule, None)
+    }
+
+    fn matches_at(access: &AccessKind, rule: &PermissionRule, cwd: Option<&Path>) -> bool {
         let policy = CompiledPolicy::new(PermissionConfig::new(vec![rule.clone()]));
         let cr = CompiledRule {
             rule: &policy.config.rules[0],
             matcher: policy.matchers[0].as_ref(),
         };
-        pattern_matches(access, &cr)
+        pattern_matches(access, &cr, cwd)
     }
 
     #[test]
@@ -695,6 +835,34 @@ mod tests {
         assert!(matches(&access, &rule_for("npm*")));
         assert!(matches(&access, &rule_for("npm install")));
         assert!(!matches(&access, &rule_for("cargo*")));
+    }
+
+    #[test]
+    fn bash_pattern_preview_matches_the_real_evaluator() {
+        let cmd = "gh api repos/owner/repo/pulls/42 --method PATCH";
+        // Word-boundary prefixes (the arrow-scope forms) and mid-command globs.
+        assert!(bash_pattern_matches_command("gh", cmd));
+        assert!(bash_pattern_matches_command("gh api repos/owner/*", cmd));
+        assert!(bash_pattern_matches_command("gh api * --method PATCH", cmd));
+        assert!(!bash_pattern_matches_command("gh api repos/other/*", cmd));
+        // `gh` must not match `ghostscript`.
+        assert!(!bash_pattern_matches_command("gh", "ghostscript -h"));
+        // `*` matches everything; empty/blank never does; leading command
+        // whitespace can't dodge the match.
+        assert!(bash_pattern_matches_command("*", cmd));
+        assert!(!bash_pattern_matches_command("", cmd));
+        assert!(!bash_pattern_matches_command("   ", cmd));
+        assert!(bash_pattern_matches_command("gh api", "   gh api foo"));
+    }
+
+    #[test]
+    fn bash_pattern_broadness_flags_only_unscoped_grants() {
+        assert!(bash_pattern_is_broad("*"));
+        assert!(bash_pattern_is_broad("gh"));
+        assert!(bash_pattern_is_broad("gh*"));
+        assert!(!bash_pattern_is_broad("gh api"));
+        assert!(!bash_pattern_is_broad("gh api repos/owner/*"));
+        assert!(!bash_pattern_is_broad(""));
     }
 
     #[test]
@@ -1484,5 +1652,262 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    // ── path normalize before glob match (GBT-4940) ────────────────────────
+
+    fn read_allow(pattern: &str) -> PermissionRule {
+        PermissionRule {
+            action: RuleAction::Allow,
+            tool: ToolFilter::Read,
+            pattern: Some(pattern.to_string()),
+            pattern_mode: PatternMode::Glob,
+        }
+    }
+
+    fn read_deny(pattern: &str) -> PermissionRule {
+        PermissionRule {
+            action: RuleAction::Deny,
+            tool: ToolFilter::Read,
+            pattern: Some(pattern.to_string()),
+            pattern_mode: PatternMode::Glob,
+        }
+    }
+
+    fn eval_read_at(path: &str, rule: &PermissionRule, cwd: &Path) -> Option<Decision> {
+        CompiledPolicy::new(PermissionConfig::new(vec![rule.clone()]))
+            .evaluate_with_cwd(&AccessKind::Read(Some(path.into())), Some(cwd))
+    }
+
+    #[test]
+    fn allow_dot_star_denies_traversal_escapes_and_allows_bare_relatives() {
+        let cwd = Path::new("/workspace/project");
+        let rule = read_allow("./**");
+
+        for path in [
+            "src/main.rs",
+            "./src/main.rs",
+            "src/./nested/../main.rs",
+            "/workspace/project/src/main.rs",
+        ] {
+            assert!(
+                matches!(eval_read_at(path, &rule, cwd), Some(Decision::Allow)),
+                "expected allow for {path}"
+            );
+        }
+
+        for path in [
+            "../../etc/passwd",
+            "./../../etc/passwd",
+            "/etc/passwd",
+            "/workspace/other/file.rs",
+        ] {
+            assert!(
+                eval_read_at(path, &rule, cwd).is_none(),
+                "expected no allow match for traversal/escape {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_src_star_denies_escape_via_parent_segments() {
+        let cwd = Path::new("/workspace/project");
+        let rule = read_allow("src/**");
+
+        assert!(matches!(
+            eval_read_at("src/main.rs", &rule, cwd),
+            Some(Decision::Allow)
+        ));
+        assert!(matches!(
+            eval_read_at("./src/lib.rs", &rule, cwd),
+            Some(Decision::Allow)
+        ));
+        // `**` would otherwise consume `..`; normalization erases it first, so
+        // the escaped path no longer carries the `src/` prefix the glob needs.
+        assert!(eval_read_at("src/../../etc/passwd", &rule, cwd).is_none());
+        assert!(eval_read_at("src/../secrets/token", &rule, cwd).is_none());
+        assert!(eval_read_at("other/main.rs", &rule, cwd).is_none());
+    }
+
+    #[test]
+    fn deny_env_still_matches_after_normalize() {
+        let cwd = Path::new("/workspace/project");
+        let rule = read_deny("**/.env");
+
+        assert!(matches!(
+            eval_read_at(".env", &rule, cwd),
+            Some(Decision::Reject(_))
+        ));
+        assert!(matches!(
+            eval_read_at("foo/../.env", &rule, cwd),
+            Some(Decision::Reject(_))
+        ));
+        assert!(matches!(
+            eval_read_at("./config/../.env", &rule, cwd),
+            Some(Decision::Reject(_))
+        ));
+        assert!(eval_read_at("src/main.rs", &rule, cwd).is_none());
+    }
+
+    #[test]
+    fn allow_star_remains_full_filesystem_open() {
+        let cwd = Path::new("/workspace/project");
+        let rule = read_allow("*");
+        for path in ["/etc/passwd", "../../etc/passwd", "src/main.rs"] {
+            assert!(
+                matches!(eval_read_at(path, &rule, cwd), Some(Decision::Allow)),
+                "pattern=* must allow {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_dot_star_without_cwd_still_blocks_relative_traversal() {
+        // Lexical collapse alone drops `./../../…` away from `./**`.
+        let rule = read_allow("./**");
+        assert!(matches_at(
+            &AccessKind::Read(Some("src/main.rs".into())),
+            &rule,
+            None
+        ));
+        assert!(!matches_at(
+            &AccessKind::Read(Some("./../../etc/passwd".into())),
+            &rule,
+            None
+        ));
+        assert!(!matches_at(
+            &AccessKind::Read(Some("../../etc/passwd".into())),
+            &rule,
+            None
+        ));
+    }
+
+    #[test]
+    fn edit_and_grep_use_same_path_normalize() {
+        let cwd = Path::new("/workspace/project");
+        let edit_allow = PermissionRule {
+            action: RuleAction::Allow,
+            tool: ToolFilter::Edit,
+            pattern: Some("./**".into()),
+            pattern_mode: PatternMode::Glob,
+        };
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![edit_allow]));
+        assert!(matches!(
+            policy.evaluate_with_cwd(&AccessKind::Edit("src/main.rs".into()), Some(cwd)),
+            Some(Decision::Allow)
+        ));
+        assert!(
+            policy
+                .evaluate_with_cwd(&AccessKind::Edit("./../../etc/passwd".into()), Some(cwd))
+                .is_none()
+        );
+
+        let grep_deny = PermissionConfig::new(vec![read_deny("**/.env")]);
+        let policy = CompiledPolicy::new(grep_deny);
+        assert!(matches!(
+            policy.evaluate_with_cwd(
+                &AccessKind::Grep {
+                    path: Some("foo/../.env".into()),
+                    glob: None,
+                },
+                Some(cwd),
+            ),
+            Some(Decision::Reject(_))
+        ));
+    }
+
+    #[test]
+    fn allow_mid_segment_wildcard_matches_after_normalize() {
+        let cwd = Path::new("/workspace/project");
+        let rule = read_allow("src/ma*");
+
+        // A wildcard mid-segment must not break matching of the normalized
+        // relative spellings.
+        for path in ["src/main.rs", "./src/matrix.rs"] {
+            assert!(
+                matches!(eval_read_at(path, &rule, cwd), Some(Decision::Allow)),
+                "expected allow for {path}"
+            );
+        }
+        assert!(eval_read_at("src/nested/main.rs", &rule, cwd).is_none());
+        assert!(eval_read_at("src/../marker", &rule, cwd).is_none());
+    }
+
+    #[test]
+    fn allow_absolute_root_pattern_spans_filesystem() {
+        let cwd = Path::new("/workspace/project");
+        let rule = read_allow("/**");
+
+        // `/**` is rooted at `/`, not silently narrowed to the cwd.
+        for path in ["/etc/passwd", "src/main.rs", "../other/file.rs"] {
+            assert!(
+                matches!(eval_read_at(path, &rule, cwd), Some(Decision::Allow)),
+                "expected allow for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_exact_file_pattern_matches_all_spellings() {
+        let cwd = Path::new("/workspace/project");
+        let rule = read_allow("Cargo.toml");
+
+        for path in [
+            "Cargo.toml",
+            "./Cargo.toml",
+            "/workspace/project/Cargo.toml",
+        ] {
+            assert!(
+                matches!(eval_read_at(path, &rule, cwd), Some(Decision::Allow)),
+                "expected allow for {path}"
+            );
+        }
+        assert!(eval_read_at("sub/Cargo.toml", &rule, cwd).is_none());
+        assert!(eval_read_at("Cargo.toml/../secrets", &rule, cwd).is_none());
+    }
+
+    #[test]
+    fn tilde_paths_never_match_workspace_allows() {
+        let cwd = Path::new("/workspace/project");
+        // Tools expand a leading `~` to the real home AFTER this gate runs, so
+        // a tilde path must never gain cwd-relative spellings (`./~/…` would
+        // satisfy `./**` while the read escapes the workspace).
+        let rule = read_allow("./**");
+        for path in ["~/secrets/key.pem", "~", "~other/refs"] {
+            assert!(
+                eval_read_at(path, &rule, cwd).is_none(),
+                "expected no allow match for tilde path {path}"
+            );
+        }
+        assert!(!matches_at(
+            &AccessKind::Read(Some("~/secrets/key.pem".into())),
+            &rule,
+            None
+        ));
+
+        // Collapse must not erase the tilde: `~/../key.pem` is not the
+        // workspace file `key.pem`.
+        let pem = read_allow("*.pem");
+        assert!(eval_read_at("~/../key.pem", &pem, cwd).is_none());
+
+        // Literal `~` patterns still key on tilde spellings.
+        let deny = read_deny("~/**");
+        assert!(matches!(
+            eval_read_at("~/secrets/key.pem", &deny, cwd),
+            Some(Decision::Reject(_))
+        ));
+    }
+
+    #[test]
+    fn allow_single_star_stays_inside_pattern_directory() {
+        let cwd = Path::new("/workspace/project");
+        let rule = read_allow("docs/*.md");
+
+        assert!(matches!(
+            eval_read_at("docs/readme.md", &rule, cwd),
+            Some(Decision::Allow)
+        ));
+        assert!(eval_read_at("docs/sub/deep.md", &rule, cwd).is_none());
+        assert!(eval_read_at("docs/../escape.md", &rule, cwd).is_none());
     }
 }

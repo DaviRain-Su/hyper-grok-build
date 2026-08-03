@@ -76,7 +76,7 @@ pub struct PromptTurnOk {
 }
 /// Result of a prompt turn, containing the stop reason, accumulated token count,
 /// and an optional turn-end signals snapshot (for trace metadata enrichment).
-pub type PromptTurnResult = Result<PromptTurnOk, acp::Error>;
+pub(crate) type PromptTurnResult = Result<PromptTurnOk, acp::Error>;
 /// Convenience: successful end-of-turn result.
 pub(crate) fn ok_end_turn(tokens: u64, snapshot: Option<TurnDeltaSnapshot>) -> PromptTurnResult {
     Ok(PromptTurnOk {

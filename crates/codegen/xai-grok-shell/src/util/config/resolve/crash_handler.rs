@@ -50,7 +50,7 @@ pub fn resolve_crash_handler_enabled(
 static REMOTE_CRASH_HANDLER_ENABLED: std::sync::RwLock<Option<bool>> = std::sync::RwLock::new(None);
 
 /// Record the remote settings value; called when the agent applies `RemoteSettings`.
-pub fn cache_remote_crash_handler_enabled(value: Option<bool>) {
+pub(crate) fn cache_remote_crash_handler_enabled(value: Option<bool>) {
     if let Ok(mut guard) = REMOTE_CRASH_HANDLER_ENABLED.write() {
         *guard = value;
     }

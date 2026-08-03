@@ -385,7 +385,7 @@ impl CommandAvailability {
     /// Test helper: every gate satisfied (matches the legacy "feedback only"
     /// fixture but enables every newly-gated command too).
     #[cfg(test)]
-    pub fn all_enabled() -> Self {
+    pub(crate) fn all_enabled() -> Self {
         Self {
             feedback: true,
             memory: true,

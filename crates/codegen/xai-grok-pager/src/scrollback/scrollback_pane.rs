@@ -514,7 +514,7 @@ impl ScrollbackPane {
         }
 
         // Render content
-        if content_area.height > 0 {
+        let mut output = if content_area.height > 0 {
             // Use the entry_range for content rendering (same range we built descriptors for)
             let visible_range = entry_range.clone();
 
@@ -556,7 +556,11 @@ impl ScrollbackPane {
                 },
                 ..Default::default()
             }
-        }
+        };
+        // Publish the gap row this frame's pinned header actually produced
+        // (None during push transitions and degenerate tiny viewports).
+        output.output.sticky_gap_row = sticky.gap_row().filter(|row| *row < area.height);
+        output
     }
 
     /// Build prompt descriptors for a range of entries.

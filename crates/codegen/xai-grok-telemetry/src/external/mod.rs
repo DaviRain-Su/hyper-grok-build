@@ -34,6 +34,7 @@ pub mod truncate;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use opentelemetry::logs::LoggerProvider as _;
 use opentelemetry::metrics::MeterProvider as _;
@@ -220,21 +221,54 @@ fn active_handle() -> Option<Arc<ExternalTelemetry>> {
 }
 
 /// Fail-closed OTEL gate. Defaults open; the leader closes it before init and
-/// re-opens it when settings arrive (or immediately for a pure env-API-key
-/// leader, which has no remote policy to fetch).
+/// re-opens it when settings resolve.
 ///
-/// On the leader, opening is the synchronizing event: `OtelGate::apply_and_open`
-/// applies the remote force-disable (`active = false`) and then opens here, so
-/// an emitter whose `Acquire` read observes the `Release` open also observes
+/// Opening is the synchronizing event: `OtelGate::apply_and_open` applies the
+/// remote force-disable (`active = false`) and then opens here, so an emitter
+/// whose `Acquire` read observes the `Release` open also observes
 /// `active = false`; the emit-path `active` load can therefore stay `Relaxed`.
-/// Closing is fail-safe and stays `Relaxed`. The follower path force-disables
-/// without re-opening and relies on eventual visibility, acceptable because the
-/// policy is tighten-only.
+/// The window-expiry open has no such pairing and relies on eventual
+/// visibility, acceptable because the policy is tighten-only.
 static SETTINGS_RESOLVED: AtomicBool = AtomicBool::new(true);
+
+const DEFAULT_SETTINGS_GATE_MAX_WAIT: Duration = Duration::from_secs(30);
+
+static SETTINGS_GATE_MAX_WAIT_MS: AtomicU64 =
+    AtomicU64::new(DEFAULT_SETTINGS_GATE_MAX_WAIT.as_millis() as u64);
+
+static GATE_CLOSED_AT_MS: AtomicU64 = AtomicU64::new(0);
+
+fn process_uptime_ms() -> u64 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    u64::try_from(
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+/// Set the bound on the fail-closed window.
+pub fn set_settings_gate_max_wait(max_wait: Duration) {
+    SETTINGS_GATE_MAX_WAIT_MS.store(
+        u64::try_from(max_wait.as_millis()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+}
+
+/// The current bound on the fail-closed window.
+pub fn settings_gate_max_wait() -> Duration {
+    Duration::from_millis(SETTINGS_GATE_MAX_WAIT_MS.load(Ordering::Relaxed))
+}
 
 /// Close the gate (leader preinit + account switch).
 pub fn suppress_external_otel_until_settings() {
-    SETTINGS_RESOLVED.store(false, Ordering::Relaxed);
+    GATE_CLOSED_AT_MS.store(process_uptime_ms(), Ordering::Relaxed);
+    // `Release`: a reader that observes the close must also observe the
+    // timestamp published just above, or it would measure this window from an
+    // earlier close and open immediately.
+    SETTINGS_RESOLVED.store(false, Ordering::Release);
 }
 
 /// Open the gate. `Release` publishes the force-disable applied just before it.
@@ -244,10 +278,28 @@ pub fn mark_external_otel_settings_resolved() {
     }
 }
 
-/// Read the gate. `Acquire` pairs with the `Release` open.
+/// Read the gate. `Acquire` pairs with the `Release` open (and with the
+/// `Release` close that publishes the window start).
 #[inline]
 pub fn is_settings_gate_open() -> bool {
-    SETTINGS_RESOLVED.load(Ordering::Acquire)
+    SETTINGS_RESOLVED.load(Ordering::Acquire) || settings_gate_window_expired()
+}
+
+#[cold]
+fn settings_gate_window_expired() -> bool {
+    let waited = process_uptime_ms().saturating_sub(GATE_CLOSED_AT_MS.load(Ordering::Relaxed));
+    if waited < SETTINGS_GATE_MAX_WAIT_MS.load(Ordering::Relaxed) {
+        return false;
+    }
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    LOGGED.call_once(|| {
+        tracing::warn!(
+            waited_ms = waited,
+            "external otel: no fleet policy arrived within the bounded window; \
+             emitting under local configuration (a policy that arrives later still applies)"
+        );
+    });
+    true
 }
 
 /// Cheap check used by the fan-out hook and the split-sink call sites:

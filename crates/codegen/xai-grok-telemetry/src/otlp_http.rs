@@ -45,18 +45,50 @@ impl HttpClient for BlockingOtlpClient {
 /// The blocking client can't be built inside a Tokio runtime, and the batch
 /// processors drive exports from non-Tokio threads — building on a fresh
 /// thread avoids the "no reactor" panic for every caller.
+///
+/// `extra_ca_pem_files` are PEM bundle paths whose certificates are added to
+/// the trusted roots (the external stream's `OTEL_EXPORTER_OTLP_CERTIFICATE`,
+/// for customer collectors behind a private CA). Errors reading or parsing a
+/// listed bundle fail construction — exporting without a CA the user
+/// explicitly configured would silently verify against the wrong trust set.
 pub(crate) fn build_blocking_client(
     timeout: std::time::Duration,
+    extra_ca_pem_files: &[&str],
 ) -> Result<BlockingOtlpClient, String> {
+    let mut extra_roots = Vec::new();
+    for path in extra_ca_pem_files {
+        let pem = std::fs::read(path)
+            .map_err(|e| format!("reading OTEL_EXPORTER_OTLP_CERTIFICATE {path:?}: {e}"))?;
+        let certs = reqwest::Certificate::from_pem_bundle(&pem)
+            .map_err(|e| format!("parsing OTEL_EXPORTER_OTLP_CERTIFICATE {path:?}: {e}"))?;
+        // A readable but certificate-less bundle must fail closed too:
+        // building a client that verifies without the configured CA would
+        // silently use the wrong trust set.
+        if certs.is_empty() {
+            return Err(format!(
+                "OTEL_EXPORTER_OTLP_CERTIFICATE {path:?} contains no certificates"
+            ));
+        }
+        extra_roots.extend(certs);
+    }
     std::thread::Builder::new()
         .name("otlp-client-build".into())
         .spawn(move || {
-            xai_grok_extra_ca::with_extra_root_certificates_blocking(
+            // Two additive trust sources on top of the embedded webpki
+            // roots: the process-wide `GROK_EXTRA_CA_BUNDLE` (fail-open,
+            // handled inside xai-grok-extra-ca) and the external stream's
+            // per-call `OTEL_EXPORTER_OTLP_CERTIFICATE` files (fail-closed,
+            // validated above).
+            let mut builder = xai_grok_extra_ca::with_extra_root_certificates_blocking(
                 reqwest::blocking::Client::builder().timeout(timeout),
-            )
-            .build()
-            .map(BlockingOtlpClient)
-            .map_err(|e| format!("building blocking OTLP HTTP client: {e}"))
+            );
+            for cert in extra_roots {
+                builder = builder.add_root_certificate(cert);
+            }
+            builder
+                .build()
+                .map(BlockingOtlpClient)
+                .map_err(|e| format!("building blocking OTLP HTTP client: {e}"))
         })
         .map_err(|e| format!("spawning OTLP client builder thread: {e}"))?
         .join()
@@ -72,7 +104,35 @@ mod tests {
     /// with no system CA store.
     #[test]
     fn blocking_otlp_client_builds_with_embedded_roots() {
-        build_blocking_client(std::time::Duration::from_secs(5))
+        build_blocking_client(std::time::Duration::from_secs(5), &[])
             .expect("client with embedded webpki roots must build on any host");
+    }
+
+    /// A configured-but-unreadable customer CA must fail construction (the
+    /// caller degrades by disabling the stream) instead of silently building
+    /// a client that verifies against the wrong trust set.
+    #[test]
+    fn blocking_otlp_client_fails_closed_on_missing_ca_file() {
+        let err = build_blocking_client(
+            std::time::Duration::from_secs(5),
+            &["/nonexistent/corp-ca.pem"],
+        )
+        .expect_err("missing CA bundle must fail construction");
+        assert!(err.contains("OTEL_EXPORTER_OTLP_CERTIFICATE"), "{err}");
+    }
+
+    /// A readable but certificate-less bundle must also fail closed instead
+    /// of building a client that verifies against the default roots only.
+    #[test]
+    fn blocking_otlp_client_fails_closed_on_empty_ca_bundle() {
+        let file = tempfile::NamedTempFile::new().expect("temp CA file");
+        std::fs::write(file.path(), "# readable, but no PEM certificate blocks\n")
+            .expect("write empty bundle");
+        let err = build_blocking_client(
+            std::time::Duration::from_secs(5),
+            &[file.path().to_str().expect("utf-8 path")],
+        )
+        .expect_err("certificate-less bundle must fail construction");
+        assert!(err.contains("no certificates"), "{err}");
     }
 }

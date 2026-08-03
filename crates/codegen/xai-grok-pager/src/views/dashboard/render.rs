@@ -8962,7 +8962,7 @@ mod tests {
     }
 
     /// Delete-confirm armed while the input is focused routes through
-    /// `ShortcutsBar::with_pending` ("press Ctrl+x again to delete").
+    /// `ShortcutsBar::with_pending` ("press Ctrl+x again to delete row").
     #[test]
     fn render_footer_delete_confirm_uses_pending_hint() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
@@ -8986,8 +8986,8 @@ mod tests {
             "stop-confirm footer must say `press again`, got: {content:?}",
         );
         assert!(
-            content.to_lowercase().contains("delete this session"),
-            "delete-confirm footer must name the action, got: {content:?}",
+            content.to_lowercase().contains("delete row"),
+            "delete-confirm footer must use the shared localized action label, got: {content:?}",
         );
     }
 

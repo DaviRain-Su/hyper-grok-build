@@ -123,15 +123,21 @@ const REDO_LONG_HELP: &str = "\
 Redoes the last undone change in the prompt editor.\n\
 Ctrl+Shift+Z is primary; Ctrl+R is an alternate.";
 
-/// Bundle key for a pseudo-row's long-help const (paste/undo/redo).
-/// The consts are `&'static str` values compared by content.
-fn pseudo_long_help_key(lh: &str) -> &'static str {
+/// Bundle key for a localized pseudo-row long-help const.
+///
+/// Search and history also carry source-only long help. Returning `None` for
+/// those rows is important: treating every unknown value as redo help makes
+/// their detail pages render the wrong text whenever the locale bundle has a
+/// translated redo entry.
+fn pseudo_long_help_key(lh: &str) -> Option<&'static str> {
     if lh == PASTE_LONG_HELP {
-        "shortcuts_help.paste_long_help"
+        Some("shortcuts_help.paste_long_help")
     } else if lh == UNDO_LONG_HELP {
-        "shortcuts_help.undo_long_help"
+        Some("shortcuts_help.undo_long_help")
+    } else if lh == REDO_LONG_HELP {
+        Some("shortcuts_help.redo_long_help")
     } else {
-        "shortcuts_help.redo_long_help"
+        None
     }
 }
 
@@ -656,8 +662,11 @@ pub fn detail_from_entry(entry: &ShortcutsHelpEntry) -> Option<ShortcutsHelpMode
         (Some(lh), Some(id)) => {
             crate::i18n::tr_or(&format!("actions.{}.long_help", id.i18n_key()), lh).into_owned()
         }
-        // Pseudo-rows: per-const bundle key (paste/undo/redo).
-        (Some(lh), None) => crate::i18n::tr_or(pseudo_long_help_key(lh), lh).into_owned(),
+        // Pseudo-rows with a bundle key are localized; source-only rows such
+        // as search/history keep their own help instead of aliasing to redo.
+        (Some(lh), None) => pseudo_long_help_key(lh)
+            .map(|key| crate::i18n::tr_or(key, lh).into_owned())
+            .unwrap_or_else(|| lh.to_string()),
         _ => item
             .description
             .as_deref()
@@ -830,8 +839,13 @@ pub fn hint_inline_help(entry: &ShortcutsHelpEntry) -> Option<std::borrow::Cow<'
                 ));
             }
             if let Some(lh) = long_help {
-                // Pseudo-rows: per-const bundle key (paste/undo/redo).
-                return Some(crate::i18n::tr_or(pseudo_long_help_key(lh), lh));
+                // Localize known pseudo rows; preserve source-only search and
+                // history help verbatim rather than mapping them to redo.
+                return Some(
+                    pseudo_long_help_key(lh)
+                        .map(|key| crate::i18n::tr_or(key, lh))
+                        .unwrap_or(std::borrow::Cow::Borrowed(*lh)),
+                );
             }
             item.description.clone()
         }

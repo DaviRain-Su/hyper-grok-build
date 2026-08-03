@@ -274,8 +274,8 @@ impl Terminal {
 
                 // Replace cursor position if requested.
                 let is_cursor = cursor.row == line_idx + 1 && cursor.col == col_idx + 1;
-                if is_cursor && opts.cursor_char.is_some() {
-                    text.push(opts.cursor_char.unwrap());
+                if is_cursor && let Some(cursor_char) = opts.cursor_char {
+                    text.push(cursor_char);
                 } else {
                     text.push(cell.c);
                     if let Some(zw) = cell.zerowidth() {

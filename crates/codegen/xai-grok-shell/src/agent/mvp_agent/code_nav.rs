@@ -128,7 +128,7 @@ impl MvpAgent {
     /// only the **last** client to call `initialize()`.
     ///
     /// Falls back to global agent state when no session_id is given.
-    pub fn code_nav_eligibility_for_request(
+    pub(crate) fn code_nav_eligibility_for_request(
         &self,
         session_id: Option<&acp::SessionId>,
         cwd: &std::path::Path,
@@ -152,17 +152,6 @@ impl MvpAgent {
             return Err(CodeNavEligibility::SessionRequired);
         };
         drop(sessions);
-        self.code_nav_eligibility_inner(cwd, client_type, code_nav_enabled)
-    }
-
-    /// Check eligibility using the stored initialize_request context.
-    ///
-    /// **Not safe in leader mode** — reads the last `initialize()` call's
-    /// client_type and capability.  Prefer [`code_nav_eligibility_for_request`]
-    /// when a session_id is available.
-    pub fn code_nav_eligibility(&self, cwd: &std::path::Path) -> Result<(), CodeNavEligibility> {
-        let client_type = *self.client_type.borrow();
-        let code_nav_enabled = self.code_nav_enabled.get();
         self.code_nav_eligibility_inner(cwd, client_type, code_nav_enabled)
     }
 
@@ -251,7 +240,7 @@ impl MvpAgent {
 
     /// Get an existing codebase index for the given cwd.
     /// Returns None if no index exists for this cwd.
-    pub fn get_codebase_index(
+    pub(crate) fn get_codebase_index(
         &self,
         cwd: &std::path::Path,
     ) -> Option<std::sync::Arc<xai_codebase_graph::IndexManagerHandle>> {

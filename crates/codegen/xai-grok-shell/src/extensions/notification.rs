@@ -92,7 +92,7 @@ impl PromptUsage {
     /// Project a ledger snapshot for the wire. Returns `Some` whenever
     /// `incomplete` is set — even if `ledger` is `None` — so the flag is never
     /// dropped by omission. Always scrubs untrustworthy costs.
-    pub fn project_from_ledger(
+    pub(crate) fn project_from_ledger(
         ledger: Option<&xai_chat_state::UsageLedger>,
         incomplete: bool,
     ) -> Option<Self> {
@@ -116,7 +116,7 @@ impl PromptUsage {
 
     /// Error-path attach: any open ledger is always incomplete (may under-count
     /// without a freeze drain). `may_undercount` only matters when the ledger is empty.
-    pub fn for_error_path(
+    pub(crate) fn for_error_path(
         ledger: Option<&xai_chat_state::UsageLedger>,
         may_undercount: bool,
     ) -> Option<Self> {
@@ -129,7 +129,7 @@ impl PromptUsage {
 
     /// Drop cost ticks when partial or incomplete so all wire surfaces fail closed.
     /// Incomplete bills clear ticks even when `cost_is_partial` is false.
-    pub fn scrub_untrustworthy_costs(&mut self) {
+    pub(crate) fn scrub_untrustworthy_costs(&mut self) {
         if !(self.usage_is_incomplete || self.totals.cost_is_partial) {
             return;
         }
@@ -308,7 +308,7 @@ pub fn ticks_to_usd(ticks: i64) -> f64 {
 }
 
 /// Full ACP input → headless uncached input (`full − cache_read`).
-pub fn uncached_input_tokens(full_input: u64, cached_read: u64) -> u64 {
+pub(crate) fn uncached_input_tokens(full_input: u64, cached_read: u64) -> u64 {
     full_input.saturating_sub(cached_read)
 }
 
@@ -320,7 +320,7 @@ pub fn uncached_input_tokens(full_input: u64, cached_read: u64) -> u64 {
 /// - Omits all cost floats when partial or incomplete (absence ≠ free).
 /// - Incomplete with no tokens emits only `usage_is_incomplete` (no zero usage object).
 /// - `modelUsage` rows are a reduced external-compat schema (camelCase; no reasoning/duration).
-pub fn project_result_usage(result: &mut serde_json::Value, usage: &PromptUsage) {
+pub(crate) fn project_result_usage(result: &mut serde_json::Value, usage: &PromptUsage) {
     if usage.usage_is_incomplete && usage.is_token_empty() {
         result["usage_is_incomplete"] = true.into();
         return;

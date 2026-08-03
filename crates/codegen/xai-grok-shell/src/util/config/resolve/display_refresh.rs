@@ -55,7 +55,7 @@ impl Default for DisplayRefreshPolicy {
 /// `ms = clamp(round(1000/hz), floor_ms, ceiling_ms)` when
 /// `auto_cadence_enabled` and `hz` is in `[min_hz, max_hz]`; otherwise no auto.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AutoCadenceDecision {
+pub(crate) struct AutoCadenceDecision {
     /// Derived cadence when auto applies; `None` when gated off / fail-closed.
     pub ms: Option<u64>,
     /// Stable reason token for telemetry: `flag_off` | `disabled` |
@@ -252,7 +252,7 @@ pub fn resolve_display_refresh(
 /// - no `hz` → reason `probe_skip`
 /// - `hz` outside `[min_hz, max_hz]` → reason `hz_out_of_range`
 /// - else `ms = clamp(round(1000/hz), floor, ceiling)`, reason `applied`
-pub fn decide_auto_cadence(
+pub(crate) fn decide_auto_cadence(
     policy: &DisplayRefreshPolicy,
     probe_hz: Option<u32>,
 ) -> AutoCadenceDecision {
@@ -298,7 +298,7 @@ pub fn decide_auto_cadence(
 /// `reason` is `env_override` when **both** env knobs are set and auto is not
 /// gated off (`flag_off` / `disabled`) — including when the probe was skipped
 /// for cadence because env already pins both clocks.
-pub fn merge_motion_cadence(
+pub(crate) fn merge_motion_cadence(
     auto: AutoCadenceDecision,
     min_draw_env: Option<u64>,
     scroll_env: Option<u64>,

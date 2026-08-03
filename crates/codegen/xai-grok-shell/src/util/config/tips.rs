@@ -1,10 +1,9 @@
-use super::RemoteSettings;
 use serde::Deserialize;
 use toml::Value as TomlValue;
 
 /// Read `[cli] show_tips` from config.toml. Returns `None` if not set.
 /// When `Some(false)`, the tip-of-the-day is suppressed on startup.
-pub fn show_tips_from_toml_opt(root: &TomlValue) -> Option<bool> {
+pub(crate) fn show_tips_from_toml_opt(root: &TomlValue) -> Option<bool> {
     if let TomlValue::Table(table) = root
         && let Some(TomlValue::Table(cli)) = table.get("cli")
     {
@@ -23,7 +22,7 @@ pub struct TipsOverride {
 }
 
 /// Parse `[tips]` from a TOML value.
-pub fn tips_from_toml(root: &TomlValue) -> Option<TipsOverride> {
+pub(crate) fn tips_from_toml(root: &TomlValue) -> Option<TipsOverride> {
     root.get("tips")?.clone().try_into::<TipsOverride>().ok()
 }
 
@@ -31,7 +30,7 @@ pub fn tips_from_toml(root: &TomlValue) -> Option<TipsOverride> {
 ///
 /// If any local source sets `exclude_default = true`, remote tips are dropped entirely.
 /// Otherwise remote tips are inserted after requirements and before user/managed config.
-pub fn merge_tips(
+pub(crate) fn merge_tips(
     requirements: Option<TipsOverride>,
     user: Option<TipsOverride>,
     managed: Option<TipsOverride>,
@@ -87,29 +86,6 @@ pub fn resolve_tips(
 
     // Priority: requirements > remote > user > managed.
     merge_tips(req, usr, mgd, remote_tips)
-}
-
-/// Convenience wrapper that loads config layers from disk and picks one tip.
-/// Prefer [`resolve_tips`] when layers are already loaded.
-pub fn resolve_tips_from_disk(
-    raw_config: &TomlValue,
-    remote_settings: Option<&RemoteSettings>,
-    grok_home: &std::path::Path,
-) -> Option<String> {
-    let requirements = crate::config::load_merged_requirements();
-    let managed = crate::config::load_managed_config().ok();
-    let remote = remote_settings.and_then(|s| s.tips.as_deref());
-
-    let all = resolve_tips(
-        requirements.as_ref(),
-        Some(raw_config),
-        managed.as_ref(),
-        remote,
-    );
-    if all.is_empty() {
-        return None;
-    }
-    crate::util::tips::pick_and_advance(&all, grok_home)
 }
 
 pub const SLASH_COMMAND_TAGS_CONFIG_PATH: &str = "slash_command_tags";
@@ -209,7 +185,8 @@ pub fn channel_from_toml_opt(root: &TomlValue) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::RemoteSettings;
+    use crate::util::config::RemoteSettings;
+
     use super::*;
     use toml::Value as TomlValue;
 

@@ -69,6 +69,13 @@ impl MvpAgent {
                 };
                 tokio::time::sleep(poll_interval).await;
 
+                let reported = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    agent_ref.get().report_resource_usage_if_due();
+                }));
+                if reported.is_err() {
+                    tracing::error!("resource telemetry: report tick panicked; continuing");
+                }
+
                 let enabled = agent_ref
                     .get()
                     .heap_profile_monitor

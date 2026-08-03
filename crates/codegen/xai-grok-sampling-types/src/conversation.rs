@@ -4466,6 +4466,53 @@ mod tests {
     use crate::tool_overrides::*;
     use assert_matches::assert_matches;
 
+    /// Keeps `forwards_prompt_cache_key()` honest against each mapping: a key that never reaches the wire looks like a 0% cache hit, not a bug.
+    #[test]
+    fn prompt_cache_key_reaches_the_wire_only_where_the_backend_claims() {
+        let request = || ConversationRequest {
+            items: vec![ConversationItem::user("hi")],
+            model: Some("test-model".to_string()),
+            prompt_cache_key: Some("cache-key-1".to_string()),
+            ..Default::default()
+        };
+
+        for backend in [
+            crate::ApiBackend::ChatCompletions,
+            crate::ApiBackend::Responses,
+            crate::ApiBackend::CodexResponses,
+            crate::ApiBackend::Messages,
+        ] {
+            let on_wire = match backend {
+                crate::ApiBackend::Responses | crate::ApiBackend::CodexResponses => {
+                    rs::CreateResponse::from(&request())
+                        .prompt_cache_key
+                        .as_deref()
+                        == Some("cache-key-1")
+                }
+                crate::ApiBackend::ChatCompletions => {
+                    let mapped = ChatCompletionRequest::from(request());
+                    serde_json::to_value(&mapped)
+                        .expect("chat request serializes")
+                        .get("prompt_cache_key")
+                        .is_some()
+                }
+                crate::ApiBackend::Messages => {
+                    let mapped = crate::build_messages_request(&request());
+                    serde_json::to_value(&mapped)
+                        .expect("messages request serializes")
+                        .get("prompt_cache_key")
+                        .is_some()
+                }
+                _ => unreachable!("the test loop contains only the three mapped backends"),
+            };
+            assert_eq!(
+                on_wire,
+                backend.forwards_prompt_cache_key(),
+                "{backend:?}: forwards_prompt_cache_key() disagrees with the mapping"
+            );
+        }
+    }
+
     #[test]
     fn codex_compaction_item_persists_and_replays_only_on_its_route() {
         let identity = ReasoningModelIdentity::new(
@@ -7557,10 +7604,12 @@ mod tests {
 
     #[test]
     fn test_messages_request_cache_breakpoint_skips_thinking() {
+        let mut reasoning = synthesized_reasoning_item("weighing options");
+        reasoning.encrypted_content = Some("provider-signature".to_string());
         let req = ConversationRequest::from_items(vec![
             ConversationItem::user("Fix the bug"),
-            ConversationItem::Reasoning(synthesized_reasoning_item("weighing options")),
-            ConversationItem::assistant("Fixed it."),
+            ConversationItem::Reasoning(reasoning),
+            ConversationItem::assistant_with_model("Fixed it.", "messages-compatible-model"),
         ])
         .with_model("messages-compatible-model");
 
@@ -8932,6 +8981,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(response.is_empty());
 
@@ -8944,6 +8996,9 @@ mod tests {
             message_chunks_emitted: 1,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(!response.is_empty());
 
@@ -8960,6 +9015,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(!response.is_empty());
     }
@@ -8984,6 +9042,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(
             response.is_empty(),
@@ -9007,6 +9068,9 @@ mod tests {
             message_chunks_emitted: 1,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(
             !response.is_empty(),
@@ -9034,6 +9098,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(
             !response.is_empty(),
@@ -9062,6 +9129,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
 
         let calls = response.tool_calls();
@@ -9082,6 +9152,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert_eq!(
             response.fallback_text().as_deref(),
@@ -9101,6 +9174,9 @@ mod tests {
             message_chunks_emitted: 42,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -9116,6 +9192,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -9135,6 +9214,9 @@ mod tests {
             message_chunks_emitted: 0, // only reasoning chunks were streamed
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert_eq!(
             response.fallback_text().as_deref(),
@@ -9157,6 +9239,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -10513,6 +10598,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         }
     }
 
@@ -10565,6 +10653,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert_eq!(
             response.empty_reason(),

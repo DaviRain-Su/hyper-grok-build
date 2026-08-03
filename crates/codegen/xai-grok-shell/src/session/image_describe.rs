@@ -53,7 +53,7 @@ const OPTIONAL_CONTEXT_TAGS: &[&str] = &[];
 ///
 /// Runs **after** `extract_user_query` (which handles the shared tags),
 /// so this only needs to cover the template-specific additions.
-pub fn strip_template_context_tags(text: &str) -> String {
+pub(crate) fn strip_template_context_tags(text: &str) -> String {
     let mut result = text.to_string();
     for tag in OPTIONAL_CONTEXT_TAGS {
         while let Some(open_start) = result.find(&format!("<{tag}")) {
@@ -115,7 +115,9 @@ fn collapse_newlines(s: &str) -> String {
 ///
 /// Returns `None` when no prior user messages exist, so callers can omit
 /// the entire `<conversation_history_outline>` block from the prompt.
-pub fn build_conversation_outline(prior_conversation: &[ConversationItem]) -> Option<String> {
+pub(crate) fn build_conversation_outline(
+    prior_conversation: &[ConversationItem],
+) -> Option<String> {
     let queries = extract_real_user_queries(prior_conversation);
     if queries.is_empty() {
         return None;
@@ -147,7 +149,7 @@ pub fn build_conversation_outline(prior_conversation: &[ConversationItem]) -> Op
 /// `current_query` should be the extracted user query text (without
 /// `<user_query>` wrappers); we wrap it here to keep the template owned
 /// in one place.
-pub fn build_describe_prompt(outline: Option<&str>, current_query: &str) -> String {
+pub(crate) fn build_describe_prompt(outline: Option<&str>, current_query: &str) -> String {
     let capped_query = truncate_middle(current_query, CURRENT_QUERY_CAP);
     let mut parts: Vec<String> = Vec::with_capacity(6);
     parts
@@ -197,7 +199,7 @@ pub fn build_describe_prompt(outline: Option<&str>, current_query: &str) -> Stri
 ///
 /// Trade-off: model output sees `‹` instead of `<` in the scrubbed
 /// region. Acceptable — these are envelope fillers, not source code.
-pub fn scrub_for_envelope(s: &str) -> String {
+pub(crate) fn scrub_for_envelope(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -219,7 +221,7 @@ pub fn scrub_for_envelope(s: &str) -> String {
 /// Other ASCII controls (BEL, ESC, etc.) are also stripped because
 /// they have no meaningful rendering and may corrupt terminal output
 /// in TUI-side downstream consumers.
-pub fn scrub_envelope_body(s: &str) -> String {
+pub(crate) fn scrub_envelope_body(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -239,7 +241,7 @@ pub fn scrub_envelope_body(s: &str) -> String {
 /// vision-model output containing a literal `</image_description>` or
 /// `</image>` cannot close the envelope early — without flattening
 /// multi-paragraph descriptions into a single line.
-pub fn render_image_description_block(description: &str) -> String {
+pub(crate) fn render_image_description_block(description: &str) -> String {
     let description = scrub_envelope_body(description.trim_end());
     format!(
         "<image>This is an image, but instead of showing it, you are given a description of it.\n\n<image_description>\n{description}\n</image_description>\nDon't mention to the user that you only have a description of the image.</image>",
@@ -248,7 +250,7 @@ pub fn render_image_description_block(description: &str) -> String {
 /// Stable fingerprint of the text passed to the vision model (outline +
 /// current user query). When this changes, cached descriptions for the
 /// same image bytes are not reused.
-pub fn describe_prompt_fingerprint(outline: Option<&str>, current_query: &str) -> String {
+pub(crate) fn describe_prompt_fingerprint(outline: Option<&str>, current_query: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     if let Some(o) = outline {
         hasher.update(b"outline:");
@@ -261,24 +263,24 @@ pub fn describe_prompt_fingerprint(outline: Option<&str>, current_query: &str) -
 }
 /// Raw blake3 digest for binary cache keys; use [`content_fingerprint`]
 /// for log lines and on-disk paths.
-pub fn content_fingerprint_bytes(bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn content_fingerprint_bytes(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }
 /// Blake3 hex digest of raw image (or other binary) bytes.
-pub fn content_fingerprint(bytes: &[u8]) -> String {
+pub(crate) fn content_fingerprint(bytes: &[u8]) -> String {
     blake3::Hash::from_bytes(content_fingerprint_bytes(bytes))
         .to_hex()
         .to_string()
 }
 /// Distinguishes cache namespaces (user attachment vs tool read).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ImageDescribeSource {
+pub(crate) enum ImageDescribeSource {
     UserAttachment,
 }
 /// Session-scoped cache for auxiliary image outputs: keyed by source, stable
 /// path label, content hash, and prompt fingerprint.
 #[derive(Debug, Default)]
-pub struct ImageDescribeCache {
+pub(crate) struct ImageDescribeCache {
     inner: Mutex<HashMap<(ImageDescribeSource, String, String, String), String>>,
 }
 impl ImageDescribeCache {
@@ -290,7 +292,7 @@ impl ImageDescribeCache {
     /// Returns a cached description when `(source, path_key, bytes, prompt)`
     /// matches a prior successful describe; otherwise calls the vision
     /// model, stores the result, and returns it.
-    pub async fn get_or_describe(
+    pub(crate) async fn get_or_describe(
         &self,
         client: xai_grok_sampler::SamplingClient,
         model: &str,
@@ -326,7 +328,7 @@ impl ImageDescribeCache {
 /// Each path is scrubbed via [`scrub_for_envelope`] before
 /// interpolation so a user-controlled path containing a literal
 /// `</image_files>` cannot close the envelope early.
-pub fn render_image_files_block(paths: &[String]) -> Option<String> {
+pub(crate) fn render_image_files_block(paths: &[String]) -> Option<String> {
     if paths.is_empty() {
         return None;
     }
@@ -343,7 +345,7 @@ pub fn render_image_files_block(paths: &[String]) -> Option<String> {
 /// Result of persisting one user-supplied image to the session's
 /// `assets/` directory.
 #[derive(Debug, Clone)]
-pub struct PersistedImage {
+pub(crate) struct PersistedImage {
     /// Absolute path on disk; surfaced to the coding model in the
     /// `<image_files>` block.
     pub path: PathBuf,
@@ -359,7 +361,7 @@ pub struct PersistedImage {
 /// inferred from `mime_type` (falling back to `png`). Returns one
 /// [`PersistedImage`] per input, in input order, so callers can render
 /// the `<image_files>` list deterministically.
-pub fn persist_user_images(
+pub(crate) fn persist_user_images(
     session_dir: &Path,
     images: &[ImageContent],
 ) -> std::io::Result<Vec<PersistedImage>> {
@@ -407,7 +409,7 @@ fn mime_to_extension(mime: &str) -> &'static str {
 /// responsibility; this module never silently fakes a successful
 /// description.
 #[derive(Debug, thiserror::Error)]
-pub enum DescribeError {
+pub(crate) enum DescribeError {
     /// The describe sampling call itself failed (transport error, auth
     /// failure, model not found, etc.). The string is the upstream error
     /// rendered with `{e}` — opaque to this module but useful for the
@@ -437,7 +439,7 @@ pub enum DescribeError {
 /// [`ImageContent`], otherwise the `data:<mime>;base64,...` URI). The
 /// caller is responsible for outline + prompt assembly so this stays a
 /// pure transport helper.
-pub async fn describe_user_images(
+pub(crate) async fn describe_user_images(
     client: OaiCompatClient,
     model: &str,
     prompt_text: String,
@@ -485,7 +487,7 @@ pub async fn describe_user_images(
 /// turn includes images. The order matches the compat-harness wire format:
 /// `<image>` block(s), `<image_files>` block, then the original
 /// `<user_query>`-wrapped user text.
-pub fn render_image_user_message(
+pub(crate) fn render_image_user_message(
     description: &str,
     image_paths: &[String],
     original_user_message: &str,
@@ -505,7 +507,7 @@ pub fn render_image_user_message(
 ///
 /// Used by other harnesses that still pass images inline as
 /// multimodal parts — persistence is independent of vision describe.
-pub fn persist_and_prepend_image_files(
+pub(crate) fn persist_and_prepend_image_files(
     session_dir: &Path,
     images: &[ImageContent],
     original_user_message: &str,

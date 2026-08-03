@@ -354,13 +354,17 @@ impl Default for ScrollConfig {
     }
 }
 
-/// Follow indicator display mode.
+/// Scroll indicator display mode: the ▼ jump-to-bottom arrow below
+/// scrollback and its ▲ jump-to-response-top mirror under the sticky
+/// prompt header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FollowIndicator {
-    /// No follow indicator.
+    /// No scroll indicators.
     None,
     /// Show ▼ centered in the gap row below scrollback when not following
-    /// and there's content below the viewport.
+    /// and there's content below the viewport, and ▲ centered under the
+    /// sticky prompt header while the answer being read starts above the
+    /// viewport top.
     #[default]
     Center,
 }
@@ -991,8 +995,8 @@ pub struct RawScrollConfig {
     /// If a scroll would be less than this percentage, scroll by this amount instead.
     /// 0 = minimal scroll (default), 25 = quarter page, 100 = full page.
     pub min_page_fraction: u8,
-    /// Follow indicator in the gap row below scrollback.
-    /// "none" = hidden, "center" = ▼ centered when content is below viewport.
+    /// Scroll indicators: the ▼ below scrollback and the ▲ under the sticky
+    /// prompt header. "none" = hidden, "center" = centered arrows.
     pub follow_indicator: RawFollowIndicator,
     /// When follow mode scrolls to new content, auto-select the latest entry.
     pub follow_auto_select: bool,
@@ -1019,13 +1023,13 @@ impl Default for RawScrollConfig {
     }
 }
 
-/// Follow indicator display mode (TOML format).
+/// Scroll indicator display mode (TOML format).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum RawFollowIndicator {
-    /// No follow indicator.
+    /// No scroll indicators.
     None,
-    /// Show ▼ centered in the gap row below scrollback.
+    /// Show ▼ centered below scrollback and ▲ under the sticky prompt header.
     #[default]
     Center,
 }

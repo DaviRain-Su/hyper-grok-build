@@ -25,7 +25,7 @@ use xai_grok_mcp::wire;
 /// serde-checked, not hand-read); entries missing `name`/`serverId` are skipped with a
 /// warning. A name seen twice keeps the first (server names are the tool namespace, so a
 /// duplicate would otherwise silently shadow). Absent meta yields none.
-pub fn parse_acp_mcp_servers(meta: Option<&acp::Meta>) -> Vec<AcpServerEntry> {
+pub(crate) fn parse_acp_mcp_servers(meta: Option<&acp::Meta>) -> Vec<AcpServerEntry> {
     let Some(array) = meta
         .and_then(|m| m.get(wire::MCP_SERVERS))
         .and_then(|v| v.as_array())
@@ -58,7 +58,7 @@ pub fn parse_acp_mcp_servers(meta: Option<&acp::Meta>) -> Vec<AcpServerEntry> {
 /// (unlike the `?Send` `acp::Client::ext_method` trait method), so the rmcp transport's
 /// `Send` invoker bound is satisfied with no relay task. Calls are independent and may
 /// run concurrently — the gateway serializes them onto the session's message channel.
-pub struct GatewayAcpInvoker {
+pub(crate) struct GatewayAcpInvoker {
     gateway: AcpAgentGatewaySender,
 }
 

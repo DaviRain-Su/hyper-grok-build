@@ -135,6 +135,14 @@ impl ContentController {
         let mut sandbox = TestSandbox::builder().mock_url(server.url()).build();
         // Keep unrelated autocomplete work out of PTY timing assertions.
         sandbox.set_env("GROK_PROMPT_SUGGESTIONS", "false");
+        // PTY assertions match English chrome ("Quit", "request changes", …).
+        // Force UI language so host OS locale (e.g. zh-CN) cannot flip labels.
+        std::fs::create_dir_all(sandbox.grok_home()).context("create sandbox grok home")?;
+        std::fs::write(
+            sandbox.grok_home().join("config.toml"),
+            "[ui]\nlanguage = \"en\"\n",
+        )
+        .context("write English UI language for hermetic PTY tests")?;
 
         Ok(Self { server, sandbox })
     }
