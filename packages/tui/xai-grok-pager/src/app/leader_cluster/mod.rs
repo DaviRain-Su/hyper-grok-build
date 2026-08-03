@@ -518,7 +518,6 @@ impl PagerLeaderCluster {
         app.leader_mode = true;
         app.auth_state = AuthState::Done;
         app.trust_state = TrustState::Done;
-        app.project_picker_shown = true;
         app.cwd = self.workdir.path().to_path_buf();
 
         let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();

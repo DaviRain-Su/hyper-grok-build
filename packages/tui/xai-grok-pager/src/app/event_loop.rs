@@ -1216,7 +1216,6 @@ pub(crate) async fn run(
         user_config.as_ref(),
         managed_config.as_ref(),
     );
-    app.project_picker_disabled = hints.project_picker_disabled;
     // Per-tip contextual hints resolve from `[ui.contextual_hints]` (loaded into
     // `app.current_ui` further below) + the remote tier; the resolve + prompt
     // propagation happen after `current_ui` is hydrated.

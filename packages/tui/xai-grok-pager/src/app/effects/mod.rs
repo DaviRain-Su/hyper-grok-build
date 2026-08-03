@@ -84,7 +84,7 @@ pub(crate) fn execute(
         }
         Effect::SetWorkingDir { path } => {
             if let Err(e) = std::env::set_current_dir(&path) {
-                tracing::warn!(error = %e, "project picker: failed to set_current_dir");
+                tracing::warn!(error = %e, "change location: failed to set_current_dir");
             }
         }
         Effect::ScheduleClearAuthCopyFeedback { generation } => {
@@ -2116,14 +2116,6 @@ pub(crate) fn execute(
                 "memory_modal_fullscreen",
                 fullscreen,
                 "memory fullscreen",
-            );
-        }
-        Effect::PersistProjectPickerDisabled { disabled } => {
-            persist_hint(
-                tasks,
-                "project_picker_disabled",
-                disabled,
-                "project picker opt-out",
             );
         }
         Effect::PersistDashboard(persisted) => {

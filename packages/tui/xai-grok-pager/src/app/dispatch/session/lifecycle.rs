@@ -5,7 +5,7 @@ use super::modal::remove_agent_and_cleanup;
 use crate::acp::model_state::{EffortTokenError, ModelState};
 use crate::acp::tracker::AcpUpdateTracker;
 use crate::app::actions::{Action, Effect, SwitchModelError};
-use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState};
+use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState, DeferredModelSwitch};
 use crate::app::agent_view::{ActivePane, AgentView, McpInitProgress};
 use crate::app::app_view::{ActiveView, AppView, TrustState};
 use crate::app::dispatch::ctx::{
@@ -30,18 +30,23 @@ use xai_grok_shell::sampling::types::ReasoningEffort;
 /// model override.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeferredSwitchOutcome {
-    pub switch: Option<(acp::ModelId, Option<ReasoningEffort>)>,
+    pub switch: Option<DeferredModelSwitch>,
     pub effort_error: Option<EffortTokenError>,
 }
 /// Resolve the stashed `-m` switch and/or `cli_effort_token` against the session
 /// catalog via [`ModelState::resolve_effort_for_model`] (same gate-first policy
 /// as `/effort` and headless).
 pub(crate) fn take_deferred_model_switch(
-    stashed: Option<(acp::ModelId, Option<ReasoningEffort>)>,
+    stashed: Option<DeferredModelSwitch>,
     models: &ModelState,
     cli_effort_token: Option<&str>,
 ) -> DeferredSwitchOutcome {
-    if let Some((model_id, mut effort)) = stashed {
+    if let Some(DeferredModelSwitch {
+        model_id,
+        mut effort,
+        prev_model_id,
+    }) = stashed
+    {
         let effort_error = match cli_effort_token {
             Some(token) if effort.is_none() => {
                 match models.resolve_effort_for_model(&model_id, token) {
@@ -55,7 +60,11 @@ pub(crate) fn take_deferred_model_switch(
             _ => None,
         };
         return DeferredSwitchOutcome {
-            switch: Some((model_id, effort)),
+            switch: Some(DeferredModelSwitch {
+                model_id,
+                effort,
+                prev_model_id,
+            }),
             effort_error,
         };
     }
@@ -77,7 +86,11 @@ pub(crate) fn take_deferred_model_switch(
             effort_error: None,
         },
         Ok(effort) => DeferredSwitchOutcome {
-            switch: Some((current, Some(effort))),
+            switch: Some(DeferredModelSwitch {
+                model_id: current,
+                effort: Some(effort),
+                prev_model_id: None,
+            }),
             effort_error: None,
         },
         Err(err) => DeferredSwitchOutcome {
@@ -88,19 +101,26 @@ pub(crate) fn take_deferred_model_switch(
 }
 /// Take the stashed deferred switch, resolve any CLI effort token against the
 /// session catalog, surface effort errors, and return the switch to apply.
+/// `prev_model_id` becomes the session's authoritative model when the
+/// create/load response replaced the catalog, else the stash-time display.
 pub(crate) fn apply_deferred_model_switch(
     agent: &mut AgentView,
     cli_effort_token: Option<&str>,
-) -> Option<(acp::ModelId, Option<ReasoningEffort>)> {
+) -> Option<DeferredModelSwitch> {
     let stashed = agent.session.deferred_model_switch.take();
     let outcome = take_deferred_model_switch(stashed, &agent.session.models, cli_effort_token);
-    apply_deferred_switch_outcome(agent, outcome)
+    apply_deferred_switch_outcome(agent, outcome).map(|mut switch| {
+        if agent.session.models.current.as_ref() != Some(&switch.model_id) {
+            switch.prev_model_id = agent.session.models.current.clone();
+        }
+        switch
+    })
 }
 /// Surface effort-token errors and return the model/effort switch (if any).
 pub(crate) fn apply_deferred_switch_outcome(
     agent: &mut AgentView,
     outcome: DeferredSwitchOutcome,
-) -> Option<(acp::ModelId, Option<ReasoningEffort>)> {
+) -> Option<DeferredModelSwitch> {
     if let Some(err) = outcome.effort_error {
         let msg = format!("--effort/--reasoning-effort: {}", err.message());
         tracing::warn!("{msg}");
@@ -412,47 +432,45 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     if app.screen_mode.is_minimal() {
         app.minimal_state.welcome_pending = true;
     }
-    if !app.needs_project_picker() {
-        let chat_kind = consume_chat_kind(app);
-        if let Some(agent) = app.agents.get_mut(&agent_id) {
-            agent.chat_kind = chat_kind;
-            #[cfg(feature = "local-workspace")]
-            {
-                let local_intent = match &app.welcome_session_local_workspace {
-                    Some(Some(_)) => true,
-                    Some(None) => false,
-                    None => crate::app::session_startup::active_local_workspace()
-                        .ok()
-                        .flatten()
-                        .is_some(),
-                };
-                let (mode, locked) =
-                    crate::views::welcome::workspace_mode::indicator_for_opening_session(
-                        agent.chat_kind,
-                        false,
-                        app.local_workspace_startup_locked,
-                        local_intent,
-                    );
-                agent.workspace_mode = mode;
-                agent.workspace_mode_cli_locked = locked;
-            }
-            agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
-            agent.mcp_init_progress = Some(McpInitProgress {
-                total: 0,
-                connected: 0,
-                started_at: Instant::now(),
-            });
-            agent.session.prompt_history_loading = true;
+    let chat_kind = consume_chat_kind(app);
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.chat_kind = chat_kind;
+        #[cfg(feature = "local-workspace")]
+        {
+            let local_intent = match &app.welcome_session_local_workspace {
+                Some(Some(_)) => true,
+                Some(None) => false,
+                None => crate::app::session_startup::active_local_workspace()
+                    .ok()
+                    .flatten()
+                    .is_some(),
+            };
+            let (mode, locked) =
+                crate::views::welcome::workspace_mode::indicator_for_opening_session(
+                    agent.chat_kind,
+                    false,
+                    app.local_workspace_startup_locked,
+                    local_intent,
+                );
+            agent.workspace_mode = mode;
+            agent.workspace_mode_cli_locked = locked;
         }
-        let preferred_session_id = app.deferred_startup.preferred_session_id.take();
-        effects.push(Effect::CreateSession {
-            agent_id,
-            cwd: effective_cwd,
-            model_id,
-            preferred_session_id,
-            chat_kind,
+        agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
+        agent.mcp_init_progress = Some(McpInitProgress {
+            total: 0,
+            connected: 0,
+            started_at: Instant::now(),
         });
+        agent.session.prompt_history_loading = true;
     }
+    let preferred_session_id = app.deferred_startup.preferred_session_id.take();
+    effects.push(Effect::CreateSession {
+        agent_id,
+        cwd: effective_cwd,
+        model_id,
+        preferred_session_id,
+        chat_kind,
+    });
     (agent_id, effects)
 }
 /// Exit the current session and return to the welcome screen.
@@ -955,17 +973,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_with_id(
             Some(crate::app::session_startup::DeferredSessionStartup::NewWithId { session_id });
         return vec![];
     }
-    let (agent_id, mut effects) = dispatch_new_session_inner_with_id(app, None);
-    for e in &mut effects {
-        if let Effect::CreateSession {
-            preferred_session_id,
-            ..
-        } = e
-        {
-            *preferred_session_id = Some(session_id.clone());
-        }
-    }
-    let _ = agent_id;
+    let (_agent_id, effects) = dispatch_new_session_inner_with_id(app, None);
     effects
 }
 /// Tear down a placeholder agent that must not proceed under sticky `--chat`
@@ -994,7 +1002,9 @@ pub(in crate::app::dispatch) fn refuse_chat_mode_build_agent(app: &mut AppView, 
         }
     }
 }
-/// Dismiss the project picker and create a session in the current directory.
+/// Create a session on an existing unbound agent without opening a project
+/// picker (picker removed upstream). Used by Live / voice cold-start when
+/// the agent has no ACP session yet.
 pub(in crate::app::dispatch) fn skip_picker_and_create_session(
     app: &mut AppView,
     agent_id: AgentId,
@@ -1006,7 +1016,6 @@ pub(in crate::app::dispatch) fn skip_picker_and_create_session(
     {
         return vec![];
     }
-    app.mark_project_picker_done();
     let chat_kind = consume_chat_kind(app);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.chat_kind = chat_kind;
@@ -1050,6 +1059,7 @@ pub(in crate::app::dispatch) fn skip_picker_and_create_session(
         chat_kind,
     }]
 }
+
 pub(in crate::app::dispatch) fn handle_session_created(
     app: &mut AppView,
     agent_id: AgentId,
@@ -1127,13 +1137,13 @@ pub(in crate::app::dispatch) fn handle_session_created(
             agent_id,
             silent: true,
         });
-        if let Some((model_id, effort)) = deferred {
+        if let Some(switch) = deferred {
             effects.push(Effect::SwitchModel {
                 agent_id,
                 session_id: session_id_clone.clone(),
-                model_id,
-                effort,
-                prev_model_id: None,
+                model_id: switch.model_id,
+                effort: switch.effort,
+                prev_model_id: switch.prev_model_id,
             });
         }
         if let Some(mode) = deferred_mode {
@@ -1232,13 +1242,13 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
             agent_id,
             silent: true,
         });
-        if let Some((model_id, effort)) = deferred {
+        if let Some(switch) = deferred {
             effects.push(Effect::SwitchModel {
                 agent_id,
                 session_id: session_id_clone.clone(),
-                model_id,
-                effort,
-                prev_model_id: None,
+                model_id: switch.model_id,
+                effort: switch.effort,
+                prev_model_id: switch.prev_model_id,
             });
         }
         if let Some(mode) = deferred_mode {
@@ -1501,7 +1511,11 @@ pub(in crate::app::dispatch) fn dispatch_agent_type_mismatch_answered(
         {
             agent.session.models.set_current(model_id.clone(), effort);
             if effort.is_some() {
-                agent.session.deferred_model_switch = Some((model_id, effort));
+                agent.session.deferred_model_switch = Some(DeferredModelSwitch {
+                    model_id,
+                    effort,
+                    prev_model_id: None,
+                });
             }
         }
         effects

@@ -688,6 +688,16 @@ impl AgentState {
         }
     }
 }
+/// A model switch stashed while no session exists, applied once the session
+/// id materialises (`apply_deferred_model_switch`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredModelSwitch {
+    pub model_id: acp::ModelId,
+    pub effort: Option<ReasoningEffort>,
+    /// Displayed model at stash time — the rollback target
+    /// (`Effect::SwitchModel.prev_model_id`) if the switch fails.
+    pub prev_model_id: Option<acp::ModelId>,
+}
 /// Per-agent business logic (ACP session, models, state).
 ///
 /// External code should use the facade methods (`handle_update`,
@@ -789,7 +799,7 @@ pub struct AgentSession {
     /// applies live remote switches and updates this field to match.
     pub user_model_preference: Option<acp::ModelId>,
     /// `/model X [effort]` issued before the session was ready, applied on SessionCreated.
-    pub deferred_model_switch: Option<(acp::ModelId, Option<ReasoningEffort>)>,
+    pub deferred_model_switch: Option<DeferredModelSwitch>,
     /// Central bg task state, keyed by task_id.
     pub bg_tasks: BTreeMap<String, BgTaskState>,
     /// Correlation map: tool_call_id → task_id.

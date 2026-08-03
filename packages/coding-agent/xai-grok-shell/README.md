@@ -268,16 +268,25 @@ echo "{\"access_token\": \"$TOKEN\", \"expires_in\": 3600}"
 
 #### Example: Auth Binary with Refresh Support
 
-When Grok needs to refresh an expired token, it re-runs your binary with `GROK_AUTH_EXPIRED=1` set in the environment. Your binary can use this to take a faster silent-refresh path:
+Grok runs your binary on two different contracts, and `GROK_AUTH_EXPIRED` is how it tells them apart:
+
+| | `GROK_AUTH_EXPIRED=1` | unset |
+|---|---|---|
+| **What it is** | A headless refresh over a credential Grok already holds — near-expiry rotation, or a token the server rejected | A sign-in: `grok login`, the sign-in screen, or the escalation after a headless run couldn't mint |
+| **Is anyone watching?** | No. stdin is closed and nothing renders your prompts | Yes. A user is waiting, and your stderr reaches them |
+| **Budget** | A few seconds (7s), then Grok kills the process | 300s — enough for a browser round trip or a device code |
+| **So your binary should** | Mint silently, or **exit non-zero**. Never block | Do the full SSO flow, and always mint fresh |
 
 ```bash
 #!/bin/sh
 if [ "$GROK_AUTH_EXPIRED" = "1" ]; then
-    # Token expired — attempt silent refresh (no user interaction)
+    # Headless: silent refresh only. If that can't work — the SSO session
+    # lapsed, say — exit non-zero rather than block. Grok then shows the
+    # sign-in screen, which re-runs this binary with the variable unset.
     echo "Refreshing token..." >&2
-    TOKEN=$(my-company-auth --refresh --silent)
+    TOKEN=$(my-company-auth --refresh --silent) || exit 1
 else
-    # First login — full interactive SSO flow
+    # A user is attached — full interactive SSO flow.
     echo "Authenticating via Acme Corp SSO..." >&2
     TOKEN=$(my-company-auth --login --interactive)
 fi
@@ -290,7 +299,11 @@ fi
 echo "{\"access_token\": \"$TOKEN\", \"expires_in\": 3600}"
 ```
 
-`GROK_AUTH_EXPIRED` is optional — if your binary ignores it, Grok still works. It just runs the same flow for both login and refresh.
+Exiting promptly on `GROK_AUTH_EXPIRED=1` is what makes the handover to the sign-in screen fast: a binary that blocks instead pays the whole refresh timeout on every start with an expired token.
+
+One case stays ambiguous, and only in **leader mode** (`--leader`, or `[cli] use_leader = true`; off by default): with no credential at all, the leader makes one extra attempt in the background just after startup, and that run has the variable unset, like a sign-in. A binary that mints without help (service account, keytab, mounted token) succeeds there and the session heals itself. One that must prompt just sits, up to the 300s sign-in ceiling — nothing waits on it, the sign-in screen is already up, and its stderr goes to `~/.grok/leader.log` rather than to the user.
+
+`GROK_AUTH_EXPIRED` is optional — if your binary ignores it, Grok still works. It just runs the same flow for both login and refresh, and a flow that prompts will be killed on the headless run before it can finish.
 
 ### Automatic Credential Refresh
 
@@ -331,10 +344,11 @@ Common log messages:
 
 | Log message | What it means |
 |-------------|---------------|
-| `auth: running external auth provider` | Your binary is being called (includes the command and whether it's a refresh) |
+| `auth: running external auth provider (headless refresh)` | Your binary is being called with `GROK_AUTH_EXPIRED=1` and a few seconds to work |
+| `auth: running external auth provider (interactive login)` | Your binary is being called on the sign-in contract: no `GROK_AUTH_EXPIRED`, stderr shown, 300s |
 | `auth: external auth provider returned fresh token` | Success — token was parsed and stored |
 | `auth: external auth provider failed` | Binary exited non-zero, or exited 0 but stdout was empty/unparseable (the `error` field has details) |
-| `auth: external auth provider timed out (likely needs interactive auth), killing` | Binary didn't exit before the timeout (60s initial, 7s mid-session refresh) and was killed |
+| `auth: external auth provider timed out (likely needs interactive auth), killing` | Binary didn't exit before the 7s headless-refresh timeout and was killed. Exiting non-zero on `GROK_AUTH_EXPIRED=1` avoids this wait entirely |
 | `auth: failed to start external auth provider` | The command couldn't be spawned (e.g. binary not found) |
 
 ### Per-Model Auth Providers

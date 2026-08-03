@@ -194,7 +194,7 @@ active.
 | `grok_code.tool_decision` | `tool_name`, `decision`, `access_kind`, `permission_mode`, `source` |
 | `grok_code.mcp_server_connection` | `status`, `transport_type`, `duration_ms`, `tool_count?`, `error_type?`; `mcp_server.name` (**details**; collapsed to `mcp_server` otherwise) |
 | `grok_code.permission_mode_changed` | `to_mode`, `trigger` |
-| `grok_code.skill_activated` | `skill_source`; `skill.name` (**details**) |
+| `grok_code.skill_activated` | `skill_source`, `trigger` = `slash_command` \| `skill_md_read` \| `skill_tool`; `skill.name` (**details**) |
 | `grok_code.plugin_loaded` | `install_kind?`, `success`, `error_category?`; `plugin_name` (**details**) |
 | `grok_code.compaction` | `duration_ms`, `tokens_before`, `tokens_after`, `model?` |
 | `grok_code.subagent` | `phase` = `launched` \| `completed`, `subagent_type?`, `outcome?`, `duration_ms?` |

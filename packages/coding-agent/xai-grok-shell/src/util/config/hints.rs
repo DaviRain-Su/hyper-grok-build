@@ -53,13 +53,12 @@ impl WorktreeHintMode {
     }
 }
 
-/// Resolved `[hints]` UI opt-outs (TUI "don't ask again" and related).
+/// Resolved `[hints]` worktree preferences for `/new` and `/fork`.
 ///
 /// Read via effective config merge when available; falls back to partial layer
 /// merge so a bad user `config.toml` does not drop managed/requirements hints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedHints {
-    pub project_picker_disabled: bool,
     pub new_session_worktree_mode: WorktreeHintMode,
     pub fork_worktree_mode: WorktreeHintMode,
 }
@@ -67,7 +66,6 @@ pub struct ResolvedHints {
 impl Default for ResolvedHints {
     fn default() -> Self {
         Self {
-            project_picker_disabled: false,
             new_session_worktree_mode: WorktreeHintMode::Never,
             fork_worktree_mode: WorktreeHintMode::Ask,
         }
@@ -76,15 +74,8 @@ impl Default for ResolvedHints {
 
 impl ResolvedHints {
     fn from_hints_table(hints: Option<&TomlValue>) -> Self {
-        let hint_bool = |key: &str| -> bool {
-            hints
-                .and_then(|h| h.get(key))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-        };
         let (new_session, fork) = WorktreeHintMode::resolve_pair(hints);
         Self {
-            project_picker_disabled: hint_bool("project_picker_disabled"),
             new_session_worktree_mode: new_session,
             fork_worktree_mode: fork,
         }
@@ -191,11 +182,18 @@ mod tests {
 
     #[test]
     fn resolve_hints_requirements_overrides_user_when_effective_missing() {
-        let user: TomlValue = toml::from_str("[hints]\nproject_picker_disabled = false\n").unwrap();
+        let user: TomlValue = toml::from_str("[hints]\nfork_worktree_mode = \"never\"\n").unwrap();
         let requirements: TomlValue =
-            toml::from_str("[hints]\nproject_picker_disabled = true\n").unwrap();
+            toml::from_str("[hints]\nfork_worktree_mode = \"always\"\n").unwrap();
         let resolved = resolve_hints(None, Some(&requirements), Some(&user), None);
-        assert!(resolved.project_picker_disabled);
+        assert_eq!(resolved.fork_worktree_mode, WorktreeHintMode::Always);
+        assert_eq!(resolved.new_session_worktree_mode, WorktreeHintMode::Never);
+    }
+
+    /// `/new` defaults to Never and `/fork` to Ask, so an absent key is not the same answer for both.
+    #[test]
+    fn resolve_hints_defaults_differ_per_command() {
+        let resolved = resolve_hints(None, None, None, None);
         assert_eq!(resolved.new_session_worktree_mode, WorktreeHintMode::Never);
         assert_eq!(resolved.fork_worktree_mode, WorktreeHintMode::Ask);
     }
@@ -203,9 +201,9 @@ mod tests {
     #[test]
     fn resolve_hints_uses_effective_root_when_provided() {
         let effective: TomlValue =
-            toml::from_str("[hints]\nproject_picker_disabled = true\n").unwrap();
+            toml::from_str("[hints]\nnew_session_worktree_mode = \"always\"\n").unwrap();
         let resolved = resolve_hints(Some(&effective), None, None, None);
-        assert!(resolved.project_picker_disabled);
+        assert_eq!(resolved.new_session_worktree_mode, WorktreeHintMode::Always);
     }
 
     const ENV_CONTEXTUAL_HINTS: &str = "GROK_CONTEXTUAL_HINTS";

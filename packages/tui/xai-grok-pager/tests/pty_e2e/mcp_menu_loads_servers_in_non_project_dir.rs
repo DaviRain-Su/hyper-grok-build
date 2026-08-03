@@ -3,8 +3,7 @@
 use super::common::*;
 
 /// 14. **MCP menu loads in a non-project dir** (fake `$HOME` as cwd).
-/// Guards the create-on-demand path: `/mcps` bypasses the project picker,
-/// so the deferred session must be created when the menu needs it.
+/// The menu must populate the same way it does inside a project.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn mcp_menu_loads_servers_in_non_project_dir() {

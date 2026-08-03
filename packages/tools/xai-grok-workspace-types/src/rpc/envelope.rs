@@ -13,6 +13,13 @@ use serde::{Deserialize, Serialize};
 /// without depending on the workspace crate's error enum.
 pub const TURN_ACTIVE: &str = "turn_active";
 
+pub const HUB_ERROR: &str = "hub_error";
+
+pub const UNKNOWN_METHOD: &str = "unknown_method";
+
+/// Legacy shape: binaries predating [`UNKNOWN_METHOD`] report it under [`HUB_ERROR`].
+pub const UNKNOWN_METHOD_ERR_PREFIX: &str = "unknown workspace method:";
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RpcEnvelope<T> {
@@ -32,6 +39,11 @@ impl RpcError {
     /// turn boundary.
     pub fn is_turn_active(&self) -> bool {
         self.code == TURN_ACTIVE
+    }
+
+    /// True for every wire shape an unserved method arrives in; relays re-wrap it.
+    pub fn is_unknown_method(&self) -> bool {
+        self.code == UNKNOWN_METHOD || self.message.contains(UNKNOWN_METHOD_ERR_PREFIX)
     }
 }
 
@@ -108,5 +120,35 @@ mod tests {
         assert!(env.into_result().unwrap_err().is_turn_active());
         let env: RpcEnvelope<String> = RpcEnvelope::err_parts("hub_error", "boom");
         assert!(!env.into_result().unwrap_err().is_turn_active());
+    }
+
+    #[test]
+    fn is_unknown_method_matches_both_wire_shapes() {
+        let err = RpcError {
+            code: UNKNOWN_METHOD.to_owned(),
+            message: "workspace.export_github".to_owned(),
+        };
+        assert!(err.is_unknown_method());
+
+        let legacy = RpcError {
+            code: HUB_ERROR.to_owned(),
+            message: format!("{UNKNOWN_METHOD_ERR_PREFIX} workspace.export_github"),
+        };
+        assert!(legacy.is_unknown_method());
+
+        let rewrapped = RpcError {
+            code: HUB_ERROR.to_owned(),
+            message: format!(
+                "unknown error code: {UNKNOWN_METHOD}: {UNKNOWN_METHOD_ERR_PREFIX} \
+                 workspace.export_github"
+            ),
+        };
+        assert!(rewrapped.is_unknown_method());
+
+        let other_hub_error = RpcError {
+            code: HUB_ERROR.to_owned(),
+            message: "boom".to_owned(),
+        };
+        assert!(!other_hub_error.is_unknown_method());
     }
 }

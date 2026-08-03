@@ -567,14 +567,6 @@ impl AgentView {
                         }
                     }
                     KeyCode::Esc => {
-                        if matches!(
-                            qv.local_kind,
-                            Some(
-                                crate::views::question_view::LocalQuestionKind::ProjectSelect { .. }
-                            )
-                        ) {
-                            return self.submit_question_answers(true);
-                        }
                         let active = qv.active_tab;
                         qv.clear_selection(active);
                     }
@@ -2094,9 +2086,7 @@ mod question_answer_focus_tests {
     use crate::actions::ActionRegistry;
     use crate::app::app_view::InputOutcome;
     use crate::views::prompt_widget::StashedPrompt;
-    use crate::views::question_view::{
-        LocalQuestionKind, QuestionFocus, QuestionSelection, QuestionViewState,
-    };
+    use crate::views::question_view::{QuestionFocus, QuestionSelection, QuestionViewState};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use xai_grok_tools::implementations::grok_build::ask_user_question::{
         Question, QuestionOption,
@@ -2254,24 +2244,6 @@ mod question_answer_focus_tests {
         press(&mut agent, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(agent.active_pane, AgentPane::Prompt);
         assert!(agent.question_view.is_some());
-    }
-    #[test]
-    fn esc_still_skips_the_project_picker() {
-        let mut agent = make_agent();
-        open_two_questions(&mut agent);
-        if let Some(ref mut qv) = agent.question_view {
-            qv.local_kind = Some(LocalQuestionKind::ProjectSelect {
-                resolved_paths: Vec::new(),
-                original_cwd: std::path::PathBuf::from("/tmp"),
-                stashed_prompt: String::new(),
-                dont_ask_index: 0,
-            });
-        }
-        press(&mut agent, KeyCode::Esc, KeyModifiers::NONE);
-        assert!(
-            agent.question_view.is_none(),
-            "Esc submits the picker as skipped instead of unselecting"
-        );
     }
     #[test]
     fn tab_in_input_mode_stays_with_the_text_field() {

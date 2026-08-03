@@ -101,19 +101,6 @@ pub enum LocalQuestionKind {
         /// path back to `dispatch_fork_resolved` without a global mailbox.
         directive: Option<String>,
     },
-    /// Shown on first prompt from a non-project directory.
-    ProjectSelect {
-        /// Index-aligned with the leading question options. Direct lookup by
-        /// selection index.
-        resolved_paths: Vec<std::path::PathBuf>,
-        /// The original cwd (fallback on cancel/skip).
-        original_cwd: std::path::PathBuf,
-        /// The prompt text the user typed (stashed to re-send after selection).
-        stashed_prompt: String,
-        /// Option index of the "Don't ask me again" entry. Selecting it
-        /// continues in `original_cwd` and persists the opt-out.
-        dont_ask_index: usize,
-    },
     /// Modal opened by `/new` to resolve the worktree question.
     /// On submit, the selected option index is translated into an
     /// [`crate::app::actions::Action::NewSessionAnswered`].

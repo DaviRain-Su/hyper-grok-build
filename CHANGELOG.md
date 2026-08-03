@@ -4,6 +4,25 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.119-r1] — 2026-08-04
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `e5478ef`
+  (monorepo `SOURCE_REV` `27d2088a…`), basing this community revision on
+  upstream **0.2.119**. Notable upstream: remove project-directory picker,
+  external-binary auth as fresh login, nested-checkout skip in file watching,
+  optimistic pre-session model selection, tool-output size honesty, skill
+  telemetry, same-branch `git-head-changed`.
+- **Workspace layout** — Crates live under `packages/{ai,agent,tools,tui,
+  coding-agent,extensions,platform,build}` (pi-mono style); crate names stay
+  `xai-*` for upstream merge compatibility.
+- **Desktop** — Vendored local-link Comet controller under `desktop/comet/`
+  (cloud edge/WorkOS stripped).
+
+### Fixed
+- **Release install CI** — install jobs install protoc/dotslash; PowerShell
+  static parse gate declares `[ref]` targets so modern `pwsh` accepts the check.
+
 ## [0.2.118-r1] — 2026-08-03
 
 ### Changed

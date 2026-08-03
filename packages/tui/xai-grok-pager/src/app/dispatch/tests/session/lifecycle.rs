@@ -738,7 +738,7 @@ fn session_failed_orphan_on_welcome_with_survivor_uses_startup_warning() {
     );
 }
 #[test]
-fn switch_model_without_session_does_nothing() {
+fn switch_model_without_session_sends_nothing_to_server() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().session.session_id = None;
@@ -750,7 +750,11 @@ fn switch_model_without_session_does_nothing() {
         },
         &mut app,
     );
-    assert!(effects.is_empty());
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SwitchModel { .. }))
+    );
     assert!(!app.agents[&id].session.model_switch_pending);
 }
 #[test]
@@ -925,12 +929,86 @@ fn switch_model_deferred_when_no_session_id() {
         },
         &mut app,
     );
-    assert!(effects.is_empty());
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::PersistPreferredModel { model_id: m, .. }] if m == &model_id
+        ),
+        "expected persist-only, got {effects:?}"
+    );
+    assert_eq!(
+        app.agents[&id].session.models.current,
+        Some(model_id.clone())
+    );
     assert_eq!(
         app.agents[&id].session.deferred_model_switch,
-        Some((model_id, None))
+        Some(crate::app::agent::DeferredModelSwitch {
+            model_id,
+            effort: None,
+            prev_model_id: None,
+        })
     );
     assert!(!app.agents[&id].session.model_switch_pending);
+}
+#[test]
+fn deferred_switch_threads_stash_prev_into_effect() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_a = acp::ModelId::new(std::sync::Arc::from("model-a"));
+    let model_b = acp::ModelId::new(std::sync::Arc::from("model-b"));
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.session_id = None;
+    agent.session.models.current = Some(model_a.clone());
+    dispatch(
+        Action::SwitchModel {
+            model_id: model_b.clone(),
+            effort: None,
+        },
+        &mut app,
+    );
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionCreated {
+            agent_id: id,
+            session_id: "prev-session".into(),
+            models: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::SwitchModel { model_id, prev_model_id, .. }
+            if *model_id == model_b && *prev_model_id == Some(model_a.clone())
+    )));
+}
+#[test]
+fn deferred_switch_prefers_authoritative_current_as_prev() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_b = acp::ModelId::new(std::sync::Arc::from("model-b"));
+    let server_model = acp::ModelId::new(std::sync::Arc::from("server-model"));
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.session_id = None;
+    agent.session.deferred_model_switch = Some(crate::app::agent::DeferredModelSwitch {
+        model_id: model_b.clone(),
+        effort: None,
+        prev_model_id: None,
+    });
+    agent.session.models.current = Some(server_model.clone());
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionCreated {
+            agent_id: id,
+            session_id: "auth-session".into(),
+            models: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::SwitchModel { model_id, prev_model_id, .. }
+            if *model_id == model_b && *prev_model_id == Some(server_model.clone())
+    )));
 }
 #[test]
 fn deferred_model_switch_applied_on_session_created() {
@@ -943,7 +1021,11 @@ fn deferred_model_switch_applied_on_session_created() {
         .get_mut(&id)
         .unwrap()
         .session
-        .deferred_model_switch = Some((model_id.clone(), None));
+        .deferred_model_switch = Some(crate::app::agent::DeferredModelSwitch {
+        model_id: model_id.clone(),
+        effort: None,
+        prev_model_id: None,
+    });
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionCreated {
             agent_id: id,
@@ -981,7 +1063,11 @@ fn deferred_model_switch_applied_on_worktree_session_created() {
         .get_mut(&id)
         .unwrap()
         .session
-        .deferred_model_switch = Some((model_id.clone(), None));
+        .deferred_model_switch = Some(crate::app::agent::DeferredModelSwitch {
+        model_id: model_id.clone(),
+        effort: None,
+        prev_model_id: None,
+    });
     let session_id: acp::SessionId = "wt-session".into();
     let effects = dispatch(
         Action::TaskComplete(TaskResult::WorktreeSessionCreated {
@@ -1806,58 +1892,6 @@ fn entry_title_falls_back_to_short_session_id_when_no_prompt() {
     assert_eq!(title, "session abcdef01");
 }
 #[test]
-fn new_session_defers_create_session_for_non_project_dir() {
-    let mut app = project_picker_app();
-    let effects = dispatch(Action::NewSession, &mut app);
-    assert!(app.agents.contains_key(&AgentId(0)));
-    assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e, Effect::CreateSession { .. })),
-    );
-}
-#[test]
-fn new_session_creates_session_for_project_dir() {
-    let mut app = test_app();
-    app.project_picker_shown = false;
-    app.cwd = PathBuf::from("/Users/someone/my-project");
-    let effects = dispatch(Action::NewSession, &mut app);
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::CreateSession { .. })),
-    );
-}
-#[tokio::test]
-async fn project_selected_creates_session_and_sends_prompt() {
-    let mut app = project_picker_app();
-    dispatch(Action::NewSession, &mut app);
-    let id = AgentId(0);
-    let dir = std::env::temp_dir();
-    let selected = dunce::canonicalize(&dir).unwrap_or(dir);
-    let effects = dispatch(
-        Action::ProjectSelected {
-            path: selected.clone(),
-            stashed_prompt: "hello".into(),
-            disable_picker: false,
-        },
-        &mut app,
-    );
-    assert_eq!(app.agents[&id].session.cwd, selected);
-    assert_eq!(app.cwd, selected);
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::SetWorkingDir { path } if path == &selected))
-    );
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::CreateSession { cwd, .. } if cwd == &selected))
-    );
-    assert_eq!(app.agents[&id].session.queue_len(), 1);
-}
-#[test]
 fn bg_task_killed_no_op_for_unknown_session() {
     let mut app = two_agent_app_with_bg_task();
     let effects = dispatch(
@@ -1985,12 +2019,9 @@ fn cycle_mode_pre_session_clears_stale_yolo_under_pin() {
         "Plan+yolo resets to Normal (matches the with-session catch-all), not always-approve"
     );
 }
-/// Pre-session (welcome screen / fresh tab): Shift+Tab must cycle the
-/// mode locally (optimistic pending + deferred ACP push) AND kick off
-/// session creation — without emitting duplicate CreateSession effects
-/// on repeated presses.
+/// While session creation is in flight, Shift+Tab cycles the mode locally (optimistic pending plus a deferred ACP push) and never creates a session.
 #[test]
-fn dispatch_cycle_mode_pre_session_cycles_locally_and_creates_session() {
+fn dispatch_cycle_mode_pre_session_cycles_locally() {
     let mut app = test_app_with_agent();
     app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
     let effects = dispatch(Action::CycleMode, &mut app);
@@ -2006,10 +2037,10 @@ fn dispatch_cycle_mode_pre_session_cycles_locally_and_creates_session() {
         "Plan must be deferred to SessionCreated"
     );
     assert!(
-        effects
+        !effects
             .iter()
             .any(|e| matches!(e, Effect::CreateSession { .. })),
-        "first press must create the session, got {effects:?}"
+        "cycling a mode must not create a session, got {effects:?}"
     );
     let effects = dispatch(Action::CycleMode, &mut app);
     let agent = &app.agents[&AgentId(0)];
@@ -2021,7 +2052,7 @@ fn dispatch_cycle_mode_pre_session_cycles_locally_and_creates_session() {
         !effects
             .iter()
             .any(|e| matches!(e, Effect::CreateSession { .. })),
-        "no duplicate CreateSession, got {effects:?}"
+        "still no CreateSession, got {effects:?}"
     );
     assert!(
         effects.iter().any(|e| matches!(

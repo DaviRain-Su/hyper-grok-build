@@ -1212,6 +1212,20 @@ mod tests {
             output_total_bytes: 0,
         }
     }
+    /// A log that cannot be read produces an empty snapshot with a
+    /// non-zero total. The completion must still say how big the output
+    /// is and where to read it.
+    #[test]
+    fn bash_completion_for_an_unreadable_log_still_points_at_the_file() {
+        let mut task = make_completed("bg-unreadable");
+        task.output = String::new();
+        task.truncated = true;
+        task.output_total_bytes = 123_456;
+        task.output_file = std::path::PathBuf::from("/tmp/bg-unreadable.log");
+        let msg = format_bash_completion(&task, None, Some("read_file"));
+        assert!(msg.contains("123456 bytes total"), "{msg}");
+        assert!(msg.contains("/tmp/bg-unreadable.log"), "{msg}");
+    }
     /// The snapshot holds part of a large log. The footer the model reads must
     /// state the task's real size, not the size of the part on hand.
     #[test]

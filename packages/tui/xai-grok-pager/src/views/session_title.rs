@@ -157,7 +157,7 @@ pub(crate) fn sanitize_display_text(s: &str) -> Cow<'_, str> {
 }
 
 /// Format an elapsed duration as a compact relative label (`now`, `30s ago`,
-/// `5m ago`, `2h ago`, `3d ago`). Shared by the dashboard and project picker.
+/// `5m ago`, `2h ago`, `3d ago`).
 pub(crate) fn format_relative_time(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     if secs < 1 {

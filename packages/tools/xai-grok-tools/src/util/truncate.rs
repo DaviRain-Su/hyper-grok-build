@@ -139,15 +139,21 @@ pub fn truncate_with_preview(
     footer_hint: Option<&str>,
 ) -> (String, bool) {
     let PartialOutput { text, total_bytes } = output;
-    if text.len() <= max_bytes {
+    let whole = total_bytes <= text.len();
+    if whole && text.len() <= max_bytes {
         return (text.to_string(), false);
     }
 
-    let preview = truncate_str(text, preview_bytes.min(text.len()));
     let footer = match footer_hint {
         Some(hint) => format!("[Output truncated - {total_bytes} bytes total. {hint}]"),
         None => format!("[Output truncated - {total_bytes} bytes total]"),
     };
+    // Text that fits the limit can still be part of a larger output; the
+    // reader still needs the total size and where to find the rest.
+    if text.len() <= max_bytes {
+        return (format!("{text}\n\n{footer}"), true);
+    }
+    let preview = truncate_str(text, preview_bytes.min(text.len()));
     (format!("{preview}\n\n{footer}"), true)
 }
 
@@ -586,13 +592,29 @@ mod tests {
         assert!(result.contains("Use read_file for full content"));
     }
 
-    /// A caller holding part of a larger output states the real size.
+    /// A partial copy always states the size of the output it came from,
+    /// whether or not the text on hand needed cutting.
     #[test]
-    fn truncate_with_preview_reports_the_size_it_is_given() {
+    fn a_partial_copy_always_states_the_real_size() {
+        // The text fits the limit: kept whole, footer added.
+        let (result, truncated) = truncate_with_preview(
+            PartialOutput::part_of("held", 5_000_000),
+            4_000,
+            2_000,
+            Some("Use read_file for full content"),
+        );
+        assert!(truncated);
+        assert!(result.starts_with("held"), "{result}");
+        assert!(result.contains("5000000 bytes total"), "{result}");
+        assert!(
+            result.contains("Use read_file for full content"),
+            "{result}"
+        );
+
+        // The text is over the limit: cut, and the footer keeps the total.
         let held = "x".repeat(10_000);
         let (result, truncated) =
             truncate_with_preview(PartialOutput::part_of(&held, 5_000_000), 4_000, 2_000, None);
-
         assert!(truncated);
         assert!(result.contains("5000000 bytes total"), "{result}");
     }

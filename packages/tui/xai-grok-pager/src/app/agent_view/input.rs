@@ -277,7 +277,7 @@ impl AgentView {
     /// keep their in-overlay meaning. Dashboard-overlay only; the overlay
     /// stays pending (no answer sent).
     pub(crate) fn overlay_esc_backs_out(&self) -> bool {
-        use crate::views::question_view::{LocalQuestionKind, QuestionFocus};
+        use crate::views::question_view::QuestionFocus;
         if !self.in_dashboard_overlay {
             return false;
         }
@@ -291,7 +291,6 @@ impl AgentView {
             return self.active_pane != AgentPane::Scrollback
                 && qv.focus == QuestionFocus::Navigation
                 && qv.active_tab == 0
-                && !matches!(qv.local_kind, Some(LocalQuestionKind::ProjectSelect { .. }))
                 && !qv.active_tab_has_selection();
         }
         false

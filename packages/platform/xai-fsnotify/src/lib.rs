@@ -5,6 +5,7 @@
 //! Single workspace root only; multi-root composition (parent + worktrees)
 //! lives in the workspace layer.
 
+mod checkout;
 mod error;
 mod event;
 mod paths;
@@ -12,6 +13,7 @@ mod source;
 mod state;
 mod watcher;
 
+pub use checkout::watch_root_covers;
 pub use error::FsNotifyError;
 pub use event::{FsEvent, FsEventKind, GitMetaKind};
 pub use source::{

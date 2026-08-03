@@ -203,18 +203,20 @@ pub struct AuthChannels {
     pub code_rx: mpsc::Receiver<String>,
 }
 
+/// Sets no `GROK_AUTH_EXPIRED`: operator binaries, which live outside this
+/// repo, read that variable as "headless, don't prompt" and decline the run.
 async fn run_external_auth_provider(
     command: &str,
     auth_manager: &Arc<AuthManager>,
-    is_refresh: bool,
+    over_stale_credential: bool,
     on_stderr: Option<StderrCallback>,
 ) -> anyhow::Result<(GrokAuth, bool)> {
     let inherit_stderr = on_stderr.is_none();
     tracing::info!(
         cmd = %command,
-        is_refresh,
+        over_stale_credential,
         inherit_stderr,
-        "auth: running external auth provider"
+        "auth: running external auth provider (interactive login)"
     );
 
     // `sh -c` on unix, `cmd /C` on Windows — a hardcoded `sh` cannot spawn on a
@@ -235,10 +237,6 @@ async fn run_external_auth_provider(
         cmd.stderr(std::process::Stdio::inherit());
     } else {
         cmd.stderr(std::process::Stdio::piped());
-    }
-
-    if is_refresh {
-        cmd.env("GROK_AUTH_EXPIRED", "1");
     }
 
     xai_grok_tools::util::detach_command(&mut cmd);
@@ -299,7 +297,7 @@ async fn run_external_auth_provider(
     )?;
 
     // Token output has no profile; carry it forward, or fetch it when reauth cleared prev.
-    match (is_refresh, auth_manager.current_or_expired()) {
+    match (over_stale_credential, auth_manager.current_or_expired()) {
         (true, Some(prev)) => auth.carry_user_profile_from(&prev),
         _ => auth_manager.enrich_auth_inline(&mut auth).await,
     }
@@ -567,7 +565,7 @@ async fn run_auth_flow_steps(
         // OidcRefresher instances in sibling processes. Without this,
         // two processes can send the same refresh_token simultaneously,
         // triggering IdP refresh-token-family revocation (reuse detection).
-        let _file_lock = auth_manager
+        let file_lock = auth_manager
             .try_lock_auth_file_async(crate::auth::manager::AUTH_LOCK_TIMEOUT)
             .await;
 
@@ -578,7 +576,7 @@ async fn run_auth_flow_steps(
             "auth run_auth_flow expired path",
             None,
             Some(serde_json::json!({
-                "got_lock": _file_lock.is_some(),
+                "got_lock": file_lock.is_some(),
                 "disk_found": disk_auth.is_some(),
                 "disk_expired": disk_expired,
             })),
@@ -600,6 +598,10 @@ async fn run_auth_flow_steps(
         // Disk token not usable. Try the full auth() dispatcher which
         // handles OIDC refresh, external binary, disk re-read — all
         // through refresh_chain (single mutation point).
+        //
+        // flock does not nest: held across `auth()`, which re-acquires the same
+        // file lock, this blocks the process on itself until the lock timeout.
+        drop(file_lock);
         match auth_manager.auth().await {
             Ok(fresh) => return Ok((fresh, false)),
             Err(e) => {
@@ -635,8 +637,9 @@ async fn run_auth_flow_steps(
     }
 
     if let Some(ref cmd) = grok_com_config.auth_provider_command {
-        let is_refresh = reauth || auth_manager.is_expired();
-        match run_external_auth_provider(cmd, auth_manager, is_refresh, on_stderr).await {
+        let over_stale_credential = reauth || auth_manager.is_expired();
+        match run_external_auth_provider(cmd, auth_manager, over_stale_credential, on_stderr).await
+        {
             Ok(result) => return Ok(result),
             Err(e) => {
                 tracing::warn!(
@@ -1512,6 +1515,49 @@ mod tests {
         assert_eq!(auth.map(|a| a.key), Some("xai-ext-token".to_string()));
     }
 
+    #[tokio::test]
+    async fn interactive_login_carries_no_expired_flag_even_over_a_stale_credential() {
+        let echo_env = "printf '%s' \"e=${GROK_AUTH_EXPIRED:-unset}\"";
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = Arc::new(
+            AuthManager::new(dir.path(), GrokComConfig::default())
+                .with_proxy_base_url(&dead_proxy_url()),
+        );
+        mgr.hot_swap(GrokAuth {
+            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+            ..oidc_session("stale-token", None)
+        });
+
+        let (auth, _) = run_external_auth_provider(echo_env, &mgr, true, None)
+            .await
+            .expect("provider output must parse");
+        assert_eq!(
+            auth.key, "e=unset",
+            "a login over an expired credential must not tell the binary to take its silent path"
+        );
+    }
+
+    /// The script is the one published in `README.md`, which operators copy.
+    #[tokio::test]
+    async fn a_provider_written_to_the_published_contract_can_sign_in_after_an_expiry() {
+        let conforming =
+            r#"if [ "$GROK_AUTH_EXPIRED" = "1" ]; then exit 1; else printf '%s' sso-token; fi"#;
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = Arc::new(
+            AuthManager::new(dir.path(), GrokComConfig::default())
+                .with_proxy_base_url(&dead_proxy_url()),
+        );
+        mgr.hot_swap(GrokAuth {
+            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+            ..oidc_session("stale-token", None)
+        });
+
+        let (auth, _) = run_external_auth_provider(conforming, &mgr, true, None)
+            .await
+            .expect("the sign-in run must reach the binary's interactive branch");
+        assert_eq!(auth.key, "sso-token");
+    }
+
     /// External-provider output is team-pinned before persist (parity with OIDC
     /// / device-code): a wrong-team token is rejected and nothing is written.
     #[tokio::test]
@@ -1558,8 +1604,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn external_reauth_without_prev_auth_enriches_inline() {
-        // Regression: reauth clears the manager before the provider runs with
-        // is_refresh=true; flags must then come from /user, not default empty.
+        // Regression: reauth clears the manager before the provider runs over
+        // a stale credential; flags must then come from /user, not default
+        // empty.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let app = axum::Router::new().route(

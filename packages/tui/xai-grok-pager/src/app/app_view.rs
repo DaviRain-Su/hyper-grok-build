@@ -614,11 +614,6 @@ pub struct AppView {
     pub current_ui: xai_grok_shell::agent::config::UiConfig,
     /// Working directory.
     pub cwd: PathBuf,
-    /// Whether the project picker question has already been shown this session.
-    pub project_picker_shown: bool,
-    /// "Don't ask me again" opt-out from [`xai_grok_shell::util::config::resolve_hints`];
-    /// TUI writes to user `config.toml` only.
-    pub project_picker_disabled: bool,
     /// Whether the cwd is inside a git repository (any ancestor has `.git`).
     /// Pre-computed at startup so dispatch stays free of filesystem I/O.
     pub cwd_has_git_ancestor: bool,
@@ -1421,8 +1416,6 @@ impl AppView {
             settings_registry: Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            project_picker_shown: false,
-            project_picker_disabled: false,
             cwd_has_git_ancestor: std::env::current_dir()
                 .ok()
                 .is_some_and(|c| c.ancestors().any(|p| p.join(".git").exists())),
@@ -1638,13 +1631,12 @@ impl AppView {
     /// [`take_deferred_model_switch`](crate::app::dispatch::session::lifecycle::take_deferred_model_switch);
     /// resolving it here would use the pre-session dashboard catalog and a
     /// remapped menu id could resolve differently.
-    pub fn deferred_model_switch_from_cli(
-        &self,
-    ) -> Option<(
-        acp::ModelId,
-        Option<xai_grok_shell::sampling::types::ReasoningEffort>,
-    )> {
-        Some((self.cli_model_override.clone()?, None))
+    pub fn deferred_model_switch_from_cli(&self) -> Option<crate::app::agent::DeferredModelSwitch> {
+        Some(crate::app::agent::DeferredModelSwitch {
+            model_id: self.cli_model_override.clone()?,
+            effort: None,
+            prev_model_id: None,
+        })
     }
     /// Voice capture is armed: the in-prompt dictation overlay can show and
     /// Ctrl+Space can start capture.
@@ -2091,16 +2083,6 @@ impl AppView {
                 .map(|sid| sid.0.as_ref()),
             _ => None,
         }
-    }
-    /// Whether the project picker should intercept the next prompt.
-    pub fn needs_project_picker(&self) -> bool {
-        !self.project_picker_shown
-            && !self.project_picker_disabled
-            && !crate::project_picker::detection::is_project_dir(&self.cwd)
-    }
-    /// Mark the project picker as resolved so it won't fire again.
-    pub fn mark_project_picker_done(&mut self) {
-        self.project_picker_shown = true;
     }
     /// Show a toast on the currently active view.
     ///
@@ -6122,8 +6104,6 @@ pub(crate) mod tests {
             settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
             cwd: std::path::PathBuf::from("/tmp"),
-            project_picker_shown: true,
-            project_picker_disabled: false,
             cwd_has_git_ancestor: false,
             acp_tx: tx,
             scratch: crate::scrollback::render::ScratchBuffer::new(),
@@ -12246,30 +12226,6 @@ pub(crate) mod tests {
             app.agents.contains_key(&id),
             "ExitSession intercept must NOT remove the agent (it only closes the popup)",
         );
-    }
-    #[test]
-    fn needs_project_picker_false_when_disabled() {
-        let mut app = test_app();
-        app.project_picker_shown = false;
-        app.cwd = std::path::PathBuf::from("/tmp");
-        app.project_picker_disabled = true;
-        assert!(!app.needs_project_picker());
-    }
-    #[test]
-    fn needs_project_picker_false_when_already_shown() {
-        let mut app = test_app();
-        app.project_picker_shown = true;
-        app.cwd = std::path::PathBuf::from("/tmp");
-        app.project_picker_disabled = false;
-        assert!(!app.needs_project_picker());
-    }
-    #[test]
-    fn needs_project_picker_true_for_non_project_dir() {
-        let mut app = test_app();
-        app.project_picker_shown = false;
-        app.project_picker_disabled = false;
-        app.cwd = std::path::PathBuf::from("/tmp");
-        assert!(app.needs_project_picker());
     }
     /// Chat mode hides the welcome picker's source filter, so `f` must not
     /// cycle it; Build mode keeps the cycle.

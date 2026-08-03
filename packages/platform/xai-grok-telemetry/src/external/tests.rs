@@ -694,13 +694,36 @@ fn skill_activated_name_gated() {
         &events::SkillDispatched {
             skill_name: "internal-deploy-runbook".into(),
             plugin_source: None,
+            trigger: events::SkillTrigger::SlashCommand,
         },
     );
     let events = exported_events(&stream);
     let ev = &events[0];
     assert_eq!(attr(ev, "skill_source").as_deref(), Some("local"));
+    assert_eq!(attr(ev, "trigger").as_deref(), Some("slash_command"));
     assert_eq!(attr(ev, "skill.name"), None);
     assert!(!format!("{events:?}").contains("internal-deploy-runbook"));
+}
+
+#[test]
+fn skill_activated_exports_every_trigger() {
+    for (trigger, label) in [
+        (events::SkillTrigger::SlashCommand, "slash_command"),
+        (events::SkillTrigger::SkillMdRead, "skill_md_read"),
+        (events::SkillTrigger::SkillTool, "skill_tool"),
+    ] {
+        let stream = build(gates_off());
+        emit_event_into(
+            &stream,
+            &events::SkillDispatched {
+                skill_name: "pdf".into(),
+                plugin_source: None,
+                trigger,
+            },
+        );
+        let events = exported_events(&stream);
+        assert_eq!(attr(&events[0], "trigger").as_deref(), Some(label));
+    }
 }
 
 #[test]

@@ -864,15 +864,9 @@ pub(crate) async fn run_shell_child(
         }
     };
     let child_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd);
-    let cwd_outside_parent = match (
-        dunce::canonicalize(&child_cwd),
-        dunce::canonicalize(&ctx.parent_cwd),
-    ) {
-        (Ok(child), Ok(parent)) => !child.starts_with(&parent),
-        _ => child_cwd != ctx.parent_cwd,
-    };
+    let covered_by_parent = xai_fsnotify::watch_root_covers(&ctx.parent_cwd, &child_cwd);
     let subagent_fs_watch = FsWatchCapabilities {
-        hunk_tracking: ctx.hunk_tracking_enabled && cwd_outside_parent,
+        hunk_tracking: ctx.hunk_tracking_enabled && !covered_by_parent,
         ..FsWatchCapabilities::none()
     };
     let child_cwd_abs = xai_grok_paths::AbsPathBuf::new(child_cwd).unwrap_or_else(|_| {

@@ -1,15 +1,16 @@
-//! Data sources for the project picker: recent directories from session history.
+//! Recent project directories drawn from session history, plus path display shared by the dashboard.
 
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use xai_file_utils::workspace_classifier::is_project_dir;
 use xai_grok_shell::session::persistence::list_recent_summaries;
 
 pub async fn collect_recent_dirs(limit: usize) -> Vec<(PathBuf, DateTime<Utc>)> {
     let summaries = match list_recent_summaries(500).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!(error = %e, "project picker: failed to list recent sessions");
+            tracing::warn!(error = %e, "recent dirs: failed to list recent sessions");
             return vec![];
         }
     };
@@ -27,7 +28,7 @@ pub async fn collect_recent_dirs(limit: usize) -> Vec<(PathBuf, DateTime<Utc>)> 
         .into_iter()
         .filter_map(|(cwd, ts)| {
             let p = PathBuf::from(&cwd);
-            if p.is_dir() && super::detection::is_project_dir(&p) {
+            if p.is_dir() && is_project_dir(&p) {
                 Some((p, ts))
             } else {
                 None

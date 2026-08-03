@@ -17,7 +17,7 @@ use super::session::modal::dispatch_sessions_confirm_close;
 use super::turn::dispatch_cancel_turn;
 use super::voice::{merge_prompt_with_voice_interim, voice_stop_on_submit};
 use crate::app::actions::{Action, Effect};
-use crate::app::agent::AgentId;
+use crate::app::agent::{AgentId, DeferredModelSwitch};
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView, DashboardReturn, TrustState};
 use agent_client_protocol as acp;
@@ -811,11 +811,9 @@ pub(super) fn dispatch_dashboard_open_location_picker(app: &mut AppView) -> Vec<
     }
 
     let cwd = app.cwd.clone();
-    // Same pattern as `open_project_question` — the recent-dirs source is
-    // async; block the current runtime thread briefly to collect it.
+    // The recent-dirs source is async; block the current runtime thread briefly to collect it.
     let recent = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current()
-            .block_on(crate::project_picker::sources::collect_recent_dirs(10))
+        tokio::runtime::Handle::current().block_on(crate::recent_dirs::collect_recent_dirs(10))
     });
 
     // Worktree label index (root path → label), built once and reused to
@@ -829,17 +827,14 @@ pub(super) fn dispatch_dashboard_open_location_picker(app: &mut AppView) -> Vec<
     let mut candidates: Vec<LocationCandidate> = Vec::new();
     candidates.push(LocationCandidate {
         label: location_picker_label(&cwd),
-        detail: format!(
-            "{}  (current)",
-            crate::project_picker::sources::display_path(&cwd)
-        ),
+        detail: format!("{}  (current)", crate::recent_dirs::display_path(&cwd)),
         worktree: worktree_label(&cwd),
         path: cwd.clone(),
     });
     for (path, ts) in recent.into_iter().filter(|(p, _)| p != &cwd) {
         let detail = format!(
             "{}  ({})",
-            crate::project_picker::sources::display_path(&path),
+            crate::recent_dirs::display_path(&path),
             crate::views::session_title::format_relative_time(
                 (chrono::Utc::now() - ts).to_std().unwrap_or_default()
             ),
@@ -902,7 +897,7 @@ pub(super) fn dispatch_dashboard_change_location(app: &mut AppView, input: Strin
     );
 
     let changed = app.cwd != path;
-    let display = crate::project_picker::sources::display_path(&path);
+    let display = crate::recent_dirs::display_path(&path);
     app.cwd = path.clone();
     // Keep the git-repo flag in sync with the new cwd (it's otherwise only
     // computed at startup). Worktree dispatch reads it.
@@ -1198,10 +1193,7 @@ pub(super) fn dispatch_dashboard_dispatch(
         });
     let (prompt_text, mut pasted_images, chip_elements) = prompt_state.into_submission();
     log_dashboard_launched("prompt");
-    let saved_shown = app.project_picker_shown;
-    app.project_picker_shown = true;
     let (new_id, effects) = dispatch_new_session_inner_with_id(app, model_id);
-    app.project_picker_shown = saved_shown;
     let policy_block = app.yolo_policy_block;
     if let Some(agent) = app.agents.get_mut(&new_id) {
         agent.session.enqueue_prompt(prompt_text);
@@ -1617,7 +1609,12 @@ pub(super) fn apply_pending_dispatch_config(
         // deferred switch when an explicit effort must be pushed. Setting it
         // (or clearing to `None`) also overrides any CLI `-m` default so the
         // dashboard's `/model` choice wins.
-        agent.session.deferred_model_switch = m.effort.map(|e| (m.id.clone(), Some(e)));
+        agent.session.deferred_model_switch = m.effort.map(|e| DeferredModelSwitch {
+            model_id: m.id.clone(),
+            effort: Some(e),
+            // Effort-only push; no display change to roll back.
+            prev_model_id: None,
+        });
     }
     match pending_mode {
         DashboardDispatchMode::Normal => {

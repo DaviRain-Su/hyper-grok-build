@@ -7,9 +7,6 @@ use super::*;
 fn send_prompt_clears_active_ephemeral_tip() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    // Keep the project picker from intercepting the prompt in tests.
-    app.mark_project_picker_done();
-
     let agent = app.agents.get_mut(&id).unwrap();
     let _ = agent.ephemeral_tip.show(
         crate::tips::EphemeralTip::new("t", ratatui::text::Line::from("hint")),
@@ -526,7 +523,6 @@ fn small_screen_trigger_out_of_band_consumes_without_showing() {
 fn send_prompt_keeps_ambient_small_screen_tip() {
     use crate::tips::small_screen::SMALL_SCREEN_TIP_SEEN_KEY;
     let mut app = test_app_with_agent();
-    app.mark_project_picker_done();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().last_terminal_size = (100, 24);
 
@@ -603,7 +599,6 @@ fn ambient_tip_ttl_freezes_while_row_cannot_paint() {
 fn small_screen_tip_lifecycle_shows_once_across_submit_and_occlusion() {
     use crate::tips::small_screen::SMALL_SCREEN_TIP_SEEN_KEY;
     let mut app = test_app_with_agent();
-    app.mark_project_picker_done();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().last_terminal_size = (100, 24);
 
@@ -2352,6 +2347,30 @@ fn bash_while_idle_stays_on_local_path() {
     assert!(app.agents[&id].bash_turn);
 }
 
+/// A bash command submitted before the session binds is queued, clears the composer, and still lands
+/// in up-arrow history with its `! ` prefix. It waits for the drain rather than emitting an effect.
+#[test]
+fn bash_before_the_session_binds_is_queued_and_recorded() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.session_id = None;
+
+    let effects = dispatch(Action::SendBashCommand("ls -la".into()), &mut app);
+
+    assert!(effects.is_empty(), "nothing may send yet, got {effects:?}");
+    let agent = &app.agents[&id];
+    assert_eq!(agent.session.queue_len(), 1, "the command must be queued");
+    assert!(
+        agent.prompt.text().is_empty(),
+        "the composer must be cleared"
+    );
+    assert_eq!(
+        agent.session.prompt_history.first().map(String::as_str),
+        Some("! ls -la"),
+        "up-arrow history must record the command"
+    );
+}
+
 // ── Reconnect-pending dispatch guards ─────────────────────────────
 
 #[test]
@@ -2775,7 +2794,6 @@ fn prompt_history_loaded_refreshes_open_history_search_with_current_query() {
 fn agent_send_before_paste_probe_keeps_image() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app_with_agent();
-    app.project_picker_shown = true; // don't intercept the send with the picker
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -2942,7 +2960,6 @@ fn interject_before_paste_probe_keeps_image() {
 fn agent_paste_completion_after_switch_does_not_send_to_other_agent() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app_with_agent(); // agent A = AgentId(0), active view
-    app.project_picker_shown = true;
     let a = AgentId(0);
     let b = AgentId(1);
     // A second agent B for the user to switch to mid-probe.
@@ -3025,56 +3042,31 @@ fn agent_paste_completion_after_switch_does_not_send_to_other_agent() {
     );
 }
 
+/// A prompt submitted before the session binds is held in the agent's queue rather than dropped.
+/// `maybe_drain_queue` emits nothing until `SessionCreated` arrives.
 #[test]
-fn slash_passthrough_in_non_project_dir_creates_session() {
-    let mut app = project_picker_app();
+fn prompt_before_the_session_binds_is_queued() {
+    let mut app = test_app();
     dispatch(Action::NewSession, &mut app);
     let id = AgentId(0);
-
-    let effects =
-        dispatch_send_prompt_inner(&mut app, "/notarealcommandxyz".into(), true, false, false);
-
     assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::CreateSession { .. })),
-        "picker-bypassing pass-through must create the deferred session"
+        app.agents[&id].session.session_id.is_none(),
+        "precondition: session not bound yet"
     );
-    assert!(app.project_picker_shown);
-    assert_eq!(app.agents[&id].session.queue_len(), 1);
-}
 
-#[test]
-fn local_slash_in_non_project_dir_does_not_create_session() {
-    let mut app = project_picker_app();
-    dispatch(Action::NewSession, &mut app);
+    let effects = dispatch_send_prompt_inner(&mut app, "fix the bug".into(), true, false, false);
 
-    let effects = dispatch_send_prompt_inner(&mut app, "/dashboard".into(), true, false, false);
-
+    assert_eq!(
+        app.agents[&id].session.queue_len(),
+        1,
+        "the prompt must be queued, not dropped"
+    );
     assert!(
         !effects
             .iter()
-            .any(|e| matches!(e, Effect::CreateSession { .. })),
-        "pager-local commands must not create sessions"
+            .any(|e| matches!(e, Effect::SendPrompt { .. })),
+        "nothing may go to the wire before the session binds, got {effects:?}"
     );
-}
-
-#[test]
-fn slash_and_exit_input_does_not_trigger_project_picker() {
-    // Real prompts are eligible.
-    assert!(input_can_trigger_project_picker("fix the bug"));
-    assert!(input_can_trigger_project_picker("  hello world  "));
-    // Slash commands (e.g. /models, /help) must pass through untouched.
-    assert!(!input_can_trigger_project_picker("/models"));
-    assert!(!input_can_trigger_project_picker("/help"));
-    assert!(!input_can_trigger_project_picker("  /dashboard  "));
-    // Exit aliases and empty input never send a prompt.
-    assert!(!input_can_trigger_project_picker("exit"));
-    assert!(!input_can_trigger_project_picker("quit"));
-    assert!(!input_can_trigger_project_picker(":q"));
-    assert!(!input_can_trigger_project_picker(":wq!"));
-    assert!(!input_can_trigger_project_picker(""));
-    assert!(!input_can_trigger_project_picker("   "));
 }
 
 // ── Screen-mode slash gate tests ────────────────────────────────────

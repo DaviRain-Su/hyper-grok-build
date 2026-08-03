@@ -44,10 +44,7 @@ use super::modes::{
     permission_mode_toast,
 };
 use super::permissions::drain_permission_queue;
-use super::prompt::{
-    dispatch_doctor, dispatch_send_prompt, dispatch_send_prompt_inner,
-    input_can_trigger_project_picker,
-};
+use super::prompt::{dispatch_doctor, dispatch_send_prompt, dispatch_send_prompt_inner};
 use super::session::fork::build_child_fork_marker;
 use super::session::lifecycle::{dispatch_new_session_inner, drain_startup_actions, finish_trust};
 use super::session::load::{dispatch_load_session_with_restore, reanchor_grouped_selection};
@@ -86,8 +83,6 @@ fn test_app() -> AppView {
         settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
         current_ui: xai_grok_shell::agent::config::UiConfig::default(),
         cwd: PathBuf::from("/tmp"),
-        project_picker_shown: true,
-        project_picker_disabled: false,
         cwd_has_git_ancestor: false,
         acp_tx: tx,
         scratch: crate::scrollback::render::ScratchBuffer::new(),
@@ -748,12 +743,6 @@ fn two_agent_app_with_bg_task() -> AppView {
     app.agents.insert(id1, agent1);
     app.next_agent_id = 2;
     assert!(matches!(app.active_view, ActiveView::Agent(AgentId(0))));
-    app
-}
-fn project_picker_app() -> AppView {
-    let mut app = test_app();
-    app.cwd = PathBuf::from("/tmp");
-    app.project_picker_shown = false;
     app
 }
 /// Test helper: open Settings then OpenResetConfirm for `key`.

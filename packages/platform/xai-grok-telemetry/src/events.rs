@@ -805,11 +805,24 @@ pub struct SkillRemoved {
     pub success: bool,
 }
 
+#[derive(Serialize, Clone, Copy, strum::IntoStaticStr)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum SkillTrigger {
+    /// The user ran `/skill-name`, at turn start or mid-turn.
+    SlashCommand,
+    /// The model read the skill's `SKILL.md` with `read_file`.
+    SkillMdRead,
+    /// The model called the skill tool, which only vendor-compat toolsets register.
+    SkillTool,
+}
+
 #[derive(Serialize)]
 pub struct SkillDispatched {
     pub skill_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_source: Option<String>,
+    pub trigger: SkillTrigger,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1220,33 +1233,6 @@ pub struct PagerSlashCommand {
 #[derive(Serialize)]
 pub struct PlanSubmit {
     pub action: String,
-}
-
-/// Which option the user chose in the project-directory picker (shown on the
-/// first prompt when Grok Build is launched from a non-project directory).
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectPickerOutcome {
-    RecentProject,
-    CustomPath,
-    CurrentDir,
-    DontAskAgain,
-    Dismissed,
-}
-
-impl ProjectPickerOutcome {
-    pub fn picked_project(self) -> bool {
-        matches!(self, Self::RecentProject | Self::CustomPath)
-    }
-}
-
-/// User resolved the project-directory picker. `picked_project` is the headline
-/// signal: did they actually choose a project directory?
-#[derive(Serialize)]
-pub struct ProjectPickerSelected {
-    pub outcome: ProjectPickerOutcome,
-    pub picked_project: bool,
-    pub project_dir_options: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -1894,7 +1880,6 @@ telemetry_event!(
 );
 telemetry_event!(PagerSlashCommand, "pager_slash_command");
 telemetry_event!(PlanSubmit, "plan_submit");
-telemetry_event!(ProjectPickerSelected, "project_picker_selected");
 telemetry_event!(SuperGrokUpsellShown, "supergrok_upsell_shown");
 telemetry_event!(SuperGrokUpsellClicked, "supergrok_upsell_clicked");
 telemetry_event!(AnnouncementCtaShown, "announcement_cta_shown");
@@ -2093,75 +2078,6 @@ mod tests {
     }
 
     #[test]
-    fn project_picker_selected_name_and_shape() {
-        assert_eq!(ProjectPickerSelected::NAME, "project_picker_selected");
-
-        let picked = serde_json::to_value(ProjectPickerSelected {
-            outcome: ProjectPickerOutcome::RecentProject,
-            picked_project: ProjectPickerOutcome::RecentProject.picked_project(),
-            project_dir_options: 3,
-        })
-        .unwrap();
-        assert_eq!(
-            picked,
-            serde_json::json!({
-                "outcome": "recent_project",
-                "picked_project": true,
-                "project_dir_options": 3,
-            })
-        );
-
-        let dismissed = serde_json::to_value(ProjectPickerSelected {
-            outcome: ProjectPickerOutcome::Dismissed,
-            picked_project: ProjectPickerOutcome::Dismissed.picked_project(),
-            project_dir_options: 1,
-        })
-        .unwrap();
-        assert_eq!(
-            dismissed,
-            serde_json::json!({
-                "outcome": "dismissed",
-                "picked_project": false,
-                "project_dir_options": 1,
-            })
-        );
-    }
-
-    #[test]
-    fn project_picker_outcome_picked_project_mapping() {
-        assert!(ProjectPickerOutcome::RecentProject.picked_project());
-        assert!(ProjectPickerOutcome::CustomPath.picked_project());
-        assert!(!ProjectPickerOutcome::CurrentDir.picked_project());
-        assert!(!ProjectPickerOutcome::DontAskAgain.picked_project());
-        assert!(!ProjectPickerOutcome::Dismissed.picked_project());
-    }
-
-    #[test]
-    fn project_picker_outcome_wire_strings() {
-        let s = |o: ProjectPickerOutcome| serde_json::to_value(o).unwrap();
-        assert_eq!(
-            s(ProjectPickerOutcome::RecentProject),
-            serde_json::json!("recent_project")
-        );
-        assert_eq!(
-            s(ProjectPickerOutcome::CustomPath),
-            serde_json::json!("custom_path")
-        );
-        assert_eq!(
-            s(ProjectPickerOutcome::CurrentDir),
-            serde_json::json!("current_dir")
-        );
-        assert_eq!(
-            s(ProjectPickerOutcome::DontAskAgain),
-            serde_json::json!("dont_ask_again")
-        );
-        assert_eq!(
-            s(ProjectPickerOutcome::Dismissed),
-            serde_json::json!("dismissed")
-        );
-    }
-
-    #[test]
     fn plugin_cta_event_names() {
         assert_eq!(PluginCtaImpression::NAME, "plugin_cta_impression");
         assert_eq!(PluginCtaConnectClicked::NAME, "plugin_cta_connect_clicked");
@@ -2197,6 +2113,27 @@ mod tests {
                 "changed": false,
             })
         );
+    }
+
+    /// Serde renames the payload field, strum renders the external label: two snake_case implementations, so pin that they agree on every variant.
+    #[test]
+    fn skill_trigger_serializes_the_same_string_strum_yields() {
+        for trigger in [
+            SkillTrigger::SlashCommand,
+            SkillTrigger::SkillMdRead,
+            SkillTrigger::SkillTool,
+        ] {
+            let serde = serde_json::to_value(SkillDispatched {
+                skill_name: "pdf".into(),
+                plugin_source: None,
+                trigger,
+            })
+            .unwrap();
+            assert_eq!(
+                serde,
+                serde_json::json!({ "skill_name": "pdf", "trigger": <&'static str>::from(trigger) })
+            );
+        }
     }
 
     #[test]

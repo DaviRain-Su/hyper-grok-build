@@ -1341,13 +1341,6 @@ fn cycle_mode_pre_session_always_approve_to_normal_persists_ask() {
         "pre-session Always-Approve → Normal must persist 'ask' \
          (stale config.toml relaunches yolo), got {effects:?}"
     );
-    // Welcome-screen Shift+Tab still kicks off session creation.
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::CreateSession { .. })),
-        "expected CreateSession alongside the persist, got {effects:?}"
-    );
 }
 
 /// Negative control for the pre-session persist: Normal → Plan changes the

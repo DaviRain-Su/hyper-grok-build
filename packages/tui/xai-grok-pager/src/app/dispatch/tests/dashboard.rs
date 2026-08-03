@@ -872,10 +872,11 @@ fn dashboard_confirm_worktree_applies_pending_model_and_plan() {
     let agent = &app.agents[&wt_id];
     assert_eq!(
         agent.session.deferred_model_switch,
-        Some((
+        Some(crate::app::agent::DeferredModelSwitch {
             model_id,
-            Some(xai_grok_shell::sampling::types::ReasoningEffort::High)
-        )),
+            effort: Some(xai_grok_shell::sampling::types::ReasoningEffort::High),
+            prev_model_id: None,
+        }),
         "effort must be stashed for the shell",
     );
     assert_eq!(
@@ -1016,7 +1017,6 @@ fn dashboard_image_dispatch_cancel_rewind_resends_attachment() {
 fn dashboard_dispatch_send_before_paste_probe_keeps_image() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app_with_agent();
-    app.project_picker_shown = true;
     open_dashboard(&mut app);
     crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook::with_raster(
         None,
@@ -1112,7 +1112,6 @@ fn dashboard_dispatch_send_before_paste_probe_keeps_image() {
 fn dashboard_second_stash_does_not_overwrite_first() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app_with_agent();
-    app.project_picker_shown = true;
     open_dashboard(&mut app);
     let row = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
     let fields = crate::views::dashboard::peek::compute_peek_fields(&row, &app.agents)
@@ -2037,10 +2036,11 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
     let agent = &app.agents[&new_id];
     assert_eq!(
         agent.session.deferred_model_switch,
-        Some((
+        Some(crate::app::agent::DeferredModelSwitch {
             model_id,
-            Some(xai_grok_shell::sampling::types::ReasoningEffort::High)
-        )),
+            effort: Some(xai_grok_shell::sampling::types::ReasoningEffort::High),
+            prev_model_id: None,
+        }),
         "effort must be stashed for the shell"
     );
     assert_eq!(
@@ -2078,10 +2078,11 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
     let agent = &app.agents[&new_id];
     assert_eq!(
         agent.session.deferred_model_switch,
-        Some((
+        Some(crate::app::agent::DeferredModelSwitch {
             model_id,
-            Some(xai_grok_shell::sampling::types::ReasoningEffort::High)
-        )),
+            effort: Some(xai_grok_shell::sampling::types::ReasoningEffort::High),
+            prev_model_id: None,
+        }),
         "effort must be stashed for the shell"
     );
     assert_eq!(

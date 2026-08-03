@@ -224,8 +224,7 @@ pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, _cause: Switch
     // that forgets the deferring chokepoint gate trips this in debug/tests. The
     // deferring chokepoints (`dispatch_new_session`/`_worktree_session`/
     // `_load_session_inner`) stash+return BEFORE reaching here, so this never
-    // fires on the reachable gated paths. (`dispatch_project_selected` re-creates
-    // an already-active, post-gate agent without switching, so it is exempt.)
+    // fires on the reachable gated paths.
     // `_cause` stays underscored so it isn't flagged unused once `debug_assert!`
     // compiles out in release.
     debug_assert!(
