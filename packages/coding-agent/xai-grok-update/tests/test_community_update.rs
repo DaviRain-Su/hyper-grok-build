@@ -1412,14 +1412,17 @@ fn install_ps1_static_syntax_and_contract_markers() {
         }
     }
 
+    // PowerShell requires [ref] targets to be *existing variables* — `[ref]$null`
+    // and an undeclared `$errs` raise InvalidOperation on modern pwsh and fail
+    // the static parse gate even when install.ps1 itself is fine.
     if let Ok(status) = Command::new("pwsh")
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
             &format!(
-                "$null = [System.Management.Automation.Language.Parser]::ParseFile('{}', [ref]$null, [ref]$errs); if ($errs) {{ $errs | ForEach-Object {{ $_.ToString() }}; exit 1 }}",
-                ps1.display()
+                "$tokens = $null; $errs = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile('{}', [ref]$tokens, [ref]$errs); if ($errs) {{ $errs | ForEach-Object {{ $_.ToString() }}; exit 1 }}",
+                ps1.display().to_string().replace('\'', "''")
             ),
         ])
         .status()
