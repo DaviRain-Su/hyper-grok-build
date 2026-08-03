@@ -20,7 +20,7 @@ build_guest() {
   )
 }
 
-EX="$ROOT/crates/codegen/xai-grok-extension-runtime/examples"
+EX="$ROOT/packages/extensions/xai-grok-extension-runtime/examples"
 build_guest "$EX/rust-guest-template" hyper_ext_rust_guest_template
 build_guest "$EX/sdk-path-guard" sdk_path_guard
 build_guest "$EX/sdk-stop-once" sdk_stop_once

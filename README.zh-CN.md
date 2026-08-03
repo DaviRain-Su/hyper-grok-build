@@ -35,7 +35,7 @@ Português、Français、Deutsch、Русский),并可在设置中实时切�
 [许可证](#许可证)
 
 **English: [README.md](README.md)** ·
-**中文用户指南: [docs/user-guide-zh-CN/](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)**
+**中文用户指南: [docs/user-guide-zh-CN/](packages/tui/xai-grok-pager/docs/user-guide-zh-CN/)**
 
 </div>
 
@@ -44,7 +44,7 @@ Português、Français、Deutsch、Русский),并可在设置中实时切�
 ## 界面截图
 
 真实 TUI(在 PTY 中用仓库内置的
-[`tui_shot`](crates/codegen/xai-grok-pager-pty-harness/examples/tui_shot.rs)
+[`tui_shot`](packages/tui/xai-grok-pager-pty-harness/examples/tui_shot.rs)
 工具捕获),展示 10 种 UI 语言中的两种:
 
 | English | 简体中文 |
@@ -140,7 +140,7 @@ nix develop                                   # 提供 rust + protoc + cmake + g
 ## 供应商
 
 Hyper 保留了本代码树中的多供应商注册表(见 pager
-[用户指南（中文）](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)):
+[用户指南（中文）](packages/tui/xai-grok-pager/docs/user-guide-zh-CN/)):
 
 | 平台 | 认证方式 | 备注 |
 | -------- | ---- | ----- |
@@ -155,7 +155,7 @@ Hyper 保留了本代码树中的多供应商注册表(见 pager
 
 选择器中的模型 id 形如 `{platform}/{model}`(例如
 `kimi-code/k3`、`opencode-go/kimi-k3`、`openai-codex/gpt-5.6-sol`)。各平台文档位于
-`crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/`(Moonshot、Kimi Code、
+`packages/tui/xai-grok-pager/docs/user-guide-zh-CN/`(Moonshot、Kimi Code、
 OpenAI Codex 等)。
 
 配置和凭据仍然存放在 **`~/.grok`**(与上游 Grok Build 相同的路径),
@@ -198,7 +198,7 @@ cargo build -p xai-grok-pager-bin --profile release-dist
 ## 发布
 
 1. 将根目录的 [`VERSION`](VERSION) 文件设置为 **monorepo 锁步客户端版本**
-   (与 `crates/codegen/xai-grok-pager/Cargo.toml` /
+   (与 `packages/tui/xai-grok-pager/Cargo.toml` /
    `xai-grok-version` 保持一致,当前为 `0.2.118-r1`)。CI 会把它编译进
    `x-grok-client-version`;xAI 会拒绝低于 **0.1.202** 的客户端(HTTP 426)。
    **不要**自己编造一个较低的营销版本号(例如 `0.1.0`)。
@@ -271,13 +271,13 @@ Amp 风格的 **agent 模式**(low / medium / high / ultra 档位)目前**仅有
 仓库内用户指南(示例中可能仍写着 `grok`;Hyper 的二进制名是
 `hyper`,路径仍在 `~/.grok` 下):
 
-- 中文：[用户指南（中文）](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)
-- English：[User Guide](crates/codegen/xai-grok-pager/docs/user-guide/)
+- 中文：[用户指南（中文）](packages/tui/xai-grok-pager/docs/user-guide-zh-CN/)
+- English：[User Guide](packages/tui/xai-grok-pager/docs/user-guide/)
 
 相关扩展文档：
 
-- [Hooks 与 Plugins 指南（中文）](crates/codegen/xai-grok-pager/docs/hooks-and-plugins.zh-CN.md)
-- [自定义 Hooks 指南（中文）](crates/codegen/xai-grok-pager/docs/custom-hooks.zh-CN.md)
+- [Hooks 与 Plugins 指南（中文）](packages/tui/xai-grok-pager/docs/hooks-and-plugins.zh-CN.md)
+- [自定义 Hooks 指南（中文）](packages/tui/xai-grok-pager/docs/custom-hooks.zh-CN.md)
 
 上游产品文档:[docs.x.ai/build](https://docs.x.ai/build/overview)
 
@@ -287,18 +287,27 @@ Amp 风格的 **agent 模式**(low / medium / high / ultra 档位)目前**仅有
 
 ## 仓库结构
 
+按 [pi-mono](https://github.com/earendil-works/pi) 风格将 crate 分到
+`packages/*` 分层（crate 名仍为 `xai-*`，便于上游 merge）。
+详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 与
+[docs/UPSTREAM_PATH_MAP.md](docs/UPSTREAM_PATH_MAP.md)。
+
 | 路径 | 内容 |
 |------|----------|
-| `crates/codegen/xai-grok-pager-bin` | 组合根;构建 `hyper` 二进制 |
-| `crates/codegen/xai-grok-pager` | TUI |
-| `crates/codegen/xai-grok-shell` | Agent 运行时 |
+| `packages/ai/` | 模型、鉴权、采样、HTTP、语音 |
+| `packages/agent/` | Agent 循环、会话状态、压缩、HyperCore |
+| `packages/tools/` | 工具、沙箱、workspace、computer-hub |
+| `packages/tui/` | Pager TUI、渲染、Markdown、PTY |
+| `packages/coding-agent/` | Shell 会话 + `hyper` 二进制组合根 |
+| `packages/extensions/` | WASM 扩展宿主 / SDK / marketplace |
+| `packages/platform/` | 路径、FS/git、崩溃、遥测、测试 |
+| `packages/build/` | 构建辅助（protoc） |
 | `install.sh` / `install.ps1` | 发布安装脚本 |
 | `.github/workflows/release.yml` | 多平台发布 CI |
 
 > [!IMPORTANT]
-> 根目录的 `Cargo.toml`(workspace 成员 / 依赖版本)是从 monorepo
-> **生成**的 —— 请将其视为只读。本地修改请编辑各个 crate 自己的
-> `Cargo.toml`,这样在同步时才能保留下来。
+> 优先编辑各 crate 自己的 `Cargo.toml`。新增 crate 时同步更新根目录
+> `Cargo.toml` 的 workspace members。
 
 ---
 

@@ -9,7 +9,7 @@
 # upstream yanks for the hardened CLI binary. Warp's engine delegates layout
 # to a Rust port of dagre.js (the same algorithm mermaid.js uses), which fixes
 # the cyclic-flowchart back-edge mis-routing of the previous engine. See
-# crates/codegen/xai-grok-mermaid.
+# packages/tui/xai-grok-mermaid.
 #
 # ============================================================================
 # VENDORING NOTES — single source of truth. Re-apply / re-bless ALL of the
@@ -119,7 +119,7 @@
 #     theme-colored axes/text (was a fixed near-black, invisible on dark). `bar`
 #     stays unsupported (ignored). Covered by `xychart_diagram::tests` here and
 #     the `categorical_xychart_*` raster test in
-#     crates/codegen/xai-grok-mermaid/tests/pure_engine.rs.
+#     packages/tui/xai-grok-mermaid/tests/pure_engine.rs.
 #
 # Re-audit checklist:
 #  - This crate's own source contains no `unsafe` and no filesystem / network I/O.

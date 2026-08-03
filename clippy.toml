@@ -1,4 +1,4 @@
-# Clippy config for crates/codegen/**.
+# Clippy config for packages/** workspace crates.
 #
 # NOTE: clippy uses the NEAREST clippy.toml (no merging), so this file must
 # duplicate any settings from the repo-root //clippy.toml.

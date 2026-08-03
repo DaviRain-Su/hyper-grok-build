@@ -14,7 +14,7 @@ Run from the repository root.
 
 from pathlib import Path
 
-AGENT_DIR = Path("crates/codegen/xai-grok-agent")
+AGENT_DIR = Path("packages/agent/xai-grok-agent")
 OUT = AGENT_DIR / "src/prompt/prompt_encrypted.rs"
 
 # (const name, template path, seed) — order matches PROMPT_SEEDS.

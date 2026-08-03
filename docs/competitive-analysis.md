@@ -63,7 +63,7 @@ Hyper 已经站在「一流终端 coding agent」梯队：hashline 编辑、LSP�
 - 配置与凭证：`~/.grok`；二进制：`~/.hyper`
 
 详见根目录 [README.md](../README.md) 与
-[user-guide](../crates/codegen/xai-grok-pager/docs/user-guide/)。
+[user-guide](../packages/tui/xai-grok-pager/docs/user-guide/)。
 
 ### 2.2 已具备的关键能力（与竞品重叠大）
 
@@ -523,7 +523,7 @@ Hyper 可占据的位置（power user）：
 | Codex CLI | https://github.com/openai/codex |
 | OpenCode | https://github.com/anomalyco/opencode |
 | Goose | https://github.com/block/goose （组织迁移时以官方为准） |
-| Hyper | [README.md](../README.md) · [user-guide](../crates/codegen/xai-grok-pager/docs/user-guide/) |
+| Hyper | [README.md](../README.md) · [user-guide](../packages/tui/xai-grok-pager/docs/user-guide/) |
 | Hyper 设计 | [design-oracle.md](./design-oracle.md) · [design-modes.md](./design-modes.md) · [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) |
 
 ---

@@ -486,6 +486,6 @@ effort = "medium"
 - Amp Modes: https://ampcode.com/modes  
 - Amp Manual: https://ampcode.com/manual  
 - Hyper 竞品分析: [competitive-analysis.md](./competitive-analysis.md)  
-- 现有 subagent 文档: `crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md`  
+- 现有 subagent 文档: `packages/tui/xai-grok-pager/docs/user-guide/16-subagents.md`  
 - 现有解析: `xai-grok-shell/.../subagent/mod.rs`（`resolve_subagent_sampling_config`）  
 - 现有 overrides: `xai-grok-subagent-resolution`  

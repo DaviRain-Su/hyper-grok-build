@@ -228,5 +228,5 @@ TUI：`/agents` → 选 `oracle` → `m` 钉模型（已有）。
 ## 11. 参考
 
 - 现有 Oracle：`xai-tool-types` `ORACLE_PROMPT` / `ORACLE_SUBAGENT`；`AgentDefinition::oracle()`
-- 用户文档：`crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md`（Consulting the Oracle）
+- 用户文档：`packages/tui/xai-grok-pager/docs/user-guide/16-subagents.md`（Consulting the Oracle）
 - Amp Oracle / Modes：https://ampcode.com/manual 、https://ampcode.com/modes

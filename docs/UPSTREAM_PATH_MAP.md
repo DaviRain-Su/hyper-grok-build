@@ -1,0 +1,95 @@
+# Upstream path map
+
+Hyper reorganized crates into `packages/*` (pi-mono style).
+Upstream `xai-org/grok-build` still uses `crates/codegen` and `crates/common`.
+
+Use this table (or `scripts/upstream-path-rewrite.py`) when merging upstream patches.
+
+| Upstream (old) | Hyper (new) | Package layer |
+|----------------|-------------|---------------|
+| `crates/codegen/ptyctl` | `packages/tui/ptyctl` | `tui` |
+| `crates/codegen/ptyctl-cli` | `packages/tui/ptyctl-cli` | `tui` |
+| `crates/codegen/xai-acp-lib` | `packages/coding-agent/xai-acp-lib` | `coding-agent` |
+| `crates/codegen/xai-agent-lifecycle` | `packages/agent/xai-agent-lifecycle` | `agent` |
+| `crates/codegen/xai-chat-state` | `packages/agent/xai-chat-state` | `agent` |
+| `crates/common/xai-circuit-breaker` | `packages/platform/xai-circuit-breaker` | `platform` |
+| `crates/codegen/xai-codebase-graph` | `packages/platform/xai-codebase-graph` | `platform` |
+| `crates/common/xai-computer-hub-core` | `packages/tools/xai-computer-hub-core` | `tools` |
+| `crates/common/xai-computer-hub-mcp-adapter` | `packages/tools/xai-computer-hub-mcp-adapter` | `tools` |
+| `crates/common/xai-computer-hub-sdk` | `packages/tools/xai-computer-hub-sdk` | `tools` |
+| `crates/codegen/xai-crash-handler` | `packages/platform/xai-crash-handler` | `platform` |
+| `crates/codegen/xai-fast-worktree` | `packages/platform/xai-fast-worktree` | `platform` |
+| `crates/codegen/xai-file-utils` | `packages/platform/xai-file-utils` | `platform` |
+| `crates/codegen/xai-fsnotify` | `packages/platform/xai-fsnotify` | `platform` |
+| `crates/codegen/xai-gix-status` | `packages/platform/xai-gix-status` | `platform` |
+| `crates/codegen/xai-grok-agent` | `packages/agent/xai-grok-agent` | `agent` |
+| `crates/codegen/xai-grok-announcements` | `packages/coding-agent/xai-grok-announcements` | `coding-agent` |
+| `crates/codegen/xai-grok-auth` | `packages/ai/xai-grok-auth` | `ai` |
+| `crates/common/xai-grok-compaction` | `packages/agent/xai-grok-compaction` | `agent` |
+| `crates/codegen/xai-grok-config` | `packages/coding-agent/xai-grok-config` | `coding-agent` |
+| `crates/codegen/xai-grok-config-types` | `packages/coding-agent/xai-grok-config-types` | `coding-agent` |
+| `crates/codegen/xai-grok-dashboard` | `packages/coding-agent/xai-grok-dashboard` | `coding-agent` |
+| `crates/codegen/xai-grok-env` | `packages/platform/xai-grok-env` | `platform` |
+| `crates/codegen/xai-grok-extension-api` | `packages/extensions/xai-grok-extension-api` | `extensions` |
+| `crates/codegen/xai-grok-extension-macros` | `packages/extensions/xai-grok-extension-macros` | `extensions` |
+| `crates/codegen/xai-grok-extension-runtime` | `packages/extensions/xai-grok-extension-runtime` | `extensions` |
+| `crates/codegen/xai-grok-extension-sdk` | `packages/extensions/xai-grok-extension-sdk` | `extensions` |
+| `crates/codegen/xai-grok-extra-ca` | `packages/platform/xai-grok-extra-ca` | `platform` |
+| `crates/codegen/xai-grok-hooks` | `packages/coding-agent/xai-grok-hooks` | `coding-agent` |
+| `crates/codegen/xai-grok-http` | `packages/ai/xai-grok-http` | `ai` |
+| `crates/codegen/xai-grok-markdown` | `packages/tui/xai-grok-markdown` | `tui` |
+| `crates/codegen/xai-grok-markdown-core` | `packages/tui/xai-grok-markdown-core` | `tui` |
+| `crates/codegen/xai-grok-mcp` | `packages/coding-agent/xai-grok-mcp` | `coding-agent` |
+| `crates/codegen/xai-grok-memory` | `packages/coding-agent/xai-grok-memory` | `coding-agent` |
+| `crates/codegen/xai-grok-mermaid` | `packages/tui/xai-grok-mermaid` | `tui` |
+| `crates/codegen/xai-grok-models` | `packages/ai/xai-grok-models` | `ai` |
+| `crates/codegen/xai-grok-pager` | `packages/tui/xai-grok-pager` | `tui` |
+| `crates/codegen/xai-grok-pager-bin` | `packages/coding-agent/xai-grok-pager-bin` | `coding-agent` |
+| `crates/codegen/xai-grok-pager-minimal` | `packages/tui/xai-grok-pager-minimal` | `tui` |
+| `crates/codegen/xai-grok-pager-pty-harness` | `packages/tui/xai-grok-pager-pty-harness` | `tui` |
+| `crates/codegen/xai-grok-pager-render` | `packages/tui/xai-grok-pager-render` | `tui` |
+| `crates/codegen/xai-grok-paths` | `packages/platform/xai-grok-paths` | `platform` |
+| `crates/codegen/xai-grok-plugin-marketplace` | `packages/extensions/xai-grok-plugin-marketplace` | `extensions` |
+| `crates/codegen/xai-grok-sampler` | `packages/ai/xai-grok-sampler` | `ai` |
+| `crates/codegen/xai-grok-sampling-types` | `packages/ai/xai-grok-sampling-types` | `ai` |
+| `crates/codegen/xai-grok-sandbox` | `packages/tools/xai-grok-sandbox` | `tools` |
+| `crates/codegen/xai-grok-secrets` | `packages/platform/xai-grok-secrets` | `platform` |
+| `crates/codegen/xai-grok-shared` | `packages/coding-agent/xai-grok-shared` | `coding-agent` |
+| `crates/codegen/xai-grok-shell` | `packages/coding-agent/xai-grok-shell` | `coding-agent` |
+| `crates/codegen/xai-grok-shell-base` | `packages/coding-agent/xai-grok-shell-base` | `coding-agent` |
+| `crates/codegen/xai-grok-shell-session-support` | `packages/coding-agent/xai-grok-shell-session-support` | `coding-agent` |
+| `crates/codegen/xai-grok-subagent-resolution` | `packages/agent/xai-grok-subagent-resolution` | `agent` |
+| `crates/codegen/xai-grok-telemetry` | `packages/platform/xai-grok-telemetry` | `platform` |
+| `crates/codegen/xai-grok-test-support` | `packages/platform/xai-grok-test-support` | `platform` |
+| `crates/codegen/xai-grok-tools` | `packages/tools/xai-grok-tools` | `tools` |
+| `crates/codegen/xai-grok-tools-api` | `packages/tools/xai-grok-tools-api` | `tools` |
+| `crates/codegen/xai-grok-update` | `packages/coding-agent/xai-grok-update` | `coding-agent` |
+| `crates/codegen/xai-grok-version` | `packages/platform/xai-grok-version` | `platform` |
+| `crates/codegen/xai-grok-voice` | `packages/ai/xai-grok-voice` | `ai` |
+| `crates/codegen/xai-grok-workspace` | `packages/tools/xai-grok-workspace` | `tools` |
+| `crates/codegen/xai-grok-workspace-client` | `packages/tools/xai-grok-workspace-client` | `tools` |
+| `crates/codegen/xai-grok-workspace-types` | `packages/tools/xai-grok-workspace-types` | `tools` |
+| `crates/codegen/xai-hooks-plugins-types` | `packages/coding-agent/xai-hooks-plugins-types` | `coding-agent` |
+| `crates/codegen/xai-hunk-tracker` | `packages/platform/xai-hunk-tracker` | `platform` |
+| `crates/codegen/xai-hyper-core` | `packages/agent/xai-hyper-core` | `agent` |
+| `crates/codegen/xai-hyper-host` | `packages/agent/xai-hyper-host` | `agent` |
+| `crates/common/xai-interjection-core` | `packages/agent/xai-interjection-core` | `agent` |
+| `crates/codegen/xai-mixpanel` | `packages/ai/xai-mixpanel` | `ai` |
+| `crates/codegen/xai-prompt-queue` | `packages/agent/xai-prompt-queue` | `agent` |
+| `crates/build/xai-proto-build` | `packages/build/xai-proto-build` | `build` |
+| `crates/codegen/xai-ratatui-inline` | `packages/tui/xai-ratatui-inline` | `tui` |
+| `crates/codegen/xai-ratatui-textarea` | `packages/tui/xai-ratatui-textarea` | `tui` |
+| `crates/codegen/xai-sqlite-journal` | `packages/platform/xai-sqlite-journal` | `platform` |
+| `crates/codegen/xai-system-power` | `packages/platform/xai-system-power` | `platform` |
+| `crates/common/xai-test-utils` | `packages/platform/xai-test-utils` | `platform` |
+| `crates/codegen/xai-token-estimation` | `packages/ai/xai-token-estimation` | `ai` |
+| `crates/common/xai-tool-protocol` | `packages/tools/xai-tool-protocol` | `tools` |
+| `crates/common/xai-tool-runtime` | `packages/tools/xai-tool-runtime` | `tools` |
+| `crates/common/xai-tool-types` | `packages/tools/xai-tool-types` | `tools` |
+| `crates/common/xai-tracing` | `packages/platform/xai-tracing` | `platform` |
+| `crates/codegen/xai-tracing-macros` | `packages/platform/xai-tracing-macros` | `platform` |
+| `crates/codegen/xai-tty-utils` | `packages/tui/xai-tty-utils` | `tui` |
+| `crates/codegen/xai-workflow` | `packages/agent/xai-workflow` | `agent` |
+
+Unchanged roots: `third_party/`, `prod/`, `bundled/`, workspace root files.
+

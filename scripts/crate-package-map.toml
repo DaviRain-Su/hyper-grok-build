@@ -1,0 +1,126 @@
+# Source of truth: crate directory name → packages/<package>/
+# Paths are relative to repo root. Crate Cargo package names are unchanged.
+# Used by reorg tooling and docs/UPSTREAM_PATH_MAP.md.
+
+[packages.ai]
+from = ["crates/codegen"]
+crates = [
+  "xai-grok-models",
+  "xai-grok-sampler",
+  "xai-grok-sampling-types",
+  "xai-grok-auth",
+  "xai-grok-http",
+  "xai-token-estimation",
+  "xai-grok-voice",
+  "xai-mixpanel",
+]
+
+[packages.agent]
+from = ["crates/codegen", "crates/common"]
+crates = [
+  "xai-grok-agent",
+  "xai-agent-lifecycle",
+  "xai-chat-state",
+  "xai-hyper-core",
+  "xai-hyper-host",
+  "xai-grok-compaction",
+  "xai-interjection-core",
+  "xai-prompt-queue",
+  "xai-workflow",
+  "xai-grok-subagent-resolution",
+]
+
+[packages.tools]
+from = ["crates/codegen", "crates/common"]
+crates = [
+  "xai-grok-tools",
+  "xai-grok-tools-api",
+  "xai-tool-types",
+  "xai-tool-protocol",
+  "xai-tool-runtime",
+  "xai-grok-sandbox",
+  "xai-grok-workspace",
+  "xai-grok-workspace-client",
+  "xai-grok-workspace-types",
+  "xai-computer-hub-core",
+  "xai-computer-hub-sdk",
+  "xai-computer-hub-mcp-adapter",
+]
+
+[packages.tui]
+from = ["crates/codegen"]
+crates = [
+  "xai-grok-pager",
+  "xai-grok-pager-render",
+  "xai-grok-pager-minimal",
+  "xai-grok-pager-pty-harness",
+  "xai-ratatui-inline",
+  "xai-ratatui-textarea",
+  "xai-grok-markdown",
+  "xai-grok-markdown-core",
+  "xai-grok-mermaid",
+  "xai-tty-utils",
+  "ptyctl",
+  "ptyctl-cli",
+]
+
+[packages.coding-agent]
+from = ["crates/codegen"]
+crates = [
+  "xai-grok-pager-bin",
+  "xai-grok-shell",
+  "xai-grok-shell-base",
+  "xai-grok-shell-session-support",
+  "xai-grok-config",
+  "xai-grok-config-types",
+  "xai-grok-dashboard",
+  "xai-grok-mcp",
+  "xai-grok-memory",
+  "xai-grok-update",
+  "xai-grok-announcements",
+  "xai-acp-lib",
+  "xai-grok-hooks",
+  "xai-hooks-plugins-types",
+  "xai-grok-shared",
+]
+
+[packages.extensions]
+from = ["crates/codegen"]
+crates = [
+  "xai-grok-extension-api",
+  "xai-grok-extension-macros",
+  "xai-grok-extension-runtime",
+  "xai-grok-extension-sdk",
+  "xai-grok-plugin-marketplace",
+]
+
+[packages.platform]
+from = ["crates/codegen", "crates/common"]
+crates = [
+  "xai-grok-paths",
+  "xai-grok-env",
+  "xai-grok-secrets",
+  "xai-grok-extra-ca",
+  "xai-grok-version",
+  "xai-crash-handler",
+  "xai-grok-telemetry",
+  "xai-tracing",
+  "xai-tracing-macros",
+  "xai-fsnotify",
+  "xai-file-utils",
+  "xai-fast-worktree",
+  "xai-gix-status",
+  "xai-codebase-graph",
+  "xai-hunk-tracker",
+  "xai-sqlite-journal",
+  "xai-system-power",
+  "xai-circuit-breaker",
+  "xai-test-utils",
+  "xai-grok-test-support",
+]
+
+[packages.build]
+from = ["crates/build"]
+crates = [
+  "xai-proto-build",
+]

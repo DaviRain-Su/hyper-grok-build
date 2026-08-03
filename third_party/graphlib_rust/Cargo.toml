@@ -7,7 +7,7 @@
 # `dagre_rust` layout engine and directly by the Warp `mermaid-to-svg` engine.
 # It is a young single-author crate on the untrusted-input render path, so
 # vendoring gives a full audit surface and immunity to upstream yanks. See
-# third_party/mermaid-to-svg and crates/codegen/xai-grok-mermaid.
+# third_party/mermaid-to-svg and packages/tui/xai-grok-mermaid.
 #
 # ============================================================================
 # VENDORING NOTES — re-apply / re-bless ALL of the following on every upgrade:

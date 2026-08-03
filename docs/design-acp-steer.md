@@ -26,14 +26,14 @@ ACP **ExtRequest**(请求/响应,非 notification):
 
 ## grok 侧实现(已存在,勿改)
 
-- **入口注册**: `crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs:3848`
+- **入口注册**: `packages/coding-agent/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs:3848`
   `"x.ai/interject" => crate::extensions::interject::handle(self, &args).await`
-- **handler**: `crates/codegen/xai-grok-shell/src/extensions/interject.rs`
+- **handler**: `packages/coding-agent/xai-grok-shell/src/extensions/interject.rs`
   `handle()` 解析 `InterjectRequest`,发送 `SessionCommand::Interject { text, id, images }`。
-- **run loop**: `crates/codegen/xai-grok-shell/src/session/acp_session_impl/run_loop.rs:1977`
+- **run loop**: `packages/coding-agent/xai-grok-shell/src/session/acp_session_impl/run_loop.rs:1977`
   的 `Interject` 分支:turn 运行中 → push 进 `pending_interjections`;idle → 排一个
   fallback prompt turn。
-- **drain**: `crates/codegen/xai-grok-shell/src/session/acp_session_impl/interjection.rs`
+- **drain**: `packages/coding-agent/xai-grok-shell/src/session/acp_session_impl/interjection.rs`
   `drain_pending_interjections` 在下一个安全点把缓冲的 steer 合进运行中的 turn
   (作为独立的 synthetic user message,不取消当前 turn)。
 - **广播**: `broadcast_interjection` 向所有 attached client 扇出

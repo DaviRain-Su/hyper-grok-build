@@ -6,89 +6,89 @@ async-openai = { git = "https://github.com/our-forks/async-openai.git", rev = "9
 [workspace]
 resolver = "2"
 members = [
-    "crates/build/xai-proto-build",
-    "crates/codegen/ptyctl",
-    "crates/codegen/ptyctl-cli",
-    "crates/codegen/xai-acp-lib",
-    "crates/codegen/xai-agent-lifecycle",
-    "crates/codegen/xai-chat-state",
-    "crates/codegen/xai-codebase-graph",
-    "crates/codegen/xai-crash-handler",
-    "crates/codegen/xai-fast-worktree",
-    "crates/codegen/xai-file-utils",
-    "crates/codegen/xai-fsnotify",
-    "crates/codegen/xai-gix-status",
-    "crates/codegen/xai-grok-agent",
-    "crates/codegen/xai-grok-announcements",
-    "crates/codegen/xai-grok-auth",
-    "crates/codegen/xai-grok-config",
-    "crates/codegen/xai-grok-config-types",
-    "crates/codegen/xai-grok-dashboard",
-    "crates/codegen/xai-grok-env",
-    "crates/codegen/xai-grok-extra-ca",
-    "crates/codegen/xai-grok-hooks",
-    "crates/codegen/xai-grok-extension-api",
-    "crates/codegen/xai-grok-extension-macros",
-    "crates/codegen/xai-grok-extension-runtime",
-    "crates/codegen/xai-grok-extension-sdk",
-    "crates/codegen/xai-grok-http",
-    "crates/codegen/xai-grok-markdown",
-    "crates/codegen/xai-grok-markdown-core",
-    "crates/codegen/xai-grok-mcp",
-    "crates/codegen/xai-grok-memory",
-    "crates/codegen/xai-grok-mermaid",
-    "crates/codegen/xai-grok-models",
-    "crates/codegen/xai-grok-pager",
-    "crates/codegen/xai-grok-pager-bin",
-    "crates/codegen/xai-grok-pager-minimal",
-    "crates/codegen/xai-grok-pager-pty-harness",
-    "crates/codegen/xai-grok-pager-render",
-    "crates/codegen/xai-grok-paths",
-    "crates/codegen/xai-grok-plugin-marketplace",
-    "crates/codegen/xai-grok-sampler",
-    "crates/codegen/xai-grok-sampling-types",
-    "crates/codegen/xai-grok-sandbox",
-    "crates/codegen/xai-grok-secrets",
-    "crates/codegen/xai-grok-shared",
-    "crates/codegen/xai-grok-shell",
-    "crates/codegen/xai-grok-shell-base",
-    "crates/codegen/xai-grok-shell-session-support",
-    "crates/codegen/xai-grok-subagent-resolution",
-    "crates/codegen/xai-grok-telemetry",
-    "crates/codegen/xai-grok-test-support",
-    "crates/codegen/xai-grok-tools",
-    "crates/codegen/xai-grok-tools-api",
-    "crates/codegen/xai-grok-update",
-    "crates/codegen/xai-grok-version",
-    "crates/codegen/xai-grok-voice",
-    "crates/codegen/xai-grok-workspace",
-    "crates/codegen/xai-grok-workspace-client",
-    "crates/codegen/xai-grok-workspace-types",
-    "crates/codegen/xai-hooks-plugins-types",
-    "crates/codegen/xai-hyper-core",
-    "crates/codegen/xai-hyper-host",
-    "crates/codegen/xai-hunk-tracker",
-    "crates/codegen/xai-mixpanel",
-    "crates/codegen/xai-prompt-queue",
-    "crates/codegen/xai-ratatui-inline",
-    "crates/codegen/xai-ratatui-textarea",
-    "crates/codegen/xai-sqlite-journal",
-    "crates/codegen/xai-system-power",
-    "crates/codegen/xai-token-estimation",
-    "crates/codegen/xai-tracing-macros",
-    "crates/codegen/xai-tty-utils",
-    "crates/codegen/xai-workflow",
-    "crates/common/xai-circuit-breaker",
-    "crates/common/xai-computer-hub-core",
-    "crates/common/xai-computer-hub-mcp-adapter",
-    "crates/common/xai-computer-hub-sdk",
-    "crates/common/xai-grok-compaction",
-    "crates/common/xai-interjection-core",
-    "crates/common/xai-test-utils",
-    "crates/common/xai-tool-protocol",
-    "crates/common/xai-tool-runtime",
-    "crates/common/xai-tool-types",
-    "crates/common/xai-tracing",
+    "packages/build/xai-proto-build",
+    "packages/tui/ptyctl",
+    "packages/tui/ptyctl-cli",
+    "packages/coding-agent/xai-acp-lib",
+    "packages/agent/xai-agent-lifecycle",
+    "packages/agent/xai-chat-state",
+    "packages/platform/xai-codebase-graph",
+    "packages/platform/xai-crash-handler",
+    "packages/platform/xai-fast-worktree",
+    "packages/platform/xai-file-utils",
+    "packages/platform/xai-fsnotify",
+    "packages/platform/xai-gix-status",
+    "packages/agent/xai-grok-agent",
+    "packages/coding-agent/xai-grok-announcements",
+    "packages/ai/xai-grok-auth",
+    "packages/coding-agent/xai-grok-config",
+    "packages/coding-agent/xai-grok-config-types",
+    "packages/coding-agent/xai-grok-dashboard",
+    "packages/platform/xai-grok-env",
+    "packages/platform/xai-grok-extra-ca",
+    "packages/coding-agent/xai-grok-hooks",
+    "packages/extensions/xai-grok-extension-api",
+    "packages/extensions/xai-grok-extension-macros",
+    "packages/extensions/xai-grok-extension-runtime",
+    "packages/extensions/xai-grok-extension-sdk",
+    "packages/ai/xai-grok-http",
+    "packages/tui/xai-grok-markdown",
+    "packages/tui/xai-grok-markdown-core",
+    "packages/coding-agent/xai-grok-mcp",
+    "packages/coding-agent/xai-grok-memory",
+    "packages/tui/xai-grok-mermaid",
+    "packages/ai/xai-grok-models",
+    "packages/tui/xai-grok-pager",
+    "packages/coding-agent/xai-grok-pager-bin",
+    "packages/tui/xai-grok-pager-minimal",
+    "packages/tui/xai-grok-pager-pty-harness",
+    "packages/tui/xai-grok-pager-render",
+    "packages/platform/xai-grok-paths",
+    "packages/extensions/xai-grok-plugin-marketplace",
+    "packages/ai/xai-grok-sampler",
+    "packages/ai/xai-grok-sampling-types",
+    "packages/tools/xai-grok-sandbox",
+    "packages/platform/xai-grok-secrets",
+    "packages/coding-agent/xai-grok-shared",
+    "packages/coding-agent/xai-grok-shell",
+    "packages/coding-agent/xai-grok-shell-base",
+    "packages/coding-agent/xai-grok-shell-session-support",
+    "packages/agent/xai-grok-subagent-resolution",
+    "packages/platform/xai-grok-telemetry",
+    "packages/platform/xai-grok-test-support",
+    "packages/tools/xai-grok-tools",
+    "packages/tools/xai-grok-tools-api",
+    "packages/coding-agent/xai-grok-update",
+    "packages/platform/xai-grok-version",
+    "packages/ai/xai-grok-voice",
+    "packages/tools/xai-grok-workspace",
+    "packages/tools/xai-grok-workspace-client",
+    "packages/tools/xai-grok-workspace-types",
+    "packages/coding-agent/xai-hooks-plugins-types",
+    "packages/agent/xai-hyper-core",
+    "packages/agent/xai-hyper-host",
+    "packages/platform/xai-hunk-tracker",
+    "packages/ai/xai-mixpanel",
+    "packages/agent/xai-prompt-queue",
+    "packages/tui/xai-ratatui-inline",
+    "packages/tui/xai-ratatui-textarea",
+    "packages/platform/xai-sqlite-journal",
+    "packages/platform/xai-system-power",
+    "packages/ai/xai-token-estimation",
+    "packages/platform/xai-tracing-macros",
+    "packages/tui/xai-tty-utils",
+    "packages/agent/xai-workflow",
+    "packages/platform/xai-circuit-breaker",
+    "packages/tools/xai-computer-hub-core",
+    "packages/tools/xai-computer-hub-mcp-adapter",
+    "packages/tools/xai-computer-hub-sdk",
+    "packages/agent/xai-grok-compaction",
+    "packages/agent/xai-interjection-core",
+    "packages/platform/xai-test-utils",
+    "packages/tools/xai-tool-protocol",
+    "packages/tools/xai-tool-runtime",
+    "packages/tools/xai-tool-types",
+    "packages/platform/xai-tracing",
     "prod/mc/cli-chat-proxy-types",
     "third_party/dagre_rust",
     "third_party/graphlib_rust",
@@ -307,61 +307,61 @@ wildmatch = "2"
 windows = { version = "0.61", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Pipes"] }
 wiremock = "0.6"
 wl-clipboard-rs = "0.9"
-xai-acp-lib = { path = "crates/codegen/xai-acp-lib" }
-xai-agent-lifecycle = { path = "crates/codegen/xai-agent-lifecycle" }
-xai-circuit-breaker = { path = "crates/common/xai-circuit-breaker" }
-xai-computer-hub-core = { path = "crates/common/xai-computer-hub-core" }
-xai-computer-hub-sdk = { path = "crates/common/xai-computer-hub-sdk" }
-xai-gix-status = { path = "crates/codegen/xai-gix-status" }
-xai-grok-agent = { path = "crates/codegen/xai-grok-agent" }
-xai-grok-announcements = { path = "crates/codegen/xai-grok-announcements" }
-xai-grok-auth = { path = "crates/codegen/xai-grok-auth" }
-xai-grok-config = { path = "crates/codegen/xai-grok-config" }
-xai-grok-config-types = { path = "crates/codegen/xai-grok-config-types" }
-xai-grok-env = { path = "crates/codegen/xai-grok-env" }
-xai-grok-extension-api = { path = "crates/codegen/xai-grok-extension-api" }
-xai-grok-extension-macros = { path = "crates/codegen/xai-grok-extension-macros" }
-xai-grok-extension-runtime = { path = "crates/codegen/xai-grok-extension-runtime" }
-xai-grok-extension-sdk = { path = "crates/codegen/xai-grok-extension-sdk" }
-xai-grok-extra-ca = { path = "crates/codegen/xai-grok-extra-ca" }
-xai-grok-http = { path = "crates/codegen/xai-grok-http" }
-xai-grok-markdown = { path = "crates/codegen/xai-grok-markdown" }
-xai-grok-markdown-core = { path = "crates/codegen/xai-grok-markdown-core" }
-xai-grok-mcp = { path = "crates/codegen/xai-grok-mcp" }
-xai-grok-memory = { path = "crates/codegen/xai-grok-memory" }
-xai-grok-mermaid = { path = "crates/codegen/xai-grok-mermaid" }
-xai-grok-models = { path = "crates/codegen/xai-grok-models" }
-xai-grok-sampler = { path = "crates/codegen/xai-grok-sampler" }
-xai-grok-secrets = { path = "crates/codegen/xai-grok-secrets" }
-xai-grok-shared = { path = "crates/codegen/xai-grok-shared" }
-xai-grok-shell = { path = "crates/codegen/xai-grok-shell" }
-xai-grok-shell-base = { path = "crates/codegen/xai-grok-shell-base" }
-xai-grok-shell-session-support = { path = "crates/codegen/xai-grok-shell-session-support" }
-xai-grok-telemetry = { path = "crates/codegen/xai-grok-telemetry" }
-xai-grok-test-support = { path = "crates/codegen/xai-grok-test-support" }
-xai-grok-tools = { path = "crates/codegen/xai-grok-tools" }
-xai-grok-tools-api = { path = "crates/codegen/xai-grok-tools-api" }
-xai-grok-version = { path = "crates/codegen/xai-grok-version" }
-xai-grok-workspace = { path = "crates/codegen/xai-grok-workspace" }
-xai-grok-workspace-types = { path = "crates/codegen/xai-grok-workspace-types" }
-xai-hooks-plugins-types = { path = "crates/codegen/xai-hooks-plugins-types" }
-xai-hyper-core = { path = "crates/codegen/xai-hyper-core" }
-xai-hyper-host = { path = "crates/codegen/xai-hyper-host" }
-xai-interjection-core = { path = "crates/common/xai-interjection-core" }
-xai-mixpanel = { path = "crates/codegen/xai-mixpanel" }
-xai-prompt-queue = { path = "crates/codegen/xai-prompt-queue" }
-xai-proto-build = { path = "crates/build/xai-proto-build" }
-xai-ratatui-inline = { path = "crates/codegen/xai-ratatui-inline" }
-xai-ratatui-textarea = { path = "crates/codegen/xai-ratatui-textarea" }
-xai-sqlite-journal = { path = "crates/codegen/xai-sqlite-journal" }
-xai-system-power = { path = "crates/codegen/xai-system-power" }
-xai-test-utils = { path = "crates/common/xai-test-utils" }
-xai-token-estimation = { path = "crates/codegen/xai-token-estimation" }
-xai-tool-protocol = { path = "crates/common/xai-tool-protocol" }
-xai-tool-runtime = { path = "crates/common/xai-tool-runtime" }
-xai-tool-types = { path = "crates/common/xai-tool-types" }
-xai-tracing = { path = "crates/common/xai-tracing" }
-xai-tty-utils = { path = "crates/codegen/xai-tty-utils" }
+xai-acp-lib = { path = "packages/coding-agent/xai-acp-lib" }
+xai-agent-lifecycle = { path = "packages/agent/xai-agent-lifecycle" }
+xai-circuit-breaker = { path = "packages/platform/xai-circuit-breaker" }
+xai-computer-hub-core = { path = "packages/tools/xai-computer-hub-core" }
+xai-computer-hub-sdk = { path = "packages/tools/xai-computer-hub-sdk" }
+xai-gix-status = { path = "packages/platform/xai-gix-status" }
+xai-grok-agent = { path = "packages/agent/xai-grok-agent" }
+xai-grok-announcements = { path = "packages/coding-agent/xai-grok-announcements" }
+xai-grok-auth = { path = "packages/ai/xai-grok-auth" }
+xai-grok-config = { path = "packages/coding-agent/xai-grok-config" }
+xai-grok-config-types = { path = "packages/coding-agent/xai-grok-config-types" }
+xai-grok-env = { path = "packages/platform/xai-grok-env" }
+xai-grok-extension-api = { path = "packages/extensions/xai-grok-extension-api" }
+xai-grok-extension-macros = { path = "packages/extensions/xai-grok-extension-macros" }
+xai-grok-extension-runtime = { path = "packages/extensions/xai-grok-extension-runtime" }
+xai-grok-extension-sdk = { path = "packages/extensions/xai-grok-extension-sdk" }
+xai-grok-extra-ca = { path = "packages/platform/xai-grok-extra-ca" }
+xai-grok-http = { path = "packages/ai/xai-grok-http" }
+xai-grok-markdown = { path = "packages/tui/xai-grok-markdown" }
+xai-grok-markdown-core = { path = "packages/tui/xai-grok-markdown-core" }
+xai-grok-mcp = { path = "packages/coding-agent/xai-grok-mcp" }
+xai-grok-memory = { path = "packages/coding-agent/xai-grok-memory" }
+xai-grok-mermaid = { path = "packages/tui/xai-grok-mermaid" }
+xai-grok-models = { path = "packages/ai/xai-grok-models" }
+xai-grok-sampler = { path = "packages/ai/xai-grok-sampler" }
+xai-grok-secrets = { path = "packages/platform/xai-grok-secrets" }
+xai-grok-shared = { path = "packages/coding-agent/xai-grok-shared" }
+xai-grok-shell = { path = "packages/coding-agent/xai-grok-shell" }
+xai-grok-shell-base = { path = "packages/coding-agent/xai-grok-shell-base" }
+xai-grok-shell-session-support = { path = "packages/coding-agent/xai-grok-shell-session-support" }
+xai-grok-telemetry = { path = "packages/platform/xai-grok-telemetry" }
+xai-grok-test-support = { path = "packages/platform/xai-grok-test-support" }
+xai-grok-tools = { path = "packages/tools/xai-grok-tools" }
+xai-grok-tools-api = { path = "packages/tools/xai-grok-tools-api" }
+xai-grok-version = { path = "packages/platform/xai-grok-version" }
+xai-grok-workspace = { path = "packages/tools/xai-grok-workspace" }
+xai-grok-workspace-types = { path = "packages/tools/xai-grok-workspace-types" }
+xai-hooks-plugins-types = { path = "packages/coding-agent/xai-hooks-plugins-types" }
+xai-hyper-core = { path = "packages/agent/xai-hyper-core" }
+xai-hyper-host = { path = "packages/agent/xai-hyper-host" }
+xai-interjection-core = { path = "packages/agent/xai-interjection-core" }
+xai-mixpanel = { path = "packages/ai/xai-mixpanel" }
+xai-prompt-queue = { path = "packages/agent/xai-prompt-queue" }
+xai-proto-build = { path = "packages/build/xai-proto-build" }
+xai-ratatui-inline = { path = "packages/tui/xai-ratatui-inline" }
+xai-ratatui-textarea = { path = "packages/tui/xai-ratatui-textarea" }
+xai-sqlite-journal = { path = "packages/platform/xai-sqlite-journal" }
+xai-system-power = { path = "packages/platform/xai-system-power" }
+xai-test-utils = { path = "packages/platform/xai-test-utils" }
+xai-token-estimation = { path = "packages/ai/xai-token-estimation" }
+xai-tool-protocol = { path = "packages/tools/xai-tool-protocol" }
+xai-tool-runtime = { path = "packages/tools/xai-tool-runtime" }
+xai-tool-types = { path = "packages/tools/xai-tool-types" }
+xai-tracing = { path = "packages/platform/xai-tracing" }
+xai-tty-utils = { path = "packages/tui/xai-tty-utils" }
 zbus = { version = "5" }
 zip = "3"
 zstd = "0.13"

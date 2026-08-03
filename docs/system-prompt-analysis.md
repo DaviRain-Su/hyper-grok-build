@@ -5,7 +5,7 @@
 | 状态 | 分析 + 已落地吸收（2026-07-24） |
 | 数据源 | [WEIFENG2333/phistory](https://github.com/WEIFENG2333/phistory) — agent CLI 系统提示词版本化快照（claude-tap 抓取） |
 | 快照版本 | Claude Code **2.1.98**（~100KB）· Codex **0.99.0**（~22KB）· Kimi Code **0.9.0**（~67KB）· Grok Build **0.2.99**（~47KB，基线） |
-| 可编辑面 | `crates/codegen/xai-grok-agent/templates/prompt.md`（默认方言核心，~5KB）· `apply_patch_prompt.md`（Codex 方言行为层，~22KB）· `subagent_prompt.md`（子代理）· `xai-tool-types/src/task.rs`（spawn_subagent 工具描述） |
+| 可编辑面 | `packages/agent/xai-grok-agent/templates/prompt.md`（默认方言核心，~5KB）· `apply_patch_prompt.md`（Codex 方言行为层，~22KB）· `subagent_prompt.md`（子代理）· `xai-tool-types/src/task.rs`（spawn_subagent 工具描述） |
 | 原则 | **抄行为，不抄皮肤**；核心 prompt 刻意保持紧凑，每行都要挣回自己的 token |
 
 ---

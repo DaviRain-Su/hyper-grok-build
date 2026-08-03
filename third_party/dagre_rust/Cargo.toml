@@ -10,7 +10,7 @@
 # Why vendored: the Rust port of dagre.js (the same layout engine mermaid.js
 # uses). It is the layout core of the Warp `mermaid-to-svg` engine, which renders
 # untrusted model output, so vendoring gives a full audit surface and immunity to
-# upstream yanks. See third_party/mermaid-to-svg and crates/codegen/xai-grok-mermaid.
+# upstream yanks. See third_party/mermaid-to-svg and packages/tui/xai-grok-mermaid.
 #
 # ============================================================================
 # VENDORING NOTES — re-apply / re-bless ALL of the following on every upgrade:

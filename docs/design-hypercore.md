@@ -229,8 +229,8 @@ impl<H: HyperHost> HyperCore<H> {
 | 交付物 | 说明 |
 |--------|------|
 | 本文档合入 `docs/` | Accepted |
-| `crates/codegen/xai-hyper-host` | `HyperHost` + `HYPER_HOST_API` + 错误/流类型 |
-| `crates/codegen/xai-hyper-core` | `HyperCore`：restore / submit / snapshot |
+| `packages/agent/xai-hyper-host` | `HyperHost` + `HYPER_HOST_API` + 错误/流类型 |
+| `packages/agent/xai-hyper-core` | `HyperCore`：restore / submit / snapshot |
 | `MockHost`（`xai_hyper_core::mock`） | 内存 snapshot + terminal + echo stream |
 | 单测 | restore → submit → commit → 幂等 `turn_id` |
 
@@ -396,7 +396,7 @@ CI：mock 必跑；native 集成测 optional（需 key）；CF 用 vitest pool w
 ## 9. 里程碑与目录草图
 
 ```text
-crates/codegen/
+packages/agent/
   xai-hyper-host/          # trait + types
   xai-hyper-core/          # engine
 examples/

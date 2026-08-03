@@ -8,18 +8,18 @@ on:
   push:
     branches: [main, master]
     paths:
-      - "crates/codegen/xai-grok-extension-api/**"
-      - "crates/codegen/xai-grok-extension-macros/**"
-      - "crates/codegen/xai-grok-extension-runtime/**"
-      - "crates/codegen/xai-grok-extension-sdk/**"
+      - "packages/extensions/xai-grok-extension-api/**"
+      - "packages/extensions/xai-grok-extension-macros/**"
+      - "packages/extensions/xai-grok-extension-runtime/**"
+      - "packages/extensions/xai-grok-extension-sdk/**"
       - "scripts/check-extensions.sh"
       - ".github/workflows/extensions.yml"
   pull_request:
     paths:
-      - "crates/codegen/xai-grok-extension-api/**"
-      - "crates/codegen/xai-grok-extension-macros/**"
-      - "crates/codegen/xai-grok-extension-runtime/**"
-      - "crates/codegen/xai-grok-extension-sdk/**"
+      - "packages/extensions/xai-grok-extension-api/**"
+      - "packages/extensions/xai-grok-extension-macros/**"
+      - "packages/extensions/xai-grok-extension-runtime/**"
+      - "packages/extensions/xai-grok-extension-sdk/**"
       - "scripts/check-extensions.sh"
       - ".github/workflows/extensions.yml"
   workflow_dispatch:

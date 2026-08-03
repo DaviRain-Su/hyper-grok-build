@@ -1,0 +1,278 @@
+[package]
+license = "Apache-2.0"
+name = "xai-grok-shell"
+version = "0.2.118-r1"
+edition.workspace = true
+
+[features]
+default = []
+dhat-heap = ["dep:dhat"]
+# Session synthesis + in-process e2e harness (`session::testkit`) for soak,
+# load, and bench tests. Off by default; the tests/benches that use it declare
+# it via `required-features`.
+test-support = []
+# Local Computer Hub workspace_server (own/attach + crash-restart). Requires
+local-workspace = []
+default-bazel = [
+    "local-workspace",
+    "test-support",
+]
+
+[dependencies]
+xai-grok-extra-ca = { workspace = true }
+dunce = { workspace = true }
+tonic-prost = { workspace = true, optional = true }
+agent-client-protocol = { workspace = true }
+anyhow = { workspace = true }
+xai-grok-announcements = { workspace = true }
+xai-prompt-queue = { workspace = true }
+xai-grok-version = { workspace = true }
+xai-hyper-host = { workspace = true }
+xai-hyper-core = { workspace = true, features = ["native"] }
+
+async-openai = { workspace = true }
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+bm25 = "2.3"
+bytes = { workspace = true }
+chrono = { workspace = true }
+indexmap = { workspace = true, features = ["serde"] }
+ignore = { workspace = true }
+jsonschema = { workspace = true }
+futures = { workspace = true }
+glob = { workspace = true }
+globset = { workspace = true }
+kanal = "0.1"
+regex = { workspace = true }
+# rmcp 2.1 + reqwest 0.13 are quarantined inside `xai-grok-mcp`. The remaining
+# MCP code in this crate (extensions/mcp.rs, mcp_doctor.rs) reaches rmcp model
+# types via `xai_grok_mcp::rmcp::model::*`. reqwest 0.13 is a private impl
+# detail of xai-grok-mcp::servers; shell never sees it. Every HTTP call site
+# in this crate uses workspace reqwest 0.12.
+xai-grok-mcp = { workspace = true }
+reqwest = { workspace = true, features = ["stream", "blocking"] }
+reqwest-middleware = { workspace = true }
+# rusqlite 0.37 + bundled = self-contained SQLite (>= 3.50.2) with FTS5.
+# Bumped from 0.32 to resolve CVE-2025-29087, CVE-2025-3277, CVE-2025-6965.
+# sqlite-vec is C ABI, not Rust-version dependent — any rusqlite with `bundled` works.
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { workspace = true }
+serde_ignored = "0.1"
+serde_json = { workspace = true, features = ["preserve_order"] }
+similar = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true }
+dirs = "6"
+tokio-stream = { workspace = true }
+tower-http = { workspace = true, features = ["cors"] }
+toml = { workspace = true, features = ["preserve_order"] }
+toml_edit = { workspace = true }
+tokio = { workspace = true, features = [
+    "io-std",
+    "process",
+    "rt",
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "sync",
+] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = [
+    "env-filter",
+    "fmt",
+    "json",
+    "time",
+] }
+obfstr = { workspace = true }
+tokio-util = { workspace = true, features = ["compat"] }
+tokio-retry = { workspace = true }
+uuid = { workspace = true, features = ["v4", "v5", "v7"] }
+xai-acp-lib = { workspace = true }
+axum = { workspace = true, features = ["ws", "multipart"] }
+backon = { workspace = true }
+webbrowser = { workspace = true }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "logging",
+    "tls12",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "logging",
+    "std",
+    "tls12",
+] }
+rustls-native-certs = "0.8"
+futures-util = { workspace = true }
+urlencoding = { workspace = true }
+gethostname = { workspace = true }
+gcloud-storage = { workspace = true }
+git2 = { version = "0.20", default-features = false, features = [
+    "vendored-libgit2",
+] }
+notify = { workspace = true }
+notify-debouncer-mini = { workspace = true }
+nucleo = { workspace = true }
+arc-swap = { workspace = true }
+infer = "0.15"
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
+moka = { workspace = true, features = ["future"] }
+dhat = { workspace = true, optional = true }
+base64 = { workspace = true }
+# Use `aws_lc_rs` (not `rust_crypto`) so feature unification with gcloud-storage
+# (which enables jsonwebtoken's `aws_lc_rs` via gcloud-auth `jwt-aws-lc-rs`)
+# leaves exactly one crypto feature active. With both `rust_crypto` and
+# `aws_lc_rs` enabled, jsonwebtoken's `CryptoProvider::from_crate_features`
+# cannot auto-select and returns a panic-instance that permanently poisons the
+# process-global OnceLock (after which even `install_default` can't recover),
+# panicking any JWT encode/decode. Matching gcloud-storage's backend keeps a
+# single feature active so auto-detection resolves to aws-lc-rs.
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+sha2 = { workspace = true }
+rand = { workspace = true }
+shlex = { workspace = true }
+strum = { workspace = true }
+xai-fast-worktree = { path = "../../platform/xai-fast-worktree", features = ["metadata"] }
+
+tonic = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+xai-grok-paths = { path = "../../platform/xai-grok-paths" }
+xai-grok-shell-base = { workspace = true }
+xai-grok-shell-session-support = { workspace = true }
+xai-grok-shared = { workspace = true }
+xai-tracing-macros = { path = "../../platform/xai-tracing-macros" }
+xai-fsnotify = { path = "../../platform/xai-fsnotify" }
+xai-codebase-graph = { path = "../../platform/xai-codebase-graph" }
+xai-hunk-tracker = { path = "../../platform/xai-hunk-tracker" }
+xai-agent-lifecycle = { workspace = true }
+xai-interjection-core = { workspace = true }
+xai-grok-sandbox = { path = "../../tools/xai-grok-sandbox", default-features = false }
+xai-chat-state = { path = "../../agent/xai-chat-state" }
+xai-grok-compaction = { path = "../../agent/xai-grok-compaction" }
+xai-grok-sampler = { path = "../../ai/xai-grok-sampler" }
+xai-sqlite-journal = { workspace = true }
+xai-token-estimation = { workspace = true }
+xai-grok-sampling-types = { path = "../../ai/xai-grok-sampling-types" }
+xai-grok-tools = { path = "../../tools/xai-grok-tools" }
+xai-tty-utils = { workspace = true }
+xai-workflow = { path = "../../agent/xai-workflow" }
+xai-system-power = { workspace = true }
+xai-grok-workspace = { workspace = true }
+xai-grok-subagent-resolution = { path = "../../agent/xai-grok-subagent-resolution" }
+xai-grok-agent = { path = "../../agent/xai-grok-agent" }
+xai-grok-config = { workspace = true }
+xai-grok-config-types = { workspace = true }
+xai-grok-memory = { workspace = true }
+xai-grok-hooks = { path = "../xai-grok-hooks" }
+xai-grok-extension-api = { path = "../../extensions/xai-grok-extension-api" }
+xai-grok-extension-runtime = { path = "../../extensions/xai-grok-extension-runtime" }
+xai-hooks-plugins-types = { path = "../xai-hooks-plugins-types" }
+xai-grok-plugin-marketplace = { path = "../../extensions/xai-grok-plugin-marketplace" }
+xai-file-utils = { path = "../../platform/xai-file-utils" }
+xai-grok-auth = { workspace = true, features = ["middleware"] }
+xai-grok-telemetry = { workspace = true }
+xai-grok-http = { workspace = true }
+xai-grok-models = { workspace = true }
+prod-mc-cli-chat-proxy-types = { path = "../../../prod/mc/cli-chat-proxy-types" }
+flate2 = { workspace = true }
+fs2 = { workspace = true }
+zstd = { workspace = true }
+tar = { workspace = true }
+url = { workspace = true }
+walkdir = { workspace = true }
+tdigests = "1.0"
+semver = { workspace = true }
+process-wrap = { version = "9.0.0", features = ["tokio1", "job-object", "creation-flags"] }
+portable-pty = "0.9"
+parking_lot.workspace = true
+dashmap.workspace = true
+
+# Used by acp_session.rs and mcp_servers.rs for the unified
+# xai_tool_runtime::Tool dispatch model and the computer-hub MCP adapter.
+xai-computer-hub-sdk = { workspace = true }
+xai-tool-runtime = { workspace = true }
+xai-tool-protocol = { workspace = true }
+xai-tool-types = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+nix = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+siphasher = { workspace = true }
+windows = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+# Pre-main unified-log redirect (`test_support::redirect_unified_log_for_tests`).
+ctor = { workspace = true }
+filetime = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+xai-grok-memory = { workspace = true, features = ["test-support"] }
+xai-grok-workspace = { workspace = true, features = ["test-support"] }
+xai-grok-config = { workspace = true, features = [] }
+ring = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+rsa = { workspace = true }
+semver = { workspace = true }
+serial_test = { workspace = true }
+# Test-only builds expose `env::EnvVarGuard` and the cpu_profile test seams to
+# this crate's test targets.
+xai-grok-shell-base = { workspace = true, features = ["test-support"] }
+xai-grok-test-support = { workspace = true, features = [] }
+xai-test-utils = { workspace = true }
+# `test-util` enables `#[tokio::test(start_paused = true)]` (paused virtual
+# clock with auto-advance) so interval-driven loop tests in `auth::refresh`
+# can assert exact tick counts deterministically without real-time sleep.
+tokio = { workspace = true, features = ["test-util"] }
+
+[dependencies.tempfile]
+workspace = true
+
+[[bench]]
+name = "session_list"
+harness = false
+
+[[bench]]
+name = "fork_copy"
+harness = false
+required-features = ["test-support"]
+
+[[bench]]
+name = "skills_watcher_startup"
+harness = false
+
+[[test]]
+name = "test_leader_soak"
+required-features = ["test-support"]
+
+[[test]]
+name = "test_session_load_memory"
+required-features = ["test-support"]
+
+[[test]]
+name = "session_fork_replay_memory"
+required-features = ["test-support"]
+
+[[test]]
+name = "session_load_perf"
+required-features = ["test-support"]
+
+[[test]]
+name = "testkit_synth_roundtrip"
+required-features = ["test-support"]
+
+[lints]
+workspace = true
+[build-dependencies]
+# build.rs only downloads ripgrep — no rmcp involvement. Workspace reqwest
+# (0.12) is plenty.
+reqwest = { workspace = true, features = ["blocking"] }
+flate2 = { workspace = true }
+tar = { workspace = true }
+[[bin]]
+name = "chat-history-downgrade"
+path = "src/bin/chat-history-downgrade.rs"

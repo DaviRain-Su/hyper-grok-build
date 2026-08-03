@@ -438,7 +438,7 @@ world extension {
 |------|------|
 | `docs/design-wasm-extensions.md` | 本设计正文（从 plan 晋升） |
 | `docs/competitive-analysis.md` | A13 状态 → design/building |
-| `crates/codegen/xai-grok-pager/docs/user-guide/…` | 开发者指南（Phase 3） |
+| `packages/tui/xai-grok-pager/docs/user-guide/…` | 开发者指南（Phase 3） |
 | `crates/.../examples/extensions/` | 官方示例 |
 
 ---

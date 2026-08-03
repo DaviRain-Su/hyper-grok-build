@@ -7,7 +7,7 @@
 # `dagre_rust` layout crates (the Warp `mermaid-to-svg` engine stack). It is a
 # young single-author crate on the untrusted-input render path, so vendoring
 # gives a full audit surface and immunity to upstream yanks. See
-# crates/codegen/xai-grok-mermaid and third_party/mermaid-to-svg.
+# packages/tui/xai-grok-mermaid and third_party/mermaid-to-svg.
 #
 # ============================================================================
 # VENDORING NOTES — re-apply / re-bless ALL of the following on every upgrade:

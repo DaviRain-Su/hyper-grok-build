@@ -79,7 +79,7 @@ scratch 路径（`cli_models` 用的就是这个，避开 `OnceLock`-cached 真�
 
 `auth::attribution::EMIT_COUNT` 是 `static AtomicU64`，任何观察它的测试必须
 `#[serial_test::serial(attribution_emit_count)]`。详见
-`crates/codegen/xai-grok-shell/src/auth/attribution.rs:57`。
+`packages/coding-agent/xai-grok-shell/src/auth/attribution.rs:57`。
 
 ## 3. 规约
 

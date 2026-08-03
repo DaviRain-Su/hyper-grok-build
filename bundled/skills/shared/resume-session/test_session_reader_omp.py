@@ -2,7 +2,7 @@
 """Regression tests for the OMP reader in session_reader.py.
 
 These tests exercise the OMP-specific behavior that must match
-`crates/codegen/xai-grok-workspace/src/foreign_sessions/omp.rs` and the
+`packages/tools/xai-grok-workspace/src/foreign_sessions/omp.rs` and the
 official OMP append-only-tree session format:
 
 * `_omp_profile` / `_omp_sessions_root` profile precedence and suppression.

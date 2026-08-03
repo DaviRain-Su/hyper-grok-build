@@ -37,7 +37,7 @@ timelines, charts, logs, and live event streaming.
 [License](#license)
 
 **中文文档: [README.zh-CN.md](README.zh-CN.md)** ·
-**中文用户指南: [docs/user-guide-zh-CN/](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)**
+**中文用户指南: [docs/user-guide-zh-CN/](packages/tui/xai-grok-pager/docs/user-guide-zh-CN/)**
 
 </div>
 
@@ -46,7 +46,7 @@ timelines, charts, logs, and live event streaming.
 ## Screenshots
 
 The real TUI (captured in a PTY with the in-repo
-[`tui_shot`](crates/codegen/xai-grok-pager-pty-harness/examples/tui_shot.rs)
+[`tui_shot`](packages/tui/xai-grok-pager-pty-harness/examples/tui_shot.rs)
 harness), in two of the ten UI locales:
 
 | English | 简体中文 |
@@ -143,7 +143,7 @@ nix develop                                   # shell with rust + protoc + cmake
 ## Providers
 
 Hyper keeps the multi-provider registry from this tree (see the pager
-[user guide](crates/codegen/xai-grok-pager/docs/user-guide/)):
+[user guide](packages/tui/xai-grok-pager/docs/user-guide/)):
 
 | Platform | Auth | Notes |
 | -------- | ---- | ----- |
@@ -158,7 +158,7 @@ Hyper keeps the multi-provider registry from this tree (see the pager
 
 Model ids in the picker look like `{platform}/{model}` (e.g.
 `kimi-code/k3`, `opencode-go/kimi-k3`, `openai-codex/gpt-5.6-sol`). Platform docs live under
-`crates/codegen/xai-grok-pager/docs/user-guide/` (Moonshot, Kimi Code,
+`packages/tui/xai-grok-pager/docs/user-guide/` (Moonshot, Kimi Code,
 OpenAI Codex, …).
 
 Config and credentials still live under **`~/.grok`** (same paths as
@@ -202,7 +202,7 @@ See [`CHANGELOG.md`](./CHANGELOG.md) for release notes. Known limitations:
 ## Releasing
 
 1. Set the root [`VERSION`](VERSION) file to the **monorepo lockstep client
-   version** (same as `crates/codegen/xai-grok-pager/Cargo.toml` /
+   version** (same as `packages/tui/xai-grok-pager/Cargo.toml` /
    `xai-grok-version`, currently `0.2.118-r1`). CI compiles this into
    `x-grok-client-version`; xAI rejects clients below **0.1.202** (HTTP 426).
    Do **not** invent a separate low marketing version (e.g. `0.1.0`).
@@ -275,11 +275,11 @@ Known issues and remaining work: [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md).
 In-tree user guide (examples may still say `grok`; the Hyper binary name is
 `hyper`, paths remain under `~/.grok`):
 
-- English: [`crates/codegen/xai-grok-pager/docs/user-guide/`](crates/codegen/xai-grok-pager/docs/user-guide/)
-- 中文: [`crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/`](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)
+- English: [`packages/tui/xai-grok-pager/docs/user-guide/`](packages/tui/xai-grok-pager/docs/user-guide/)
+- 中文: [`packages/tui/xai-grok-pager/docs/user-guide-zh-CN/`](packages/tui/xai-grok-pager/docs/user-guide-zh-CN/)
 
 Related extension docs also have Chinese translations (`*.zh-CN.md`) under
-`crates/codegen/xai-grok-pager/docs/`.
+`packages/tui/xai-grok-pager/docs/`.
 
 Upstream product docs: [docs.x.ai/build](https://docs.x.ai/build/overview)
 
@@ -289,18 +289,27 @@ Upstream product docs: [docs.x.ai/build](https://docs.x.ai/build/overview)
 
 ## Repository layout
 
+Layout follows [pi-mono](https://github.com/earendil-works/pi)-style package
+layers under `packages/*` (crate names stay `xai-*` for upstream merges).
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+[docs/UPSTREAM_PATH_MAP.md](docs/UPSTREAM_PATH_MAP.md).
+
 | Path | Contents |
 |------|----------|
-| `crates/codegen/xai-grok-pager-bin` | Composition root; builds the `hyper` binary |
-| `crates/codegen/xai-grok-pager` | TUI |
-| `crates/codegen/xai-grok-shell` | Agent runtime |
+| `packages/ai/` | Models, auth, sampler, HTTP, voice |
+| `packages/agent/` | Agent loop, chat state, compaction, HyperCore |
+| `packages/tools/` | Tools, sandbox, workspace, computer-hub |
+| `packages/tui/` | Pager TUI, render, markdown, PTY |
+| `packages/coding-agent/` | Shell session + `hyper` binary composition |
+| `packages/extensions/` | WASM extension host / SDK / marketplace |
+| `packages/platform/` | Paths, FS/git, crash, telemetry, tests |
+| `packages/build/` | Build helpers (protoc) |
 | `install.sh` / `install.ps1` | Release installers |
 | `.github/workflows/release.yml` | Multi-target release CI |
 
 > [!IMPORTANT]
-> The root `Cargo.toml` (workspace members / dependency versions) is
-> **generated** from the monorepo — treat it as read-only. Prefer editing
-> per-crate `Cargo.toml` files for local changes that should survive syncs.
+> Prefer editing per-crate `Cargo.toml` files. Workspace member paths live in
+> the root `Cargo.toml`; keep them in sync when adding crates.
 
 ---
 

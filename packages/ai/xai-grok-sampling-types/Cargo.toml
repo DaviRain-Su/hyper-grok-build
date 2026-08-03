@@ -1,0 +1,27 @@
+[package]
+license = "Apache-2.0"
+name = "xai-grok-sampling-types"
+version = "0.1.0"
+edition.workspace = true
+description = "Pure data types for the xAI sampling / chat-completion API layer"
+
+[dependencies]
+async-openai = { workspace = true }
+chrono = { workspace = true }
+indexmap = { workspace = true, features = ["serde"] }
+reqwest = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+xai-grok-compaction = { path = "../../agent/xai-grok-compaction" }
+xai-grok-models = { workspace = true }
+xai-grok-tools = { path = "../../tools/xai-grok-tools" }
+
+[dev-dependencies]
+assert_matches = { workspace = true }
+
+[lints]
+workspace = true
