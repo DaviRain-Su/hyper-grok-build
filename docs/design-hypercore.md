@@ -249,8 +249,8 @@ impl<H: HyperHost> HyperCore<H> {
 | 接入 `xai-grok-sampler`（feature `native`） | `chat_completions` / `responses` / `codex_responses` / `messages` |
 | `NativeHost` | env / `auth.json` 读 key；`~/.grok/hypercore/<session>/` |
 | CLI | `hypercore-demo`：stdin 多轮，流式打印 delta |
-| 幂等 terminal turn 文件 | `terminals/<turn_id>.json` |
-| 基础截断 | `max_messages` 丢最旧非 system |
+| 幂等 terminal 持久化 | `state.v2.json` raw `turn_id` map（legacy `terminals/<sanitized>.json` 只读兼容） |
+| 基础截断 | `max_messages` **soft target**：按原子组丢最旧可删组；`ToolExchange` 不拆；尾部 active exchange 时保护整个 **active-turn suffix**（最右 prior `user`→尾部，含同 turn 多 exchange）可暂时超 cap |
 
 **明确不做：** PTY、MCP、子 agent、插件、TUI。
 
@@ -448,7 +448,7 @@ docs/
 | 工厂 | `SessionActor::shell_hypercore_host()` |
 | 实验 turn 路径 | **P6 containment：** legacy 默认；仅显式 `HYPERCORE_TURN=1` 进入 Hypercore |
 | Host API | **v2**：`ToolDefinition`、`ModelChunk::ToolCall`、`list_tools`、`ChatMessage` tool 字段 |
-| Core tool loop | **done**：`submit_turn` / `submit_turn_with_tools` / `continue_turn_with_tools`；snapshot **v2**；`ToolBatchResult::Abort` + 完整 transcript checkpoint |
+| Core tool loop | **done**：`submit_turn` / `submit_turn_with_tools` / `continue_turn_with_tools`；snapshot **v2**；`ToolBatchResult::Abort` + 完整 transcript checkpoint；group-aware soft-cap trim（atomic tool exchange） |
 | Native 桥 | tools/json_schema → `ConversationRequest`；`Completed` 提取 tool_calls |
 | Shell 工具 | `prepare_tool_definitions` → core；batch → `execute_tool_calls` |
 | json_schema / outer | native + StructuredOutput；`run_turn_outer_loop`（goal/stop）；稳定 `hc:{len}:{prompt_id}:r{n}` round id |
@@ -490,6 +490,17 @@ hyper
 | **多模态 user（Image 等）** | path decision pre-route legacy；seed 转换 fail-closed，禁止静默 strip |
 | **双 transcript** | `chat_state` 权威；`~/.grok/hypercore/<id>/` 旁路 snapshot |
 | **Cloudflare / 远端 Host** | 原 Phase 2，仍后置 |
+
+### Transcript soft-cap trim（group-aware）
+
+| 规则 | 说明 |
+|------|------|
+| Soft target | `max_messages` 是目标长度，不是硬上限 |
+| 原子组 | `system` singleton；`ToolExchange` = `assistant` 且 `tool_calls` 非空 + 紧随其后的全部连续 `role=="tool"`（异常/未知 id 也并入，避免拆组）；其它行（含孤立 tool）singleton |
+| 删除 | 只删 protected suffix **外**最旧**完整**可删组；绝不拆 `ToolExchange` |
+| Active-turn suffix | 仅当 transcript **尾部**是 `ToolExchange`：从该 exchange 前最右侧 `role=="user"` 的 Other 组起保护到尾（当前 user、同 turn 此前 exchange/assistant、active exchange）；无 user 则 fallback 仅保护 active exchange。尾部不是 `ToolExchange` 时无 suffix 保护，完成 turn 后可按组裁 |
+| System | 优先保留；先删 suffix 外非 system；无候选时可删多余旧 system，但至少保留一个（若存在）；仍无可删则 soft overflow |
+| Tool batch | 整批 push tool results 后再 trim 一次（不在每条 result 后 trim） |
 
 ### Core Abort / terminal 语义（correctness）
 

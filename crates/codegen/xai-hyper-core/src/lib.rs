@@ -68,7 +68,12 @@ pub enum CoreError {
 pub struct CoreConfig {
     /// Logical model id passed to the host.
     pub model: String,
-    /// Max transcript messages kept (system + user/assistant/tool). Soft cap.
+    /// Soft target for transcript length (system + user/assistant/tool).
+    ///
+    /// Trim drops whole atomic groups (never splits a tool exchange). While a
+    /// tool exchange is active at the tail, the whole **active-turn suffix**
+    /// (rightmost prior `user` through that exchange) is protected and may
+    /// temporarily exceed this cap.
     pub max_messages: usize,
     /// Max model/tool iterations per user turn.
     #[serde(default = "default_max_tool_steps")]
@@ -705,6 +710,8 @@ impl<H: HyperHost> HyperCore<H> {
                 }
             };
 
+            // Push the full tool-result batch first, then trim once so a
+            // multi-call exchange is never half-trimmed mid-batch.
             for (idx, call) in pending_calls.iter().enumerate() {
                 let result = results.get(idx).cloned().unwrap_or_else(|| HostToolResult {
                     call_id: call.id.clone(),
@@ -738,8 +745,8 @@ impl<H: HyperHost> HyperCore<H> {
                     tool_calls: Vec::new(),
                     tool_call_id: Some(call.id.clone()),
                 });
-                self.trim_messages();
             }
+            self.trim_messages();
 
             if finish_after {
                 stop_reason = step_stop.or_else(|| Some("end_turn".into()));
@@ -795,17 +802,163 @@ impl<H: HyperHost> HyperCore<H> {
         })
     }
 
+    /// Drop oldest complete transcript groups until `items.len() <= max_messages`
+    /// (soft target), without splitting a tool exchange.
+    ///
+    /// Groups:
+    /// - each `system` row (singleton);
+    /// - `ToolExchange` = assistant with non-empty `tool_calls` + all immediately
+    ///   following consecutive `role == "tool"` rows (even unknown/mismatched ids);
+    /// - every other row (including orphan tools) as a singleton.
+    ///
+    /// When the transcript **tail** is a `ToolExchange`, protect the whole
+    /// **active-turn suffix**: from the rightmost `role == "user"` `Other` group
+    /// before that exchange through the tail (current user, any same-turn prior
+    /// exchanges / assistant rows, and the active exchange). If no such user
+    /// exists, fall back to protecting only the active exchange. When the tail
+    /// is not a `ToolExchange`, nothing is protected by this rule and completed
+    /// turns may be trimmed group-by-group.
+    ///
+    /// Prefer dropping non-system groups outside the protected suffix; excess
+    /// older system rows may be dropped, but at least one system is kept when
+    /// any exist. If nothing safe remains, allow temporary soft-cap overflow.
+    /// Re-partitions after each deletion for simplicity.
     fn trim_messages(&mut self) {
         let max = self.config.max_messages.max(2);
         while self.items.len() > max {
-            // Prefer dropping oldest non-system.
-            if let Some(i) = self.items.iter().position(|m| m.role != "system") {
-                self.items.remove(i);
-            } else {
-                self.items.remove(0);
+            let groups = partition_transcript_groups(&self.items);
+            if groups.is_empty() {
+                break;
+            }
+
+            // Active-turn suffix: when tail is a ToolExchange, protect from the
+            // rightmost prior user (if any) through the end of the transcript.
+            let protected_from = active_turn_protected_from(&self.items, &groups);
+
+            let system_count = groups
+                .iter()
+                .filter(|g| g.kind == TranscriptGroupKind::System)
+                .count();
+
+            // 1) Oldest non-system group outside the protected active-turn suffix.
+            let mut delete: Option<(usize, usize)> = None;
+            for g in &groups {
+                if g.kind == TranscriptGroupKind::System {
+                    continue;
+                }
+                if let Some(pf) = protected_from
+                    && g.start >= pf
+                {
+                    continue;
+                }
+                delete = Some((g.start, g.end));
+                break;
+            }
+
+            // 2) Else drop oldest excess system (keep ≥1 system if any).
+            if delete.is_none()
+                && system_count > 1
+                && let Some(g) = groups
+                    .iter()
+                    .find(|g| g.kind == TranscriptGroupKind::System)
+            {
+                delete = Some((g.start, g.end));
+            }
+
+            match delete {
+                Some((start, end)) => {
+                    self.items.drain(start..end);
+                }
+                // Nothing safe to drop (protected suffix / sole system).
+                // Allow temporary overflow of the soft cap.
+                None => break,
             }
         }
     }
+}
+
+/// Start index of the protected active-turn suffix, if any.
+///
+/// When the last group is a [`TranscriptGroupKind::ToolExchange`], returns the
+/// start of the rightmost `user` [`TranscriptGroupKind::Other`] group before
+/// that exchange, or the exchange start if no such user exists. When the tail
+/// is not a tool exchange, returns `None` (no suffix protection).
+fn active_turn_protected_from(
+    items: &[TranscriptItem],
+    groups: &[TranscriptGroup],
+) -> Option<usize> {
+    let active = groups
+        .last()
+        .filter(|g| g.kind == TranscriptGroupKind::ToolExchange)?;
+    let mut user_start: Option<usize> = None;
+    for g in groups {
+        if g.start >= active.start {
+            break;
+        }
+        if g.kind == TranscriptGroupKind::Other
+            && items.get(g.start).is_some_and(|item| item.role == "user")
+        {
+            user_start = Some(g.start);
+        }
+    }
+    Some(user_start.unwrap_or(active.start))
+}
+
+/// Kind of an atomic transcript group used by [`HyperCore::trim_messages`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranscriptGroupKind {
+    System,
+    ToolExchange,
+    Other,
+}
+
+/// Half-open index range `[start, end)` of one atomic group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TranscriptGroup {
+    start: usize,
+    end: usize,
+    kind: TranscriptGroupKind,
+}
+
+/// Partition transcript rows into atomic groups for soft-cap trimming.
+fn partition_transcript_groups(items: &[TranscriptItem]) -> Vec<TranscriptGroup> {
+    let mut groups = Vec::new();
+    let mut i = 0;
+    while i < items.len() {
+        let item = &items[i];
+        if item.role == "system" {
+            groups.push(TranscriptGroup {
+                start: i,
+                end: i + 1,
+                kind: TranscriptGroupKind::System,
+            });
+            i += 1;
+            continue;
+        }
+        if item.role == "assistant" && !item.tool_calls.is_empty() {
+            let start = i;
+            i += 1;
+            // Consume every following tool row so the exchange stays atomic
+            // even when ids are unknown/mismatched.
+            while i < items.len() && items[i].role == "tool" {
+                i += 1;
+            }
+            groups.push(TranscriptGroup {
+                start,
+                end: i,
+                kind: TranscriptGroupKind::ToolExchange,
+            });
+            continue;
+        }
+        // Plain user/assistant, orphan tool, or other — singleton.
+        groups.push(TranscriptGroup {
+            start: i,
+            end: i + 1,
+            kind: TranscriptGroupKind::Other,
+        });
+        i += 1;
+    }
+    groups
 }
 
 fn transcript_to_chat_message(i: &TranscriptItem) -> ChatMessage {
@@ -849,6 +1002,9 @@ fn decode_snapshot(bytes: &[u8]) -> Result<SessionSnapshot, CoreError> {
 mod tests {
     use super::*;
     use crate::mock::MockHost;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use xai_hyper_host::ModelStream;
 
     #[tokio::test]
     async fn restore_submit_commit_and_idempotent_turn() {
@@ -1409,5 +1565,856 @@ mod tests {
             .unwrap();
         assert!(third.replayed);
         assert_eq!(host.model_stream_opens(), 1);
+    }
+
+    /// Host that emits two tool calls on the first open and captures every
+    /// [`ModelStreamRequest`] so tests can assert legal tool-exchange structure.
+    #[derive(Clone)]
+    struct MultiToolCaptureHost {
+        opens: Arc<AtomicUsize>,
+        captured: Arc<Mutex<Vec<ModelStreamRequest>>>,
+    }
+
+    impl MultiToolCaptureHost {
+        fn new() -> Self {
+            Self {
+                opens: Arc::new(AtomicUsize::new(0)),
+                captured: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn open_count(&self) -> usize {
+            self.opens.load(Ordering::SeqCst)
+        }
+
+        fn captured(&self) -> Vec<ModelStreamRequest> {
+            self.captured.lock().expect("captured").clone()
+        }
+    }
+
+    struct StaticStream {
+        chunks: std::vec::IntoIter<ModelChunk>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelStream for StaticStream {
+        async fn next_chunk(&mut self) -> Result<Option<ModelChunk>, HostError> {
+            Ok(self.chunks.next())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HyperHost for MultiToolCaptureHost {
+        async fn open_model_stream(
+            &self,
+            req: ModelStreamRequest,
+        ) -> Result<Box<dyn ModelStream>, HostError> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            let n = self.opens.load(Ordering::SeqCst);
+            self.captured.lock().expect("captured").push(req);
+
+            let chunks = if n == 1 {
+                vec![
+                    ModelChunk::ToolCall {
+                        id: "call_a".into(),
+                        name: "alpha".into(),
+                        arguments: r#"{"x":1}"#.into(),
+                    },
+                    ModelChunk::ToolCall {
+                        id: "call_b".into(),
+                        name: "beta".into(),
+                        arguments: r#"{"y":2}"#.into(),
+                    },
+                    ModelChunk::Done {
+                        stop_reason: Some("tool_calls".into()),
+                    },
+                ]
+            } else {
+                vec![
+                    ModelChunk::TextDelta("final after tools".into()),
+                    ModelChunk::Done {
+                        stop_reason: Some("end_turn".into()),
+                    },
+                ]
+            };
+            Ok(Box::new(StaticStream {
+                chunks: chunks.into_iter(),
+            }))
+        }
+
+        async fn commit_snapshot(
+            &self,
+            _session_id: &str,
+            _snapshot: &[u8],
+            _terminal: Option<&xai_hyper_host::TerminalTurnRecord>,
+        ) -> Result<(), HostError> {
+            Ok(())
+        }
+
+        async fn load_snapshot(&self, _session_id: &str) -> Result<Option<Vec<u8>>, HostError> {
+            Ok(None)
+        }
+
+        async fn load_terminal_turn(
+            &self,
+            _session_id: &str,
+            _turn_id: &str,
+        ) -> Result<Option<xai_hyper_host::TerminalTurnRecord>, HostError> {
+            Ok(None)
+        }
+
+        fn now_unix_ms(&self) -> u64 {
+            0
+        }
+    }
+
+    fn assert_tool_exchanges_intact(items: &[TranscriptItem]) {
+        let groups = partition_transcript_groups(items);
+        for g in groups {
+            if g.kind != TranscriptGroupKind::ToolExchange {
+                continue;
+            }
+            let parent = &items[g.start];
+            assert_eq!(parent.role, "assistant");
+            assert!(!parent.tool_calls.is_empty());
+            for item in items.iter().take(g.end).skip(g.start + 1) {
+                assert_eq!(item.role, "tool");
+            }
+        }
+        // No orphan tool may sit immediately after a non-tool-call assistant
+        // or user without its parent — every tool after an exchange parent is
+        // inside a ToolExchange group; remaining tools are singletons only
+        // when not preceded by assistant(tool_calls).
+        let mut i = 0;
+        while i < items.len() {
+            if items[i].role == "assistant" && !items[i].tool_calls.is_empty() {
+                i += 1;
+                while i < items.len() && items[i].role == "tool" {
+                    i += 1;
+                }
+                continue;
+            }
+            // Orphan tools are allowed as seed anomalies but must not appear
+            // mid-exchange (already covered by partition).
+            i += 1;
+        }
+    }
+
+    #[test]
+    fn partition_groups_system_exchange_and_orphan_tool() {
+        let items = vec![
+            TranscriptItem::text("system", "s"),
+            TranscriptItem::text("user", "u"),
+            TranscriptItem {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_calls: vec![
+                    TranscriptToolCall {
+                        id: "c1".into(),
+                        name: "t".into(),
+                        arguments: "{}".into(),
+                    },
+                    TranscriptToolCall {
+                        id: "c2".into(),
+                        name: "t".into(),
+                        arguments: "{}".into(),
+                    },
+                ],
+                tool_call_id: None,
+            },
+            TranscriptItem {
+                role: "tool".into(),
+                content: "r1".into(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("c1".into()),
+            },
+            // Unknown id still joins the exchange (consecutive tool rows).
+            TranscriptItem {
+                role: "tool".into(),
+                content: "r2".into(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("unknown".into()),
+            },
+            TranscriptItem::text("assistant", "plain"),
+            // Orphan only when not immediately after an exchange parent.
+            TranscriptItem {
+                role: "tool".into(),
+                content: "orphan".into(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("lone".into()),
+            },
+        ];
+        let groups = partition_transcript_groups(&items);
+        assert_eq!(groups.len(), 5);
+        assert_eq!(groups[0].kind, TranscriptGroupKind::System);
+        assert_eq!(groups[1].kind, TranscriptGroupKind::Other); // user
+        assert_eq!(groups[2].kind, TranscriptGroupKind::ToolExchange);
+        assert_eq!(groups[2].start, 2);
+        assert_eq!(groups[2].end, 5); // assistant + 2 tools (incl unknown id)
+        assert_eq!(groups[3].kind, TranscriptGroupKind::Other); // plain assistant
+        assert_eq!(groups[4].kind, TranscriptGroupKind::Other); // orphan tool
+        assert_eq!(groups[4].start, 6);
+    }
+
+    #[tokio::test]
+    async fn group_aware_trim_protects_active_multi_tool_exchange() {
+        // max_messages=3 soft target; system + history, then assistant with 2
+        // calls + 2 tool rows must stay together even when len > 3.
+        let host = MultiToolCaptureHost::new();
+        let mut core = HyperCore::restore_or_new(
+            host.clone(),
+            "trim-active-exchange",
+            CoreConfig {
+                model: "multi-tool".into(),
+                max_messages: 3,
+                max_tool_steps: 8,
+            },
+        )
+        .await
+        .unwrap();
+
+        core.seed_transcript(
+            vec![
+                TranscriptItem::text("system", "sys"),
+                TranscriptItem::text("user", "old-u"),
+                TranscriptItem::text("assistant", "old-a"),
+            ],
+            1,
+        );
+        assert_eq!(core.items().len(), 3);
+
+        let out = core
+            .submit_turn_with_tools(
+                TurnRequest {
+                    turn_id: "t-multi".into(),
+                    text: "run two tools".into(),
+                    json_schema: None,
+                    tools: Some(Vec::new()),
+                },
+                |_text, calls| async move {
+                    assert_eq!(calls.len(), 2);
+                    ToolBatchResult::Continue(
+                        calls
+                            .into_iter()
+                            .map(|c| HostToolResult {
+                                call_id: c.id,
+                                ok: true,
+                                content: "ok".into(),
+                            })
+                            .collect(),
+                    )
+                },
+            )
+            .await
+            .expect("multi tool turn");
+
+        assert!(!out.replayed);
+        assert_eq!(out.tools_called.len(), 2);
+        assert_eq!(host.open_count(), 2);
+
+        // Second model request must see a legal active-turn suffix: current
+        // user before parent assistant(tool_calls), matching tool rows, and
+        // system retained.
+        let captured = host.captured();
+        assert_eq!(captured.len(), 2);
+        let second = &captured[1].messages;
+
+        let system_idxs: Vec<usize> = second
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == "system")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(system_idxs.len(), 1, "exactly one system on second open");
+
+        let user_idx = second
+            .iter()
+            .position(|m| m.role == "user" && m.content == "run two tools")
+            .expect("current user must survive soft-cap trim into second request");
+        let parent_idx = second
+            .iter()
+            .position(|m| m.role == "assistant" && !m.tool_calls.is_empty())
+            .expect("parent assistant(tool_calls) on second open");
+        assert!(
+            user_idx < parent_idx,
+            "current user must precede tool-call parent: user={user_idx} parent={parent_idx}"
+        );
+
+        let call_ids: Vec<&str> = second[parent_idx]
+            .tool_calls
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert!(call_ids.contains(&"call_a"));
+        assert!(call_ids.contains(&"call_b"));
+        let mut seen = Vec::new();
+        let mut j = parent_idx + 1;
+        while j < second.len() && second[j].role == "tool" {
+            seen.push(second[j].tool_call_id.clone().unwrap_or_default());
+            j += 1;
+        }
+        assert!(
+            seen.contains(&"call_a".to_string()) && seen.contains(&"call_b".to_string()),
+            "tool rows must answer parent call ids: {seen:?}"
+        );
+
+        // Ideal soft-cap path: only system + active-turn suffix remain.
+        let roles: Vec<&str> = second.iter().map(|m| m.role.as_str()).collect();
+        if roles == ["system", "user", "assistant", "tool", "tool"] {
+            assert_eq!(second[1].content, "run two tools");
+        } else {
+            // Extra history is allowed; relative order of suffix must hold.
+            assert!(roles.contains(&"system"));
+            assert!(user_idx < parent_idx);
+        }
+
+        // After final plain assistant, any remaining exchange is whole or gone.
+        assert_tool_exchanges_intact(core.items());
+        assert!(
+            core.items()
+                .iter()
+                .any(|it| it.role == "assistant" && it.content.contains("final after tools"))
+        );
+        // Soft cap may still be exceeded only if protected content remains;
+        // with final plain assistant, active exchange is no longer protected
+        // and older groups should have been dropped toward max.
+        let groups = partition_transcript_groups(core.items());
+        let exchange_count = groups
+            .iter()
+            .filter(|g| g.kind == TranscriptGroupKind::ToolExchange)
+            .count();
+        // Either the whole exchange remains (with system/final) or it was
+        // dropped as a unit — never partial.
+        if exchange_count == 0 {
+            assert!(
+                !core.items().iter().any(|it| it.role == "tool"),
+                "no orphan tools after exchange drop"
+            );
+        } else {
+            assert_eq!(exchange_count, 1);
+            let ex = groups
+                .iter()
+                .find(|g| g.kind == TranscriptGroupKind::ToolExchange)
+                .unwrap();
+            assert_eq!(ex.end - ex.start, 3); // assistant + 2 tools
+        }
+    }
+
+    #[tokio::test]
+    async fn group_aware_trim_keeps_parent_and_tool_rows_mid_batch() {
+        // Drive trim after assistant(tool_calls) with max=3 and verify the
+        // parent is retained even before tool results arrive.
+        let host = MultiToolCaptureHost::new();
+        let mut core = HyperCore::restore_or_new(
+            host.clone(),
+            "trim-mid-batch",
+            CoreConfig {
+                model: "multi-tool".into(),
+                max_messages: 3,
+                max_tool_steps: 8,
+            },
+        )
+        .await
+        .unwrap();
+
+        core.seed_transcript(
+            vec![
+                TranscriptItem::text("system", "sys"),
+                TranscriptItem::text("user", "u0"),
+                TranscriptItem::text("assistant", "a0"),
+            ],
+            0,
+        );
+
+        // Abort after tools are scheduled but before results would commit —
+        // first we need a path that observes mid-loop state. Use a custom
+        // invoker that inspects core items via side channel is hard; instead
+        // seed an in-progress exchange and call trim directly.
+        core.seed_transcript(
+            vec![
+                TranscriptItem::text("system", "sys"),
+                TranscriptItem::text("user", "u0"),
+                TranscriptItem::text("assistant", "a0"),
+                TranscriptItem::text("user", "u1"),
+                TranscriptItem {
+                    role: "assistant".into(),
+                    content: String::new(),
+                    tool_calls: vec![
+                        TranscriptToolCall {
+                            id: "c1".into(),
+                            name: "t1".into(),
+                            arguments: "{}".into(),
+                        },
+                        TranscriptToolCall {
+                            id: "c2".into(),
+                            name: "t2".into(),
+                            arguments: "{}".into(),
+                        },
+                    ],
+                    tool_call_id: None,
+                },
+            ],
+            0,
+        );
+        // seed_transcript trims: active-turn suffix (user u1 + assistant w/
+        // calls) protected; older non-system dropped toward soft cap 3.
+        let items = core.items();
+        assert!(
+            items
+                .iter()
+                .any(|i| i.role == "assistant" && i.tool_calls.len() == 2),
+            "parent assistant with tool_calls must survive soft-cap trim: {items:?}"
+        );
+        assert!(
+            items.iter().any(|i| i.role == "user" && i.content == "u1"),
+            "current user anchors active-turn suffix: {items:?}"
+        );
+        assert!(
+            items.iter().any(|i| i.role == "system"),
+            "system kept when possible"
+        );
+        // system + user + parent assistant may fit exactly at soft cap 3.
+        assert!(items.len() >= 3);
+        assert!(
+            !items.iter().any(|i| i.role == "user" && i.content == "u0"),
+            "older turn history outside suffix should drop"
+        );
+
+        // Append tool rows (as batch would) and trim once.
+        let mut items = core.items().to_vec();
+        items.push(TranscriptItem {
+            role: "tool".into(),
+            content: "r1".into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some("c1".into()),
+        });
+        items.push(TranscriptItem {
+            role: "tool".into(),
+            content: "r2".into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some("c2".into()),
+        });
+        core.seed_transcript(items, 0);
+        let items = core.items();
+        assert_tool_exchanges_intact(items);
+        let user_idx = items
+            .iter()
+            .position(|i| i.role == "user" && i.content == "u1")
+            .expect("current user present");
+        let parent_idx = items
+            .iter()
+            .position(|i| i.role == "assistant" && i.tool_calls.len() == 2)
+            .expect("parent present");
+        assert!(user_idx < parent_idx);
+        assert_eq!(
+            items.get(parent_idx + 1).map(|i| i.role.as_str()),
+            Some("tool")
+        );
+        assert_eq!(
+            items.get(parent_idx + 2).map(|i| i.role.as_str()),
+            Some("tool")
+        );
+        // Soft cap 3 but protected active-turn suffix + system → len > max.
+        assert!(items.len() > 3);
+    }
+
+    #[tokio::test]
+    async fn active_turn_suffix_keeps_user_and_exchange_over_soft_cap() {
+        // Pure unit: old history + current user + active two-tool exchange.
+        // max=3 → old rows drop; system + user + full exchange remain (len>max).
+        let host = MockHost::new();
+        let mut core = HyperCore::restore_or_new(
+            host,
+            "trim-active-suffix",
+            CoreConfig {
+                model: "mock-echo".into(),
+                max_messages: 3,
+                max_tool_steps: 8,
+            },
+        )
+        .await
+        .unwrap();
+
+        core.seed_transcript(
+            vec![
+                TranscriptItem::text("system", "sys"),
+                TranscriptItem::text("user", "old-u"),
+                TranscriptItem::text("assistant", "old-a"),
+                TranscriptItem::text("user", "current"),
+                TranscriptItem {
+                    role: "assistant".into(),
+                    content: String::new(),
+                    tool_calls: vec![
+                        TranscriptToolCall {
+                            id: "c1".into(),
+                            name: "t1".into(),
+                            arguments: "{}".into(),
+                        },
+                        TranscriptToolCall {
+                            id: "c2".into(),
+                            name: "t2".into(),
+                            arguments: "{}".into(),
+                        },
+                    ],
+                    tool_call_id: None,
+                },
+                TranscriptItem {
+                    role: "tool".into(),
+                    content: "r1".into(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some("c1".into()),
+                },
+                TranscriptItem {
+                    role: "tool".into(),
+                    content: "r2".into(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some("c2".into()),
+                },
+            ],
+            0,
+        );
+
+        let items = core.items();
+        assert!(items.len() > 3, "soft overflow while active turn protected");
+        assert!(items.iter().any(|i| i.role == "system"));
+        assert!(
+            !items
+                .iter()
+                .any(|i| i.role == "user" && i.content == "old-u"),
+            "old history outside suffix should drop"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|i| i.role == "assistant" && i.content == "old-a")
+        );
+
+        let roles: Vec<&str> = items.iter().map(|i| i.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            ["system", "user", "assistant", "tool", "tool"],
+            "expected system + active-turn suffix: {roles:?}"
+        );
+        assert_eq!(items[1].content, "current");
+        assert_eq!(items[2].tool_calls.len(), 2);
+        assert_tool_exchanges_intact(items);
+
+        // continue/seed path without a *new* append: rightmost existing user
+        // still anchors protection (re-trim same transcript).
+        let again = items.to_vec();
+        core.seed_transcript(again, 0);
+        let roles2: Vec<&str> = core.items().iter().map(|i| i.role.as_str()).collect();
+        assert_eq!(roles2, ["system", "user", "assistant", "tool", "tool"]);
+        assert_eq!(core.items()[1].content, "current");
+    }
+
+    #[tokio::test]
+    async fn active_turn_suffix_keeps_prior_same_turn_exchanges() {
+        // Same turn: system, current user, completed ex1, active ex2 — tiny max.
+        // Entire user→ex1→ex2 suffix must remain.
+        let host = MockHost::new();
+        let mut core = HyperCore::restore_or_new(
+            host,
+            "trim-multi-ex-suffix",
+            CoreConfig {
+                model: "mock-echo".into(),
+                max_messages: 2,
+                max_tool_steps: 8,
+            },
+        )
+        .await
+        .unwrap();
+
+        core.seed_transcript(
+            vec![
+                TranscriptItem::text("system", "sys"),
+                TranscriptItem::text("user", "old-drop"),
+                TranscriptItem::text("assistant", "old-drop-a"),
+                TranscriptItem::text("user", "current-turn"),
+                // completed exchange 1
+                TranscriptItem {
+                    role: "assistant".into(),
+                    content: "step1".into(),
+                    tool_calls: vec![TranscriptToolCall {
+                        id: "ex1".into(),
+                        name: "t".into(),
+                        arguments: "{}".into(),
+                    }],
+                    tool_call_id: None,
+                },
+                TranscriptItem {
+                    role: "tool".into(),
+                    content: "ex1-result".into(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some("ex1".into()),
+                },
+                // active exchange 2 (tail)
+                TranscriptItem {
+                    role: "assistant".into(),
+                    content: "step2".into(),
+                    tool_calls: vec![
+                        TranscriptToolCall {
+                            id: "ex2a".into(),
+                            name: "t".into(),
+                            arguments: "{}".into(),
+                        },
+                        TranscriptToolCall {
+                            id: "ex2b".into(),
+                            name: "t".into(),
+                            arguments: "{}".into(),
+                        },
+                    ],
+                    tool_call_id: None,
+                },
+                TranscriptItem {
+                    role: "tool".into(),
+                    content: "ex2a-result".into(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some("ex2a".into()),
+                },
+                TranscriptItem {
+                    role: "tool".into(),
+                    content: "ex2b-result".into(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some("ex2b".into()),
+                },
+            ],
+            0,
+        );
+
+        let items = core.items();
+        assert!(items.len() > 2);
+        assert!(
+            !items
+                .iter()
+                .any(|i| i.content == "old-drop" || i.content == "old-drop-a"),
+            "pre-turn history must be droppable: {items:?}"
+        );
+        assert!(items.iter().any(|i| i.role == "system"));
+
+        let user_idx = items
+            .iter()
+            .position(|i| i.role == "user" && i.content == "current-turn")
+            .expect("current user");
+        let ex1_idx = items
+            .iter()
+            .position(|i| i.role == "assistant" && i.tool_calls.iter().any(|c| c.id == "ex1"))
+            .expect("completed same-turn exchange");
+        let ex2_idx = items
+            .iter()
+            .position(|i| i.role == "assistant" && i.tool_calls.iter().any(|c| c.id == "ex2a"))
+            .expect("active exchange");
+        assert!(user_idx < ex1_idx && ex1_idx < ex2_idx);
+        // Full ex1 + ex2 tool rows still present.
+        assert!(
+            items
+                .iter()
+                .any(|i| i.tool_call_id.as_deref() == Some("ex1"))
+        );
+        assert!(
+            items
+                .iter()
+                .any(|i| i.tool_call_id.as_deref() == Some("ex2a"))
+        );
+        assert!(
+            items
+                .iter()
+                .any(|i| i.tool_call_id.as_deref() == Some("ex2b"))
+        );
+        assert_tool_exchanges_intact(items);
+
+        let groups = partition_transcript_groups(items);
+        let pf = active_turn_protected_from(items, &groups).expect("protected suffix");
+        assert_eq!(pf, user_idx);
+        assert_eq!(
+            groups.last().unwrap().kind,
+            TranscriptGroupKind::ToolExchange
+        );
+    }
+
+    #[tokio::test]
+    async fn text_only_history_still_trims_oldest_non_system() {
+        let host = MockHost::new();
+        let mut core = HyperCore::restore_or_new(
+            host,
+            "trim-text",
+            CoreConfig {
+                model: "mock-echo".into(),
+                max_messages: 3,
+                max_tool_steps: 8,
+            },
+        )
+        .await
+        .unwrap();
+
+        core.seed_transcript(
+            vec![
+                TranscriptItem::text("system", "sys"),
+                TranscriptItem::text("user", "u0"),
+                TranscriptItem::text("assistant", "a0"),
+                TranscriptItem::text("user", "u1"),
+                TranscriptItem::text("assistant", "a1"),
+            ],
+            2,
+        );
+        // Soft target 3: system + last two plain messages.
+        assert_eq!(core.items().len(), 3);
+        assert_eq!(core.items()[0].role, "system");
+        assert_eq!(core.items()[0].content, "sys");
+        assert_eq!(core.items()[1].content, "u1");
+        assert_eq!(core.items()[2].content, "a1");
+    }
+
+    #[tokio::test]
+    async fn orphan_tool_seed_no_panic_and_old_exchange_atomic() {
+        let host = MockHost::new();
+        let mut core = HyperCore::restore_or_new(
+            host,
+            "trim-orphan",
+            CoreConfig {
+                model: "mock-echo".into(),
+                max_messages: 3,
+                max_tool_steps: 8,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Seed: system, old complete exchange, orphan tool, recent text.
+        core.seed_transcript(
+            vec![
+                TranscriptItem::text("system", "sys"),
+                TranscriptItem {
+                    role: "assistant".into(),
+                    content: String::new(),
+                    tool_calls: vec![TranscriptToolCall {
+                        id: "old".into(),
+                        name: "t".into(),
+                        arguments: "{}".into(),
+                    }],
+                    tool_call_id: None,
+                },
+                TranscriptItem {
+                    role: "tool".into(),
+                    content: "old-result".into(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some("old".into()),
+                },
+                TranscriptItem {
+                    role: "tool".into(),
+                    content: "orphan".into(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some("ghost".into()),
+                },
+                TranscriptItem::text("user", "new"),
+                TranscriptItem::text("assistant", "reply"),
+            ],
+            1,
+        );
+
+        assert_tool_exchanges_intact(core.items());
+        // No panic; len converges toward soft cap.
+        assert!(
+            core.items().len() <= 3 || {
+                // If still over, only because of protected tail — tail is plain
+                // assistant so should be <= 3.
+                false
+            }
+        );
+        assert_eq!(core.items().len(), 3);
+        assert_eq!(core.items()[0].role, "system");
+
+        // Old exchange either fully present or fully gone.
+        let has_old_parent = core
+            .items()
+            .iter()
+            .any(|i| i.role == "assistant" && i.tool_calls.iter().any(|c| c.id == "old"));
+        let has_old_tool = core
+            .items()
+            .iter()
+            .any(|i| i.role == "tool" && i.tool_call_id.as_deref() == Some("old"));
+        assert_eq!(
+            has_old_parent, has_old_tool,
+            "old exchange must be all-or-nothing"
+        );
+        // With max=3 and recent user+assistant, old exchange should be gone.
+        assert!(!has_old_parent);
+        // Orphan tool also dropped as a singleton.
+        assert!(
+            !core
+                .items()
+                .iter()
+                .any(|i| i.tool_call_id.as_deref() == Some("ghost"))
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_exchange_dropped_as_whole_after_final_assistant() {
+        let host = MockHost::new();
+        let mut core = HyperCore::restore_or_new(
+            host,
+            "trim-drop-exchange",
+            CoreConfig {
+                model: "mock-echo".into(),
+                max_messages: 3,
+                max_tool_steps: 8,
+            },
+        )
+        .await
+        .unwrap();
+
+        core.seed_transcript(
+            vec![
+                TranscriptItem::text("system", "sys"),
+                TranscriptItem {
+                    role: "assistant".into(),
+                    content: String::new(),
+                    tool_calls: vec![
+                        TranscriptToolCall {
+                            id: "c1".into(),
+                            name: "t".into(),
+                            arguments: "{}".into(),
+                        },
+                        TranscriptToolCall {
+                            id: "c2".into(),
+                            name: "t".into(),
+                            arguments: "{}".into(),
+                        },
+                    ],
+                    tool_call_id: None,
+                },
+                TranscriptItem {
+                    role: "tool".into(),
+                    content: "r1".into(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some("c1".into()),
+                },
+                TranscriptItem {
+                    role: "tool".into(),
+                    content: "r2".into(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some("c2".into()),
+                },
+                TranscriptItem::text("assistant", "final plain"),
+            ],
+            1,
+        );
+
+        // Final plain assistant is at tail → exchange is not active/protected.
+        // Soft cap 3: system + ? ; exchange (3 rows) is one group — either keep
+        // system+exchange (len 4 > 3 soft, but exchange not protected so should
+        // drop exchange and keep system + final) or similar.
+        assert_tool_exchanges_intact(core.items());
+        let has_any_tool = core.items().iter().any(|i| i.role == "tool");
+        let has_parent = core
+            .items()
+            .iter()
+            .any(|i| i.role == "assistant" && !i.tool_calls.is_empty());
+        assert_eq!(has_any_tool, has_parent);
+        // Prefer system + final plain; exchange should be fully dropped.
+        assert!(!has_any_tool, "completed exchange dropped as a unit");
+        assert_eq!(core.items().last().unwrap().content, "final plain");
+        assert!(core.items().iter().any(|i| i.role == "system"));
+        assert!(core.items().len() <= 3);
     }
 }

@@ -5,6 +5,14 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **Hypercore group-aware transcript trim** — `max_messages` is a soft target:
+  trim drops whole atomic groups and never splits a tool exchange
+  (`assistant` with `tool_calls` + following consecutive `tool` rows). While a
+  tool exchange is active at the tail, the whole **active-turn suffix** (from
+  the rightmost prior `user` through that exchange, including same-turn prior
+  exchanges) is protected and may temporarily exceed the cap. Tool results are
+  batch-pushed then trimmed once so multi-call steps stay legal for the next
+  model request.
 - **Hypercore atomic disk store (`state.v2.json`)** — Session snapshot and
   terminal records now commit as one locked read-modify-write to a single
   authoritative file (unique temp, durable replace, no fixed `.tmp`). Snapshot
