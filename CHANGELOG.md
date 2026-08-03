@@ -5,6 +5,16 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **Hypercore atomic disk store (`state.v2.json`)** — Session snapshot and
+  terminal records now commit as one locked read-modify-write to a single
+  authoritative file (unique temp, durable replace, no fixed `.tmp`). Snapshot
+  falls back to legacy only when v2 is absent; terminals may also fall back
+  per-key on a valid v2 map miss, but only when `record.turn_id` exactly matches
+  the requested raw id (sanitize collisions are ignored). Corrupt/wrong-version
+  v2 fails closed. First insert of a turn consults legacy under lock for
+  exact-id conflict/idempotent promote. Raw turn ids avoid map sanitize
+  collisions; identical terminals are idempotent, differing same-id records
+  conflict.
 - **Hypercore correctness (Abort / no same-round legacy fallback)** — Core
   `ToolBatchResult::Abort` restores a full transcript checkpoint (no terminal /
   snapshot / `completed_turns` bump). Shell maps permission cancel, tool

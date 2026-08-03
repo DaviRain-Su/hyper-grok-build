@@ -39,10 +39,38 @@ hyper
 
 ```text
 ~/.grok/hypercore/<session_id>/
-  snapshot.json          # schema_version 2 transcript
-  terminals/<turn_id>.json   # idempotent terminal records
+  state.v2.json              # authoritative atomic snapshot + terminals
+  state.v2.lock              # cross-process exclusive lock (RMW)
+  snapshot.json              # legacy transcript (never auto-deleted/modified)
+  terminals/<sanitized>.json # legacy terminal records (never auto-deleted/modified)
 ```
 
+- **Authoritative on-disk Hypercore state** is `state.v2.json` (`format_version: 2`):
+  opaque snapshot bytes plus a `BTreeMap` of terminal records keyed by **raw**
+  `turn_id` (map key must equal `record.turn_id`). New commits publish this
+  single file under lock (unique temp → fsync → atomic replace → directory
+  sync on Unix).
+- **Snapshot legacy fallback**: read `snapshot.json` only when `state.v2.json`
+  is **absent**. If v2 exists but is corrupt or has a wrong `format_version`,
+  loads and commits **fail closed** (no snapshot fallback, no overwrite).
+- **Terminal legacy fallback**: when v2 is absent, **or** when a valid v2 is
+  present but the raw turn_id is missing from the map, read
+  `terminals/<sanitize(turn_id)>.json`. The record is returned only if
+  `record.turn_id` **exactly** equals the requested raw id (sanitize collisions
+  yield “not found”; files are never deleted or modified). Corrupt /
+  wrong-version v2 never falls back for terminals either.
+- **Commit vs legacy**: inserting a new raw turn_id into the v2 map consults the
+  matching legacy file under the session lock. Exact-id same record →
+  idempotent promote; exact-id different content → conflict (snapshot does not
+  advance); missing file or sanitize collision → free to insert; parse/I/O
+  errors → fail closed.
+- **Turn-id collisions**: v2 keys use the raw turn id, so ids that share a
+  sanitize form (e.g. `a/b` vs `a?b`) no longer collide in the map. Session
+  directory names and legacy terminal filenames still use path sanitization;
+  those collisions are documented only and are **not** migrated in this layout.
+- There is **no** automatic migration scan, dual-write to legacy, terminal GC,
+  or deletion of orphan/legacy files (only the current commit’s temp file is
+  cleaned up on failure).
 - **Authoritative chat** for the TUI / ACP remains `chat_state` / session store.
 - Hypercore snapshot is a parallel restore + idempotency surface.
 - Each **subagent** session has its own `session_id` directory.

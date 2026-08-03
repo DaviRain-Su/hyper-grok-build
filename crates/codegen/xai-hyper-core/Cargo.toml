@@ -13,6 +13,7 @@ native = ["dep:xai-grok-sampler", "dep:xai-grok-sampling-types", "dep:futures", 
 
 [dependencies]
 async-trait = { workspace = true }
+fs2 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -23,6 +24,9 @@ dirs = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 xai-grok-sampler = { workspace = true, optional = true }
 xai-grok-sampling-types = { path = "../xai-grok-sampling-types", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
