@@ -4,6 +4,11 @@ name = "xai-grok-update"
 version = "0.1.220-alpha.4"
 edition.workspace = true
 
+[[bin]]
+name = "hyper-verify-release-archive"
+path = "src/bin/hyper_verify_release_archive.rs"
+required-features = ["community-build"]
+
 [dependencies]
 anyhow = { workspace = true }
 futures = { workspace = true }

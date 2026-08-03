@@ -2613,6 +2613,499 @@ pub(crate) async fn run_update_if_available(
     Ok(matches!(run_mode, UpdateRunMode::Blocking))
 }
 
+/// Options for release-archive contract verification (CI producer checks).
+#[derive(Debug, Clone)]
+pub struct ReleaseArchiveVerifyOptions<'a> {
+    /// Expected root binary entry (`hyper` or `hyper.exe`). When `None`,
+    /// inferred from the archive extension.
+    pub binary_entry: Option<&'a str>,
+    /// Optional expected SHA-256 (lowercase hex) of the archive bytes.
+    pub expected_sha256: Option<&'a str>,
+    /// When set, every regular file under this tree must appear under
+    /// `bundled/` in the archive (and the archive must not invent extra
+    /// managed files outside that set is *not* required — only completeness).
+    pub expected_bundle_root: Option<&'a Path>,
+    /// When true, the archive must contain at least one `bundled/**` file.
+    pub require_bundle: bool,
+}
+
+impl Default for ReleaseArchiveVerifyOptions<'_> {
+    fn default() -> Self {
+        Self {
+            binary_entry: None,
+            expected_sha256: None,
+            expected_bundle_root: None,
+            require_bundle: true,
+        }
+    }
+}
+
+/// Summary of a verified release archive.
+#[derive(Debug, Clone)]
+pub struct ReleaseArchiveReport {
+    pub binary_entry: String,
+    pub sha256: String,
+    pub bundle_file_count: usize,
+    pub notice_entries: Vec<String>,
+}
+
+fn infer_binary_entry(archive_path: &Path) -> Result<&'static str> {
+    let name = archive_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if name.ends_with(".zip") {
+        Ok("hyper.exe")
+    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        Ok("hyper")
+    } else {
+        bail!(
+            "cannot infer binary entry for archive {} (expected .tar.gz or .zip)",
+            archive_path.display()
+        )
+    }
+}
+
+/// Map of relative POSIX-style paths under a bundle root → file bytes.
+fn collect_bundle_file_map(root: &Path) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    let mut out = std::collections::BTreeMap::new();
+    if !root.is_dir() {
+        bail!("bundle root is not a directory: {}", root.display());
+    }
+    fn walk(
+        dir: &Path,
+        prefix: &Path,
+        out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> Result<()> {
+        for entry in std::fs::read_dir(dir)
+            .with_context(|| format!("reading bundle dir {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str == "__pycache__" || name_str.ends_with(".pyc") || name_str.ends_with(".pyo")
+            {
+                continue;
+            }
+            // Reject control characters / path separators in component names.
+            if name_str
+                .chars()
+                .any(|c| c.is_control() || c == '/' || c == '\\')
+            {
+                bail!("bundle path component contains illegal characters: {name_str}");
+            }
+            let rel = prefix.join(&name);
+            let meta = std::fs::symlink_metadata(&path)
+                .with_context(|| format!("inspecting {}", path.display()))?;
+            if meta.file_type().is_symlink() {
+                bail!("bundle tree must not contain symlinks: {}", path.display());
+            }
+            if meta.is_dir() {
+                walk(&path, &rel, out)?;
+            } else if meta.is_file() {
+                let key = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let bytes = std::fs::read(&path)
+                    .with_context(|| format!("reading bundle file {}", path.display()))?;
+                if out.insert(key.clone(), bytes).is_some() {
+                    bail!("duplicate bundle path after normalize: {key}");
+                }
+            }
+        }
+        Ok(())
+    }
+    walk(root, Path::new(""), &mut out)?;
+    Ok(out)
+}
+
+/// Verify a packaged Hyper release archive against the producer contract:
+/// unique root `hyper`/`hyper.exe`, allowlisted notices, complete `bundled/**`,
+/// no unexpected/dangerous paths (enforced by the shared extractor).
+pub fn verify_release_archive(
+    archive_path: &Path,
+    options: ReleaseArchiveVerifyOptions<'_>,
+) -> Result<ReleaseArchiveReport> {
+    if !archive_path.is_file() {
+        bail!("release archive not found: {}", archive_path.display());
+    }
+    let actual_sha = sha256_file(archive_path)?;
+    if let Some(expected) = options.expected_sha256 {
+        let expected = expected.to_ascii_lowercase();
+        if !valid_sha256(&expected) {
+            bail!("expected SHA-256 is not a 64-char hex digest");
+        }
+        if actual_sha != expected {
+            bail!(
+                "SHA-256 mismatch for {}: expected {}, got {}",
+                archive_path.display(),
+                expected,
+                actual_sha
+            );
+        }
+    }
+
+    let binary_entry = match options.binary_entry {
+        Some(entry) => entry,
+        None => infer_binary_entry(archive_path)?,
+    };
+
+    // Unique temp root under std::env::temp_dir (no production tempfile dep).
+    // Include a random component so parallel verifiers cannot collide.
+    let tmp_root = std::env::temp_dir().join(format!(
+        "hyper-release-verify-{}-{}-{}",
+        std::process::id(),
+        now_unix(),
+        {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            archive_path.hash(&mut h);
+            std::thread::current().id().hash(&mut h);
+            h.finish()
+        }
+    ));
+    if tmp_root.exists() {
+        let _ = std::fs::remove_dir_all(&tmp_root);
+    }
+    std::fs::create_dir_all(&tmp_root)
+        .with_context(|| format!("creating verify temp dir {}", tmp_root.display()))?;
+    let stage_root = tmp_root.join("extract");
+    let bundle_stage = tmp_root.join("bundle-stage");
+    std::fs::create_dir_all(&stage_root)?;
+
+    let name = archive_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    let extract_result = if name.ends_with(".zip") {
+        extract_zip_archive(archive_path, &stage_root, bundle_stage, binary_entry)
+    } else {
+        #[cfg(unix)]
+        {
+            extract_tar_archive(archive_path, &stage_root, bundle_stage, binary_entry)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(anyhow::anyhow!("tar.gz verification requires a Unix host"))
+        }
+    };
+
+    let report = (|| -> Result<ReleaseArchiveReport> {
+        let extracted = extract_result?;
+        if !extracted.binary.is_file() {
+            bail!("archive is missing root binary {binary_entry}");
+        }
+        let binary_len = std::fs::metadata(&extracted.binary)?.len();
+        if binary_len == 0 {
+            bail!("archive root binary {binary_entry} is empty");
+        }
+        if binary_len > MAX_BINARY_BYTES {
+            bail!("archive root binary {binary_entry} exceeds size limit");
+        }
+
+        let archive_bundle = match extracted.bundle_stage.as_ref() {
+            Some(stage) => collect_bundle_file_map(stage)?,
+            None => std::collections::BTreeMap::new(),
+        };
+
+        if options.require_bundle && archive_bundle.is_empty() {
+            bail!(
+                "release archive {} is missing bundled/** runtime files",
+                archive_path.display()
+            );
+        }
+
+        if let Some(expected_root) = options.expected_bundle_root {
+            let expected = collect_bundle_file_map(expected_root)?;
+            if expected.is_empty() {
+                bail!(
+                    "expected bundle root contains no files: {}",
+                    expected_root.display()
+                );
+            }
+            // Bidirectional, byte-identical comparison: reject missing, extra,
+            // and content-different files.
+            let mut missing = Vec::new();
+            let mut different = Vec::new();
+            for (path, exp_bytes) in &expected {
+                match archive_bundle.get(path) {
+                    None => missing.push(path.clone()),
+                    Some(got) if got != exp_bytes => different.push(path.clone()),
+                    Some(_) => {}
+                }
+            }
+            let mut extra = Vec::new();
+            for path in archive_bundle.keys() {
+                if !expected.contains_key(path) {
+                    extra.push(path.clone());
+                }
+            }
+            if !missing.is_empty() || !extra.is_empty() || !different.is_empty() {
+                let mut parts = Vec::new();
+                if !missing.is_empty() {
+                    parts.push(format!("missing: {}", missing.join(", ")));
+                }
+                if !extra.is_empty() {
+                    parts.push(format!("extra: {}", extra.join(", ")));
+                }
+                if !different.is_empty() {
+                    parts.push(format!("content differs: {}", different.join(", ")));
+                }
+                bail!(
+                    "release archive {} bundled tree does not match expected root ({}): {}",
+                    archive_path.display(),
+                    expected_root.display(),
+                    parts.join("; ")
+                );
+            }
+        }
+
+        // Notices are drained by the extractor; unexpected root entries are
+        // already rejected by classify_archive_entry during extract.
+        let notice_entries = Vec::new();
+
+        Ok(ReleaseArchiveReport {
+            binary_entry: binary_entry.to_string(),
+            sha256: actual_sha,
+            bundle_file_count: archive_bundle.len(),
+            notice_entries,
+        })
+    })();
+
+    let _ = std::fs::remove_dir_all(&tmp_root);
+    report
+}
+
+fn validate_asset_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("asset name is empty");
+    }
+    if name
+        .chars()
+        .any(|c| c.is_control() || c == '/' || c == '\\')
+    {
+        bail!("asset name contains illegal characters: {name:?}");
+    }
+    if name.contains("..") {
+        bail!("asset name must not contain '..': {name}");
+    }
+    Ok(())
+}
+
+/// Verify a `SHA256SUMS` manifest against on-disk archive files.
+///
+/// Each `archives` entry is `(asset_name, path)`. The manifest must contain
+/// exactly one valid digest line per asset and must not list unknown names
+/// when `strict_names` is true. Duplicate / case-colliding names (manifest or
+/// CLI args) fail closed.
+pub fn verify_sha256sums_manifest(
+    manifest_path: &Path,
+    archives: &[(String, PathBuf)],
+    strict_names: bool,
+) -> Result<()> {
+    let body = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    if body.len() as u64 > MAX_MANIFEST_BYTES {
+        bail!("SHA256SUMS is unexpectedly large");
+    }
+
+    let mut manifest: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut fold_seen: HashSet<String> = HashSet::new();
+    for (lineno, line) in body.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.chars().any(|c| c.is_control()) {
+            bail!("SHA256SUMS line {} contains control characters", lineno + 1);
+        }
+        let mut parts = line.split_whitespace();
+        let digest = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("SHA256SUMS line {} is malformed", lineno + 1))?;
+        let name = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("SHA256SUMS line {} is missing a filename", lineno + 1))?
+            .trim_start_matches('*');
+        if parts.next().is_some() {
+            bail!("SHA256SUMS line {} has trailing fields", lineno + 1);
+        }
+        validate_asset_name(name)?;
+        let digest = digest.to_ascii_lowercase();
+        if !valid_sha256(&digest) {
+            bail!("SHA256SUMS has an invalid digest for {name}");
+        }
+        let fold = name.to_ascii_lowercase();
+        if !fold_seen.insert(fold) {
+            bail!("SHA256SUMS contains duplicate or case-colliding entry for {name}");
+        }
+        if manifest.insert(name.to_string(), digest).is_some() {
+            bail!("SHA256SUMS contains duplicate entries for {name}");
+        }
+    }
+
+    // CLI archive args: reject duplicates / case collisions.
+    let mut arg_fold: HashSet<String> = HashSet::new();
+    for (name, _) in archives {
+        validate_asset_name(name)?;
+        let fold = name.to_ascii_lowercase();
+        if !arg_fold.insert(fold) {
+            bail!("duplicate or case-colliding --archive name: {name}");
+        }
+    }
+
+    let expected_names: HashSet<String> = archives.iter().map(|(n, _)| n.clone()).collect();
+    if strict_names {
+        for name in manifest.keys() {
+            if !expected_names.contains(name) {
+                bail!("SHA256SUMS lists unexpected asset {name}");
+            }
+        }
+        if manifest.len() != archives.len() {
+            bail!(
+                "SHA256SUMS entry count ({}) does not match archive count ({})",
+                manifest.len(),
+                archives.len()
+            );
+        }
+    }
+
+    for (name, path) in archives {
+        let expected = manifest
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("SHA256SUMS is missing an entry for {name}"))?;
+        let actual = sha256_file(path)?;
+        if &actual != expected {
+            bail!("SHA-256 mismatch for {name}: expected {expected}, got {actual}");
+        }
+    }
+    Ok(())
+}
+
+/// CLI entry for `hyper-verify-release-archive` (release CI).
+pub fn run_verify_release_cli(args: &[String]) -> Result<()> {
+    // Usage:
+    //   hyper-verify-release-archive --archive PATH [--sha256 HEX] [--bundle-root DIR]
+    //       [--binary-entry NAME] [--allow-empty-bundle]
+    //   hyper-verify-release-archive --sums PATH --archive NAME=PATH [--archive NAME=PATH ...]
+    //       [--strict-names]
+    let mut archives: Vec<(String, PathBuf)> = Vec::new();
+    let mut single_archive: Option<PathBuf> = None;
+    let mut sums: Option<PathBuf> = None;
+    let mut expected_sha: Option<String> = None;
+    let mut bundle_root: Option<PathBuf> = None;
+    let mut binary_entry: Option<String> = None;
+    let mut require_bundle = true;
+    let mut strict_names = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--archive" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| anyhow::anyhow!("--archive requires a value"))?;
+                if let Some((name, path)) = value.split_once('=') {
+                    archives.push((name.to_string(), PathBuf::from(path)));
+                } else {
+                    single_archive = Some(PathBuf::from(value));
+                }
+            }
+            "--sums" => {
+                i += 1;
+                sums = Some(PathBuf::from(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--sums requires a path"))?,
+                ));
+            }
+            "--sha256" => {
+                i += 1;
+                expected_sha = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--sha256 requires a digest"))?
+                        .to_ascii_lowercase(),
+                );
+            }
+            "--bundle-root" => {
+                i += 1;
+                bundle_root =
+                    Some(PathBuf::from(args.get(i).ok_or_else(|| {
+                        anyhow::anyhow!("--bundle-root requires a directory")
+                    })?));
+            }
+            "--binary-entry" => {
+                i += 1;
+                binary_entry = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--binary-entry requires a name"))?
+                        .clone(),
+                );
+            }
+            "--allow-empty-bundle" => require_bundle = false,
+            "--strict-names" => strict_names = true,
+            "--help" | "-h" => {
+                eprintln!(
+                    "Usage:\n  \
+                     hyper-verify-release-archive --archive PATH [--sha256 HEX] [--bundle-root DIR]\n  \
+                     hyper-verify-release-archive --sums SHA256SUMS --archive NAME=PATH ..."
+                );
+                return Ok(());
+            }
+            other => bail!("unknown argument: {other}"),
+        }
+        i += 1;
+    }
+
+    if let Some(manifest) = sums {
+        if archives.is_empty() {
+            bail!("--sums requires one or more --archive NAME=PATH entries");
+        }
+        verify_sha256sums_manifest(&manifest, &archives, strict_names)?;
+        for (name, path) in &archives {
+            let report = verify_release_archive(
+                path,
+                ReleaseArchiveVerifyOptions {
+                    binary_entry: binary_entry.as_deref(),
+                    expected_sha256: None,
+                    expected_bundle_root: bundle_root.as_deref(),
+                    require_bundle,
+                },
+            )?;
+            eprintln!(
+                "ok  {name}  sha256={}  binary={}  bundle_files={}",
+                report.sha256, report.binary_entry, report.bundle_file_count
+            );
+        }
+        eprintln!("SHA256SUMS and {} archive(s) verified", archives.len());
+        return Ok(());
+    }
+
+    let archive = single_archive
+        .ok_or_else(|| anyhow::anyhow!("provide --archive PATH (or --sums with NAME=PATH)"))?;
+    let report = verify_release_archive(
+        &archive,
+        ReleaseArchiveVerifyOptions {
+            binary_entry: binary_entry.as_deref(),
+            expected_sha256: expected_sha.as_deref(),
+            expected_bundle_root: bundle_root.as_deref(),
+            require_bundle,
+        },
+    )?;
+    eprintln!(
+        "ok  {}  sha256={}  binary={}  bundle_files={}",
+        archive.display(),
+        report.sha256,
+        report.binary_entry,
+        report.bundle_file_count
+    );
+    Ok(())
+}
+
 pub(crate) async fn run_update(
     force: bool,
     pinned_version: Option<&str>,

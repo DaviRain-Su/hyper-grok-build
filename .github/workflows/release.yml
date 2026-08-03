@@ -285,6 +285,37 @@ jobs:
           Get-FileHash -Algorithm SHA256 $archive
           Add-Content -Path $env:GITHUB_ENV -Value "ARCHIVE=$archive"
 
+      # Reuse the same archive classifier/extractor as the community updater so
+      # CI cannot ship a layout installers or `hyper update` would reject.
+      - name: Build release-archive contract verifier
+        shell: bash
+        run: |
+          cargo build -p xai-grok-update --features community-build \
+            --bin hyper-verify-release-archive --locked
+
+      - name: Verify packaged archive contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          verifier="target/debug/hyper-verify-release-archive"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            verifier="target/debug/hyper-verify-release-archive.exe"
+          fi
+          digest="$(
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$ARCHIVE" | cut -d' ' -f1
+            else
+              shasum -a 256 "$ARCHIVE" | cut -d' ' -f1
+            fi
+          )"
+          binary_entry="hyper"
+          if [ "${{ runner.os }}" = "Windows" ]; then binary_entry="hyper.exe"; fi
+          "$verifier" \
+            --archive "$ARCHIVE" \
+            --sha256 "$digest" \
+            --binary-entry "$binary_entry" \
+            --bundle-root bundled
+
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
@@ -292,22 +323,143 @@ jobs:
           path: ${{ env.ARCHIVE }}
           if-no-files-found: error
 
-  release:
-    name: publish GitHub Release
-    needs: build
+  # Windows-native install.ps1 coverage (local HTTP fixture, binary-only,
+  # injected state-failure rollback, malicious zip). Not a static-only gate.
+  install-ps1:
+    name: install.ps1 (windows-2022)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show
+      - name: Run install.ps1 integration tests
+        shell: pwsh
+        run: |
+          cargo test -p xai-grok-update --features community-build `
+            --test test_install_ps1 --locked -- --nocapture
+
+  # macOS install.sh contract: exercises bsdtar listing/parser branch against
+  # the same community fixtures (full install, binary-only, injection rollback,
+  # double-slash / SUMS rejection). Complements Linux GNU tar CI.
+  install-sh-macos:
+    name: install.sh (macos-14)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show
+      - name: Show tar flavor
+        run: |
+          tar --version 2>&1 | head -3 || true
+          which tar
+      - name: Run install.sh / community contract tests
+        run: |
+          cargo test -p xai-grok-update \
+            --features community-build,community-update-test-hooks \
+            --test test_community_update --locked -- --nocapture
+
+  # Linux install.sh contract (GNU tar) — same test binary as macOS so both
+  # TAR_FLAVOR branches are live-exercised before publish.
+  install-sh-linux:
+    name: install.sh (ubuntu-24.04)
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show
+      - name: Show tar flavor
+        run: tar --version | head -3
+      - name: Run install.sh / community contract tests
+        run: |
+          cargo test -p xai-grok-update \
+            --features community-build,community-update-test-hooks \
+            --test test_community_update --locked -- --nocapture
+
+  release:
+    name: publish GitHub Release
+    needs: [build, install-ps1, install-sh-macos, install-sh-linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show
+
       - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
 
+      # Refuse to publish unless the exact five platform archives are present
+      # and nothing else (guards missing matrix legs / unexpected extras).
+      - name: Assert exact release asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          expected=(
+            "hyper-${version}-aarch64-apple-darwin.tar.gz"
+            "hyper-${version}-x86_64-apple-darwin.tar.gz"
+            "hyper-${version}-x86_64-unknown-linux-gnu.tar.gz"
+            "hyper-${version}-aarch64-unknown-linux-gnu.tar.gz"
+            "hyper-${version}-x86_64-pc-windows-msvc.zip"
+          )
+          cd dist
+          ls -l
+          mapfile -t found < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          mapfile -t want < <(printf '%s\n' "${expected[@]}" | sort)
+          if [ "${#found[@]}" -ne "${#want[@]}" ]; then
+            echo "expected exactly ${#want[@]} release archives, found ${#found[@]}" >&2
+            printf 'found: %s\n' "${found[@]}" >&2
+            exit 1
+          fi
+          for i in "${!want[@]}"; do
+            if [ "${found[$i]}" != "${want[$i]}" ]; then
+              echo "release asset set mismatch:" >&2
+              printf '  expected: %s\n' "${want[@]}" >&2
+              printf '  found:    %s\n' "${found[@]}" >&2
+              exit 1
+            fi
+          done
+          echo "exact five release archives present"
+
       - name: Generate SHA256SUMS
         working-directory: dist
         run: |
           ls -l
-          sha256sum hyper-* > SHA256SUMS
+          sha256sum \
+            "hyper-${GITHUB_REF_NAME#v}-aarch64-apple-darwin.tar.gz" \
+            "hyper-${GITHUB_REF_NAME#v}-x86_64-apple-darwin.tar.gz" \
+            "hyper-${GITHUB_REF_NAME#v}-x86_64-unknown-linux-gnu.tar.gz" \
+            "hyper-${GITHUB_REF_NAME#v}-aarch64-unknown-linux-gnu.tar.gz" \
+            "hyper-${GITHUB_REF_NAME#v}-x86_64-pc-windows-msvc.zip" \
+            > SHA256SUMS
           cat SHA256SUMS
+          # Exactly five digest lines, no extras.
+          test "$(wc -l < SHA256SUMS | tr -d '[:space:]')" -eq 5
+
+      # Final gate before publish: every downloaded artifact must match
+      # SHA256SUMS and still satisfy the release-archive contract (unique root
+      # binary, allowlisted notices, complete bundled/**, no dangerous paths).
+      - name: Verify release artifacts and SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p xai-grok-update --features community-build \
+            --bin hyper-verify-release-archive --locked
+          verifier="target/debug/hyper-verify-release-archive"
+          version="${GITHUB_REF_NAME#v}"
+          args=(--sums dist/SHA256SUMS --strict-names --bundle-root bundled)
+          for name in \
+            "hyper-${version}-aarch64-apple-darwin.tar.gz" \
+            "hyper-${version}-x86_64-apple-darwin.tar.gz" \
+            "hyper-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+            "hyper-${version}-aarch64-unknown-linux-gnu.tar.gz" \
+            "hyper-${version}-x86_64-pc-windows-msvc.zip"
+          do
+            args+=(--archive "${name}=dist/${name}")
+          done
+          "$verifier" "${args[@]}"
 
       # v3 = Node 24. draft:false publishes (reuses/updates an existing draft if
       # present so a failed previous run cannot leave an untagged draft forever).
