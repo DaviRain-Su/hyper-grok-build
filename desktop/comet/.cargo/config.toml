@@ -1,0 +1,13 @@
+# Fetch git dependencies via the system `git` CLI instead of libgit2. The
+# wingleeio/zed + zed-scap git deps (comet-ui's gpui) intermittently fail to
+# fetch over libgit2 with SSL/TLS errors in this environment; the system git
+# CLI handles them reliably.
+[net]
+git-fetch-with-cli = true
+
+# Linux x86_64 linker search path for gpui's xkbcommon/xkbcommon-x11 dependencies.
+# The system packages provide only the .so.0 runtime libs; the .so symlinks live
+# under ~/.local/lib/gpui-link (created during the local gpui setup). Without
+# this, `cargo run --bin comet` fails with "unable to find library -lxkbcommon-x11".
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-L", "/home/davirain/.local/lib/gpui-link"]

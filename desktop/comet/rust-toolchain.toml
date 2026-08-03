@@ -1,0 +1,5 @@
+[toolchain]
+# comet-ui's gpui (wingleeio/zed fork @ a6c1ad5) uses std::hint::cold_path,
+# stabilized in 1.95.0 (matches the Zed checkout's own rust-toolchain pin).
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

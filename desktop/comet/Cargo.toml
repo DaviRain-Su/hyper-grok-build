@@ -1,0 +1,118 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/proto",
+    "crates/doc",
+    "crates/sync",
+    "crates/harness",
+    "crates/engine",
+    "crates/rpc",
+    "crates/update",
+    "crates/ui",
+    "crates/tui",
+    "apps/comet",
+    "apps/tui",
+]
+
+[workspace.package]
+version = "0.1.6"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+comet-proto = { path = "crates/proto" }
+comet-doc = { path = "crates/doc" }
+comet-sync = { path = "crates/sync" }
+comet-harness = { path = "crates/harness" }
+comet-engine = { path = "crates/engine" }
+comet-rpc = { path = "crates/rpc" }
+comet-update = { path = "crates/update" }
+comet-ui = { path = "crates/ui" }
+comet-tui = { path = "crates/tui" }
+
+# CRDT
+loro = "1.13"
+# Wire protocol for the SessionRoom DO rooms — official Rust twin of the npm
+# `loro-protocol` package the TS edge speaks (same monorepo, byte-identical
+# frames, cross-checked by its js_snapshots tests).
+loro-protocol = "0.3"
+
+# gpui — the wingleeio/zed fork: upstream f14fea9 + two commits on
+# `comet/line-wrap-closing-punctuation` (rebase that branch when bumping the
+# upstream rev): a6bf17c fixes BOTH wrap-rule copies (LineWrapper +
+# line_layout's shaped-text duplicate); 14baea0 adds the EdgeFade primitive
+# (Window::with_edge_fade — per-primitive scroll-edge fades for the glass
+# sidebar).
+gpui = { git = "https://github.com/wingleeio/zed", rev = "a6c1ad501f90c9437d2553bde691958f150364c5" }
+gpui_platform = { git = "https://github.com/wingleeio/zed", rev = "a6c1ad501f90c9437d2553bde691958f150364c5", features = [
+    "wayland",
+    "x11",
+    "font-kit",
+    "runtime_shaders",
+] }
+gpui_tokio = { git = "https://github.com/wingleeio/zed", rev = "a6c1ad501f90c9437d2553bde691958f150364c5" }
+
+# ratatui — the terminal viewport (`comet-tui`). Deliberately narrow features:
+# `widget-calendar` (a default) drags in `time`, and we render no calendar.
+# `layout-cache` memoizes the cassowary solve, which is the one per-frame cost
+# in ratatui that isn't already diffed away.
+ratatui = { version = "0.30", default-features = false, features = [
+    "std",
+    "crossterm",
+    "layout-cache",
+    "underline-color",
+] }
+
+# async / net
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+libc = "0.2"
+# native-tls (platform TLS — OpenSSL on Linux, matching curl/browser ClientHello
+# fingerprint) instead of rustls: networks that fingerprint-hold the rustls
+# ClientHello (GFW-style JA3 blocking) make rustls WS dials time out, while
+# OpenSSL passes. Confirmed via crates/sync/tests/ws_dial_probe.rs.
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+# Direct deps so comet-sync can drive the WS handshake over a Happy-Eyeballs
+# TCP connect (see crates/sync/src/room.rs::dial_ws).
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+futures = "0.3"
+async-trait = "0.1"
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# misc
+anyhow = "1"
+tempfile = "3"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+notify = "7"
+portable-pty = "0.8"
+alacritty_terminal = "0.26"
+pulldown-cmark = "0.12"
+unicode-segmentation = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+
+[profile.release]
+# Distribution profile (scripts/package-linux.sh): thin LTO buys most of fat
+# LTO's size/speed win at a fraction of the link time; strip debug symbols.
+lto = "thin"
+strip = "symbols"
+
+[profile.dev]
+# gpui is slow unoptimized; match zed's approach for deps
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 2

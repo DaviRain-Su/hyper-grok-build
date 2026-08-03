@@ -1,0 +1,26 @@
+[package]
+name = "comet-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+loro.workspace = true
+loro-protocol.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+native-tls.workspace = true
+tokio-native-tls.workspace = true
+futures.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+comet-doc.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+# `start_paused` virtual-clock tests (the 2026-07-30 sync-stall regressions).
+tokio = { workspace = true, features = ["test-util"] }

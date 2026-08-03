@@ -302,6 +302,7 @@ Amp 风格的 **agent 模式**(low / medium / high / ultra 档位)目前**仅有
 | `packages/extensions/` | WASM 扩展宿主 / SDK / marketplace |
 | `packages/platform/` | 路径、FS/git、崩溃、遥测、测试 |
 | `packages/build/` | 构建辅助（protoc） |
+| `desktop/comet/` | 可选**本地**桌面控制器（gpui；嵌套 workspace；已去云） |
 | `install.sh` / `install.ps1` | 发布安装脚本 |
 | `.github/workflows/release.yml` | 多平台发布 CI |
 

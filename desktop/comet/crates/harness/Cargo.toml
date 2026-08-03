@@ -1,0 +1,34 @@
+[package]
+name = "comet-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+comet-proto.workspace = true
+base64 = "0.22"
+tokio.workspace = true
+tokio-util = { workspace = true, features = ["compat", "rt"] }
+uuid.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# ACP (agent-client-protocol) — the wire protocol `hyper agent stdio` speaks.
+# Same version/features the grok fork's xai-hyper-desktop uses (0.10.4).
+agent-client-protocol = { version = "0.10", features = ["unstable"] }
+# Async read/write compat for the ACP ClientSideConnection (futures<->tokio).
+# (features on the tokio-util line above.)
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# In-process ACP transport for the e2e harness mock test (mirrors
+# agent-client-protocol's own rpc_tests setup).
+piper = "0.2"

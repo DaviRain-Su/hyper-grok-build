@@ -1,0 +1,32 @@
+[package]
+name = "comet-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+comet-proto.workspace = true
+comet-doc.workspace = true
+comet-engine.workspace = true
+comet-rpc.workspace = true
+comet-update.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui_tokio.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+pulldown-cmark.workspace = true
+alacritty_terminal.workspace = true
+base64 = "0.22"
+unicode-segmentation.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,31 @@
+[package]
+name = "comet-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+comet-proto.workspace = true
+comet-doc.workspace = true
+comet-rpc.workspace = true
+tokio.workspace = true
+clap.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+libc.workspace = true
+unicode-segmentation.workspace = true
+unicode-width = "0.2"
+ratatui.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# The render tests assert column widths directly, so they need the same
+# measurement the renderer uses.
+unicode-width = "0.2"
