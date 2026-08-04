@@ -138,6 +138,9 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
 }
 
 /// The settings sections (feature-inventory §1.5 routes).
+///
+/// `Devices` remains for deep-link compatibility but is **hidden** from the
+/// local-link Hyper desktop nav (multi-device cloud sync is disabled).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     Devices,
@@ -147,8 +150,8 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 4] = [
-        SettingsSection::Devices,
+    /// Visible settings nav for the offline Hyper desktop fork.
+    pub const ALL: [SettingsSection; 3] = [
         SettingsSection::Agents,
         SettingsSection::Shortcuts,
         SettingsSection::Archived,
@@ -158,7 +161,7 @@ impl SettingsSection {
     /// `settingsTitle` — the same strings in both places).
     pub fn label(self) -> &'static str {
         match self {
-            SettingsSection::Devices => "Devices",
+            SettingsSection::Devices => "Devices (local only)",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::Archived => "Archived sessions",
@@ -591,10 +594,12 @@ impl Shell {
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors.
         let route = match std::env::var("COMET_OPEN_ROUTE").ok().as_deref() {
-            Some("settings") | Some("settings/devices") => {
-                Route::Settings(SettingsSection::Devices)
+            // Local-link default: Accounts (agent login), not multi-device Devices.
+            Some("settings") | Some("settings/agents") => {
+                Route::Settings(SettingsSection::Agents)
             }
-            Some("settings/agents") => Route::Settings(SettingsSection::Agents),
+            // Devices page still works if forced (dev), but is hidden from the nav.
+            Some("settings/devices") => Route::Settings(SettingsSection::Devices),
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
             // `new` pins the new-chat canvas (suppresses boot auto-select).
@@ -614,7 +619,7 @@ impl Shell {
             Some("signin") => Some(GatePhase::SignIn),
             Some("org") => Some(GatePhase::OrgGate),
             Some("failed") => Some(GatePhase::Failed(
-                "Could not reach the comet engine on port 27901".into(),
+                "Could not reach the Hyper desktop engine on the IPC port".into(),
             )),
             _ => None,
         };

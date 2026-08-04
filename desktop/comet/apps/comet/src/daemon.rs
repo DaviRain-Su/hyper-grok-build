@@ -7,17 +7,18 @@ use std::process::Command;
 
 use anyhow::{Context, bail};
 
-const LAUNCHD_LABEL: &str = "sh.zeron.comet";
-/// Same unit name the curl|sh installer (`edge/src/install.sh`) writes, so
-/// `comet daemon …` manages that installation rather than a competing copy.
-const SYSTEMD_UNIT: &str = "comet-native.service";
+/// LaunchAgent label for the Hyper local-desktop engine (replaces sh.zeron.comet).
+const LAUNCHD_LABEL: &str = "dev.hyper.desktop";
+/// systemd --user unit for the Hyper local-desktop engine.
+const SYSTEMD_UNIT: &str = "hyper-desktop.service";
 
 /// Environment captured into the unit file. `PATH` is always included (the
-/// engine spawns harness CLIs like `claude`, which service managers' minimal
-/// default PATH won't find); the `COMET_*`/logging vars only when set.
+/// engine spawns harness CLIs like `hyper`, which service managers' minimal
+/// default PATH won't find); the COMET_*/HYPER_* logging vars only when set.
 const CAPTURED_ENV: &[&str] = &[
     "PATH",
     "COMET_DATA_DIR",
+    "HYPER_DESKTOP_DATA_DIR",
     "COMET_ORG_ID",
     "COMET_IPC_PORT",
     "COMET_HARNESS",
@@ -217,7 +218,7 @@ fn render_systemd_unit(exe: &Path, env: &[(String, String)]) -> String {
     // fail-fast exit (5 × RestartSec=5 lands inside the 60s window) — otherwise
     // a signed-out daemon restart-loops forever.
     let mut unit = String::from(
-        "[Unit]\nDescription=Comet native headless engine\nAfter=network-online.target\n\
+        "[Unit]\nDescription=Hyper desktop local engine (offline)\nAfter=network-online.target\n\
          StartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Service]\n",
     );
     for (key, value) in env {
@@ -226,29 +227,31 @@ fn render_systemd_unit(exe: &Path, env: &[(String, String)]) -> String {
         unit.push_str(&format!("Environment=\"{key}={value}\"\n"));
     }
     unit.push_str(&format!(
-        "ExecStart={} headless\nRestart=on-failure\nRestartSec=5\nEnvironmentFile=-%h/.comet-native/env\n\n[Install]\nWantedBy=default.target\n",
+        "ExecStart={} headless\nRestart=on-failure\nRestartSec=5\n\
+         EnvironmentFile=-%h/.hyper/desktop/env\n\n[Install]\nWantedBy=default.target\n",
         systemd_exec_path(exe)
     ));
     unit
 }
 
-/// The ExecStart binary path. An exe under `~/.comet-native/app/` came from the
-/// curl|sh installer, whose upgrades relink `app/current` — point the unit at
-/// the symlink (as the installer's own unit does) so it never pins one version.
-/// (`current_exe` resolves symlinks, so the versioned dir is what we see here.)
+/// The ExecStart binary path. An exe under a managed `app/` tree uses the
+/// `current` symlink so upgrades do not pin a versioned path.
 fn systemd_exec_path(exe: &Path) -> String {
     exec_path_for(exe, std::env::var_os("HOME").map(PathBuf::from).as_deref())
 }
 
 fn exec_path_for(exe: &Path, home: Option<&Path>) -> String {
-    let installed = home
-        .map(|home| home.join(".comet-native/app"))
-        .is_some_and(|app_root| exe.starts_with(app_root));
-    if installed {
-        "%h/.comet-native/app/current/comet".to_string()
-    } else {
-        format!("{}", exe.display())
+    if let Some(home) = home {
+        let hyper_app = home.join(".hyper/desktop/app");
+        if exe.starts_with(&hyper_app) {
+            return "%h/.hyper/desktop/app/current/comet".to_string();
+        }
+        let legacy = home.join(".comet-native/app");
+        if exe.starts_with(&legacy) {
+            return "%h/.comet-native/app/current/comet".to_string();
+        }
     }
+    format!("{}", exe.display())
 }
 
 fn render_launchd_plist(exe: &Path, env: &[(String, String)], log: &Path) -> String {
@@ -385,14 +388,21 @@ mod tests {
         // Inner quotes escaped so systemd re-parses the value verbatim.
         assert!(unit.contains("Environment=\"RUST_LOG=info,comet=\\\"debug\\\"\"\n"));
         assert!(unit.contains("Restart=on-failure"));
-        assert!(unit.contains("EnvironmentFile=-%h/.comet-native/env"));
+        assert!(unit.contains("EnvironmentFile=-%h/.hyper/desktop/env"));
         assert!(unit.contains("WantedBy=default.target"));
+        assert!(unit.contains("Hyper desktop local engine"));
     }
 
     #[test]
     fn installed_exe_uses_the_current_symlink() {
-        // Installer-managed binary (current_exe resolves the `current` symlink to
-        // the versioned dir): the unit must point back at the symlink.
+        assert_eq!(
+            exec_path_for(
+                Path::new("/home/u/.hyper/desktop/app/0.3.0/comet"),
+                Some(Path::new("/home/u")),
+            ),
+            "%h/.hyper/desktop/app/current/comet"
+        );
+        // Legacy comet-native layout still maps to the old symlink.
         assert_eq!(
             exec_path_for(
                 Path::new("/home/u/.comet-native/app/0.3.0/comet"),
@@ -414,17 +424,17 @@ mod tests {
     fn launchd_plist_shape() {
         let plist = render_launchd_plist(
             Path::new("/Users/x/comet & co/comet"),
-            &[("COMET_EDGE_URL".into(), "https://e?a=1&b=2".into())],
-            Path::new("/Users/x/.comet-native/daemon.log"),
+            &[("HYPER_AGENT_BIN".into(), "/opt/hyper".into())],
+            Path::new("/Users/x/.hyper/desktop/daemon.log"),
         );
-        assert!(plist.contains("<key>Label</key><string>sh.zeron.comet</string>"));
+        assert!(plist.contains("<key>Label</key><string>dev.hyper.desktop</string>"));
         // XML-escaped exe path and env value.
         assert!(plist.contains("<string>/Users/x/comet &amp; co/comet</string>"));
-        assert!(plist.contains("<string>https://e?a=1&amp;b=2</string>"));
+        assert!(plist.contains("<string>/opt/hyper</string>"));
         assert!(plist.contains("<string>headless</string>"));
         assert!(plist.contains("<key>SuccessfulExit</key><false/>"));
         assert!(plist.contains(
-            "<key>StandardOutPath</key><string>/Users/x/.comet-native/daemon.log</string>"
+            "<key>StandardOutPath</key><string>/Users/x/.hyper/desktop/daemon.log</string>"
         ));
     }
 }

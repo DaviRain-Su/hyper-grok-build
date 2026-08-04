@@ -304,7 +304,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 | `packages/extensions/` | WASM extension host / SDK / marketplace |
 | `packages/platform/` | Paths, FS/git, crash, telemetry, tests |
 | `packages/build/` | Build helpers (protoc) |
-| `desktop/comet/` | Optional **local** desktop controller (gpui; nested workspace; cloud stripped) |
+| `desktop/comet/` | Optional **local** desktop controller (gpui; nested workspace; cloud stripped). Run: `./scripts/run-desktop.sh` |
 | `install.sh` / `install.ps1` | Release installers |
 | `.github/workflows/release.yml` | Multi-target release CI |
 

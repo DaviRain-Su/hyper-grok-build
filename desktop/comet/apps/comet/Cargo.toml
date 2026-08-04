@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 comet-engine.workspace = true
+comet-harness.workspace = true
 comet-ui.workspace = true
 comet-tui.workspace = true
 # cloud release updater removed from this local-link fork

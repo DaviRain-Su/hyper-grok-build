@@ -13,7 +13,10 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "comet",
-    about = "Hyper local desktop controller (offline / local-link only)"
+    about = "Hyper local desktop controller (offline / local-link only)",
+    long_about = "Desktop shell for Hyper: local engine + gpui UI, driving \
+`hyper agent stdio` over ACP. No cloud sync. Set HYPER_AGENT_BIN if hyper is \
+not on PATH; monorepo target/release/hyper is auto-discovered."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -24,9 +27,9 @@ struct Cli {
 enum Command {
     /// Run the engine without a UI (local daemon mode).
     Headless,
-    /// Show local engine + IPC status.
+    /// Show local engine + IPC + resolved Hyper binary.
     Status,
-    /// Log in to the Hyper/xAI agent (OAuth). Not a cloud multi-device sign-in.
+    /// Log in to the Hyper agent (OAuth). Not a cloud multi-device sign-in.
     AgentLogin {
         #[arg(long)]
         device_auth: bool,
@@ -83,11 +86,14 @@ fn main() -> anyhow::Result<()> {
             runtime.block_on(async move {
                 match comet_engine::agent_login(device_auth).await {
                     Ok(()) => {
-                        eprintln!("Agent login complete.");
+                        eprintln!("Agent login complete (Hyper credentials).");
                         Ok(())
                     }
                     Err(e) => {
                         eprintln!("Agent login failed: {e}");
+                        eprintln!(
+                            "Hint: build hyper first or set HYPER_AGENT_BIN to the hyper binary."
+                        );
                         Err(anyhow::anyhow!("agent login failed: {e}"))
                     }
                 }
@@ -153,12 +159,23 @@ fn ipc_port() -> u16 {
         .unwrap_or(27654)
 }
 
+/// Desktop engine store (spaces/chats/docs). Separate from Hyper's `~/.grok`
+/// agent home — agent auth and tools still use Hyper's own paths.
 fn data_dir() -> std::path::PathBuf {
     if let Some(dir) = std::env::var_os("COMET_DATA_DIR") {
         return std::path::PathBuf::from(dir);
     }
+    if let Some(dir) = std::env::var_os("HYPER_DESKTOP_DATA_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
     let home = std::env::var_os("HOME").expect("HOME not set");
-    // Prefer Hyper-scoped data when available; keep comet-native for
-    // continuity with existing local installs of this controller.
-    std::path::PathBuf::from(home).join(".comet-native")
+    let home = std::path::PathBuf::from(home);
+    // Prefer Hyper-scoped path; fall back to legacy comet-native for continuity.
+    let hyper_desktop = home.join(".hyper").join("desktop");
+    let legacy = home.join(".comet-native");
+    if hyper_desktop.is_dir() || !legacy.is_dir() {
+        hyper_desktop
+    } else {
+        legacy
+    }
 }

@@ -1,86 +1,91 @@
 # Comet — Hyper local desktop controller
 
-Vendored from [hyper-comet](file:///home/davirain/hyper-comet) into this monorepo
-as the **desktop / local control entry** for Hyper.
+Vendored desktop shell for Hyper: **local engine + gpui UI**, driving the monorepo
+`hyper` binary over ACP (`hyper agent stdio`). Cloud edge / WorkOS multi-device
+sync are disabled.
 
-## Scope (this fork)
+## Architecture
 
-| Kept | Removed |
-|------|---------|
-| gpui desktop UI (`comet`) | Cloudflare edge / Durable Objects (`edge/`) |
-| Local engine + localhost IPC | WorkOS multi-device cloud sign-in |
-| TUI attach (`comet tui`) | Remote DeviceRoom peer relay (online path) |
-| Hyper harness (`hyper agent stdio`) | Cloud release update (`comet update`) |
-| Local daemon install | iOS app |
-| Agent OAuth (`comet agent-login`) | Production `edge.comet.zeron.sh` |
+```text
+comet UI / tui  ──IPC :27654──►  local engine  ──spawn──►  hyper agent stdio
+                                     │
+                                     └── data: ~/.hyper/desktop
+                                              (spaces/chats; not ~/.grok)
+```
 
-**Local-link only:** UI ↔ local engine (IPC) ↔ Hyper agent. No cloud sync.
+| Surface | Role |
+|---------|------|
+| `hyper` (root monorepo) | Coding agent, auth (`~/.grok`), tools, TUI |
+| `comet` (this tree) | Optional desktop controller |
+
+## Build & run (recommended)
+
+From the **monorepo root**:
+
+```bash
+./scripts/run-desktop.sh              # build hyper (release) + comet, then open UI
+./scripts/run-desktop.sh --release    # both release
+./scripts/run-desktop.sh --status     # resolve hyper + engine status
+./scripts/run-desktop.sh -- headless  # engine only
+```
+
+Manual:
+
+```bash
+# 1) Hyper agent
+cargo build -p xai-grok-pager-bin --features community-build --release
+export HYPER_AGENT_BIN="$PWD/target/release/hyper"   # or CARGO_TARGET_DIR path
+
+# 2) Desktop
+cd desktop/comet
+cargo build -p comet --release
+./target/release/comet                # or $CARGO_TARGET_DIR/release/comet
+```
+
+`resolve_hyper_bin` auto-discovers monorepo `target/{release,debug}/hyper` when
+you run from the repo (or set `HYPER_AGENT_BIN`).
+
+## Commands
+
+```bash
+comet                 # headed gpui (default harness: hyper)
+comet headless        # engine only
+comet tui             # terminal viewport on local IPC
+comet status          # data dir, IPC, resolved hyper path
+comet agent-login     # hyper login --oauth
+comet daemon install  # systemd/launchd user service
+```
+
+## Environment
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `HYPER_AGENT_BIN` | auto | Path to `hyper` / `grok` |
+| `COMET_DATA_DIR` / `HYPER_DESKTOP_DATA_DIR` | `~/.hyper/desktop` (else legacy `~/.comet-native`) | Engine store |
+| `COMET_IPC_PORT` | `27654` | Localhost engine port |
+| `COMET_HARNESS` | `hyper` | `hyper` / `mock` / `codex` / `cursor` |
+
+Cloud vars (`COMET_EDGE_*`, `COMET_WORKOS_*`) are **ignored**.
+
+## Local-link product rules
+
+- Settings nav: **Accounts / Shortcuts / Archived** (Devices cloud page hidden).
+- Daemon: `dev.hyper.desktop` (launchd) / `hyper-desktop.service` (systemd).
+- Agent credentials stay in Hyper (`hyper login` → `~/.grok`); desktop only stores UI sessions.
 
 ## Layout
 
 ```
-desktop/comet/          # nested Cargo workspace (not in root workspace members)
-  apps/comet/           # `comet` binary (headed default, headless, tui, daemon)
-  apps/tui/             # `comet-tui` binary
+desktop/comet/          # nested Cargo workspace (not in root members)
+  apps/comet/           # `comet` binary
+  apps/tui/             # `comet-tui`
   crates/
-    engine/ harness/    # agent runs (Hyper default)
-    rpc/                # localhost IPC
-    ui/                 # gpui
-    tui/                # ratatui viewport
-    proto/ doc/ sync/   # local docs/store (cloud rooms off when offline)
+    engine/ harness/    # Hyper harness default
+    ui/ tui/ rpc/       # gpui + ratatui + IPC
+    proto/ doc/ sync/   # local docs (rooms off when offline)
 ```
-
-## Build
-
-Separate from the root Hyper workspace (gpui pulls a Zed fork).
-
-```bash
-cd desktop/comet
-cargo build -p comet --release
-# binary: target/release/comet
-```
-
-Needs system deps for gpui (X11/Wayland on Linux, etc.). See upstream Zed build notes.
-
-## Run
-
-```bash
-# Headed desktop (embeds engine or attaches to local daemon)
-./target/release/comet
-
-# Engine only
-./target/release/comet headless
-
-# Terminal viewport (attaches to local IPC)
-./target/release/comet tui
-
-# Status / agent login / daemon
-./target/release/comet status
-./target/release/comet agent-login
-./target/release/comet daemon install
-```
-
-### Environment
-
-| Var | Default | Meaning |
-|-----|---------|---------|
-| `COMET_DATA_DIR` | `~/.comet-native` | Local store |
-| `COMET_IPC_PORT` | `27654` | Localhost engine port |
-| `COMET_HARNESS` | `hyper` | Agent harness (`hyper` / `mock` / …) |
-| `HYPER_AGENT_BIN` | resolve `hyper`/`grok` on PATH | Agent CLI |
-
-Cloud vars (`COMET_EDGE_*`, `COMET_WORKOS_*`) are **ignored** by this local-link entrypoint.
-
-## Relation to Hyper CLI
-
-| Surface | Role |
-|---------|------|
-| `hyper` (root monorepo) | Primary TUI coding agent |
-| `comet` (this tree) | Optional desktop shell that **controls** Hyper via ACP |
-
-Build Hyper first so `hyper` is on `PATH` (or set `HYPER_AGENT_BIN`).
 
 ## License
 
-MIT (see `LICENSE`). Upstream Comet architecture notes remain in `ARCHITECTURE.md`
-for historical context; cloud sections do not apply to this fork.
+MIT (see `LICENSE`). Historical cloud design notes in `ARCHITECTURE.md` no longer
+apply to this local-link fork.
