@@ -1221,6 +1221,7 @@ dependencies = [
  "anyhow",
  "clap",
  "comet-engine",
+ "comet-harness",
  "comet-tui",
  "comet-ui",
  "tokio",
