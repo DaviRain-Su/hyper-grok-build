@@ -392,6 +392,7 @@ impl SessionActor {
         } else {
             LoopFireMode::InSession
         };
+        let wasm_cmds = self.wasm_registered_commands.borrow().clone();
         let prompt_blocks = match slash_commands::resolve(
             prompt_blocks,
             &slash_skills,
@@ -399,6 +400,7 @@ impl SessionActor {
             skill_rewrite,
             &named_workflows,
             loop_fire_mode,
+            &wasm_cmds,
         ) {
             Ok(blocks) => blocks,
             Err(SlashCommandOutcome::Builtin(action)) => {

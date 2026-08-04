@@ -57,7 +57,7 @@ pub mod host;
 mod macros;
 pub mod prelude;
 
-pub use xai_grok_extension_macros::{hyper_hook, hyper_plugin, hyper_tool};
+pub use xai_grok_extension_macros::{hyper_command, hyper_hook, hyper_plugin, hyper_tool};
 
 /// Must match host CORE_ABI_VERSION.
 pub const CORE_ABI_VERSION: i32 = 1;

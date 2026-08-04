@@ -243,7 +243,9 @@ impl SessionActor {
         let availability = self.build_command_availability(&tool_names, has_workflow_runs);
         self.maybe_reconcile_active_goal_without_plan().await;
         let (_, workflows) = self.named_workflow_snapshot();
-        let commands = slash_commands::available_commands(&skills, availability, &workflows);
+        let wasm_cmds = self.wasm_registered_commands.borrow().clone();
+        let commands =
+            slash_commands::available_commands(&skills, availability, &workflows, &wasm_cmds);
         let meta = Some(slash_commands::build_tools_meta(&tool_names));
         tracing::info!(
             session_id = %self.session_info.id.0,

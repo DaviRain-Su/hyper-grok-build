@@ -31,7 +31,7 @@
 | tool 后观察 | ● | ● | **齐** | WASM `post_tool_use` + shell/HTTP hooks；success/input/result preview |
 | stop / 续跑门 | ◐ | ● | **齐/更强** | stop_gate + cap |
 | registerTool | ● | ● | **齐（MVP）** | `wasm_*` ToolBridge |
-| 自定义 slash 命令 | ● | ◐ | **半** | 声明式 `commands/` 有；WASM 无 `register_command` |
+| 自定义 slash 命令 | ● | ● | **齐（MVP）** | 声明式 `commands/` + WASM `register_command` / `#[hyper_command]` |
 | 键盘 / TUI 扩展 | ● | ○ | **缺** | 需 Host UI API（notify/status/keybind） |
 | 改 compaction 管道 | ● | ◐ | **半** | pre_compact observe only；无 rewrite |
 | before LLM rewrite messages | ● | ○ | **缺** | 仅 inject（before_agent / before_model）；full rewrite 有意后置 |

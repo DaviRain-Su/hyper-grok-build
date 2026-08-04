@@ -60,4 +60,20 @@ mod plugin {
         tool_result(args);
         allow()
     }
+
+    // capability: register_command — slash `/hello_wasm [name]`
+    #[hyper_command(
+        name = "hello_wasm",
+        description = "WASM register_command demo: greets the given name",
+        argument_hint = "<name>"
+    )]
+    fn hello_wasm(args: &str) -> i32 {
+        let name = if args.trim().is_empty() {
+            "world"
+        } else {
+            args.trim()
+        };
+        tool_result(&format!("hello from wasm, {name}"));
+        allow()
+    }
 }

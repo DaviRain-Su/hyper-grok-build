@@ -1767,6 +1767,7 @@ pub(crate) async fn spawn_session_actor(
             rt
         }),
         wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
+        wasm_registered_commands: std::cell::RefCell::new(Vec::new()),
         events: crate::session::events::EventTracker::new(
             &crate::session::persistence::session_dir(&session_info),
         ),

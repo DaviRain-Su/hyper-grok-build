@@ -902,16 +902,22 @@ impl SessionActor {
                 &bridge, &new_rt, &mut owned, sid,
             )
             .await;
+            let cmds = new_rt.collect_registered_commands().await;
+            let cmd_n = cmds.len();
+            *self.wasm_registered_commands.borrow_mut() = cmds;
             tracing::info!(
                 session_id = %sid,
                 wasm_tools = n,
-                "wasm extension tools synced to tool bridge"
+                wasm_commands = cmd_n,
+                "wasm extension tools/commands synced"
             );
             crate::session::wasm_tools::emit_runtime_metrics(
                 self.telemetry_enabled,
                 "plugin_reload",
                 &new_rt,
             );
+            // Refresh ACP autocomplete so new wasm slash commands appear.
+            self.send_available_commands_update().await;
         }
 
         // Reload hooks in the current session

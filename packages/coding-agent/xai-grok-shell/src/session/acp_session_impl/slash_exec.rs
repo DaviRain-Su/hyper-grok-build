@@ -875,6 +875,25 @@ impl SessionActor {
                 self.send_host_turn_slash_command_output(&msg).await;
                 ok_end_turn(0, None)
             }
+            BuiltinAction::WasmCommand {
+                extension,
+                name,
+                args,
+            } => {
+                let ext_rt = self.extension_runtime.borrow().clone();
+                let msg = match ext_rt
+                    .invoke_registered_command(&extension, &name, &args)
+                    .await
+                {
+                    Ok(out) if out.is_empty() => {
+                        format!("/{name} completed (wasm:{extension}).")
+                    }
+                    Ok(out) => out,
+                    Err(e) => format!("/{name} failed (wasm:{extension}): {e}"),
+                };
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
             BuiltinAction::GoalStatus => {
                 let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
                 let goal_tokens = self.goal_tokens_used(current_tokens);

@@ -41,13 +41,13 @@ use std::time::Duration;
 
 use xai_grok_extension_api::{
     BeforeAgentStartIn, BeforeAgentStartOut, CORE_ABI_VERSION, Capability, ContractError,
-    EXPORT_ABI_VERSION, EXPORT_DESCRIBE_TOOL, EXPORT_INVOKE_TOOL, EXPORT_ON_BEFORE_AGENT_START,
-    EXPORT_ON_BEFORE_MODEL, EXPORT_ON_POST_TOOL_USE, EXPORT_ON_PRE_COMPACT, EXPORT_ON_PRE_TOOL_USE,
-    EXPORT_ON_SESSION_END, EXPORT_ON_SESSION_START, EXPORT_ON_STOP, EXPORT_TOOL_COUNT,
-    ExtensionSpec, GateFailMode, GuestStringError, MAX_INJECT_BYTES, MAX_TOOL_PAYLOAD_BYTES,
-    PostToolIn, PreCompactIn, PreToolIn, StopIn, StopOut, WasmToolDescriptor,
-    is_valid_guest_tool_name, is_valid_tool_schema_json, read_guest_utf8_from_memory, timeouts,
-    truncate_utf8,
+    EXPORT_ABI_VERSION, EXPORT_COMMAND_COUNT, EXPORT_DESCRIBE_COMMAND, EXPORT_DESCRIBE_TOOL,
+    EXPORT_INVOKE_COMMAND, EXPORT_INVOKE_TOOL, EXPORT_ON_BEFORE_AGENT_START, EXPORT_ON_BEFORE_MODEL,
+    EXPORT_ON_POST_TOOL_USE, EXPORT_ON_PRE_COMPACT, EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END,
+    EXPORT_ON_SESSION_START, EXPORT_ON_STOP, EXPORT_TOOL_COUNT, ExtensionSpec, GateFailMode,
+    GuestStringError, MAX_INJECT_BYTES, MAX_TOOL_PAYLOAD_BYTES, PostToolIn, PreCompactIn, PreToolIn,
+    StopIn, StopOut, WasmCommandDescriptor, WasmToolDescriptor, is_valid_guest_tool_name,
+    is_valid_tool_schema_json, read_guest_utf8_from_memory, timeouts, truncate_utf8,
 };
 
 /// Errors from loading or calling a guest.
@@ -338,6 +338,8 @@ struct LoadedGuest {
     /// Short tool names last returned by [`ExtensionRuntime::collect_registered_tools`].
     /// Empty until first successful collect; when non-empty, invoke must match.
     advertised_tools: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Short slash command names from [`ExtensionRuntime::collect_registered_commands`].
+    advertised_commands: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     #[cfg(feature = "wasm")]
     inner: WasmGuest,
     #[cfg(not(feature = "wasm"))]
@@ -455,6 +457,9 @@ impl ExtensionRuntime {
                         gate_fail: spec.gate_fail,
                         plugin_data_dir,
                         advertised_tools: Arc::new(std::sync::Mutex::new(
+                            std::collections::HashSet::new(),
+                        )),
+                        advertised_commands: Arc::new(std::sync::Mutex::new(
                             std::collections::HashSet::new(),
                         )),
                         inner,
@@ -999,6 +1004,161 @@ impl ExtensionRuntime {
         }
     }
 
+    /// Collect slash commands from guests with [`Capability::RegisterCommand`].
+    ///
+    /// Same name rules as tools; `argument_hint` is free text from the describe
+    /// `set_tool_schema` host slot (not JSON Schema).
+    pub async fn collect_registered_commands(&self) -> Vec<WasmCommandDescriptor> {
+        let mut out = Vec::new();
+        #[cfg(feature = "wasm")]
+        for guest in &self.guests {
+            if !guest.capabilities.contains(&Capability::RegisterCommand) {
+                continue;
+            }
+            let host = HostCtx {
+                plugin_data_dir: guest.plugin_data_dir.clone(),
+                ..HostCtx::default()
+            };
+            let (count_res, _) = guest
+                .inner
+                .call_with_timeout_host(GuestCall::CommandCount, timeouts::OBSERVE, host)
+                .await;
+            self.metrics.record_call(&count_res);
+            let count = match count_res {
+                GuestCallResult::Ok { code, .. } if code >= 0 => code as usize,
+                _ => continue,
+            };
+            let count = count.min(32);
+            let mut seen_names = std::collections::HashSet::new();
+            let mut guest_cmds = Vec::new();
+            for i in 0..count {
+                let host = HostCtx {
+                    tool_index: i as i32,
+                    plugin_data_dir: guest.plugin_data_dir.clone(),
+                    ..HostCtx::default()
+                };
+                let (r, host_out) = guest
+                    .inner
+                    .call_with_timeout_host(GuestCall::DescribeCommand, timeouts::OBSERVE, host)
+                    .await;
+                self.metrics.record_call(&r);
+                if !matches!(r, GuestCallResult::Ok { code: 0, .. }) {
+                    continue;
+                }
+                let name = host_out.tool_name_out;
+                if !is_valid_guest_tool_name(&name) {
+                    tracing::warn!(
+                        extension = %guest.name,
+                        command = %name,
+                        "skipping wasm command with invalid name"
+                    );
+                    continue;
+                }
+                if !seen_names.insert(name.clone()) {
+                    tracing::warn!(
+                        extension = %guest.name,
+                        command = %name,
+                        "skipping duplicate wasm command name within extension"
+                    );
+                    continue;
+                }
+                guest_cmds.push(WasmCommandDescriptor {
+                    extension: guest.name.clone(),
+                    name,
+                    description: host_out.tool_description_out,
+                    argument_hint: host_out.tool_schema_out,
+                });
+            }
+            if let Ok(mut set) = guest.advertised_commands.lock() {
+                *set = guest_cmds.iter().map(|c| c.name.clone()).collect();
+            }
+            out.extend(guest_cmds);
+        }
+        out
+    }
+
+    /// Invoke a slash command registered by a guest. `command_name` is the short name.
+    /// `args` is raw free text from the slash line (not required to be JSON).
+    pub async fn invoke_registered_command(
+        &self,
+        extension: &str,
+        command_name: &str,
+        args: &str,
+    ) -> Result<String, RuntimeError> {
+        #[cfg(feature = "wasm")]
+        {
+            let guest = self
+                .guests
+                .iter()
+                .find(|g| g.name == extension)
+                .ok_or_else(|| {
+                    RuntimeError::Module(format!("extension not loaded: {extension}"))
+                })?;
+            if !guest.capabilities.contains(&Capability::RegisterCommand) {
+                return Err(RuntimeError::Module(format!(
+                    "extension `{extension}` lacks register_command capability"
+                )));
+            }
+            if args.len() > MAX_TOOL_PAYLOAD_BYTES {
+                return Err(RuntimeError::PayloadTooLarge { got: args.len() });
+            }
+            if !is_valid_guest_tool_name(command_name) {
+                return Err(RuntimeError::InvalidToolName(command_name.to_string()));
+            }
+            {
+                let advertised = guest
+                    .advertised_commands
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                if !advertised.is_empty() && !advertised.contains(command_name) {
+                    return Err(RuntimeError::UnknownTool(
+                        command_name.to_string(),
+                        extension.to_string(),
+                    ));
+                }
+            }
+            let host = HostCtx {
+                tool_name: command_name.to_string(),
+                tool_input: args.to_string(),
+                plugin_data_dir: guest.plugin_data_dir.clone(),
+                ..HostCtx::default()
+            };
+            let (r, host_out) = guest
+                .inner
+                .call_with_timeout_host(GuestCall::InvokeCommand, timeouts::GATE, host)
+                .await;
+            self.metrics.record_call(&r);
+            match r {
+                GuestCallResult::Ok { code: 0, .. } => Ok(if host_out.tool_result_out.is_empty() {
+                    String::new()
+                } else {
+                    host_out.tool_result_out
+                }),
+                GuestCallResult::Ok { code, .. } => Err(RuntimeError::Module(format!(
+                    "command `{command_name}` returned code {code}: {}",
+                    if host_out.tool_result_out.is_empty() {
+                        host_out.gate_reason
+                    } else {
+                        host_out.tool_result_out
+                    }
+                ))),
+                GuestCallResult::Failed { error, .. } => Err(RuntimeError::Trap(error)),
+                GuestCallResult::Timeout { limit, .. } => Err(RuntimeError::Timeout(limit)),
+                GuestCallResult::SkippedExport { export, .. } => {
+                    Err(RuntimeError::MissingExport(export))
+                }
+                GuestCallResult::SkippedCapability { .. } => {
+                    Err(RuntimeError::Module("capability skipped".into()))
+                }
+            }
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            let _ = (extension, command_name, args);
+            Err(RuntimeError::WasmDisabled)
+        }
+    }
+
     async fn dispatch_all_observe(
         &self,
         call: GuestCall,
@@ -1053,6 +1213,9 @@ enum GuestCall {
     ToolCount,
     DescribeTool,
     InvokeTool,
+    CommandCount,
+    DescribeCommand,
+    InvokeCommand,
 }
 
 /// Outcome of one guest invocation (for UI / scrollback).
@@ -1516,6 +1679,9 @@ impl WasmGuest {
             GuestCall::ToolCount => EXPORT_TOOL_COUNT,
             GuestCall::DescribeTool => EXPORT_DESCRIBE_TOOL,
             GuestCall::InvokeTool => EXPORT_INVOKE_TOOL,
+            GuestCall::CommandCount => EXPORT_COMMAND_COUNT,
+            GuestCall::DescribeCommand => EXPORT_DESCRIBE_COMMAND,
+            GuestCall::InvokeCommand => EXPORT_INVOKE_COMMAND,
         }
     }
 
@@ -2850,6 +3016,62 @@ mod tests {
             i32.const 0)
         )
     "#;
+
+    /// Minimal register_command guest: one slash command `hello`.
+    const COMMAND_GUEST: &str = r#"
+        (module
+          (import "hyper_host" "tool_index" (func $tool_index (result i32)))
+          (import "hyper_host" "set_tool_name" (func $set_name (param i32 i32)))
+          (import "hyper_host" "set_tool_description" (func $set_desc (param i32 i32)))
+          (import "hyper_host" "set_tool_schema" (func $set_hint (param i32 i32)))
+          (import "hyper_host" "set_tool_result" (func $set_result (param i32 i32)))
+          (import "hyper_host" "tool_name_len" (func $name_len (result i32)))
+          (import "hyper_host" "input_len" (func $input_len (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "hello")
+          (data (i32.const 16) "Say hello")
+          (data (i32.const 32) "<name>")
+          (data (i32.const 48) "hi-from-cmd")
+          (func (export "hyper_ext_abi_version") (result i32) i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32) i32.const 0)
+          (func (export "hyper_ext_command_count") (result i32) i32.const 1)
+          (func (export "hyper_ext_describe_command") (result i32)
+            (if (i32.ne (call $tool_index) (i32.const 0))
+              (then (return (i32.const 1))))
+            (call $set_name (i32.const 0) (i32.const 5))
+            (call $set_desc (i32.const 16) (i32.const 9))
+            (call $set_hint (i32.const 32) (i32.const 6))
+            i32.const 0)
+          (func (export "hyper_ext_invoke_command") (result i32)
+            ;; require non-empty command name from host
+            (if (i32.eqz (call $name_len)) (then (return (i32.const 1))))
+            (call $set_result (i32.const 48) (i32.const 11))
+            i32.const 0)
+        )
+    "#;
+
+    #[tokio::test]
+    async fn register_and_invoke_slash_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "cmd.wasm", COMMAND_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec(
+            "cmd-ext",
+            path,
+            vec![Capability::RegisterCommand],
+        ))
+        .unwrap();
+        let cmds = rt.collect_registered_commands().await;
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].name, "hello");
+        assert_eq!(cmds[0].description, "Say hello");
+        assert_eq!(cmds[0].argument_hint, "<name>");
+        let out = rt
+            .invoke_registered_command("cmd-ext", "hello", "world")
+            .await
+            .expect("invoke");
+        assert_eq!(out, "hi-from-cmd");
+    }
 
     #[tokio::test]
     async fn post_tool_use_observe_success_and_failure() {

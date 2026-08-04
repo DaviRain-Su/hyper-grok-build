@@ -81,6 +81,14 @@ pub const EXPORT_TOOL_COUNT: &str = "hyper_ext_tool_count";
 pub const EXPORT_DESCRIBE_TOOL: &str = "hyper_ext_describe_tool";
 /// Invoke tool named in host `tool_name` with `tool_input`; write result via `set_tool_result`.
 pub const EXPORT_INVOKE_TOOL: &str = "hyper_ext_invoke_tool";
+/// Return number of slash commands this guest registers (requires `register_command`).
+pub const EXPORT_COMMAND_COUNT: &str = "hyper_ext_command_count";
+/// Describe command at `tool_index` via `set_tool_name` / `set_tool_description` /
+/// `set_tool_schema` (schema slot holds free-text **argument_hint**, not JSON Schema).
+pub const EXPORT_DESCRIBE_COMMAND: &str = "hyper_ext_describe_command";
+/// Invoke slash command named in host `tool_name` with `tool_input` = raw args text;
+/// write result via `set_tool_result`.
+pub const EXPORT_INVOKE_COMMAND: &str = "hyper_ext_invoke_command";
 /// Before each model round (tool loop iteration); inject via set_inject_context.
 pub const EXPORT_ON_BEFORE_MODEL: &str = "hyper_ext_on_before_model";
 
@@ -92,6 +100,26 @@ pub struct WasmToolDescriptor {
     pub description: String,
     /// JSON Schema object (as string). Empty → default empty object schema.
     pub input_schema_json: String,
+}
+
+/// One slash command advertised by a WASM guest (Pi-style `registerCommand`).
+///
+/// Client-facing slash name is the short [`Self::name`] (no `wasm_` prefix);
+/// collisions with builtins/skills are resolved host-side (builtins win first).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmCommandDescriptor {
+    pub extension: String,
+    pub name: String,
+    pub description: String,
+    /// Optional autocomplete hint shown as unstructured command input (e.g. `"<path>"`).
+    pub argument_hint: String,
+}
+
+impl WasmCommandDescriptor {
+    /// ACP autocomplete name (same as short guest name after sanitization check).
+    pub fn slash_name(&self) -> &str {
+        &self.name
+    }
 }
 
 impl WasmToolDescriptor {
@@ -250,6 +278,8 @@ pub enum Capability {
     StopGate,
     /// Guest may expose tools via `hyper_ext_tool_count` / describe / invoke.
     RegisterTool,
+    /// Guest may expose slash commands via `hyper_ext_command_count` / describe / invoke.
+    RegisterCommand,
     /// Per-model-round inject (system-reminder), not full history rewrite.
     BeforeModelInject,
 }
@@ -261,6 +291,7 @@ impl Capability {
             Self::BeforeAgentInject => "before_agent_inject",
             Self::StopGate => "stop_gate",
             Self::RegisterTool => "register_tool",
+            Self::RegisterCommand => "register_command",
             Self::BeforeModelInject => "before_model_inject",
         }
     }
@@ -271,6 +302,7 @@ impl Capability {
             "before_agent_inject" => Some(Self::BeforeAgentInject),
             "stop_gate" => Some(Self::StopGate),
             "register_tool" => Some(Self::RegisterTool),
+            "register_command" => Some(Self::RegisterCommand),
             "before_model_inject" => Some(Self::BeforeModelInject),
             _ => None,
         }
@@ -579,6 +611,7 @@ mod tests {
             Capability::BeforeAgentInject,
             Capability::StopGate,
             Capability::RegisterTool,
+            Capability::RegisterCommand,
             Capability::BeforeModelInject,
         ] {
             assert_eq!(Capability::parse(cap.as_str()), Some(cap));

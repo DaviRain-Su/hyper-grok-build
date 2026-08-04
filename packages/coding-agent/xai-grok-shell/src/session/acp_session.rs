@@ -965,6 +965,9 @@ pub(crate) struct SessionActor {
     /// Client tool names this session registered on the shared ToolBridge
     /// (session-scoped unregister; see Oracle review).
     pub(crate) wasm_registered_tools: std::cell::RefCell<Vec<String>>,
+    /// Slash commands collected from loaded WASM extensions (`register_command`).
+    pub(crate) wasm_registered_commands:
+        std::cell::RefCell<Vec<xai_grok_extension_api::WasmCommandDescriptor>>,
     /// Centralized event tracking: event log, turn-end guard, active tool,
     /// doom loop terminate flag. All event-related state lives here.
     pub(crate) events: crate::session::events::EventTracker,

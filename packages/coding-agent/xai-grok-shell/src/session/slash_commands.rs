@@ -618,10 +618,15 @@ pub(super) fn available_commands(
     skills: &[SkillInfo],
     availability: CommandAvailability,
     workflows: &[crate::session::workflow::registry::WorkflowListing],
+    wasm_commands: &[xai_grok_extension_api::WasmCommandDescriptor],
 ) -> Vec<acp::AvailableCommand> {
     let catalog = EffectiveCommandCatalog::build(skills, availability, workflows);
-    let mut commands =
-        Vec::with_capacity(catalog.builtins.len() + catalog.skills.len() + catalog.workflows.len());
+    let mut commands = Vec::with_capacity(
+        catalog.builtins.len()
+            + catalog.skills.len()
+            + catalog.workflows.len()
+            + wasm_commands.len(),
+    );
     commands.extend(catalog.builtins.iter().map(|builtin| {
         acp::AvailableCommand::new(builtin.name.to_string(), builtin.description.to_string()).input(
             builtin.argument_hint.map(|hint| {
@@ -677,6 +682,27 @@ pub(super) fn available_commands(
             acp::UnstructuredCommandInput::new("<args>".to_string()),
         )))
         .meta(meta)
+    }));
+    // WASM slash commands last: builtins / skills / workflows win name collisions.
+    commands.extend(wasm_commands.iter().map(|cmd| {
+        let desc = if cmd.description.is_empty() {
+            format!("WASM extension `{}`", cmd.extension)
+        } else {
+            cmd.description.clone()
+        };
+        let meta = serde_json::json!({
+            "wasmExtension": cmd.extension,
+            "source": "wasm",
+        })
+        .as_object()
+        .cloned();
+        acp::AvailableCommand::new(cmd.name.clone(), desc)
+            .input((!cmd.argument_hint.is_empty()).then(|| {
+                acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
+                    cmd.argument_hint.clone(),
+                ))
+            }))
+            .meta(meta)
     }));
     commands
 }
@@ -1042,7 +1068,7 @@ pub(crate) async fn list_commands(
         }
         let skills = product_skill_infos(auth).await.unwrap_or_default();
         return Ok(ListCommandsResponse {
-            commands: available_commands(&skills, availability, &[]),
+            commands: available_commands(&skills, availability, &[], &[]),
             tools: None,
         });
     }
@@ -1060,7 +1086,7 @@ pub(crate) async fn list_commands(
             .map(std::path::Path::new),
     );
     Ok(ListCommandsResponse {
-        commands: available_commands(&skills, availability, &workflows),
+        commands: available_commands(&skills, availability, &workflows, &[]),
         tools: None,
     })
 }
@@ -1165,9 +1191,15 @@ pub(super) enum BuiltinAction {
         name: String,
         input: String,
     },
+    /// Slash command registered by a trusted WASM extension (`register_command`).
+    WasmCommand {
+        extension: String,
+        name: String,
+        args: String,
+    },
 }
 impl BuiltinAction {
-    pub(crate) fn command_name(&self) -> &'static str {
+    pub(crate) fn command_name(&self) -> &str {
         match self {
             BuiltinAction::Compact { .. } => "compact",
             BuiltinAction::SetYolo { .. } => "yolo",
@@ -1199,6 +1231,7 @@ impl BuiltinAction {
             BuiltinAction::DeepResearch { .. } => "deep-research",
             BuiltinAction::WorkflowManage { .. } => "workflow",
             BuiltinAction::WorkflowLaunch { .. } => "workflow",
+            BuiltinAction::WasmCommand { name, .. } => name.as_str(),
         }
     }
     pub(crate) fn args_provided(&self) -> bool {
@@ -1233,6 +1266,7 @@ impl BuiltinAction {
             BuiltinAction::DeepResearch { .. } => true,
             BuiltinAction::WorkflowManage { .. } => true,
             BuiltinAction::WorkflowLaunch { input, .. } => !input.is_empty(),
+            BuiltinAction::WasmCommand { args, .. } => !args.is_empty(),
         }
     }
 }
@@ -1416,6 +1450,7 @@ pub(super) fn resolve(
     _skill_rewrite: SkillSlashRewrite,
     workflows: &[crate::session::workflow::registry::WorkflowListing],
     loop_fire_mode: LoopFireMode,
+    wasm_commands: &[xai_grok_extension_api::WasmCommandDescriptor],
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
     let Some((command_name, args)) = parse_slash_prefix(&prompt_blocks) else {
         return Ok(prompt_blocks);
@@ -1482,6 +1517,13 @@ pub(super) fn resolve(
             },
         ));
     }
+    if let Some(cmd) = wasm_commands.iter().find(|c| c.name == command_name) {
+        return Err(SlashCommandOutcome::Builtin(BuiltinAction::WasmCommand {
+            extension: cmd.extension.clone(),
+            name: cmd.name.clone(),
+            args: args.to_string(),
+        }));
+    }
     Ok(prompt_blocks)
 }
 /// Extract `(name, args)` if the first text block starts with `/`.
@@ -1547,6 +1589,7 @@ mod tests {
             skill_rewrite,
             workflows,
             LoopFireMode::Detached,
+            &[],
         )
     }
     #[test]
@@ -1939,6 +1982,7 @@ mod tests {
                 SkillSlashRewrite::default(),
                 &[],
                 mode,
+                &[],
             )
             .unwrap_err();
             let SlashCommandOutcome::InvokeSkill { blocks, .. } = outcome else {
@@ -2034,7 +2078,7 @@ mod tests {
     #[test]
     fn available_commands_orders_builtins_first() {
         let skills = vec![make_skill("commit", true), make_skill("deploy", true)];
-        let commands = available_commands(&skills, all_gated(), &[]);
+        let commands = available_commands(&skills, all_gated(), &[], &[]);
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -2064,7 +2108,7 @@ mod tests {
         );
     }
     fn advertised_names(availability: CommandAvailability) -> Vec<String> {
-        available_commands(&[], availability, &[])
+        available_commands(&[], availability, &[], &[])
             .into_iter()
             .map(|c| c.name)
             .collect()
@@ -2289,7 +2333,7 @@ mod tests {
     #[test]
     fn available_commands_populates_acp_fields() {
         let skills = vec![make_skill("commit", true)];
-        let commands = available_commands(&skills, all_gated(), &[]);
+        let commands = available_commands(&skills, all_gated(), &[], &[]);
         let builtin = commands.iter().find(|c| c.name == "compact").unwrap();
         assert!(builtin.input.is_some());
         let flush = commands.iter().find(|c| c.name == "flush").unwrap();
@@ -2458,7 +2502,7 @@ mod tests {
             make_scoped_skill("commit", SkillScope::User),
             make_skill("deploy", true),
         ];
-        let commands = available_commands(&skills, all_gated(), &[]);
+        let commands = available_commands(&skills, all_gated(), &[], &[]);
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"local:commit"));
         assert!(names.contains(&"user:commit"));
@@ -2475,7 +2519,7 @@ mod tests {
             make_scoped_skill("compact", SkillScope::Local),
             make_skill("deploy", true),
         ];
-        let commands = available_commands(&skills, all_gated(), &[]);
+        let commands = available_commands(&skills, all_gated(), &[], &[]);
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
         assert!(
             names.contains(&"local:compact"),
@@ -2542,7 +2586,7 @@ mod tests {
     }
     /// Collect the advertised command names for the given availability.
     fn advertised_names_with(availability: CommandAvailability) -> Vec<String> {
-        available_commands(&[], availability, &[])
+        available_commands(&[], availability, &[], &[])
             .into_iter()
             .map(|c| c.name)
             .collect()
@@ -2800,7 +2844,7 @@ mod tests {
     #[test]
     fn named_workflows_advertise_and_resolve() {
         let workflows = vec![listing("triage-flakes"), listing("goal")];
-        let commands = available_commands(&[], all_gated(), &workflows);
+        let commands = available_commands(&[], all_gated(), &workflows, &[]);
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"triage-flakes"), "{names:?}");
         assert_eq!(names.iter().filter(|n| **n == "goal").count(), 1);
@@ -2852,7 +2896,7 @@ mod tests {
             listing("commit"),
             listing("review"),
         ];
-        let names: Vec<_> = available_commands(&skills, all_gated(), &workflows)
+        let names: Vec<_> = available_commands(&skills, all_gated(), &workflows, &[])
             .into_iter()
             .map(|command| command.name)
             .collect();
@@ -2895,7 +2939,7 @@ mod tests {
         second.path = "/other/commit/SKILL.md".into();
         let skills = vec![first, second];
         assert!(
-            available_commands(&skills, all_gated(), &[])
+            available_commands(&skills, all_gated(), &[], &[])
                 .iter()
                 .all(|command| command.name != "same-plugin:commit")
         );
@@ -2918,7 +2962,7 @@ mod tests {
             ..CommandAvailability::all_enabled()
         };
         let workflows = vec![listing("review")];
-        let names: Vec<_> = available_commands(&[], availability, &workflows)
+        let names: Vec<_> = available_commands(&[], availability, &workflows, &[])
             .into_iter()
             .map(|command| command.name)
             .collect();

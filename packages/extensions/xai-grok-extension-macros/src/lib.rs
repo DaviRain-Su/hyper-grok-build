@@ -18,8 +18,9 @@ use syn::{
 /// Turn an inline module containing annotated ordinary functions into a Hyper
 /// WASM guest while keeping those functions visible to rust-analyzer.
 ///
-/// Use `#[hyper_hook(pre_tool_use)]` for lifecycle handlers and
-/// `#[hyper_tool(description = "…", schema = "…")]` for guest tools.
+/// Use `#[hyper_hook(pre_tool_use)]` for lifecycle handlers,
+/// `#[hyper_tool(description = "…", schema = "…")]` for guest tools, and
+/// `#[hyper_command(description = "…", argument_hint = "…")]` for slash commands.
 #[proc_macro_attribute]
 pub fn hyper_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr = TokenStream2::from(attr);
@@ -47,6 +48,16 @@ pub fn hyper_tool(_attr: TokenStream, item: TokenStream) -> TokenStream {
     marker_outside_plugin(
         item,
         "`#[hyper_tool(...)]` must be inside an inline module annotated with `#[hyper_plugin]`",
+    )
+}
+
+/// Marker consumed by [`hyper_plugin`]. Using it outside a `#[hyper_plugin]`
+/// inline module is an error.
+#[proc_macro_attribute]
+pub fn hyper_command(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    marker_outside_plugin(
+        item,
+        "`#[hyper_command(...)]` must be inside an inline module annotated with `#[hyper_plugin]`",
     )
 }
 
@@ -117,6 +128,19 @@ struct Tool {
     schema: Option<LitStr>,
 }
 
+struct CommandArgs {
+    name: Option<LitStr>,
+    description: LitStr,
+    argument_hint: Option<LitStr>,
+}
+
+struct Command {
+    function: Ident,
+    name: LitStr,
+    description: LitStr,
+    argument_hint: Option<LitStr>,
+}
+
 fn expand_hyper_plugin(attr: TokenStream2, mut module: ItemMod) -> syn::Result<TokenStream2> {
     if !attr.is_empty() {
         return Err(Error::new_spanned(
@@ -135,6 +159,8 @@ fn expand_hyper_plugin(attr: TokenStream2, mut module: ItemMod) -> syn::Result<T
     let mut hooks = HashMap::<HookKind, (Ident, Span)>::new();
     let mut tools = Vec::<Tool>::new();
     let mut tool_names = HashMap::<String, Span>::new();
+    let mut commands = Vec::<Command>::new();
+    let mut command_names = HashMap::<String, Span>::new();
     let mut errors = None;
 
     for item in items.iter_mut() {
@@ -146,6 +172,8 @@ fn expand_hyper_plugin(attr: TokenStream2, mut module: ItemMod) -> syn::Result<T
             &mut hooks,
             &mut tools,
             &mut tool_names,
+            &mut commands,
+            &mut command_names,
             &mut errors,
         );
     }
@@ -155,7 +183,7 @@ fn expand_hyper_plugin(attr: TokenStream2, mut module: ItemMod) -> syn::Result<T
     }
 
     let sdk = sdk_path();
-    let generated = generate_exports(&sdk, &hooks, &tools);
+    let generated = generate_exports(&sdk, &hooks, &tools, &commands);
     let generated: syn::File = syn::parse2(generated)?;
     items.extend(generated.items);
 
@@ -167,6 +195,8 @@ fn process_function(
     hooks: &mut HashMap<HookKind, (Ident, Span)>,
     tools: &mut Vec<Tool>,
     tool_names: &mut HashMap<String, Span>,
+    commands: &mut Vec<Command>,
+    command_names: &mut HashMap<String, Span>,
     errors: &mut Option<Error>,
 ) {
     if function.sig.ident.to_string().starts_with("hyper_ext_") {
@@ -181,6 +211,7 @@ fn process_function(
 
     let mut hook_marker = None;
     let mut tool_marker = None;
+    let mut command_marker = None;
     let mut retained = Vec::with_capacity(function.attrs.len());
 
     for attribute in std::mem::take(&mut function.attrs) {
@@ -214,18 +245,36 @@ fn process_function(
                 }
                 Err(error) => push_error(errors, error),
             }
+        } else if is_marker(&attribute, "hyper_command") {
+            match parse_command_attribute(&attribute) {
+                Ok(args) => {
+                    if command_marker.replace((args, attribute.span())).is_some() {
+                        push_error(
+                            errors,
+                            Error::new(
+                                attribute.span(),
+                                "a function may have only one `hyper_command` marker",
+                            ),
+                        );
+                    }
+                }
+                Err(error) => push_error(errors, error),
+            }
         } else {
             retained.push(attribute);
         }
     }
     function.attrs = retained;
 
-    if hook_marker.is_some() && tool_marker.is_some() {
+    let kind_count = usize::from(hook_marker.is_some())
+        + usize::from(tool_marker.is_some())
+        + usize::from(command_marker.is_some());
+    if kind_count > 1 {
         push_error(
             errors,
             Error::new(
                 function.sig.ident.span(),
-                "a function cannot be both a Hyper lifecycle hook and a Hyper tool",
+                "a function cannot mix Hyper hook / tool / command markers",
             ),
         );
         return;
@@ -273,6 +322,38 @@ fn process_function(
             name,
             description: args.description,
             schema: args.schema,
+        });
+    }
+
+    if let Some((args, marker_span)) = command_marker {
+        if let Err(error) = validate_tool_signature(&function.sig) {
+            push_error(errors, error);
+        }
+        let name = args.name.unwrap_or_else(|| {
+            LitStr::new(
+                function.sig.ident.to_string().as_str(),
+                function.sig.ident.span(),
+            )
+        });
+        if let Err(error) = validate_tool_name(&name) {
+            push_error(errors, error);
+        }
+        let name_value = name.value();
+        if let Some(first_span) = command_names.get(&name_value) {
+            let mut error = Error::new(
+                marker_span,
+                format!("duplicate Hyper command name `{name_value}`"),
+            );
+            error.combine(Error::new(*first_span, "first command declared here"));
+            push_error(errors, error);
+        } else {
+            command_names.insert(name_value, marker_span);
+        }
+        commands.push(Command {
+            function: function.sig.ident.clone(),
+            name,
+            description: args.description,
+            argument_hint: args.argument_hint,
         });
     }
 }
@@ -329,6 +410,57 @@ fn parse_tool_attribute(attribute: &Attribute) -> syn::Result<ToolArgs> {
         name,
         description,
         schema,
+    })
+}
+
+fn parse_command_attribute(attribute: &Attribute) -> syn::Result<CommandArgs> {
+    let mut name = None;
+    let mut description = None;
+    let mut argument_hint = None;
+
+    attribute.parse_nested_meta(|meta| {
+        if meta.path.is_ident("name") {
+            if name.is_some() {
+                return Err(meta.error("duplicate `name`"));
+            }
+            name = Some(meta.value()?.parse::<LitStr>()?);
+            Ok(())
+        } else if meta.path.is_ident("description") {
+            if description.is_some() {
+                return Err(meta.error("duplicate `description`"));
+            }
+            description = Some(meta.value()?.parse::<LitStr>()?);
+            Ok(())
+        } else if meta.path.is_ident("argument_hint") {
+            if argument_hint.is_some() {
+                return Err(meta.error("duplicate `argument_hint`"));
+            }
+            argument_hint = Some(meta.value()?.parse::<LitStr>()?);
+            Ok(())
+        } else {
+            Err(meta.error(
+                "unknown `hyper_command` option; expected `name`, `description`, or `argument_hint`",
+            ))
+        }
+    })?;
+
+    let description = description.ok_or_else(|| {
+        Error::new(
+            attribute.span(),
+            "`#[hyper_command]` requires `description = \"...\"`",
+        )
+    })?;
+    if description.value().is_empty() {
+        return Err(Error::new(
+            description.span(),
+            "Hyper command description must not be empty",
+        ));
+    }
+
+    Ok(CommandArgs {
+        name,
+        description,
+        argument_hint,
     })
 }
 
@@ -483,6 +615,7 @@ fn generate_exports(
     sdk: &TokenStream2,
     hooks: &HashMap<HookKind, (Ident, Span)>,
     tools: &[Tool],
+    commands: &[Command],
 ) -> TokenStream2 {
     let session_start = hook_call_or_zero(hooks, HookKind::SessionStart);
     let session_end = hook_call_or_zero(hooks, HookKind::SessionEnd);
@@ -517,6 +650,7 @@ fn generate_exports(
         Ident::new("hyper_ext_on_pre_compact", Span::call_site()),
     );
     let tool_exports = generate_tool_exports(sdk, tools);
+    let command_exports = generate_command_exports(sdk, commands);
 
     quote! {
         #[doc(hidden)]
@@ -544,6 +678,7 @@ fn generate_exports(
         #stop
         #pre_compact
         #tool_exports
+        #command_exports
     }
 }
 
@@ -629,6 +764,70 @@ fn generate_tool_exports(sdk: &TokenStream2, tools: &[Tool]) -> TokenStream2 {
             let args = #sdk::tool_input_json();
             #(#invoke)*
             #sdk::deny("unknown wasm tool")
+        }
+    }
+}
+
+fn generate_command_exports(sdk: &TokenStream2, commands: &[Command]) -> TokenStream2 {
+    if commands.is_empty() {
+        return TokenStream2::new();
+    }
+
+    let metadata = commands.iter().map(|command| {
+        let name = &command.name;
+        let description = &command.description;
+        let hint = command.argument_hint.as_ref().map_or_else(
+            || quote!(""),
+            |hint| quote!(#hint),
+        );
+        quote!((#name, #description, #hint),)
+    });
+    let invoke = commands.iter().map(|command| {
+        let name = &command.name;
+        let function = &command.function;
+        quote! {
+            if name == #name {
+                return #function(args.as_str());
+            }
+        }
+    });
+
+    quote! {
+        #[doc(hidden)]
+        const __HYPER_EXT_COMMAND_META: &[(&str, &str, &str)] = &[
+            #(#metadata)*
+        ];
+
+        #[doc(hidden)]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn hyper_ext_command_count() -> i32 {
+            __HYPER_EXT_COMMAND_META.len() as i32
+        }
+
+        #[doc(hidden)]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn hyper_ext_describe_command() -> i32 {
+            let index = #sdk::tool_index();
+            if index < 0 {
+                return 1;
+            }
+            let index = index as usize;
+            if index >= __HYPER_EXT_COMMAND_META.len() {
+                return 1;
+            }
+            let (name, description, argument_hint) = __HYPER_EXT_COMMAND_META[index];
+            // Reuse tool describe host imports: schema slot = argument_hint text.
+            #sdk::describe_tool(name, description, argument_hint);
+            0
+        }
+
+        #[doc(hidden)]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn hyper_ext_invoke_command() -> i32 {
+            let name = #sdk::tool_name();
+            let args = #sdk::tool_input_json();
+            #(#invoke)*
+            #sdk::deny("unknown wasm command")
         }
     }
 }

@@ -1812,10 +1812,12 @@ pub(super) async fn run_session(
                             let availability =
                                 session.build_command_availability(&tool_names, has_runs);
                             let (_, workflows) = session.named_workflow_snapshot();
+                            let wasm_cmds = session.wasm_registered_commands.borrow().clone();
                             let commands = slash_commands::available_commands(
                                 &skills,
                                 availability,
                                 &workflows,
+                                &wasm_cmds,
                             );
                             let _ = respond_to.send(slash_commands::ListCommandsResponse {
                                 commands,
@@ -1865,7 +1867,7 @@ pub(super) async fn run_session(
                                     );
                                 }
                             }
-                            // Register wasm_* tools once extensions are warm.
+                            // Register wasm_* tools and slash commands once extensions are warm.
                             let bridge = session.agent.borrow().tool_bridge().clone();
                             let mut owned = session.wasm_registered_tools.borrow_mut();
                             let sid = session.session_info.id.0.as_ref();
@@ -1873,10 +1875,14 @@ pub(super) async fn run_session(
                                 &bridge, &ext_rt, &mut owned, sid,
                             )
                             .await;
-                            if n > 0 {
+                            let cmds = ext_rt.collect_registered_commands().await;
+                            let cmd_n = cmds.len();
+                            *session.wasm_registered_commands.borrow_mut() = cmds;
+                            if n > 0 || cmd_n > 0 {
                                 tracing::info!(
                                     wasm_tools = n,
-                                    "wasm extension tools registered at session_start"
+                                    wasm_commands = cmd_n,
+                                    "wasm extension tools/commands registered at session_start"
                                 );
                             }
                             crate::session::wasm_tools::emit_runtime_metrics(

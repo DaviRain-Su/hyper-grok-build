@@ -239,6 +239,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             xai_grok_extension_runtime::ExtensionRuntime::new(),
         ),
         wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
+        wasm_registered_commands: std::cell::RefCell::new(Vec::new()),
         events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
         observability_bridge: noop_observability_bridge(),
         current_turn_number: std::cell::Cell::new(0),
