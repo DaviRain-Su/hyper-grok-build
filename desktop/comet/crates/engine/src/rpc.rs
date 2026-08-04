@@ -182,6 +182,17 @@ struct AgentAccountParams {
 #[serde(rename_all = "camelCase")]
 struct StartAgentLoginParams {
     harness: HarnessId,
+    /// Hyper only: `xai` | `openai` | `claude` | `kimi` | `github` | `radius`.
+    #[serde(default)]
+    provider: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveHyperApiKeyParams {
+    /// Platform id (`openrouter`, `openai`, `moonshot-ai`, `xai`, …).
+    platform: String,
+    api_key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -578,6 +589,7 @@ fn forwardable(method: &str) -> bool {
             | methods::COMPLETE_AGENT_LOGIN
             | methods::POLL_AGENT_LOGIN
             | methods::CANCEL_AGENT_LOGIN
+            | methods::SAVE_HYPER_API_KEY
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -982,10 +994,19 @@ impl RpcService for EngineRpc {
                 let p: StartAgentLoginParams = parse_params(params)?;
                 let start = self
                     .agent_accounts
-                    .start_login(p.harness)
+                    .start_login_with(p.harness, p.provider.as_deref())
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&start)
+            }
+            methods::SAVE_HYPER_API_KEY => {
+                let p: SaveHyperApiKeyParams = parse_params(params)?;
+                let snapshot = self
+                    .agent_accounts
+                    .save_hyper_api_key(&p.platform, &p.api_key)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&snapshot)
             }
             methods::COMPLETE_AGENT_LOGIN => {
                 let p: CompleteAgentLoginParams = parse_params(params)?;

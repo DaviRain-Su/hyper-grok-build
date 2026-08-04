@@ -297,8 +297,15 @@ impl AgentAccounts {
             active_keys.insert(HarnessId::Codex, detected.account_key.clone());
             self.snapshot_detected(HarnessId::Codex, &detected)?;
         }
-        if let Some(detected) = self.detect_hyper() {
-            active_keys.insert(HarnessId::Hyper, detected.account_key.clone());
+        // Hyper auth.json is multi-scope (xAI OIDC + OpenAI Codex + platform/*
+        // API keys can coexist). List every live scope as its own account row.
+        let mut hyper_active: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for detected in self.detect_hyper_all() {
+            hyper_active.insert(detected.account_key.clone());
+            // Prefer first xAI-ish key for legacy single-active map consumers.
+            active_keys
+                .entry(HarnessId::Hyper)
+                .or_insert_with(|| detected.account_key.clone());
             self.snapshot_detected(HarnessId::Hyper, &detected)?;
         }
 
@@ -309,7 +316,11 @@ impl AgentAccounts {
             let active_key = active_keys.get(&harness).cloned();
             let slots = self.read_slots(harness);
             for slot in &slots {
-                let active = active_key.as_deref() == Some(slot.account_key.as_str());
+                let active = if harness == HarnessId::Hyper {
+                    hyper_active.contains(&slot.account_key)
+                } else {
+                    active_key.as_deref() == Some(slot.account_key.as_str())
+                };
                 let usage = self.usage_for(harness, slot, active, force_usage).await;
                 accounts.push(AgentAccount {
                     id: slot.id.clone(),
@@ -438,13 +449,15 @@ impl AgentAccounts {
         write_file_atomic(&self.inner.config.codex_auth_file(), json.as_bytes(), true)
     }
 
-    /// Swap a saved hyper login into the live `~/.grok/auth.json` (shared with
-    /// the official `grok` CLI). Mirrors `activate_codex`.
+    /// Merge a saved Hyper scope (or multi-scope fragment) into live
+    /// `~/.grok/auth.json`. Hyper stores many providers in one map — never
+    /// replace the whole file with a single-scope slot.
     fn activate_hyper(&self, slot: &Slot) -> Result<(), EngineError> {
         std::fs::create_dir_all(&self.inner.config.grok_home)?;
-        let json = serde_json::to_string_pretty(&slot.credentials)
-            .map_err(|e| EngineError::Other(format!("serialize hyper auth: {e}")))?;
-        write_file_atomic(&self.inner.config.hyper_auth_file(), json.as_bytes(), true)
+        let path = self.inner.config.hyper_auth_file();
+        merge_hyper_auth_file(&path, &slot.credentials)?;
+        comet_harness::invalidate_models_cache();
+        Ok(())
     }
 
     // ── forget ──────────────────────────────────────────────────────────────
@@ -486,15 +499,66 @@ impl AgentAccounts {
     // ── add-account OAuth flows ─────────────────────────────────────────────
 
     pub async fn start_login(&self, harness: HarnessId) -> Result<AgentLoginStart, EngineError> {
+        self.start_login_with(harness, None).await
+    }
+
+    /// Start a login. For Hyper, `provider` selects the CLI flag / API-key path:
+    /// `xai` (default), `openai`, `claude`, `kimi`, `github`, `radius`, or
+    /// `api:<platform>` (e.g. `api:openrouter`, `api:qwen` via moonshot-ai).
+    pub async fn start_login_with(
+        &self,
+        harness: HarnessId,
+        provider: Option<&str>,
+    ) -> Result<AgentLoginStart, EngineError> {
         self.sweep_flows();
         match harness {
             HarnessId::ClaudeCode => Ok(self.start_claude_login()),
             HarnessId::Codex => self.start_codex_login().await,
-            HarnessId::Hyper => self.start_hyper_login().await,
+            HarnessId::Hyper => self.start_hyper_login(provider).await,
             other => Err(EngineError::Other(format!(
                 "agent logins are not supported for {other:?}"
             ))),
         }
+    }
+
+    /// Store a Hyper platform / xAI API key into live `~/.grok/auth.json`
+    /// (same shape as TUI `/providers <platform> <key>`).
+    pub async fn save_hyper_api_key(
+        &self,
+        platform: &str,
+        api_key: &str,
+    ) -> Result<AgentAccountsSnapshot, EngineError> {
+        let platform = platform.trim();
+        let api_key = api_key.trim();
+        if platform.is_empty() {
+            return Err(EngineError::Other("Pick a platform id (e.g. openrouter).".into()));
+        }
+        if api_key.is_empty() {
+            return Err(EngineError::Other("API key looks empty.".into()));
+        }
+        std::fs::create_dir_all(&self.inner.config.grok_home)?;
+        let path = self.inner.config.hyper_auth_file();
+        let scope = if platform == "xai" || platform == "xai-direct" {
+            "xai::api_key".to_string()
+        } else {
+            format!("platform/{platform}")
+        };
+        let entry = serde_json::json!({
+            "key": api_key,
+            "auth_mode": "api_key",
+            "create_time": Utc::now().to_rfc3339(),
+            "user_id": "",
+            "coding_data_retention_opt_out": true,
+        });
+        let fragment = serde_json::json!({ scope: entry });
+        merge_hyper_auth_file(&path, &fragment)?;
+        // Snapshot so the Accounts list shows the new key immediately.
+        if let Some(detected) = parse_hyper_entries(&fragment).into_iter().next() {
+            self.snapshot_detected(HarnessId::Hyper, &detected)?;
+        }
+        // Credentials changed → next ListModels must re-probe usable models.
+        comet_harness::invalidate_models_cache();
+        self.list(false).await
     }
 
     fn start_claude_login(&self) -> AgentLoginStart {
@@ -662,13 +726,15 @@ impl AgentAccounts {
         })
     }
 
-    /// Start a `hyper login` (or `grok login`) flow — same spawn-CLI-and-poll
-    /// model as codex: an isolated `GROK_HOME` so the live `~/.grok` is never
-    /// touched until the user switches. Ensures the Hyper CLI is installed
-    /// (download to desktop default path when missing), then scans CLI output
-    /// for the OAuth URL so the desktop can open it. `poll_login` watches the
-    /// isolated `auth.json`.
-    async fn start_hyper_login(&self) -> Result<AgentLoginStart, EngineError> {
+    /// Start a `hyper login` flow — isolated `GROK_HOME` until poll succeeds,
+    /// then scopes are merged into live `~/.grok/auth.json`.
+    ///
+    /// `provider`: `xai` (default), `openai`, `claude`, `kimi`, `github`,
+    /// `radius`. API keys use [`Self::save_hyper_api_key`] instead.
+    async fn start_hyper_login(
+        &self,
+        provider: Option<&str>,
+    ) -> Result<AgentLoginStart, EngineError> {
         // At most ONE hyper login flow at a time — supersedes any pending.
         let stale: Vec<String> = lock(&self.inner.flows)
             .iter()
@@ -698,8 +764,35 @@ impl AgentAccounts {
             }
         };
 
-        let mut child = match tokio::process::Command::new(&bin)
-            .arg("login")
+        let provider = provider.unwrap_or("xai").trim().to_ascii_lowercase();
+        if let Some(platform) = provider.strip_prefix("api:") {
+            let _ = std::fs::remove_dir_all(&home);
+            return Err(EngineError::Other(format!(
+                "Use SaveHyperApiKey for API keys (platform={platform}), not browser login."
+            )));
+        }
+        let login_flag: Option<&str> = match provider.as_str() {
+            "xai" | "oauth" | "oidc" | "grok" | "" => None,
+            "openai" | "codex" | "chatgpt" => Some("--openai"),
+            "claude" | "anthropic" => Some("--claude"),
+            "kimi" | "kimi-code" => Some("--kimi"),
+            "github" | "copilot" => Some("--github"),
+            "radius" => Some("--radius"),
+            other => {
+                let _ = std::fs::remove_dir_all(&home);
+                return Err(EngineError::Other(format!(
+                    "Unknown Hyper login provider '{other}'. Try xai, openai, claude, kimi, github, or api:<platform>."
+                )));
+            }
+        };
+
+        let mut cmd = tokio::process::Command::new(&bin);
+        cmd.arg("login");
+        if let Some(flag) = login_flag {
+            cmd.arg(flag);
+        }
+        // Leave stdin closed: OIDC uses a loopback callback server (not paste).
+        let mut child = match cmd
             .env("GROK_HOME", &home)
             .env("HYPER_AGENT_BIN", &bin)
             .stdin(std::process::Stdio::null())
@@ -988,11 +1081,28 @@ impl AgentAccounts {
         };
         let detected = match harness {
             HarnessId::Codex => read_json(&home.join("auth.json")).and_then(parse_codex_auth),
-            HarnessId::Hyper => read_json(&home.join("auth.json")).and_then(parse_hyper_auth),
+            // Hyper auth.json is a scope map; any non-empty parse means success.
+            HarnessId::Hyper => {
+                read_json(&home.join("auth.json")).and_then(|v| parse_hyper_entries(&v).into_iter().next())
+            }
             _ => None,
         };
         if let Some(detected) = detected {
-            self.snapshot_detected(harness, &detected)?;
+            // Hyper: merge isolated scopes into live ~/.grok so the agent can
+            // use them immediately (multi-provider coexist). Then snapshot UI slots.
+            if harness == HarnessId::Hyper {
+                if let Some(isolated) = read_json(&home.join("auth.json")) {
+                    let _ = merge_hyper_auth_file(&self.inner.config.hyper_auth_file(), &isolated);
+                    for d in parse_hyper_entries(&isolated) {
+                        let _ = self.snapshot_detected(HarnessId::Hyper, &d);
+                    }
+                } else {
+                    let _ = self.snapshot_detected(harness, &detected);
+                }
+                comet_harness::invalidate_models_cache();
+            } else {
+                self.snapshot_detected(harness, &detected)?;
+            }
             self.cancel_login(login_id);
             return Ok(AgentLoginPoll {
                 status: AgentLoginStatus::Done,
@@ -1102,11 +1212,11 @@ impl AgentAccounts {
         read_json(&self.inner.config.codex_auth_file()).and_then(parse_codex_auth)
     }
 
-    /// Detect a live `~/.grok/auth.json` (the hyper/grok CLI login). Lenient:
-    /// extracts `account_id`/`user_id`/`email` from the JSON without depending on
-    /// the exact grok `GrokAuth` schema.
-    fn detect_hyper(&self) -> Option<Detected> {
-        read_json(&self.inner.config.hyper_auth_file()).and_then(parse_hyper_auth)
+    /// Every scope in live Hyper auth.json (xAI, Codex OAuth, platform keys…).
+    fn detect_hyper_all(&self) -> Vec<Detected> {
+        read_json(&self.inner.config.hyper_auth_file())
+            .map(|v| parse_hyper_entries(&v))
+            .unwrap_or_default()
     }
 
     /// Persist a detected login into its slot (refreshing stored tokens).
@@ -1618,38 +1728,210 @@ fn parse_codex_auth(auth: serde_json::Value) -> Option<Detected> {
     })
 }
 
-/// Parse the hyper/grok `~/.grok/auth.json`. Lenient — the grok `GrokAuth`
-/// schema carries `user_id`/`email`/`account_id`/`refresh_token`; we extract
-/// enough identity for the Accounts page without depending on the exact shape.
-/// Returns `None` when there's no `account_id` or `user_id` (no real login).
-fn parse_hyper_auth(auth: serde_json::Value) -> Option<Detected> {
-    let account_key = str_field(&auth, "account_id")
-        .or_else(|| str_field(&auth, "user_id"))
-        .or_else(|| str_field(&auth, "email"))?;
-    let email = str_field(&auth, "email").unwrap_or_else(|| account_key.clone());
-    // An api-key login (no OAuth token) shows up as `auth_kind` ApiKey.
-    let is_api_key = auth
-        .get("api_key")
-        .or_else(|| auth.get("xai_api_key"))
-        .or_else(|| auth.get("OPENAI_API_KEY"))
+/// All provider scopes present in a Hyper auth.json value.
+///
+/// Real files are a **scope map**:
+/// `{ "https://auth.x.ai::…": { user_id, email, key, … }, "oauth/openai-codex": {…}, "platform/openrouter": {…} }`.
+/// Older flat shapes are still accepted.
+fn parse_hyper_entries(auth: &serde_json::Value) -> Vec<Detected> {
+    let Some(obj) = auth.as_object() else {
+        return Vec::new();
+    };
+    // Scoped store: values look like GrokAuth objects.
+    let looks_scoped = obj.values().any(|v| {
+        v.as_object().is_some_and(|o| {
+            o.contains_key("auth_mode")
+                || o.contains_key("key")
+                || o.contains_key("refresh_token")
+                || o.contains_key("user_id")
+        })
+    });
+    if looks_scoped {
+        let mut out: Vec<Detected> = obj
+            .iter()
+            .filter_map(|(scope, entry)| parse_hyper_scope_entry(scope, entry))
+            .collect();
+        // xAI first, then oauth/*, then platform/* API keys.
+        out.sort_by_key(|d| {
+            let plan = d.profile.plan.as_deref().unwrap_or("");
+            if plan == "xAI" {
+                0
+            } else if plan.starts_with("OAuth") || d.profile.auth_kind == AgentAuthKind::Oauth {
+                1
+            } else {
+                2
+            }
+        });
+        return out;
+    }
+    // Flat legacy single-object auth.json.
+    parse_hyper_flat(auth).into_iter().collect()
+}
+
+fn parse_hyper_scope_entry(scope: &str, entry: &serde_json::Value) -> Option<Detected> {
+    let Some(obj) = entry.as_object() else {
+        return None;
+    };
+    // Empty placeholder scopes.
+    let has_secret = str_field(entry, "key")
+        .filter(|k| !k.is_empty())
         .is_some()
-        && str_field(&auth, "refresh_token").is_none();
+        || str_field(entry, "refresh_token").is_some()
+        || obj
+            .get("aws_credential_chain")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        || str_field(entry, "aws_profile").is_some();
+    if !has_secret && str_field(entry, "user_id").filter(|u| !u.is_empty()).is_none() {
+        return None;
+    }
+
+    let label = hyper_scope_label(scope);
+    let user_id = str_field(entry, "user_id").filter(|s| !s.is_empty());
+    let email = str_field(entry, "email")
+        .filter(|s| !s.is_empty())
+        .or_else(|| str_field(entry, "account_id"))
+        .or_else(|| user_id.clone())
+        .unwrap_or_else(|| label.clone());
+    let account_key = format!(
+        "{scope}::{}",
+        user_id
+            .clone()
+            .or_else(|| str_field(entry, "account_id"))
+            .unwrap_or_else(|| email.clone())
+    );
+    let mode = str_field(entry, "auth_mode").unwrap_or_default();
+    let is_api_key = mode == "api_key"
+        || scope.starts_with("platform/")
+        || scope == "xai::api_key"
+        || (str_field(entry, "refresh_token").is_none()
+            && mode != "oidc"
+            && mode != "open_ai_codex"
+            && mode != "anthropic_claude"
+            && mode != "kimi_code"
+            && mode != "github_copilot"
+            && mode != "radius");
+
+    let display_name = {
+        let first = str_field(entry, "first_name").unwrap_or_default();
+        let last = str_field(entry, "last_name").unwrap_or_default();
+        let name = format!("{first} {last}").trim().to_string();
+        if name.is_empty() {
+            Some(label.clone())
+        } else {
+            Some(format!("{label} · {name}"))
+        }
+    };
+
+    // Slot credentials are a single-scope fragment so activate merges safely.
+    let credentials = serde_json::json!({ scope: entry });
+
     Some(Detected {
         account_key,
         profile: SlotProfile {
             email,
-            display_name: None,
-            organization: None,
-            plan: None,
+            display_name,
+            organization: str_field(entry, "organization_name")
+                .or_else(|| str_field(entry, "team_name")),
+            plan: Some(label),
             auth_kind: if is_api_key {
                 AgentAuthKind::ApiKey
             } else {
                 AgentAuthKind::Oauth
             },
         },
-        credentials: Some(auth),
+        credentials: Some(credentials),
         claude_config: None,
     })
+}
+
+fn parse_hyper_flat(auth: &serde_json::Value) -> Option<Detected> {
+    let account_key = str_field(auth, "account_id")
+        .or_else(|| str_field(auth, "user_id"))
+        .or_else(|| str_field(auth, "email"))?;
+    let email = str_field(auth, "email").unwrap_or_else(|| account_key.clone());
+    let is_api_key = auth
+        .get("api_key")
+        .or_else(|| auth.get("xai_api_key"))
+        .or_else(|| auth.get("OPENAI_API_KEY"))
+        .is_some()
+        && str_field(auth, "refresh_token").is_none();
+    Some(Detected {
+        account_key,
+        profile: SlotProfile {
+            email,
+            display_name: Some("xAI".into()),
+            organization: None,
+            plan: Some("xAI".into()),
+            auth_kind: if is_api_key {
+                AgentAuthKind::ApiKey
+            } else {
+                AgentAuthKind::Oauth
+            },
+        },
+        credentials: Some(auth.clone()),
+        claude_config: None,
+    })
+}
+
+fn hyper_scope_label(scope: &str) -> String {
+    if scope.starts_with("https://auth.x.ai")
+        || scope.starts_with("https://accounts.x.ai")
+        || scope == "https://accounts.x.ai/sign-in"
+    {
+        return "xAI".into();
+    }
+    match scope {
+        "xai::api_key" => "xAI API Key".into(),
+        "oauth/openai-codex" => "OpenAI Codex".into(),
+        "oauth/anthropic-claude" => "Claude".into(),
+        "oauth/kimi-code" => "Kimi Code".into(),
+        "oauth/github-copilot" => "GitHub Copilot".into(),
+        "oauth/radius" => "Radius".into(),
+        "platform/amazon-bedrock" => "Amazon Bedrock".into(),
+        s if s.starts_with("platform/") => {
+            format!("API · {}", s.trim_start_matches("platform/"))
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Merge a Hyper auth fragment (scope map) into `path`, preserving siblings.
+fn merge_hyper_auth_file(path: &Path, fragment: &serde_json::Value) -> Result<(), EngineError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut live = read_json(path).unwrap_or_else(|| serde_json::json!({}));
+    if !live.is_object() {
+        live = serde_json::json!({});
+    }
+    let live_obj = live
+        .as_object_mut()
+        .ok_or_else(|| EngineError::Other("hyper auth.json is not an object".into()))?;
+    let Some(frag) = fragment.as_object() else {
+        // Flat blob: write as-is only when live is empty (legacy activate).
+        if live_obj.is_empty() {
+            let json = serde_json::to_string_pretty(fragment)
+                .map_err(|e| EngineError::Other(format!("serialize hyper auth: {e}")))?;
+            return write_file_atomic(path, json.as_bytes(), true);
+        }
+        return Err(EngineError::Other(
+            "cannot merge flat hyper credentials into a multi-scope auth.json".into(),
+        ));
+    };
+    for (scope, entry) in frag {
+        if entry.as_object().is_some_and(|o| {
+            o.contains_key("auth_mode")
+                || o.contains_key("key")
+                || o.contains_key("refresh_token")
+                || o.contains_key("user_id")
+        }) {
+            live_obj.insert(scope.clone(), entry.clone());
+        }
+    }
+    let json = serde_json::to_string_pretty(&live)
+        .map_err(|e| EngineError::Other(format!("serialize hyper auth: {e}")))?;
+    write_file_atomic(path, json.as_bytes(), true)
 }
 
 /// ISO string (Claude) or unix seconds (Codex) → timestamp.
@@ -1800,14 +2082,17 @@ mod tests {
 
     #[test]
     fn parse_hyper_auth_oauth() {
-        // grok `~/.grok/auth.json` carries account_id/email/user_id/refresh_token.
+        // Flat legacy shape.
         let auth = serde_json::json!({
             "account_id": "acct-123",
             "email": "dave@example.com",
             "user_id": "user-9",
             "refresh_token": "rtok",
         });
-        let d = parse_hyper_auth(auth).expect("oauth auth.json parses");
+        let d = parse_hyper_entries(&auth)
+            .into_iter()
+            .next()
+            .expect("oauth auth.json parses");
         assert_eq!(d.account_key, "acct-123");
         assert_eq!(d.profile.email, "dave@example.com");
         assert_eq!(d.profile.auth_kind, AgentAuthKind::Oauth);
@@ -1816,12 +2101,16 @@ mod tests {
 
     #[test]
     fn parse_hyper_auth_falls_back_to_user_id_then_email() {
-        let d = parse_hyper_auth(serde_json::json!({ "user_id": "user-9" }))
+        let d = parse_hyper_entries(&serde_json::json!({ "user_id": "user-9" }))
+            .into_iter()
+            .next()
             .expect("falls back to user_id");
         assert_eq!(d.account_key, "user-9");
         assert_eq!(d.profile.email, "user-9");
 
-        let d = parse_hyper_auth(serde_json::json!({ "email": "x@y.z" }))
+        let d = parse_hyper_entries(&serde_json::json!({ "email": "x@y.z" }))
+            .into_iter()
+            .next()
             .expect("falls back to email");
         assert_eq!(d.account_key, "x@y.z");
         assert_eq!(d.profile.email, "x@y.z");
@@ -1829,7 +2118,74 @@ mod tests {
 
     #[test]
     fn parse_hyper_auth_rejects_empty() {
-        assert!(parse_hyper_auth(serde_json::json!({})).is_none());
-        assert!(parse_hyper_auth(serde_json::json!({ "unrelated": "field" })).is_none());
+        assert!(parse_hyper_entries(&serde_json::json!({})).is_empty());
+        assert!(parse_hyper_entries(&serde_json::json!({ "unrelated": "field" })).is_empty());
+    }
+
+    #[test]
+    fn parse_hyper_scoped_store_detects_xai_and_openai() {
+        let auth = serde_json::json!({
+            "https://auth.x.ai::client-1": {
+                "key": "access",
+                "auth_mode": "oidc",
+                "user_id": "user-xai",
+                "email": "a@x.ai",
+                "refresh_token": "rt",
+                "create_time": "2026-01-01T00:00:00Z",
+            },
+            "oauth/openai-codex": {
+                "key": "tok",
+                "auth_mode": "open_ai_codex",
+                "user_id": "",
+                "email": "a@x.ai",
+                "refresh_token": "rt2",
+                "create_time": "2026-01-01T00:00:00Z",
+            },
+            "platform/openrouter": {
+                "key": "sk-or-v1",
+                "auth_mode": "api_key",
+                "user_id": "",
+                "create_time": "2026-01-01T00:00:00Z",
+            }
+        });
+        let entries = parse_hyper_entries(&auth);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].profile.plan.as_deref(), Some("xAI"));
+        assert!(entries.iter().any(|d| d.profile.plan.as_deref() == Some("OpenAI Codex")));
+        assert!(entries.iter().any(|d| {
+            d.profile.plan.as_deref() == Some("API · openrouter")
+                && d.profile.auth_kind == AgentAuthKind::ApiKey
+        }));
+        // Login poll uses first entry — must not be empty on real scoped files.
+        assert!(!entries.is_empty());
+    }
+
+    #[test]
+    fn merge_hyper_auth_preserves_sibling_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        merge_hyper_auth_file(
+            &path,
+            &serde_json::json!({
+                "https://auth.x.ai::c": {
+                    "key": "a", "auth_mode": "oidc", "user_id": "u", "refresh_token": "r",
+                    "create_time": "2026-01-01T00:00:00Z",
+                }
+            }),
+        )
+        .unwrap();
+        merge_hyper_auth_file(
+            &path,
+            &serde_json::json!({
+                "platform/openrouter": {
+                    "key": "sk", "auth_mode": "api_key", "user_id": "",
+                    "create_time": "2026-01-01T00:00:00Z",
+                }
+            }),
+        )
+        .unwrap();
+        let live = read_json(&path).unwrap();
+        assert!(live.get("https://auth.x.ai::c").is_some());
+        assert!(live.get("platform/openrouter").is_some());
     }
 }

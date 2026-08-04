@@ -1398,6 +1398,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "gpui_tokio",
+ "image",
  "pulldown-cmark",
  "serde",
  "serde_json",

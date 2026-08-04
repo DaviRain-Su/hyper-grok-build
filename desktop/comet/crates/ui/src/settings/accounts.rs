@@ -139,6 +139,14 @@ pub fn provider_accounts(
 enum LoginFlow {
     /// StartAgentLogin in flight.
     Starting { harness: HarnessId },
+    /// Hyper: choose OAuth provider or API-key path before starting.
+    HyperPick { error: Option<SharedString> },
+    /// Hyper: paste platform API key (written to ~/.grok/auth.json).
+    HyperApiKey {
+        platform: String,
+        submitting: bool,
+        error: Option<SharedString>,
+    },
     /// Claude-style: open the URL, paste the code back.
     PasteCode {
         harness: HarnessId,
@@ -146,7 +154,7 @@ enum LoginFlow {
         submitting: bool,
         error: Option<SharedString>,
     },
-    /// Codex-style: open the URL, poll until the browser flow lands.
+    /// Codex / Hyper OAuth: open the URL, poll until the browser flow lands.
     Browser {
         harness: HarnessId,
         start: AgentLoginStart,
@@ -155,18 +163,41 @@ enum LoginFlow {
     },
 }
 
+/// Hyper OAuth providers shown in the Add-account picker.
+const HYPER_OAUTH_PROVIDERS: &[(&str, &str)] = &[
+    ("xai", "xAI (Grok OAuth)"),
+    ("openai", "OpenAI Codex (ChatGPT)"),
+    ("claude", "Anthropic Claude"),
+    ("kimi", "Kimi Code"),
+    ("github", "GitHub Copilot"),
+];
+
+/// Common Hyper API-key platforms (TUI `/providers` ids).
+const HYPER_API_PLATFORMS: &[(&str, &str)] = &[
+    ("openrouter", "OpenRouter (incl. Qwen models)"),
+    ("openai", "OpenAI API"),
+    ("anthropic", "Anthropic API"),
+    ("moonshot-ai", "Moonshot / Kimi API"),
+    ("moonshot-cn", "Moonshot CN"),
+    ("deepseek", "DeepSeek"),
+    ("zai", "Z.AI"),
+    ("opencode-go", "OpenCode Go"),
+    ("xai", "xAI API Key"),
+    ("ollama", "Ollama"),
+];
+
 impl LoginFlow {
     /// Dialog title (comet: "Add Claude account" / "Add Codex account").
     fn title(&self) -> &'static str {
-        let harness = match self {
+        match self {
+            LoginFlow::HyperPick { .. } | LoginFlow::HyperApiKey { .. } => "Add Hyper account",
             LoginFlow::Starting { harness }
             | LoginFlow::PasteCode { harness, .. }
-            | LoginFlow::Browser { harness, .. } => *harness,
-        };
-        match harness {
-            HarnessId::Hyper => "Add Hyper account",
-            HarnessId::Codex => "Add Codex account",
-            _ => "Add Claude account",
+            | LoginFlow::Browser { harness, .. } => match harness {
+                HarnessId::Hyper => "Add Hyper account",
+                HarnessId::Codex => "Add Codex account",
+                _ => "Add Claude account",
+            },
         }
     }
 }
@@ -482,12 +513,32 @@ impl AccountsPage {
     // ---- add-account flows ----
 
     fn start_login(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        self.error = None;
+        // Hyper supports multi-provider OAuth + API keys — pick first.
+        if harness == HarnessId::Hyper {
+            self.login = Some(LoginFlow::HyperPick { error: None });
+            cx.notify();
+            return;
+        }
+        self.begin_oauth_login(harness, None, cx);
+    }
+
+    fn begin_oauth_login(
+        &mut self,
+        harness: HarnessId,
+        provider: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
         self.login = Some(LoginFlow::Starting { harness });
         self.error = None;
-        let params = self.params(serde_json::json!({ "harness": harness }));
+        let mut body = serde_json::json!({ "harness": harness });
+        if let Some(p) = provider {
+            body["provider"] = serde_json::json!(p);
+        }
+        let params = self.params(body);
         self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -529,6 +580,70 @@ impl AccountsPage {
                     Err(err) => {
                         page.login = None;
                         page.error = Some(format!("Login failed to start: {err}").into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn open_hyper_api_key(&mut self, platform: &str, cx: &mut Context<Self>) {
+        self.code_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.login = Some(LoginFlow::HyperApiKey {
+            platform: platform.to_string(),
+            submitting: false,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn submit_hyper_api_key(&mut self, cx: &mut Context<Self>) {
+        let Some(LoginFlow::HyperApiKey {
+            platform,
+            submitting,
+            ..
+        }) = &mut self.login
+        else {
+            return;
+        };
+        if *submitting {
+            return;
+        }
+        let key = self.code_input.read(cx).text().trim().to_string();
+        if key.is_empty() {
+            return;
+        }
+        let platform = platform.clone();
+        *submitting = true;
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.params(serde_json::json!({
+            "platform": platform,
+            "apiKey": key,
+        }));
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::SAVE_HYPER_API_KEY, params)
+                .await;
+            this.update(cx, |page, cx| {
+                match result {
+                    Ok(_) => {
+                        page.login = None;
+                        page.load(force_usage_for(LoadTrigger::PostLogin), cx);
+                    }
+                    Err(err) => {
+                        if let Some(LoginFlow::HyperApiKey {
+                            submitting, error, ..
+                        }) = &mut page.login
+                        {
+                            *submitting = false;
+                            *error = Some(format!("{err}").into());
+                        }
                     }
                 }
                 cx.notify();
@@ -955,6 +1070,150 @@ impl AccountsPage {
                 .child(SharedString::from(label))
         };
         let body: AnyElement = match login {
+            LoginFlow::HyperPick { error } => {
+                let err = error.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(div().mt(px(8.0)).child(popover::dialog_body(
+                        &theme,
+                        "Hyper supports multiple providers in one ~/.grok/auth.json. \
+                         Choose browser OAuth, or add a platform API key (OpenRouter, Qwen, …).",
+                    )))
+                    .child(
+                        div()
+                            .mt(px(12.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .children(HYPER_OAUTH_PROVIDERS.iter().map(|(id, label)| {
+                                let id = (*id).to_string();
+                                let label = (*label).to_string();
+                                let btn_id = format!("hyper-oauth-{id}");
+                                popover::btn_ghost(&theme, &label, &btn_id)
+                                    .id(SharedString::from(btn_id))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.begin_oauth_login(
+                                            HarnessId::Hyper,
+                                            Some(&id),
+                                            cx,
+                                        );
+                                    }))
+                            })),
+                    )
+                    .child(
+                        div()
+                            .mt(px(14.0))
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from("Or API key")),
+                    )
+                    .child(
+                        div()
+                            .mt(px(6.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .children(HYPER_API_PLATFORMS.iter().map(|(id, label)| {
+                                let id = (*id).to_string();
+                                let label = (*label).to_string();
+                                let btn_id = format!("hyper-api-{id}");
+                                popover::btn_ghost(&theme, &label, &btn_id)
+                                    .id(SharedString::from(btn_id))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_hyper_api_key(&id, cx);
+                                    }))
+                            })),
+                    )
+                    .when_some(err, |el, message| {
+                        el.child(
+                            div()
+                                .mt(px(8.0))
+                                .text_size(px(12.0))
+                                .text_color(red_text)
+                                .child(message),
+                        )
+                    })
+                    .child(
+                        div()
+                            .mt(px(16.0))
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .child(
+                                popover::btn_ghost(&theme, "Cancel", "login-cancel")
+                                    .id("login-cancel")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.cancel_login(cx)),
+                                    ),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            LoginFlow::HyperApiKey {
+                platform,
+                submitting,
+                error,
+            } => {
+                let submitting = *submitting;
+                let platform_label = platform.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(div().mt(px(8.0)).child(popover::dialog_body(
+                        &theme,
+                        &format!(
+                            "Paste your {platform_label} API key. It is stored under \
+                             ~/.grok/auth.json (platform/{platform_label}) — same as TUI \
+                             /providers {platform_label} <key>."
+                        ),
+                    )))
+                    .child(
+                        div().mt(px(12.0)).child(
+                            popover::dialog_field(self.code_input.clone().into_any_element())
+                                .font_family(theme.font_mono.clone())
+                                .text_size(px(13.0)),
+                        ),
+                    )
+                    .when_some(error.clone(), |el, message| {
+                        el.child(
+                            div()
+                                .mt(px(8.0))
+                                .text_size(px(12.0))
+                                .text_color(red_text)
+                                .child(message),
+                        )
+                    })
+                    .child(
+                        div()
+                            .mt(px(16.0))
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .gap(px(8.0))
+                            .child(
+                                popover::btn_ghost(&theme, "Back", "login-back")
+                                    .id("login-back")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.login =
+                                            Some(LoginFlow::HyperPick { error: None });
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                popover::btn_primary(
+                                    &theme,
+                                    if submitting { "Saving…" } else { "Save key" },
+                                )
+                                .id("login-save-api-key")
+                                .when(submitting, |el| el.opacity(0.5))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.submit_hyper_api_key(cx)
+                                })),
+                            ),
+                    )
+                    .into_any_element()
+            }
             LoginFlow::Starting { .. } => div()
                 .mt(px(8.0))
                 .child(popover::skeleton_rows("login-starting", &theme, 2))
@@ -1033,10 +1292,10 @@ impl AccountsPage {
                 let has_error = error.is_some();
                 let body = match harness {
                     HarnessId::Hyper => {
-                        "Finish signing in to Hyper (xAI) in your browser. The new login is \
-                         captured in an isolated profile — your current session is untouched \
-                         until you switch. If no browser opened, use the link below or run \
-                         `hyper login` in a terminal."
+                        "Finish signing in with the browser. Hyper's CLI listens on a local \
+                         callback URL; when auth completes, credentials are merged into \
+                         ~/.grok/auth.json (other providers stay). If no browser opened, use \
+                         the link below."
                     }
                     _ => {
                         "Finish signing in to OpenAI in your browser. The new login is \

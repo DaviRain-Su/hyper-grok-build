@@ -198,6 +198,97 @@ chmod 0755 "$BIN_DIR/comet.new" "$BIN_DIR/hyper.new"
 mv -f "$BIN_DIR/comet.new" "$BIN_DIR/comet"
 mv -f "$BIN_DIR/hyper.new" "$BIN_DIR/hyper"
 
+# App icon assets (shipped in share/ when the release includes them).
+if [ -f "$EXTRACT/share/icons/hyper.png" ]; then
+    mkdir -p "${DESKTOP_HOME}/share/icons" 2>/dev/null || true
+    cp -f "$EXTRACT/share/icons/hyper.png" "${DESKTOP_HOME}/share/icons/hyper.png" 2>/dev/null || true
+fi
+
+case "$OS" in
+    Linux)
+        # Menu + taskbar via freedesktop .desktop + hicolor icons.
+        if [ -f "$EXTRACT/share/icons/hyper.png" ]; then
+            ICON_DIR="${HOME}/.local/share/icons/hicolor/1024x1024/apps"
+            mkdir -p "$ICON_DIR" 2>/dev/null || true
+            cp -f "$EXTRACT/share/icons/hyper.png" "$ICON_DIR/hyper.png" 2>/dev/null || true
+        fi
+        if [ -f "$EXTRACT/share/applications/hyper.desktop" ]; then
+            APP_DIR="${HOME}/.local/share/applications"
+            mkdir -p "$APP_DIR" 2>/dev/null || true
+            sed "s|^Exec=.*|Exec=${BIN_DIR}/comet|" \
+                "$EXTRACT/share/applications/hyper.desktop" \
+                > "$APP_DIR/hyper.desktop" 2>/dev/null || true
+            command -v update-desktop-database >/dev/null 2>&1 \
+                && update-desktop-database "$APP_DIR" 2>/dev/null || true
+        fi
+        ;;
+    Darwin)
+        # Dock / Launchpad: build a minimal Hyper.app around the installed binary.
+        # Needs sips + iconutil (always present on macOS).
+        if [ -f "${DESKTOP_HOME}/share/icons/hyper.png" ] \
+            && command -v sips >/dev/null 2>&1 \
+            && command -v iconutil >/dev/null 2>&1; then
+            APP_ROOT="${HOME}/Applications/Hyper.app"
+            mkdir -p "$APP_ROOT/Contents/MacOS" "$APP_ROOT/Contents/Resources" \
+                "$TMP_DIR/hyper.iconset"
+            cp -f "$BIN_DIR/comet" "$APP_ROOT/Contents/MacOS/comet"
+            chmod 0755 "$APP_ROOT/Contents/MacOS/comet"
+            # Wrapper so HYPER_AGENT_BIN points at the co-installed hyper CLI.
+            cat > "$APP_ROOT/Contents/MacOS/Hyper" <<EOF
+#!/bin/sh
+export HYPER_AGENT_BIN="${BIN_DIR}/hyper"
+export PATH="${BIN_DIR}:\${PATH}"
+exec "${BIN_DIR}/comet" "\$@"
+EOF
+            chmod 0755 "$APP_ROOT/Contents/MacOS/Hyper"
+            # Info.plist: executable = Hyper (wrapper)
+            cat > "$APP_ROOT/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>Hyper</string>
+	<key>CFBundleIconFile</key>
+	<string>hyper</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.hyper.desktop</string>
+	<key>CFBundleName</key>
+	<string>Hyper</string>
+	<key>CFBundleDisplayName</key>
+	<string>Hyper</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>${RESOLVED_VERSION}</string>
+	<key>CFBundleVersion</key>
+	<string>${RESOLVED_VERSION}</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>
+EOF
+            ICON_PNG="${DESKTOP_HOME}/share/icons/hyper.png"
+            for size in 16 32 128 256 512; do
+                sips -z "$size" "$size" "$ICON_PNG" \
+                    --out "$TMP_DIR/hyper.iconset/icon_${size}x${size}.png" >/dev/null 2>&1 || true
+                retina=$((size * 2))
+                sips -z "$retina" "$retina" "$ICON_PNG" \
+                    --out "$TMP_DIR/hyper.iconset/icon_${size}x${size}@2x.png" >/dev/null 2>&1 || true
+            done
+            iconutil -c icns "$TMP_DIR/hyper.iconset" \
+                -o "$APP_ROOT/Contents/Resources/hyper.icns" 2>/dev/null || true
+            # Ad-hoc sign so Apple silicon will launch it.
+            if command -v codesign >/dev/null 2>&1; then
+                codesign --deep --force --sign - "$APP_ROOT" 2>/dev/null || true
+            fi
+            printf 'macOS app: %s\n' "$APP_ROOT"
+        fi
+        ;;
+esac
+
 LOCAL_BIN="${HOME}/.local/bin"
 if mkdir -p "$LOCAL_BIN" 2>/dev/null; then
     ln -sfn "$BIN_DIR/comet" "$LOCAL_BIN/comet"
@@ -208,9 +299,11 @@ fi
 printf '\nHyper desktop %s installed.\n' "$RESOLVED_VERSION"
 printf '  comet: %s\n' "$BIN_DIR/comet"
 printf '  hyper: %s\n' "$BIN_DIR/hyper"
+printf '  icon:  share/icons/hyper.png (Linux menu + macOS Hyper.app)\n'
 printf '\nRun:\n'
 printf '  export HYPER_AGENT_BIN=%s\n' "$BIN_DIR/hyper"
 printf '  export PATH="%s:%s:\$PATH"\n' "$BIN_DIR" "$LOCAL_BIN"
 printf '  comet\n'
+printf '  # macOS: open ~/Applications/Hyper.app\n'
 printf '\nAgent credentials: use `hyper login` (or comet agent-login).\n'
 printf 'Desktop data dir:  %s\n' "$DESKTOP_HOME"

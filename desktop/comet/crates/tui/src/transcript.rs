@@ -683,7 +683,7 @@ fn render_tool_group(
         } else {
             theme.faint
         });
-        let used = 4 + wrap::width_of(label) + 2;
+        let used = 4 + wrap::width_of(&label) + 2;
         out.push(indented(vec![
             Span::raw("  ".to_string()),
             Span::styled(label.to_string(), label_style),

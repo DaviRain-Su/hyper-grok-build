@@ -2750,18 +2750,18 @@ mod tests {
             tool_chip_content(&ToolCall::Exec {
                 command: "cargo test".into()
             }),
-            ("Run", "cargo test".to_string())
+            ("Run".into(), "cargo test".to_string())
         );
         assert_eq!(
             tool_chip_content(&ToolCall::Search {
                 pattern: "foo".into(),
                 path: Some("src".into())
             }),
-            ("Search", "foo in src".to_string())
+            ("Search".into(), "foo in src".to_string())
         );
         assert_eq!(
             tool_chip_content(&ToolCall::ApplyPatch { path: None }),
-            ("Patch", "workspace".to_string())
+            ("Patch".into(), "workspace".to_string())
         );
         assert_eq!(
             tool_chip_content(&ToolCall::Mcp {
@@ -2769,7 +2769,7 @@ mod tests {
                 tool: "issues".into(),
                 input: None
             }),
-            ("MCP", "gh · issues".to_string())
+            ("MCP".into(), "gh · issues".to_string())
         );
         let todo = ToolCall::Todo {
             items: vec![
@@ -2783,7 +2783,18 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(tool_chip_content(&todo), ("Todo", "1/2 done".to_string()));
+        assert_eq!(
+            tool_chip_content(&todo),
+            ("Todo".into(), "1/2 done".to_string())
+        );
+        // Hyper-style unknown: tool name becomes the bold label.
+        assert_eq!(
+            tool_chip_content(&ToolCall::Unknown {
+                name: "grep".into(),
+                input: Some(serde_json::json!({"pattern": "foo"})),
+            }),
+            ("grep".into(), "foo".to_string())
+        );
     }
 
     #[test]

@@ -35,6 +35,7 @@ use tokio_util::sync::CancellationToken;
 use acp::Agent as _;
 use crate::{Harness, HarnessError, RunControls, SteerMessage};
 
+pub use catalog::{invalidate_models_cache, models_cache_generation};
 pub use ensure::{ensure_hyper_bin, ensure_hyper_bin_blocking};
 pub use rpc::{default_desktop_bin_dir, resolve_hyper_bin};
 
@@ -571,13 +572,9 @@ where
         .await
         .map_err(|e| HarnessError::Protocol(format!("initialize: {e}")))?;
 
-    let live = catalog::models_from_meta(&init.meta);
-    if live.is_empty() {
-        // No modelState in init meta — fall back to the static catalog.
-        Ok(catalog::static_fallback())
-    } else {
-        Ok(live)
-    }
+    // Empty is OK: only list models the agent currently considers usable.
+    // Do not invent grok-4 placeholders — those may be unavailable.
+    Ok(catalog::models_from_meta(&init.meta))
 }
 
 #[cfg(test)]
@@ -595,12 +592,9 @@ mod tests {
     }
 
     #[test]
-    fn static_fallback_is_non_empty() {
-        // The static fallback is what `models()` returns when the live ACP
-        // `initialize` meta carries no `modelState` (or the binary is absent).
-        let models = catalog::static_fallback();
-        assert!(!models.is_empty());
-        assert!(models.iter().all(|m| !m.id.is_empty()));
+    fn models_from_meta_empty_is_ok() {
+        // Prefer empty over inventing unavailable defaults.
+        assert!(catalog::models_from_meta(&None).is_empty());
     }
 
     // ── e2e mock roundtrip ───────────────────────────────────────────────

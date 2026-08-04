@@ -22,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 pulldown-cmark.workspace = true
 alacritty_terminal.workspace = true
+image.workspace = true
 base64 = "0.22"
 unicode-segmentation.workspace = true
 uuid.workspace = true

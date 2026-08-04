@@ -37,11 +37,20 @@ cp -f "$HYPER_TARGET/release/hyper" "$STAGE/bin/hyper"
 cp -f "$COMET_TARGET/release/comet" "$STAGE/bin/comet"
 chmod 0755 "$STAGE/bin/hyper" "$STAGE/bin/comet"
 
+# App icon + desktop entry (Linux menu / taskbar; macOS packaging uses icns separately).
+if [[ -f "$COMET_DIR/dist/hyper.png" ]]; then
+  mkdir -p "$STAGE/share/icons" "$STAGE/share/applications"
+  cp -f "$COMET_DIR/dist/hyper.png" "$STAGE/share/icons/hyper.png"
+  cp -f "$COMET_DIR/dist/hyper.desktop" "$STAGE/share/applications/hyper.desktop"
+fi
+
 cat > "$STAGE/README.txt" <<EOF
 Hyper desktop local-link bundle $VERSION ($triple)
 
 bin/comet  — desktop UI + local engine (offline)
 bin/hyper  — agent (ACP stdio); comet spawns this by default
+share/icons/hyper.png — app icon
+share/applications/hyper.desktop — Linux launcher entry
 
 Data:
   Desktop engine store: ~/.hyper/desktop  (COMET_DATA_DIR)
@@ -51,6 +60,13 @@ Run:
   export PATH="\$PWD/bin:\$PATH"
   export HYPER_AGENT_BIN="\$PWD/bin/hyper"
   comet
+
+Linux menu icon (optional):
+  install -Dm644 share/icons/hyper.png \\
+    ~/.local/share/icons/hicolor/1024x1024/apps/hyper.png
+  install -Dm644 share/applications/hyper.desktop \\
+    ~/.local/share/applications/hyper.desktop
+  # then update-desktop-database ~/.local/share/applications
 
 Cloud multi-device sync is disabled in this fork.
 EOF

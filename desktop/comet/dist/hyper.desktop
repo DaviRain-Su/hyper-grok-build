@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Hyper
+GenericName=Hyper Desktop
+Comment=Hyper local desktop — agent chat UI (offline / local-link)
+Exec=comet
+Icon=hyper
+Terminal=false
+Categories=Development;Utility;
+StartupWMClass=comet
+Keywords=hyper;grok;ai;agent;coding;

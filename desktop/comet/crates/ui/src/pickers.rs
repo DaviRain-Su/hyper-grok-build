@@ -273,6 +273,9 @@ pub struct Pickers {
     open: Option<PickerKind>,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     models: HashMap<HarnessId, Loadable<Vec<Model>>>,
+    /// `comet_harness::models_cache_generation()` when Hyper models were last
+    /// loaded — Accounts login/API-key bumps it so we re-fetch usable models.
+    hyper_models_gen: u64,
     refs: Loadable<Vec<RepoRef>>,
     /// Space id the `refs` slot belongs to (invalidated on space change).
     refs_space: Option<String>,
@@ -375,6 +378,7 @@ impl Pickers {
             open,
             harnesses: Loadable::Idle,
             models: HashMap::new(),
+            hyper_models_gen: 0,
             refs: Loadable::Idle,
             refs_space: None,
             active: 0,
@@ -668,11 +672,25 @@ impl Pickers {
     fn ensure_models(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         // Absent or Idle only — same render-loop hazard as `ensure_harnesses`;
         // the retry row clears the map to re-arm.
-        if self
-            .models
-            .get(&harness)
-            .is_some_and(|slot| !matches!(slot, Loadable::Idle))
-        {
+        // Hyper: also re-fetch when Accounts login/API-key bumped the harness
+        // models generation so the picker drops models for removed providers.
+        let hyper_gen = if harness == HarnessId::Hyper {
+            comet_harness::models_cache_generation()
+        } else {
+            0
+        };
+        let already = self.models.get(&harness);
+        let need_refresh = match already {
+            None => true,
+            Some(Loadable::Idle) => true,
+            Some(Loadable::Ready(_))
+                if harness == HarnessId::Hyper && self.hyper_models_gen != hyper_gen =>
+            {
+                true
+            }
+            Some(Loadable::Loading) | Some(Loadable::Error(_)) | Some(Loadable::Ready(_)) => false,
+        };
+        if !need_refresh {
             return;
         }
         let Some(engine) = self.engine(cx) else {
@@ -680,6 +698,9 @@ impl Pickers {
         };
         let target = self.space_target(cx);
         self.models.insert(harness, Loadable::Loading);
+        if harness == HarnessId::Hyper {
+            self.hyper_models_gen = hyper_gen;
+        }
         cx.spawn(async move |this, cx| {
             let mut params = serde_json::json!({ "harness": harness });
             if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {

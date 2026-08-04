@@ -31,19 +31,27 @@ rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
 install -m 755 "$BIN" "$STAGE/comet"
 install -m 644 "$ROOT/dist/comet.desktop" "$STAGE/comet.desktop"
-install -m 644 "$ROOT/dist/comet.png" "$STAGE/comet.png"
+install -m 644 "$ROOT/dist/hyper.desktop" "$STAGE/hyper.desktop"
+install -m 644 "$ROOT/dist/hyper.png" "$STAGE/hyper.png"
+# Back-compat names for older install scripts.
+install -m 644 "$ROOT/dist/hyper.png" "$STAGE/comet.png"
 
 cat >"$STAGE/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
-# Install Comet into ~/.local (no root needed).
+# Install Hyper desktop (comet binary) into ~/.local (no root needed).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 install -Dm755 "$HERE/comet" "$HOME/.local/bin/comet"
+install -Dm644 "$HERE/hyper.desktop" "$HOME/.local/share/applications/hyper.desktop"
 install -Dm644 "$HERE/comet.desktop" "$HOME/.local/share/applications/comet.desktop"
-install -Dm644 "$HERE/comet.png" "$HOME/.local/share/icons/hicolor/1024x1024/apps/comet.png"
+# Icon name is `hyper` (matches Icon=hyper in .desktop).
+install -Dm644 "$HERE/hyper.png" "$HOME/.local/share/icons/hicolor/1024x1024/apps/hyper.png"
+install -Dm644 "$HERE/hyper.png" "$HOME/.local/share/icons/hicolor/256x256/apps/hyper.png"
 command -v update-desktop-database >/dev/null 2>&1 \
   && update-desktop-database "$HOME/.local/share/applications" || true
-echo "Installed. Make sure ~/.local/bin is on your PATH."
+command -v gtk-update-icon-cache >/dev/null 2>&1 \
+  && gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+echo "Installed Hyper desktop. Make sure ~/.local/bin is on your PATH, then run: comet"
 INSTALL
 chmod 755 "$STAGE/install.sh"
 

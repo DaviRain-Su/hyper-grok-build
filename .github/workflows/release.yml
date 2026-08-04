@@ -60,6 +60,17 @@ jobs:
       # Node 24 majors: silence "Node.js 20 is deprecated" runner warnings.
       - uses: actions/checkout@v5
 
+      # Avoid CRLF mutations of bundled/** text on windows-2022 (publish compares
+      # zip contents against a Linux LF tree on the ubuntu release job).
+      - name: Force LF for text files (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          git config core.autocrlf false
+          git config core.eol lf
+          git rm -rf --cached . >/dev/null 2>&1 || true
+          git reset --hard HEAD
+
       - name: Check tag matches VERSION file
         shell: bash
         run: |
@@ -277,10 +288,24 @@ jobs:
             Remove-Item -Recurse -Force
           Get-ChildItem (Join-Path $staging "bundled") -File -Recurse -Include "*.pyc", "*.pyo" |
             Remove-Item -Force
+          # Git on windows-2022 often checks out text as CRLF. Publish verifies
+          # archives on Linux against a LF tree, so normalize bundled text to LF
+          # before zip (byte-identical across platforms).
+          $textExt = @(".md", ".py", ".txt", ".json", ".toml", ".yml", ".yaml", ".sh", ".rhai", ".rs", ".skill")
+          $utf8 = New-Object System.Text.UTF8Encoding $false
+          Get-ChildItem (Join-Path $staging "bundled") -File -Recurse | ForEach-Object {
+            if ($textExt -contains $_.Extension.ToLowerInvariant() -or $_.Name -in @("LICENSE", "NOTICE", "THIRD-PARTY-NOTICES")) {
+              $raw = [System.IO.File]::ReadAllBytes($_.FullName)
+              $text = [System.Text.Encoding]::UTF8.GetString($raw)
+              $normalized = ($text -replace "`r`n", "`n") -replace "`r", "`n"
+              [System.IO.File]::WriteAllText($_.FullName, $normalized, $utf8)
+            }
+          }
           if (Test-Path NOTICE) { Copy-Item NOTICE $staging }
           foreach ($f in @("THIRD-PARTY-NOTICES", "THIRD-PARTY-NOTICES.md")) {
             if (Test-Path $f) { Copy-Item $f $staging }
           }
+          if (Test-Path $archive) { Remove-Item $archive -Force }
           Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $archive
           Get-FileHash -Algorithm SHA256 $archive
           Add-Content -Path $env:GITHUB_ENV -Value "ARCHIVE=$archive"
@@ -468,18 +493,29 @@ jobs:
           test -f "$comet_bin" || { echo "missing $comet_bin"; ls -la desktop/comet/target/release/ 2>/dev/null || true; exit 1; }
           cp "$comet_bin" staging/bin/comet
           chmod 0755 staging/bin/comet
+          # App icon + Linux launcher entry (Icon=hyper).
+          mkdir -p staging/share/icons staging/share/applications
+          cp desktop/comet/dist/hyper.png staging/share/icons/hyper.png
+          cp desktop/comet/dist/hyper.desktop staging/share/applications/hyper.desktop
           cat > staging/README.txt <<EOF
           Hyper desktop local-link bundle ${GROK_VERSION} (${{ matrix.target }})
 
           Contents:
             bin/comet  — desktop UI + local engine (offline / local-link)
             bin/hyper  — agent binary (ACP stdio); comet spawns this by default
+            share/icons/hyper.png — app icon
+            share/applications/hyper.desktop — Linux menu entry
 
           Install (from this archive):
             mkdir -p "\$HOME/.hyper/desktop/bin"
             cp bin/comet bin/hyper "\$HOME/.hyper/desktop/bin/"
             ln -sfn "\$HOME/.hyper/desktop/bin/comet" "\$HOME/.local/bin/comet"
             ln -sfn "\$HOME/.hyper/desktop/bin/hyper" "\$HOME/.local/bin/hyper"
+            install -Dm644 share/icons/hyper.png \\
+              "\$HOME/.local/share/icons/hicolor/1024x1024/apps/hyper.png"
+            sed "s|^Exec=.*|Exec=\$HOME/.hyper/desktop/bin/comet|" \\
+              share/applications/hyper.desktop \\
+              > "\$HOME/.local/share/applications/hyper.desktop"
             export HYPER_AGENT_BIN="\$HOME/.hyper/desktop/bin/hyper"
             comet
 

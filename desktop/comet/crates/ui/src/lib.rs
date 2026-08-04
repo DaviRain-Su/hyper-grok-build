@@ -36,6 +36,8 @@ pub mod transcript;
 use std::borrow::Cow;
 use std::path::PathBuf;
 
+use std::sync::Arc;
+
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
 /// Embedded UI fonts — Geist and Geist Mono (variable), © Vercel Inc.,
@@ -220,10 +222,26 @@ fn open_main_window(state: gpui::Entity<state::AppState>, boot: EngineBootConfig
             } else {
                 gpui::WindowBackgroundAppearance::Opaque
             },
+            // Desktop-entry / WM class: keep `comet` for binary name, show as Hyper.
             app_id: Some("comet".into()),
+            // X11 window icon (taskbar / alt-tab). Wayland uses the .desktop Icon=.
+            icon: load_app_icon(),
             ..Default::default()
         },
         move |_, cx| cx.new(|cx| shell::Shell::new(state, boot, cx)),
     )
     .expect("failed to open window");
+}
+
+/// Decode the embedded Hyper app icon for [`WindowOptions::icon`] (X11).
+fn load_app_icon() -> Option<Arc<image::RgbaImage>> {
+    // 256px is enough for taskbars; embedded so no install path is required.
+    const PNG: &[u8] = include_bytes!("../assets/app/icon-256.png");
+    match image::load_from_memory(PNG) {
+        Ok(img) => Some(Arc::new(img.to_rgba8())),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to decode Hyper app icon");
+            None
+        }
+    }
 }

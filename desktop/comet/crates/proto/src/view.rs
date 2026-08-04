@@ -318,39 +318,79 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 /// Per-kind chip label + one-line detail. Labels match comet's `describeTool`
-/// (tool-chip.tsx) exactly, so the two viewports name a tool identically.
-pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
+/// (tool-chip.tsx) for typed calls; Hyper/`Unknown` uses the real tool name.
+pub fn tool_chip_content(call: &crate::ToolCall) -> (String, String) {
     let (label, detail) = tool_chip_content_raw(call);
     (label, single_line(&detail))
 }
 
-fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
+fn tool_chip_content_raw(call: &crate::ToolCall) -> (String, String) {
     use crate::ToolCall;
     match call {
-        ToolCall::Exec { command } => ("Run", command.clone()),
-        ToolCall::ReadFile { path } => ("Read", path.clone()),
-        ToolCall::WriteFile { path, .. } => ("Write", path.clone()),
-        ToolCall::EditFile { path, .. } => ("Edit", path.clone()),
-        ToolCall::ApplyPatch { path } => {
-            ("Patch", path.clone().unwrap_or_else(|| "workspace".into()))
-        }
+        ToolCall::Exec { command } => ("Run".into(), command.clone()),
+        ToolCall::ReadFile { path } => ("Read".into(), path.clone()),
+        ToolCall::WriteFile { path, .. } => ("Write".into(), path.clone()),
+        ToolCall::EditFile { path, .. } => ("Edit".into(), path.clone()),
+        ToolCall::ApplyPatch { path } => (
+            "Patch".into(),
+            path.clone().unwrap_or_else(|| "workspace".into()),
+        ),
         ToolCall::Search { pattern, path } => (
-            "Search",
+            "Search".into(),
             match path {
                 Some(path) => format!("{pattern} in {path}"),
                 None => pattern.clone(),
             },
         ),
-        ToolCall::Glob { pattern } => ("Glob", pattern.clone()),
-        ToolCall::WebFetch { url, .. } => ("Fetch", url.clone()),
-        ToolCall::WebSearch { query } => ("Web", query.clone()),
+        ToolCall::Glob { pattern } => ("Glob".into(), pattern.clone()),
+        ToolCall::WebFetch { url, .. } => ("Fetch".into(), url.clone()),
+        ToolCall::WebSearch { query } => ("Web".into(), query.clone()),
         ToolCall::Todo { items } => {
             let done = items.iter().filter(|i| i.done).count();
-            ("Todo", format!("{done}/{} done", items.len()))
+            ("Todo".into(), format!("{done}/{} done", items.len()))
         }
-        ToolCall::Mcp { server, tool, .. } => ("MCP", format!("{server} · {tool}")),
-        ToolCall::Unknown { name, .. } => ("Tool", name.clone()),
+        ToolCall::Mcp { server, tool, .. } => ("MCP".into(), format!("{server} · {tool}")),
+        // Prefer the real tool name as the bold label (never a blank "Tool").
+        ToolCall::Unknown { name, input } => {
+            let name = name.trim();
+            let detail = summarize_unknown_input(input.as_ref());
+            if name.is_empty() {
+                ("Tool".into(), detail.unwrap_or_else(|| "…".into()))
+            } else {
+                (name.to_string(), detail.unwrap_or_default())
+            }
+        }
     }
+}
+
+/// Pull a short human detail from unknown tool JSON (command / path / query…).
+fn summarize_unknown_input(input: Option<&serde_json::Value>) -> Option<String> {
+    let v = input?;
+    for key in [
+        "command",
+        "cmd",
+        "path",
+        "file",
+        "file_path",
+        "target_file",
+        "pattern",
+        "query",
+        "url",
+        "uri",
+        "glob",
+        "prompt",
+        "title",
+    ] {
+        if let Some(s) = v.get(key).and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+            return Some(s.to_string());
+        }
+    }
+    // Compact single-line JSON if small enough to be useful.
+    let s = v.to_string();
+    if s.len() <= 120 && s != "{}" && s != "null" {
+        return Some(s);
+    }
+    None
 }
 
 /// The ToolGroup summary line — "Ran 3 commands · edited 2 files".
