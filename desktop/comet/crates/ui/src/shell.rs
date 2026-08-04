@@ -140,8 +140,9 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
 
 /// The settings sections (feature-inventory §1.5 routes).
 ///
-/// `Devices` remains for deep-link compatibility but is **hidden** from the
-/// local-link Hyper desktop nav (multi-device cloud sync is disabled).
+/// Local-link keeps all sections visible: Hyper (agent CLI / login docs),
+/// Devices (this machine identity — no cloud multi-device sync), Accounts,
+/// Shortcuts, and Archived sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     Devices,
@@ -152,9 +153,10 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    /// Visible settings nav for the offline Hyper desktop fork.
-    pub const ALL: [SettingsSection; 4] = [
+    /// Visible settings nav for the Hyper desktop fork.
+    pub const ALL: [SettingsSection; 5] = [
         SettingsSection::Hyper,
+        SettingsSection::Devices,
         SettingsSection::Agents,
         SettingsSection::Shortcuts,
         SettingsSection::Archived,
@@ -164,7 +166,7 @@ impl SettingsSection {
     /// `settingsTitle` — the same strings in both places).
     pub fn label(self) -> &'static str {
         match self {
-            SettingsSection::Devices => "Devices (hidden)",
+            SettingsSection::Devices => "Devices",
             SettingsSection::Hyper => "Hyper",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Shortcuts => "Shortcuts",
@@ -599,12 +601,11 @@ impl Shell {
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors.
         let route = match std::env::var("COMET_OPEN_ROUTE").ok().as_deref() {
-            // Local-link default: Hyper integration overview.
+            // Default: Hyper integration overview (CLI path / first-run).
             Some("settings") | Some("settings/hyper") => {
                 Route::Settings(SettingsSection::Hyper)
             }
             Some("settings/agents") => Route::Settings(SettingsSection::Agents),
-            // Devices page still works if forced (dev), but is hidden from the nav.
             Some("settings/devices") => Route::Settings(SettingsSection::Devices),
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
@@ -1654,8 +1655,7 @@ impl Shell {
         };
         // Match the user's dragged sidebar width — the pane container clips to
         // it, so a hardcoded default here left hover washes stopping short of
-        // the sidebar's right edge (user-reported). Device identity lives on
-        // the Accounts page now — the one surface where the device matters.
+        // the sidebar's right edge (user-reported).
         div()
             .w(px(self.settings.sidebar_width))
             .h_full()
