@@ -67,7 +67,7 @@
 | 问题 | 答案 |
 |------|------|
 | 能否说「有了像 Pi 的扩展底座」？ | **能** — 动态 guest + 生命周期 + 工具注册 + post_tool 观察 + SDK |
-| 能否说「功能面 = Pi」？ | **不能** — 缺 TUI/快捷键扩展、message rewrite、WASM register_command、丰富示例 |
+| 能否说「功能面 = Pi」？ | **不能** — 缺 TUI/快捷键扩展、message rewrite、丰富示例 |
 | 能否给第三方用？ | **能起步** — SDK + init + validate；DX 还可厚 |
 | Host 是否实现错方向？ | **否** — 对齐设计；弱项在作者体验深度与 UI 扩展 |
 
@@ -77,9 +77,9 @@
 
 | 优先级 | 缺口 | 说明 | 状态 |
 |--------|------|------|------|
-| P0 | WASM `post_tool_use` | 设计 MVP 第 4 事件 | **done**（API + runtime + SDK + shell） |
-| P1 | 更多示例 / 文档 | post_tool、path-guard、stop 组合包 | 进行中 |
-| P2 | WASM `register_command` | 动态 slash；现靠声明式 commands/ | 未做 |
+| P0 | WASM `post_tool_use` | 设计 MVP 第 4 事件 | **done** |
+| P0 | WASM `register_command` | 动态 slash + ACP autocomplete | **done**（MVP：host turn 输出文本） |
+| P1 | 更多示例 / 文档 | post_tool、hello_wasm command | 进行中 |
 | P2 | 热重载 UX 对齐 Pi `/reload` | 已有 reload，可再厚 | 半 |
 | P3 | Host UI API | notify / status bar / keybind | 未做（需 pager/ACP 通道） |
 | P3 | before_model **rewrite** | 仅 inject；rewrite 要审计 | 有意后置 |
@@ -100,8 +100,12 @@ mod plugin {
     }
     #[hyper_hook(before_agent_start)] fn inject() -> i32 { … }
     #[hyper_tool(description = "…")] fn my_tool(args: &str) -> i32 { … }
+    #[hyper_command(name = "hello_wasm", description = "…", argument_hint = "<name>")]
+    fn hello_wasm(args: &str) -> i32 { tool_result("…"); allow() }
 }
 ```
+
+`plugin.json` capabilities 需包含 `register_command`；装包 trust 后 `/hello_wasm` 进入 host turn 输出。
 
 `grok plugin init` → build → trust → 启用 / reload。
 

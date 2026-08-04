@@ -97,8 +97,8 @@
 
 ## 5. 本文件状态
 
-- **现在：** **P2 + P3 关闭**；**P3.5 进行中**（`post_tool_use` 已落地）  
-- **下一刀（不打包，持续开发）：** `register_command` 设计 / 示例 wasm 重编 / 试点真实插件  
+- **现在：** **P2 + P3 关闭**；**P3.5** `post_tool_use` + `register_command` **已落地**  
+- **下一刀（不打包，持续开发）：** 示例 wasm 重编 / 热重载 UX / 试点真实插件 / P4 触发项  
 - **P4：** 仍等触发条件  
 - 清单： [extension-production-checklist.md](./extension-production-checklist.md)  
 - 对照： [extension-vs-pi.md](./extension-vs-pi.md)
