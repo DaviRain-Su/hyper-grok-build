@@ -4,7 +4,7 @@
 //! rest and swaps to a close button on hover. `+` at the end opens the
 //! new-session canvas (the tab materializes on first send). The strip inherits
 //! the old header's titlebar duties: 44px tall, drag region, animated
-//! window-controls inset, and the toggle-changes button (git spaces only).
+//! window-controls inset, and the toggle-changes button (right diff column).
 //!
 //! Styling and drag-reorder mirror the terminal tab bar
 //! (`terminal/panel.rs::render_tab_bar`) — same fixed-width tabs, drop-index
@@ -224,7 +224,6 @@ impl Shell {
             None => self.tabs_scrolled_to = None,
         }
         let has_space = space_id.is_some();
-        let git = self.space_git_detected(cx);
         let hovered = self.tab_hover.clone();
         let on_canvas = selected.is_none();
         // No sessions yet → the canvas already shows; a `+` would be redundant.
@@ -563,9 +562,11 @@ impl Shell {
             .child(tab_region)
             .when(has_space && has_tabs, |el| el.child(new_tab))
             .child(div().flex_1())
+            // Right-column Changes (file diffs): always available so the
+            // three-column layout (sidebar | chat | changes) can open any time.
             // Stable location: the toggle shows whether the pane is open or
             // not (the pane's own header is gone).
-            .when(git, |el| {
+            .when(has_space, |el| {
                 el.child(header_icon_button(
                     "toggle-changes",
                     icons::SIDEBAR_MINIMALISTIC,

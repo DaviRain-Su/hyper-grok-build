@@ -861,15 +861,6 @@ impl Shell {
         }
     }
 
-    /// Does the selected space's folder have git? Owner-stamped and synced —
-    /// gates the Changes pane, its toggle, and Cmd-B with zero RPCs.
-    fn space_git_detected(&self, cx: &App) -> bool {
-        self.state.read(cx).selected_space_git()
-    }
-
-    /// The current chat's changes-pane flag (per-session, in-memory), gated on
-    /// the space having git at all: a stale per-chat open flag must not reopen
-    /// the pane after switching into a non-git space.
     /// The per-session panel key. The new-chat canvas (no selection) keys per
     /// SPACE — one shared "" key made a canvas toggle read as global state
     /// (user report).
@@ -887,8 +878,10 @@ impl Shell {
         }
     }
 
+    /// Right-column Changes (file diffs) open flag — per session, always
+    /// toggleable (three-column layout: sidebar | chat | changes).
     fn right_pane_open(&self, cx: &App) -> bool {
-        self.panels.get(&self.panel_key(cx)).changes_open && self.space_git_detected(cx)
+        self.panels.get(&self.panel_key(cx)).changes_open
     }
 
     /// The current chat's terminal flag (per-session, in-memory).
@@ -913,10 +906,6 @@ impl Shell {
     }
 
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
-        // No git in this space → no diff pane, Cmd-B goes dead.
-        if !self.space_git_detected(cx) {
-            return;
-        }
         let from = self.right_target(cx);
         let key = self.panel_key(cx);
         let open = self.panels.toggle_changes(&key);
