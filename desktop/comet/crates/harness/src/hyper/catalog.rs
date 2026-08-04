@@ -82,7 +82,14 @@ pub async fn live_models() -> Result<Vec<Model>, HarnessError> {
     static CACHE: tokio::sync::OnceCell<Vec<Model>> = tokio::sync::OnceCell::const_new();
     CACHE
         .get_or_try_init(|| async {
-            let exe = super::rpc::resolve_hyper_bin()?;
+            // Ensure (download if needed) before spawning the models probe.
+            let exe = match super::ensure::ensure_hyper_bin().await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "hyper ensure failed; using static model catalog");
+                    return Ok(static_fallback());
+                }
+            };
             let (tx, rx) = tokio::sync::oneshot::channel();
             std::thread::Builder::new()
                 .name("hyper-models".into())

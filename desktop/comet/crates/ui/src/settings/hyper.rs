@@ -2,18 +2,25 @@
 //!
 //! Desktop sessions live under the comet data dir; agent auth, memory, skills,
 //! workflows, and WASM extensions are owned by the Hyper CLI (`~/.grok` /
-//! `GROK_HOME`). This page surfaces that boundary and how to use it.
+//! `GROK_HOME`). This page surfaces that boundary and first-run actions:
+//! ensure CLI (download when missing) and agent login.
 
 use std::path::PathBuf;
 
 use gpui::{
-    Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled,
-    Window, div, px,
+    Context, Entity, SharedString, Task, Window, div, prelude::*, px,
 };
 
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
+
+enum EnsureState {
+    Idle,
+    Working,
+    Ok(String),
+    Err(String),
+}
 
 pub struct HyperPage {
     #[allow(dead_code)]
@@ -22,6 +29,9 @@ pub struct HyperPage {
     hyper_err: Option<String>,
     grok_home: PathBuf,
     data_dir: Option<PathBuf>,
+    managed_bin: PathBuf,
+    ensure: EnsureState,
+    ensure_task: Option<Task<()>>,
 }
 
 impl HyperPage {
@@ -39,13 +49,58 @@ impl HyperPage {
                     .unwrap_or_default();
                 home.join(".grok")
             });
+        let managed_bin = comet_harness::default_desktop_bin_dir().join("hyper");
         Self {
             state,
             hyper_bin,
             hyper_err,
             grok_home,
             data_dir,
+            managed_bin,
+            ensure: EnsureState::Idle,
+            ensure_task: None,
         }
+    }
+
+    fn refresh_bin(&mut self) {
+        match comet_harness::resolve_hyper_bin() {
+            Ok(p) => {
+                self.hyper_bin = Some(p);
+                self.hyper_err = None;
+            }
+            Err(e) => {
+                self.hyper_bin = None;
+                self.hyper_err = Some(e.to_string());
+            }
+        }
+    }
+
+    fn ensure_cli(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.ensure, EnsureState::Working) {
+            return;
+        }
+        self.ensure = EnsureState::Working;
+        self.ensure_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { comet_harness::ensure_hyper_bin().await })
+                .await;
+            this.update(cx, |page, cx| {
+                match result {
+                    Ok(path) => {
+                        page.ensure = EnsureState::Ok(path.display().to_string());
+                        page.refresh_bin();
+                    }
+                    Err(e) => {
+                        page.ensure = EnsureState::Err(e.to_string());
+                    }
+                }
+                page.ensure_task = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 }
 
@@ -66,6 +121,25 @@ impl Render for HyperPage {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(not set)".into());
+        let missing = self.hyper_bin.is_none();
+        let ensure_label = match &self.ensure {
+            EnsureState::Idle if missing => "Download Hyper CLI",
+            EnsureState::Idle => "Re-check / update CLI",
+            EnsureState::Working => "Downloading…",
+            EnsureState::Ok(_) => "Installed",
+            EnsureState::Err(_) => "Retry download",
+        };
+        let ensure_status = match &self.ensure {
+            EnsureState::Ok(p) => Some(format!("Ready: {p}")),
+            EnsureState::Err(e) => Some(format!("Failed: {e}")),
+            EnsureState::Working => Some("Fetching latest release from GitHub…".into()),
+            EnsureState::Idle if missing => Some(format!(
+                "Will install to {}",
+                self.managed_bin.display()
+            )),
+            EnsureState::Idle => None,
+        };
+        let working = matches!(self.ensure, EnsureState::Working);
 
         widgets::page_column()
             .id("hyper-integration-page")
@@ -81,15 +155,52 @@ impl Render for HyperPage {
                         "Hyper binary",
                         &bin_line,
                     ))
+                    .child(card_row(
+                        &theme,
+                        "Managed install path",
+                        &self.managed_bin.display().to_string(),
+                    ))
                     .child(card_row(&theme, "Desktop data dir", &data))
                     .child(card_row(
                         &theme,
                         "Agent home (GROK_HOME)",
                         &self.grok_home.display().to_string(),
-                    )),
+                    ))
+                    .child(
+                        div()
+                            .px(px(16.0))
+                            .py(px(14.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .child(
+                                widgets::ghost_action(&theme)
+                                    .id("hyper-ensure-cli")
+                                    .hover(widgets::ghost_hover)
+                                    .when(working, |el| el.opacity(0.5))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.ensure_cli(cx);
+                                    }))
+                                    .child(SharedString::from(ensure_label)),
+                            )
+                            .children(ensure_status.map(|s| {
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(s))
+                            })),
+                    ),
             )
             .child(
                 widgets::section_card(&theme)
+                    .child(card_block(
+                        &theme,
+                        "First-run setup",
+                        "1. If Hyper CLI is missing, click Download above (or it auto-downloads \
+                         on first chat / model load / Accounts login).\n\
+2. Open Settings → Accounts → Hyper → Add account to sign in (OAuth).\n\
+3. Models come from the live agent catalog once the CLI is present and authenticated.",
+                    ))
                     .child(card_block(
                         &theme,
                         "What lives where",
@@ -108,7 +219,7 @@ WASM plugins and marketplace install go through Hyper config; the desktop does n
                         &theme,
                         "Tips",
                         "• Prefer ./scripts/run-desktop.sh from the monorepo root.\n\
-• comet agent-login → Hyper OAuth.\n\
+• Settings → Accounts → Hyper for GUI login, or: comet agent-login.\n\
 • Override agent path with HYPER_AGENT_BIN.\n\
 • Set GROK_HOME to share agent home with a custom Hyper install.",
                     )),

@@ -199,4 +199,7 @@ pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use hyper::HyperHarness;
 pub use hyper::agent_login;
+pub use hyper::default_desktop_bin_dir;
+pub use hyper::ensure_hyper_bin;
+pub use hyper::ensure_hyper_bin_blocking;
 pub use hyper::resolve_hyper_bin;

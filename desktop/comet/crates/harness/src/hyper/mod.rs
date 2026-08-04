@@ -14,6 +14,7 @@
 //! per turn) is tracked as a TODO — see the run loop.
 
 pub mod catalog;
+pub mod ensure;
 pub mod normalize;
 pub mod rpc;
 
@@ -34,7 +35,8 @@ use tokio_util::sync::CancellationToken;
 use acp::Agent as _;
 use crate::{Harness, HarnessError, RunControls, SteerMessage};
 
-pub use rpc::resolve_hyper_bin;
+pub use ensure::{ensure_hyper_bin, ensure_hyper_bin_blocking};
+pub use rpc::{default_desktop_bin_dir, resolve_hyper_bin};
 
 /// Trigger the agent's own login by spawning `<bin> login`.
 ///
@@ -43,8 +45,11 @@ pub use rpc::resolve_hyper_bin;
 /// `device_auth = true` → `--device-auth` (device code; headless/remote).
 /// Returns `Ok` when the login subprocess exits 0. The agent owns the OAuth
 /// dance and credential storage; comet only triggers + waits.
+///
+/// Ensures the Hyper CLI is present first (download to the desktop default
+/// path when missing).
 pub async fn agent_login(device_auth: bool) -> Result<(), HarnessError> {
-    let exe = resolve_hyper_bin()?;
+    let exe = ensure_hyper_bin().await?;
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.arg("login").arg(if device_auth { "--device-auth" } else { "--oauth" });
     // Inherit stdio so a terminal user sees the agent's login progress / code.
@@ -100,7 +105,7 @@ impl Harness for HyperHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let exe = rpc::resolve_hyper_bin()?;
+        let exe = ensure_hyper_bin().await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         let RunControls {
             request_input,

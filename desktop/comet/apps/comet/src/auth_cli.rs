@@ -14,7 +14,13 @@ pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
     );
     match comet_harness::resolve_hyper_bin() {
         Ok(bin) => println!("Hyper:    {}", bin.display()),
-        Err(e) => println!("Hyper:    NOT FOUND ({e})"),
+        Err(e) => {
+            println!("Hyper:    NOT FOUND ({e})");
+            println!(
+                "          will auto-download to {} on first use",
+                comet_harness::default_desktop_bin_dir().join("hyper").display()
+            );
+        }
     }
     match InstanceLock::holder(&config.data_dir) {
         Some(pid) => println!("Engine:   running (pid {pid})"),

@@ -664,9 +664,10 @@ impl AgentAccounts {
 
     /// Start a `hyper login` (or `grok login`) flow — same spawn-CLI-and-poll
     /// model as codex: an isolated `GROK_HOME` so the live `~/.grok` is never
-    /// touched until the user switches. The grok CLI opens its own browser /
-    /// paste-code prompt, so `url` is empty (poll_login watches the isolated
-    /// `auth.json`).
+    /// touched until the user switches. Ensures the Hyper CLI is installed
+    /// (download to desktop default path when missing), then scans CLI output
+    /// for the OAuth URL so the desktop can open it. `poll_login` watches the
+    /// isolated `auth.json`.
     async fn start_hyper_login(&self) -> Result<AgentLoginStart, EngineError> {
         // At most ONE hyper login flow at a time — supersedes any pending.
         let stale: Vec<String> = lock(&self.inner.flows)
@@ -686,34 +687,33 @@ impl AgentAccounts {
             .join(format!(".login-{login_id}"));
         std::fs::create_dir_all(&home)?;
 
-        // `hyper` first, fall back to `grok` (the binary users may have installed).
-        let try_spawn = |bin: &str| {
-            tokio::process::Command::new(bin)
-                .arg("login")
-                .env("GROK_HOME", &home)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
+        // Resolve or auto-download Hyper CLI into the desktop default bin dir.
+        let bin = match comet_harness::ensure_hyper_bin().await {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&home);
+                return Err(EngineError::Other(format!(
+                    "Hyper CLI not available ({e}). Install hyper or check network, then retry."
+                )));
+            }
         };
-        let mut child = match try_spawn("hyper") {
+
+        let mut child = match tokio::process::Command::new(&bin)
+            .arg("login")
+            .env("GROK_HOME", &home)
+            .env("HYPER_AGENT_BIN", &bin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
             Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match try_spawn("grok") {
-                Ok(c) => c,
-                Err(err) => {
-                    let _ = std::fs::remove_dir_all(&home);
-                    return Err(EngineError::Other(
-                        if err.kind() == std::io::ErrorKind::NotFound {
-                            "The `hyper`/`grok` CLI was not found on this device — install it first.".into()
-                        } else {
-                            format!("Could not start hyper login: {err}")
-                        },
-                    ));
-                }
-            },
             Err(err) => {
                 let _ = std::fs::remove_dir_all(&home);
-                return Err(EngineError::Other(format!("Could not start hyper login: {err}")));
+                return Err(EngineError::Other(format!(
+                    "Could not start hyper login ({}): {err}",
+                    bin.display()
+                )));
             }
         };
 
@@ -785,11 +785,21 @@ impl AgentAccounts {
             },
         );
 
-        // The grok CLI drives its own browser/paste-code prompt; comet just polls
-        // the isolated auth.json. No URL to surface.
+        // hyper login prints "Open this URL to sign in:" + auth URL; wait briefly
+        // like codex so the Accounts UI can open the browser.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let url = loop {
+            if let Some(url) = scan_hyper_login_url(&lock(&output)) {
+                break url;
+            }
+            if lock(&exit).is_some() || Instant::now() > deadline {
+                break String::new();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
         Ok(AgentLoginStart {
             login_id,
-            url: String::new(),
+            url,
             mode: AgentLoginMode::Browser,
         })
     }
@@ -1660,6 +1670,35 @@ fn scan_openai_url(output: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// Scan `hyper login` stderr/stdout for the OAuth authorize URL.
+/// Prefers `auth.x.ai`, then any other `https://` line the CLI printed.
+fn scan_hyper_login_url(output: &str) -> Option<String> {
+    for needle in ["https://auth.x.ai/", "https://accounts.x.ai/"] {
+        if let Some(start) = output.find(needle) {
+            let rest = &output[start..];
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                .unwrap_or(rest.len());
+            let url = rest[..end].trim_end_matches(['.', ',', ')', ']']);
+            if !url.is_empty() {
+                return Some(url.to_string());
+            }
+        }
+    }
+    // Fallback: first https URL after "Open this URL" / "sign in".
+    if let Some(idx) = output.find("https://") {
+        let rest = &output[idx..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+            .unwrap_or(rest.len());
+        let url = rest[..end].trim_end_matches(['.', ',', ')', ']']);
+        if url.len() > 12 {
+            return Some(url.to_string());
+        }
+    }
+    None
+}
+
 /// Minimal percent-encoding for OAuth query params (matches `encodeURIComponent`
 /// for the constant inputs used here).
 fn urlencode(input: &str) -> String {
@@ -1736,6 +1775,18 @@ mod tests {
             Some("https://auth.openai.com/authorize?x=1")
         );
         assert_eq!(scan_openai_url("nothing here"), None);
+    }
+
+    #[test]
+    fn hyper_login_url_scan() {
+        assert_eq!(
+            scan_hyper_login_url(
+                "Open this URL to sign in:\n  https://auth.x.ai/authorize?client_id=x&state=y\n"
+            )
+            .as_deref(),
+            Some("https://auth.x.ai/authorize?client_id=x&state=y")
+        );
+        assert_eq!(scan_hyper_login_url("nothing here"), None);
     }
 
     #[test]

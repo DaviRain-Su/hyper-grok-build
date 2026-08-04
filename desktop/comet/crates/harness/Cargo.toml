@@ -18,6 +18,8 @@ serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
 # ACP (agent-client-protocol) — the wire protocol `hyper agent stdio` speaks.
 # Same version/features the grok fork's xai-hyper-desktop uses (0.10.4).
 agent-client-protocol = { version = "0.10", features = ["unstable"] }

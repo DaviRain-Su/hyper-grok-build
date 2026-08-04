@@ -13,13 +13,23 @@ use crate::HarnessError;
 /// Search order:
 /// 1. `HYPER_AGENT_BIN` (absolute or relative path)
 /// 2. Beside this process executable (`comet` and `hyper` co-installed)
-/// 3. `PATH` (`hyper` then `grok`)
-/// 4. Common install locations (`~/.local/bin`, `~/.grok/bin`, …)
-/// 5. CWD-relative `target/{debug,release}/{hyper,grok}`
-/// 6. Walk up from CWD (and from the exe path) looking for a Hyper monorepo
+/// 3. Desktop managed install (`~/.hyper/desktop/bin/hyper`, see
+///    [`default_desktop_bin_dir`])
+/// 4. `PATH` (`hyper` then `grok`)
+/// 5. Common install locations (`~/.local/bin`, `~/.grok/bin`, …)
+/// 6. CWD-relative `target/{debug,release}/{hyper,grok}`
+/// 7. Walk up from CWD (and from the exe path) looking for a Hyper monorepo
 ///    root (`Cargo.toml` + `packages/coding-agent` or legacy `crates/codegen`)
 ///    and use that tree's `target/{release,debug}/hyper`
+///
+/// Does **not** download. Use [`super::ensure::ensure_hyper_bin`] when a
+/// missing binary should be fetched from GitHub Releases.
 pub fn resolve_hyper_bin() -> Result<PathBuf, HarnessError> {
+    resolve_hyper_bin_existing()
+}
+
+/// Same as [`resolve_hyper_bin`] — existing install only (no network).
+pub fn resolve_hyper_bin_existing() -> Result<PathBuf, HarnessError> {
     if let Ok(p) = std::env::var("HYPER_AGENT_BIN") {
         let pb = PathBuf::from(p);
         if pb.is_file() {
@@ -40,6 +50,14 @@ pub fn resolve_hyper_bin() -> Result<PathBuf, HarnessError> {
         // cargo-run layout: .../desktop/comet/target/debug/comet
         if let Some(p) = monorepo_hyper_from_path(dir) {
             return Ok(p);
+        }
+    }
+
+    // Managed desktop install path (auto-download target).
+    {
+        let managed = default_desktop_bin_dir().join("hyper");
+        if managed.is_file() {
+            return Ok(canonicalize_if_possible(managed));
         }
     }
 
@@ -84,11 +102,41 @@ pub fn resolve_hyper_bin() -> Result<PathBuf, HarnessError> {
     }
 
     Err(HarnessError::NotInstalled(
-        "hyper (or grok) not found. Build the monorepo agent \
-         (`cargo build -p xai-grok-pager-bin --release`) or set HYPER_AGENT_BIN \
-         to the hyper binary path."
+        "hyper (or grok) not found. Desktop will download it on first use, or set \
+         HYPER_AGENT_BIN / build the monorepo agent \
+         (`cargo build -p xai-grok-pager-bin --release`)."
             .into(),
     ))
+}
+
+/// Default directory for the desktop-managed Hyper CLI binary.
+///
+/// `COMET_DATA_DIR` / `HYPER_DESKTOP_DATA_DIR` / `~/.hyper/desktop`, then `bin/`.
+pub fn default_desktop_bin_dir() -> PathBuf {
+    let data = std::env::var_os("COMET_DATA_DIR")
+        .or_else(|| std::env::var_os("HYPER_DESKTOP_DATA_DIR"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            home.join(".hyper").join("desktop")
+        });
+    data.join("bin")
+}
+
+/// GitHub release asset triple for this host (CLI archives only).
+///
+/// Desktop + CLI releases currently ship: `aarch64-apple-darwin`,
+/// `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`.
+pub fn host_asset_triple() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
+        ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
+        _ => None,
+    }
 }
 
 fn first_agent_in_dir(dir: &Path) -> Option<PathBuf> {

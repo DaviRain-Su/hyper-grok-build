@@ -111,8 +111,9 @@ pub fn format_reset(resets_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Opt
 }
 
 /// The provider cards, in display order: (harness, name, CLI command — named
-/// in the empty-state copy, comet settings.agents.tsx `PROVIDERS`).
-pub const PROVIDERS: [(HarnessId, &str, &str); 2] = [
+/// in the empty-state copy). Hyper is first for the local-link desktop.
+pub const PROVIDERS: [(HarnessId, &str, &str); 3] = [
+    (HarnessId::Hyper, "Hyper", "hyper"),
     (HarnessId::ClaudeCode, "Claude Code", "claude"),
     (HarnessId::Codex, "Codex", "codex"),
 ];
@@ -163,6 +164,7 @@ impl LoginFlow {
             | LoginFlow::Browser { harness, .. } => *harness,
         };
         match harness {
+            HarnessId::Hyper => "Add Hyper account",
             HarnessId::Codex => "Add Codex account",
             _ => "Add Claude account",
         }
@@ -497,7 +499,11 @@ impl AccountsPage {
                         .map_err(|e| comet_rpc::RpcError::Failed(e.to_string()))
                 }) {
                     Ok(start) => {
-                        cx.open_url(&start.url);
+                        // Hyper (and some headless flows) may return empty URL
+                        // when the CLI opens the browser itself.
+                        if !start.url.is_empty() {
+                            cx.open_url(&start.url);
+                        }
                         match start.mode {
                             AgentLoginMode::PasteCode => {
                                 page.code_input
@@ -1021,24 +1027,35 @@ impl AccountsPage {
                 start,
                 message,
                 error,
+                harness,
                 ..
             } => {
                 let has_error = error.is_some();
+                let body = match harness {
+                    HarnessId::Hyper => {
+                        "Finish signing in to Hyper (xAI) in your browser. The new login is \
+                         captured in an isolated profile — your current session is untouched \
+                         until you switch. If no browser opened, use the link below or run \
+                         `hyper login` in a terminal."
+                    }
+                    _ => {
+                        "Finish signing in to OpenAI in your browser. The new login is \
+                         captured in an isolated profile — your current session is untouched \
+                         until you switch."
+                    }
+                };
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().mt(px(8.0)).child(popover::dialog_body(
-                        &theme,
-                        "Finish signing in to OpenAI in your browser. The new login is \
-                         captured in an isolated profile — your current session is untouched \
-                         until you switch.",
-                    )))
-                    .child(url_link(
-                        "login-open-url-browser",
-                        "Reopen the sign-in page",
-                        &start.url,
-                        cx,
-                    ))
+                    .child(div().mt(px(8.0)).child(popover::dialog_body(&theme, body)))
+                    .when(!start.url.is_empty(), |el| {
+                        el.child(url_link(
+                            "login-open-url-browser",
+                            "Reopen the sign-in page",
+                            &start.url,
+                            cx,
+                        ))
+                    })
                     .when(!has_error, |el| {
                         el.child(
                             div()
@@ -1194,6 +1211,7 @@ impl Render for AccountsPage {
             .filter(|&n| n > 0);
 
         let provider_icon = |harness: HarnessId| match harness {
+            HarnessId::Hyper => (crate::icons::COMET_LOGO, None),
             HarnessId::Codex => (crate::icons::OPENAI_MARK, None),
             HarnessId::Cursor => (crate::icons::CURSOR_MARK, None),
             _ => (crate::icons::CLAUDE_MARK, Some(crate::icons::claude_brand())),
@@ -1222,6 +1240,7 @@ impl Render for AccountsPage {
                 .into_iter()
                 .map(|(harness, name, _cli)| {
                     let skeleton_id = match harness {
+                        HarnessId::Hyper => "accounts-skeleton-hyper",
                         HarnessId::Codex => "accounts-skeleton-codex",
                         _ => "accounts-skeleton-claude",
                     };
