@@ -8,52 +8,61 @@ sync are disabled.
 
 ```text
 comet UI / tui  ──IPC :27654──►  local engine  ──spawn──►  hyper agent stdio
-                                     │
-                                     └── data: ~/.hyper/desktop
-                                              (spaces/chats; not ~/.grok)
+     │                │                                         │
+     │                └── data: ~/.hyper/desktop                │
+     │                     (spaces / chats / UI)                │
+     └── Settings → Hyper page                                  │
+                                                                ▼
+                                              GROK_HOME (~/.grok by default)
+                                              auth, memory, skills, plugins,
+                                              WASM extensions, Rhai workflows
 ```
 
 | Surface | Role |
 |---------|------|
-| `hyper` (root monorepo) | Coding agent, auth (`~/.grok`), tools, TUI |
-| `comet` (this tree) | Optional desktop controller |
+| `hyper` (root monorepo) | Coding agent, auth, tools, TUI, workflows, extensions |
+| `comet` (this tree) | Optional desktop controller (local-link only) |
 
-## Build & run (recommended)
+**Sessions are not merged:** desktop chat lists live in the engine data dir;
+Hyper TUI transcripts stay under `GROK_HOME`. Same agent identity and tools.
+
+## Feature map (local-link fork)
+
+| Feature | Status |
+|---------|--------|
+| Headed gpui + headless engine + TUI attach | Done |
+| Default harness Hyper + monorepo binary discovery | Done |
+| Offline (no cloud rooms / WorkOS) | Done |
+| Settings: Hyper / Accounts / Shortcuts / Archived | Done |
+| Devices multi-device UI | Hidden (deep-link only) |
+| `/workflow` via Hyper agent in chat | Done (agent-side; see Settings → Hyper) |
+| WASM extensions | Via Hyper agent config (not a second host) |
+| `./scripts/run-desktop.sh` | Done |
+| `./scripts/package-desktop.sh` | Done (local tarball; not in GitHub Release matrix yet) |
+| CI `desktop.yml` check | Done |
+| Ship `comet` on GitHub Release with `hyper` | Not yet (optional follow-up) |
+
+## Build & run
 
 From the **monorepo root**:
 
 ```bash
-./scripts/run-desktop.sh              # build hyper (release) + comet, then open UI
+./scripts/run-desktop.sh              # build hyper (release) + comet, open UI
 ./scripts/run-desktop.sh --release    # both release
-./scripts/run-desktop.sh --status     # resolve hyper + engine status
-./scripts/run-desktop.sh -- headless  # engine only
+./scripts/run-desktop.sh --status
+./scripts/run-desktop.sh -- headless
+./scripts/package-desktop.sh          # dist/desktop/hyper-desktop-<ver>-<triple>.tar.gz
 ```
-
-Manual:
-
-```bash
-# 1) Hyper agent
-cargo build -p xai-grok-pager-bin --features community-build --release
-export HYPER_AGENT_BIN="$PWD/target/release/hyper"   # or CARGO_TARGET_DIR path
-
-# 2) Desktop
-cd desktop/comet
-cargo build -p comet --release
-./target/release/comet                # or $CARGO_TARGET_DIR/release/comet
-```
-
-`resolve_hyper_bin` auto-discovers monorepo `target/{release,debug}/hyper` when
-you run from the repo (or set `HYPER_AGENT_BIN`).
 
 ## Commands
 
 ```bash
-comet                 # headed gpui (default harness: hyper)
+comet                 # headed gpui
 comet headless        # engine only
 comet tui             # terminal viewport on local IPC
 comet status          # data dir, IPC, resolved hyper path
 comet agent-login     # hyper login --oauth
-comet daemon install  # systemd/launchd user service
+comet daemon install  # systemd/launchd (dev.hyper.desktop / hyper-desktop.service)
 ```
 
 ## Environment
@@ -61,17 +70,12 @@ comet daemon install  # systemd/launchd user service
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `HYPER_AGENT_BIN` | auto | Path to `hyper` / `grok` |
-| `COMET_DATA_DIR` / `HYPER_DESKTOP_DATA_DIR` | `~/.hyper/desktop` (else legacy `~/.comet-native`) | Engine store |
+| `COMET_DATA_DIR` / `HYPER_DESKTOP_DATA_DIR` | `~/.hyper/desktop` | Engine store |
+| `GROK_HOME` | `~/.grok` | Hyper agent home (shared with CLI) |
 | `COMET_IPC_PORT` | `27654` | Localhost engine port |
 | `COMET_HARNESS` | `hyper` | `hyper` / `mock` / `codex` / `cursor` |
 
-Cloud vars (`COMET_EDGE_*`, `COMET_WORKOS_*`) are **ignored**.
-
-## Local-link product rules
-
-- Settings nav: **Accounts / Shortcuts / Archived** (Devices cloud page hidden).
-- Daemon: `dev.hyper.desktop` (launchd) / `hyper-desktop.service` (systemd).
-- Agent credentials stay in Hyper (`hyper login` → `~/.grok`); desktop only stores UI sessions.
+Cloud vars (`COMET_EDGE_*`, `COMET_WORKOS_*`) are **ignored** / stripped from the agent child.
 
 ## Layout
 
@@ -82,7 +86,6 @@ desktop/comet/          # nested Cargo workspace (not in root members)
   crates/
     engine/ harness/    # Hyper harness default
     ui/ tui/ rpc/       # gpui + ratatui + IPC
-    proto/ doc/ sync/   # local docs (rooms off when offline)
 ```
 
 ## License

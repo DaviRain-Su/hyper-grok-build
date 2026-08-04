@@ -9,6 +9,7 @@ publish.workspace = true
 comet-proto.workspace = true
 comet-doc.workspace = true
 comet-engine.workspace = true
+comet-harness.workspace = true
 comet-rpc.workspace = true
 comet-update.workspace = true
 gpui.workspace = true

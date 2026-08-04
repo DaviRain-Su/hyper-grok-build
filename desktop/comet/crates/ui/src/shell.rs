@@ -34,6 +34,7 @@ use crate::rail;
 use crate::settings::accounts::AccountsPage;
 use crate::settings::archived::ArchivedPage;
 use crate::settings::devices::DevicesPage;
+use crate::settings::hyper::HyperPage;
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
@@ -144,6 +145,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     Devices,
+    Hyper,
     Agents,
     Shortcuts,
     Archived,
@@ -151,7 +153,8 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Visible settings nav for the offline Hyper desktop fork.
-    pub const ALL: [SettingsSection; 3] = [
+    pub const ALL: [SettingsSection; 4] = [
+        SettingsSection::Hyper,
         SettingsSection::Agents,
         SettingsSection::Shortcuts,
         SettingsSection::Archived,
@@ -161,7 +164,8 @@ impl SettingsSection {
     /// `settingsTitle` — the same strings in both places).
     pub fn label(self) -> &'static str {
         match self {
-            SettingsSection::Devices => "Devices (local only)",
+            SettingsSection::Devices => "Devices (hidden)",
+            SettingsSection::Hyper => "Hyper",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::Archived => "Archived sessions",
@@ -431,6 +435,7 @@ pub struct Shell {
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
     devices_page: Option<Entity<DevicesPage>>,
+    hyper_page: Option<Entity<HyperPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
@@ -594,10 +599,11 @@ impl Shell {
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors.
         let route = match std::env::var("COMET_OPEN_ROUTE").ok().as_deref() {
-            // Local-link default: Accounts (agent login), not multi-device Devices.
-            Some("settings") | Some("settings/agents") => {
-                Route::Settings(SettingsSection::Agents)
+            // Local-link default: Hyper integration overview.
+            Some("settings") | Some("settings/hyper") => {
+                Route::Settings(SettingsSection::Hyper)
             }
+            Some("settings/agents") => Route::Settings(SettingsSection::Agents),
             // Devices page still works if forced (dev), but is hidden from the nav.
             Some("settings/devices") => Route::Settings(SettingsSection::Devices),
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
@@ -637,6 +643,7 @@ impl Shell {
             route,
             nav,
             devices_page: None,
+            hyper_page: None,
             archived_page: None,
             shortcuts_page: None,
             accounts_page: None,
@@ -1119,6 +1126,16 @@ impl Shell {
                     self.devices_page = Some(cx.new(|cx| DevicesPage::new(state, cx)));
                 }
                 match &self.devices_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Hyper => {
+                if self.hyper_page.is_none() {
+                    let state = self.state.clone();
+                    self.hyper_page = Some(cx.new(|cx| HyperPage::new(state, cx)));
+                }
+                match &self.hyper_page {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
@@ -1630,6 +1647,7 @@ impl Shell {
     ) -> AnyElement {
         let section_icon = |item: SettingsSection| match item {
             SettingsSection::Devices => icons::MONITOR,
+            SettingsSection::Hyper => icons::TERMINAL,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
@@ -2376,7 +2394,7 @@ impl Shell {
                     popover::menu_row(theme, false, "user-menu-settings")
                         .id("user-menu-settings")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_settings(SettingsSection::Devices, cx)
+                            this.open_settings(SettingsSection::Hyper, cx)
                         }))
                         .child(
                             icon(icons::SETTINGS_MINIMALISTIC)

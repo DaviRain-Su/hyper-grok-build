@@ -130,14 +130,23 @@ impl Harness for HyperHarness {
                     // Spawn the agent subprocess here (the compat transport
                     // types are !Send, so they must be created inside the
                     // thread, not captured across it).
-                    let mut child = match tokio::process::Command::new(&exe)
-                        .args(["agent", "stdio"])
+                    // Inherit parent env so GROK_HOME / auth / plugin paths match
+                    // the Hyper TUI. Explicitly pass HYPER_AGENT_BIN when set so
+                    // nested tools see the same binary.
+                    let mut cmd = tokio::process::Command::new(&exe);
+                    cmd.args(["agent", "stdio"])
                         .stdin(std::process::Stdio::piped())
                         .stdout(std::process::Stdio::piped())
                         .stderr(std::process::Stdio::inherit())
                         .current_dir(&request.cwd)
                         .kill_on_drop(true)
-                        .spawn()
+                        .env("HYPER_AGENT_BIN", &exe);
+                    // Clear cloud comet edge vars so a host shell cannot re-enable
+                    // WorkOS mode inside nested tooling by accident.
+                    cmd.env_remove("COMET_EDGE_TOKEN")
+                        .env_remove("COMET_WORKOS_CLIENT_ID")
+                        .env_remove("COMET_EDGE_URL");
+                    let mut child = match cmd.spawn()
                     {
                         Ok(c) => c,
                         Err(e) => {

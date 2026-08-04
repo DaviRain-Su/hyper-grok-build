@@ -1,0 +1,62 @@
+name: Desktop (comet)
+
+# Nested gpui workspace — keep the Hyper local desktop green without
+# compiling it on every monorepo change.
+
+on:
+  push:
+    branches: [main, master, dev]
+    paths:
+      - "desktop/comet/**"
+      - "scripts/run-desktop.sh"
+      - "scripts/package-desktop.sh"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    paths:
+      - "desktop/comet/**"
+      - "scripts/run-desktop.sh"
+      - "scripts/package-desktop.sh"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  check-comet:
+    name: cargo check comet (ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: desktop/comet
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install toolchain (desktop/comet rust-toolchain.toml)
+        run: rustup show
+
+      - name: Install Linux GUI build deps (gpui)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libwayland-dev libx11-dev libxkbcommon-x11-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libasound2-dev libvulkan-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/comet -> target
+          key: desktop-comet-linux
+
+      - name: cargo check -p comet
+        run: cargo check -p comet --locked
+
+      - name: unit tests (harness + daemon)
+        run: |
+          cargo test -p comet-harness monorepo_root --locked
+          cargo test -p comet daemon --locked

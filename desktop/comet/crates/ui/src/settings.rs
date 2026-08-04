@@ -14,6 +14,7 @@ pub mod accounts;
 pub mod archived;
 pub mod composer;
 pub mod devices;
+pub mod hyper;
 pub mod shortcuts;
 pub mod widgets;
 

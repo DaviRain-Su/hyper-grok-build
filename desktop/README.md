@@ -12,6 +12,9 @@ heavy UI stacks (gpui / Zed fork) do not pollute the root Cargo workspace.
 ```bash
 # monorepo root
 ./scripts/run-desktop.sh
+./scripts/package-desktop.sh   # optional local bundle under dist/desktop/
 ```
 
-See [`comet/README.md`](comet/README.md) for env vars, daemon install, and layout.
+CI: `.github/workflows/desktop.yml` runs `cargo check -p comet` on desktop changes.
+
+See [`comet/README.md`](comet/README.md) for feature map, env vars, daemon install, and layout.

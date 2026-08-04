@@ -94,7 +94,9 @@ fi
 
 export COMET_DATA_DIR="${COMET_DATA_DIR:-${HOME}/.hyper/desktop}"
 export COMET_HARNESS="${COMET_HARNESS:-hyper}"
-mkdir -p "$COMET_DATA_DIR"
+# Share agent auth/memory/skills/workflows/extensions with the Hyper CLI.
+export GROK_HOME="${GROK_HOME:-${HOME}/.grok}"
+mkdir -p "$COMET_DATA_DIR" "$GROK_HOME"
 
 if [[ "$STATUS_ONLY" -eq 1 ]]; then
   exec "$COMET_BIN" status
