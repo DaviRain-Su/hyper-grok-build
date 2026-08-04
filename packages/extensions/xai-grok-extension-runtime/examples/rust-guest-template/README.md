@@ -39,15 +39,30 @@ mod plugin {
         }
     }
 
+    #[hyper_hook(post_tool_use)]
+    fn observe_tools() -> i32 {
+        if !tool_success() {
+            log_warn(&format!("{} failed", tool_name()));
+        }
+        0
+    }
+
     #[hyper_tool(description = "Echo args JSON")]
     fn echo(args: &str) -> i32 {
         tool_result(args);
         allow()
     }
+
+    #[hyper_command(name = "hello_wasm", description = "Greet", argument_hint = "<name>")]
+    fn hello_wasm(args: &str) -> i32 {
+        tool_result(&format!("hello, {}", args.trim()));
+        allow()
+    }
 }
 ```
 
-Hook 和 tool 实现都是普通命名函数，rust-analyzer 可以直接跳转、重命名和定位错误。`#[hyper_plugin]` 只负责生成当前 bootstrap ABI 的胶水。
+Hook / tool / command 都是普通命名函数；`plugin.json` 的 `runtime.capabilities` 需声明
+`pre_tool_gate` / `register_tool` / `register_command` 等。`post_tool_use` 为 observe，无需 capability。
 
 ## 校验
 

@@ -39,8 +39,8 @@
 | Skills | ● | ● | **齐** | 声明式 SKILL.md |
 | 信任 / 沙箱 | 弱 | ● | **更强** | trusted + capability + fail-closed 可选 |
 | 官方作者 SDK | TS 原生 | ● Rust SDK | **齐（过程宏）** | `#[hyper_plugin]` + `#[hyper_hook(post_tool_use)]` |
-| 热重载 | ● `/reload` | ◐ | **半** | plugin reload 重建 runtime |
-| 示例生态 | 50+ | 3+ SDK 例 | **弱** | template 已含 post_tool；持续加 |
+| 热重载 | ● `/reload` | ● | **齐（MVP）** | `/plugins reload` 重建 runtime + tools/commands + ACU；消息含 wasm 计数 |
+| 示例生态 | 50+ | 3+ SDK 例 | **弱** | template 已含 post_tool + `hello_wasm` command；持续加 |
 | 多 agent 编排 | packages/脚本 | ● | **另轨** | **Rhai workflows**（非 ExtensionAPI） |
 
 图例：● 有 · ◐ 部分 · ○ 无

@@ -499,6 +499,7 @@ pub(super) async fn run_session(
                             let n = crate::session::wasm_tools::unregister_session_wasm_tools(
                                 &bridge, &mut owned,
                             );
+                            session.wasm_registered_commands.borrow_mut().clear();
                             if n > 0 {
                                 tracing::info!(
                                     wasm_tools = n,
@@ -2222,6 +2223,7 @@ pub(super) async fn run_session(
                                 let n = crate::session::wasm_tools::unregister_session_wasm_tools(
                                     &bridge, &mut owned,
                                 );
+                                session.wasm_registered_commands.borrow_mut().clear();
                                 if n > 0 {
                                     tracing::info!(
                                         wasm_tools = n,

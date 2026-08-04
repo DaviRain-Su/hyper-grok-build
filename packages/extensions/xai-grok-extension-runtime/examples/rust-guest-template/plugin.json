@@ -9,7 +9,8 @@
       "pre_tool_gate",
       "before_agent_inject",
       "before_model_inject",
-      "register_tool"
+      "register_tool",
+      "register_command"
     ]
   }
 }

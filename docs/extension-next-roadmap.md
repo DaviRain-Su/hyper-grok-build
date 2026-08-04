@@ -57,9 +57,9 @@
 |---|------|------|------|
 | 36 | WASM `post_tool_use` 全链路 | **done** | export + host `tool_success`/`tool_result_*` + shell 挂载 + SDK `#[hyper_hook(post_tool_use)]` |
 | 37 | 对照文档刷新 | **done** | `extension-vs-pi.md` |
-| 38 | 示例 / e2e 覆盖 post_tool | partial | runtime WAT 单测 + template 源码；checked-in wasm 可另编 |
+| 38 | 示例 / e2e 覆盖 post_tool | **done** | `scripts/check-extensions.sh` 重编 template/path-guard/stop-once；exports 含 post_tool + command |
 | 39 | WASM `register_command` | **done** | capability + collect/invoke + slash resolve + ACP list + `#[hyper_command]` |
-| 39b | 热重载 UX 对齐 | pending | reload 已有，可再厚 |
+| 39b | 热重载 UX 对齐 | **done** | `/plugins reload` 报告 wasm extension/tool/command 计数；ACU 刷新；session_end 清 command 缓存 |
 
 ### P4 — 远期难项（原 P2b / 设计 Phase 4 defer）— **有触发再开**
 

@@ -790,9 +790,13 @@ impl SessionActor {
         } else {
             "MCP unchanged"
         };
+        let wasm_ext = self.extension_runtime.borrow().len();
+        let wasm_tools = self.wasm_registered_tools.borrow().len();
+        let wasm_cmds = self.wasm_registered_commands.borrow().len();
         format!(
             "Plugin registry rebuilt: {count} plugin(s), {hooks_reloaded} hook(s) reloaded, \
-             {mcp_status}, {skill_count} skill(s) refreshed."
+             {mcp_status}, {skill_count} skill(s) refreshed, \
+             {wasm_ext} wasm extension(s) ({wasm_tools} tool(s), {wasm_cmds} command(s))."
         )
     }
 

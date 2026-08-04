@@ -872,7 +872,8 @@ strip = true
     "capabilities": [
       "pre_tool_gate",
       "before_agent_inject",
-      "register_tool"
+      "register_tool",
+      "register_command"
     ]
   }}
 }}
