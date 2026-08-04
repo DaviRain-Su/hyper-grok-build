@@ -455,9 +455,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            pkg-config \
+            libfontconfig1-dev libfreetype6-dev \
             libxkbcommon-dev libwayland-dev libx11-dev libxkbcommon-x11-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libasound2-dev libvulkan-dev pkg-config
+            libasound2-dev libvulkan-dev
 
       - uses: Swatinem/rust-cache@v2
         with:
