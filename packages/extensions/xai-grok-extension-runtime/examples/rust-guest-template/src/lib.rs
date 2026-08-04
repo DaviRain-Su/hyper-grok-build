@@ -29,6 +29,21 @@ mod plugin {
         }
     }
 
+    // observe-only (no capability): post_tool_use
+    #[hyper_hook(post_tool_use)]
+    fn observe_tool_result() -> i32 {
+        if tool_success() {
+            log_info(&format!("post_tool ok: {}", tool_name()));
+        } else {
+            log_warn(&format!(
+                "post_tool fail: {} preview={}",
+                tool_name(),
+                tool_result_preview()
+            ));
+        }
+        0
+    }
+
     // capability: before_agent_inject
     #[hyper_hook(before_agent_start)]
     fn add_agent_guidance() -> i32 {

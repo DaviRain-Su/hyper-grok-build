@@ -1,7 +1,7 @@
 # Hyper WASM Extensions vs Pi Extensions — 完整度对照
 
-| 日期 | 2026-07-28 |
-|------|------------|
+| 日期 | 2026-08-04（post_tool_use 补齐） |
+|------|----------------------------------|
 | Hyper 参考 | bootstrap ABI + `xai-grok-extension-sdk` + plugin/marketplace |
 | Pi 参考 | TypeScript `ExtensionAPI`（`pi.on` / `registerTool` / packages） |
 
@@ -28,19 +28,20 @@
 | session_start / end | ● | ● | **齐** | |
 | before_agent_start inject | ● | ● | **齐** | system-reminder / append |
 | tool_call gate (deny) | ● | ● | **齐** | pre_tool + capability |
-| tool 后观察 | ● | ◐ | **半** | PostToolUse hooks 有；WASM 无独立 export |
+| tool 后观察 | ● | ● | **齐** | WASM `post_tool_use` + shell/HTTP hooks；success/input/result preview |
 | stop / 续跑门 | ◐ | ● | **齐/更强** | stop_gate + cap |
 | registerTool | ● | ● | **齐（MVP）** | `wasm_*` ToolBridge |
-| 自定义 slash 命令 | ● | ◐ | **半** | 声明式 commands/ 有；WASM 无 register_command |
-| 键盘 / TUI 扩展 | ● | ○ | **缺** | 需 Host UI API |
-| 改 compaction 管道 | ● | ◐ | **半** | pre_compact observe only |
-| before LLM rewrite messages | ● | ○ | **缺** | 仅 inject；rewrite 未做 |
+| 自定义 slash 命令 | ● | ◐ | **半** | 声明式 `commands/` 有；WASM 无 `register_command` |
+| 键盘 / TUI 扩展 | ● | ○ | **缺** | 需 Host UI API（notify/status/keybind） |
+| 改 compaction 管道 | ● | ◐ | **半** | pre_compact observe only；无 rewrite |
+| before LLM rewrite messages | ● | ○ | **缺** | 仅 inject（before_agent / before_model）；full rewrite 有意后置 |
 | 主题 / prompt templates | ● | ◐ | **半** | 产品内置 themes/skills，非 WASM |
 | Skills | ● | ● | **齐** | 声明式 SKILL.md |
 | 信任 / 沙箱 | 弱 | ● | **更强** | trusted + capability + fail-closed 可选 |
-| 官方作者 SDK | TS 原生 | ● Rust SDK | **齐（过程宏）** | `#[hyper_plugin]` + 普通函数；旧 `hyper_extension!` 兼容 |
+| 官方作者 SDK | TS 原生 | ● Rust SDK | **齐（过程宏）** | `#[hyper_plugin]` + `#[hyper_hook(post_tool_use)]` |
 | 热重载 | ● `/reload` | ◐ | **半** | plugin reload 重建 runtime |
-| 示例生态 | 50+ | 3+ SDK 例 | **弱** | 持续加 |
+| 示例生态 | 50+ | 3+ SDK 例 | **弱** | template 已含 post_tool；持续加 |
+| 多 agent 编排 | packages/脚本 | ● | **另轨** | **Rhai workflows**（非 ExtensionAPI） |
 
 图例：● 有 · ◐ 部分 · ○ 无
 
@@ -53,7 +54,8 @@
 | loop 只 emit，不散落 wasmtime | **对**（session 调 runtime） |
 | untrusted 不 load | **对** |
 | capability 管 gate/inject/tools | **对** |
-| hooks 先于 wasm | **对** |
+| hooks 先于 wasm | **对**（含 post_tool） |
+| post_tool_use 为 observe、fail-open | **对**（2026-08-04 落地） |
 | fail-open 默认 | **对**；fail-closed 可选 |
 | Rust-first 作者路径 | **对**（SDK + 模板） |
 | Component Model 已上线 | **否**（文档定为可选） |
@@ -64,24 +66,49 @@
 
 | 问题 | 答案 |
 |------|------|
-| 能否说「有了像 Pi 的扩展底座」？ | **能** — 动态 guest + 生命周期 + 工具注册 + SDK |
-| 能否说「功能面 = Pi」？ | **不能** — 缺 TUI/快捷键扩展、message rewrite、丰富示例 |
+| 能否说「有了像 Pi 的扩展底座」？ | **能** — 动态 guest + 生命周期 + 工具注册 + post_tool 观察 + SDK |
+| 能否说「功能面 = Pi」？ | **不能** — 缺 TUI/快捷键扩展、message rewrite、WASM register_command、丰富示例 |
 | 能否给第三方用？ | **能起步** — SDK + init + validate；DX 还可厚 |
 | Host 是否实现错方向？ | **否** — 对齐设计；弱项在作者体验深度与 UI 扩展 |
 
 ---
 
-## 5. 建议 Oracle / 人审重点
+## 5. 剩余缺口与补齐优先级（开发中，不打包）
 
-1. 安全：fail-open 默认是否可接受；strict 路径是否够  
-2. register_tool 命名/权限是否与 MCP 冲突  
-3. SDK 抽象是否泄漏过多 ABI  
-4. 与 Pi 的差异是否应在 README 写清「非功能对等」  
-5. 下一步：更多示例 / CI / Component Model；作者路径已切过程宏  
+| 优先级 | 缺口 | 说明 | 状态 |
+|--------|------|------|------|
+| P0 | WASM `post_tool_use` | 设计 MVP 第 4 事件 | **done**（API + runtime + SDK + shell） |
+| P1 | 更多示例 / 文档 | post_tool、path-guard、stop 组合包 | 进行中 |
+| P2 | WASM `register_command` | 动态 slash；现靠声明式 commands/ | 未做 |
+| P2 | 热重载 UX 对齐 Pi `/reload` | 已有 reload，可再厚 | 半 |
+| P3 | Host UI API | notify / status bar / keybind | 未做（需 pager/ACP 通道） |
+| P3 | before_model **rewrite** | 仅 inject；rewrite 要审计 | 有意后置 |
+| P4 | Component Model / 多语言 | 触发条件见 roadmap | 未开 |
+| — | Rhai 当 ExtensionAPI | **不做**；Rhai = workflow 编排轨 | 明确分工 |
 
 ---
 
-## 6. 下一步（执行中 / 待做）
+## 6. 作者一句话（当前）
 
-见 [extension-next-roadmap.md](./extension-next-roadmap.md)。  
-P0 SDK **已做**；P1 示例 + CI 脚本在本迭代补齐。  
+```text
+#[hyper_plugin]
+mod plugin {
+    #[hyper_hook(pre_tool_use)] fn gate() -> i32 { … }
+    #[hyper_hook(post_tool_use)] fn observe() -> i32 {
+        if !tool_success() { log_warn(&tool_result_preview()); }
+        0
+    }
+    #[hyper_hook(before_agent_start)] fn inject() -> i32 { … }
+    #[hyper_tool(description = "…")] fn my_tool(args: &str) -> i32 { … }
+}
+```
+
+`grok plugin init` → build → trust → 启用 / reload。
+
+---
+
+## 7. 相关文档
+
+- [design-wasm-extensions.md](./design-wasm-extensions.md) — 设计合同  
+- [extension-next-roadmap.md](./extension-next-roadmap.md) — 执行排期  
+- [extension-production-checklist.md](./extension-production-checklist.md) — 生产清单  

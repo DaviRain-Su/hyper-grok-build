@@ -651,6 +651,9 @@ impl SessionActor {
                 duration_ms,
             );
             let mut post_tool_use_result: Option<serde_json::Value> = None;
+            // Shared preview for WASM post_tool_use (success result JSON or error text).
+            // Assigned in both Ok/Err arms below before the wasm dispatch reads it.
+            let wasm_post_tool_preview;
             if let Some((server, _)) =
                 crate::session::mcp_servers::parse_mcp_tool_name(&prepared.tool_name)
                 && server.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
@@ -702,12 +705,13 @@ impl SessionActor {
                         .clone()
                         .or_else(|| prepared.dispatch_target_name.clone())
                         .unwrap_or_else(|| prepared.tool_name.clone());
+                    let result_value = serde_json::to_value(&tool_result.output)
+                        .unwrap_or(serde_json::Value::Null);
+                    let preview = result_value.to_string();
                     post_tool_use_result = self
                         .hook_event_active(xai_grok_hooks::event::HookEventName::PostToolUse)
-                        .then(|| {
-                            serde_json::to_value(&tool_result.output)
-                                .unwrap_or(serde_json::Value::Null)
-                        });
+                        .then_some(result_value);
+                    wasm_post_tool_preview = preview;
                     let followups = self
                         .handle_bridge_tool_success(
                             &prepared.tool_call_id,
@@ -730,6 +734,8 @@ impl SessionActor {
                 }
                 Err(err) => {
                     let err: anyhow::Error = err.into();
+                    let err_text = format!("{err:#}");
+                    wasm_post_tool_preview = err_text.clone();
                     let err_followups = self
                         .handle_tool_error(
                             &prepared.tool_call_id,
@@ -757,7 +763,7 @@ impl SessionActor {
                                 tool_use_id: prepared.call_id.clone(),
                                 tool_input: tool_input_value,
                                 tool_input_truncated,
-                                error: format!("{err:#}"),
+                                error: err_text,
                                 subagent_type: self.subagent_type_label(),
                             },
                             None,
@@ -804,6 +810,35 @@ impl SessionActor {
                     Some(hook_tool_name),
                 )
                 .await;
+            }
+            // WASM post_tool_use observe: after shell/HTTP hooks, always fail-open.
+            // Runs for both success and failure (success flag on the envelope).
+            {
+                let ext_rt = self.extension_runtime.borrow().clone();
+                if !ext_rt.is_empty() {
+                    let post_in = xai_grok_extension_api::PostToolIn {
+                        tool_name: prepared.tool_name.clone(),
+                        success: !tool_failed,
+                        tool_input_json: prepared.raw_arguments.clone(),
+                        tool_result_preview: wasm_post_tool_preview,
+                    };
+                    let results = ext_rt.dispatch_post_tool_use(&post_in).await;
+                    for r in &results {
+                        if let xai_grok_extension_runtime::GuestCallResult::Failed {
+                            extension,
+                            error,
+                        } = r
+                        {
+                            tracing::debug!(
+                                target: "wasm_extension",
+                                extension = %extension,
+                                tool = %prepared.tool_name,
+                                error = %error,
+                                "wasm post_tool_use failed (observe, fail-open)"
+                            );
+                        }
+                    }
+                }
             }
             self.events.tool_finished();
             let tool_outcome = match &tool_loop {

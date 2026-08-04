@@ -92,7 +92,7 @@ pub fn input_contains(needle: &str) -> bool {
     host::bytes_contain(&host::read_input(), needle.as_bytes())
 }
 
-/// Current tool name from the host (pre_tool / invoke).
+/// Current tool name from the host (pre_tool / post_tool / invoke).
 pub fn tool_name() -> String {
     host::read_tool_name()
 }
@@ -100,6 +100,18 @@ pub fn tool_name() -> String {
 /// Current tool input / args JSON from the host.
 pub fn tool_input_json() -> String {
     String::from_utf8_lossy(&host::read_input()).into_owned()
+}
+
+/// Whether the tool call succeeded (meaningful during `post_tool_use`).
+#[inline]
+pub fn tool_success() -> bool {
+    host::tool_success()
+}
+
+/// Capped tool result / error preview from the host (`post_tool_use`).
+/// Empty when the host did not supply a preview.
+pub fn tool_result_preview() -> String {
+    host::read_tool_result_preview()
 }
 
 /// Current user prompt (before_agent); may be empty on before_model rounds.

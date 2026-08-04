@@ -40,9 +40,14 @@ interface types {
         deny(string),
     }
 
+    /// Observe-only after a tool finishes (no gate / no rewrite).
     record post-tool-in {
         tool-name: string,
         success: bool,
+        /// Tool args JSON (host-capped); empty when not provided.
+        tool-input-json: string,
+        /// Result/error preview (host-capped); empty when not provided.
+        tool-result-preview: string,
     }
 
     record stop-in {

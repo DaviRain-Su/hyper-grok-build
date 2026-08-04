@@ -8,6 +8,7 @@
 //! | `hyper_ext_on_session_start` | `() -> i32` | `0` = ok |
 //! | `hyper_ext_on_session_end` | `() -> i32` | optional |
 //! | `hyper_ext_on_pre_tool_use` | `() -> i32` | `0` allow, `1` deny |
+//! | `hyper_ext_on_post_tool_use` | `() -> i32` | optional observe; `0` = ok |
 //! | `hyper_ext_on_before_agent_start` | `() -> i32` | optional; uses set_inject/set_append |
 //! | `hyper_ext_on_stop` | `() -> i32` | `0` allow stop, `1` block |
 //! | `hyper_ext_on_pre_compact` | `() -> i32` | optional observe |
@@ -20,6 +21,8 @@
 //! | `tool_name_byte` | `(i32) -> i32` | byte at index, or `-1` |
 //! | `input_len` | `() -> i32` | UTF-8 length of tool input JSON |
 //! | `input_byte` | `(i32) -> i32` | byte at index, or `-1` |
+//! | `tool_success` | `() -> i32` | `1` if last tool succeeded (post_tool) |
+//! | `tool_result_len` / `tool_result_byte` | | post_tool result/error preview |
 //! | `prompt_len` / `prompt_byte` | | user prompt for before_agent_start |
 //! | `set_inject_context` / `set_append_system` | `(ptr,len)` | guest memory UTF-8 |
 //! | `set_gate_reason` | `(ptr,len)` | deny/stop reason string for host UI |
@@ -39,11 +42,12 @@ use std::time::Duration;
 use xai_grok_extension_api::{
     BeforeAgentStartIn, BeforeAgentStartOut, CORE_ABI_VERSION, Capability, ContractError,
     EXPORT_ABI_VERSION, EXPORT_DESCRIBE_TOOL, EXPORT_INVOKE_TOOL, EXPORT_ON_BEFORE_AGENT_START,
-    EXPORT_ON_BEFORE_MODEL, EXPORT_ON_PRE_COMPACT, EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END,
-    EXPORT_ON_SESSION_START, EXPORT_ON_STOP, EXPORT_TOOL_COUNT, ExtensionSpec, GateFailMode,
-    GuestStringError, MAX_INJECT_BYTES, MAX_TOOL_PAYLOAD_BYTES, PreCompactIn, PreToolIn, StopIn,
-    StopOut, WasmToolDescriptor, is_valid_guest_tool_name, is_valid_tool_schema_json,
-    read_guest_utf8_from_memory, timeouts, truncate_utf8,
+    EXPORT_ON_BEFORE_MODEL, EXPORT_ON_POST_TOOL_USE, EXPORT_ON_PRE_COMPACT, EXPORT_ON_PRE_TOOL_USE,
+    EXPORT_ON_SESSION_END, EXPORT_ON_SESSION_START, EXPORT_ON_STOP, EXPORT_TOOL_COUNT,
+    ExtensionSpec, GateFailMode, GuestStringError, MAX_INJECT_BYTES, MAX_TOOL_PAYLOAD_BYTES,
+    PostToolIn, PreCompactIn, PreToolIn, StopIn, StopOut, WasmToolDescriptor,
+    is_valid_guest_tool_name, is_valid_tool_schema_json, read_guest_utf8_from_memory, timeouts,
+    truncate_utf8,
 };
 
 /// Errors from loading or calling a guest.
@@ -124,6 +128,10 @@ struct HostCtx {
     plugin_data_dir: String,
     tool_name: String,
     tool_input: String,
+    /// Host → guest: whether the tool call succeeded (`post_tool_use`).
+    tool_success: bool,
+    /// Host → guest: capped tool result/error preview for `post_tool_use`.
+    tool_result_in: String,
     /// User prompt for `before_agent_start`.
     prompt: String,
     /// Written by guest via `set_inject_context`.
@@ -154,6 +162,8 @@ impl Default for HostCtx {
             plugin_data_dir: String::new(),
             tool_name: String::new(),
             tool_input: String::new(),
+            tool_success: false,
+            tool_result_in: String::new(),
             prompt: String::new(),
             inject_context: String::new(),
             append_system: String::new(),
@@ -649,6 +659,45 @@ impl ExtensionRuntime {
         out
     }
 
+    /// Post-tool observe (no gate / no rewrite). Missing export is skipped.
+    ///
+    /// Call **after** shell/HTTP PostToolUse hooks when present (design §5.2:
+    /// hooks first, then wasm). Always fail-open on trap/timeout.
+    pub async fn dispatch_post_tool_use(&self, input: &PostToolIn) -> Vec<GuestCallResult> {
+        let input = input.clone().capped();
+        let mut out = Vec::new();
+        #[cfg(feature = "wasm")]
+        for guest in &self.guests {
+            let host = HostCtx {
+                tool_name: input.tool_name.clone(),
+                tool_input: input.tool_input_json.clone(),
+                tool_success: input.success,
+                tool_result_in: input.tool_result_preview.clone(),
+                plugin_data_dir: guest.plugin_data_dir.clone(),
+                ..HostCtx::default()
+            };
+            let (r, _) = guest
+                .inner
+                .call_with_timeout_host(GuestCall::PostToolUse, timeouts::OBSERVE, host)
+                .await;
+            self.metrics.record_call(&r);
+            if !matches!(
+                &r,
+                GuestCallResult::SkippedExport {
+                    export: EXPORT_ON_POST_TOOL_USE,
+                    ..
+                }
+            ) {
+                out.push(r);
+            }
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            let _ = input;
+        }
+        out
+    }
+
     /// Pre-tool gate: first deny wins among guests with [`Capability::PreToolGate`].
     /// Trap/timeout: [`GateFailMode::Open`] allows; [`GateFailMode::Closed`] denies.
     pub async fn dispatch_pre_tool_use(&self, input: &PreToolIn) -> PreToolDispatch {
@@ -996,6 +1045,7 @@ enum GuestCall {
     SessionStart,
     SessionEnd,
     PreToolUse,
+    PostToolUse,
     BeforeAgentStart,
     BeforeModel,
     Stop,
@@ -1435,6 +1485,8 @@ impl WasmGuest {
             plugin_data_dir: std::mem::take(&mut data.plugin_data_dir),
             tool_name: std::mem::take(&mut data.tool_name),
             tool_input: std::mem::take(&mut data.tool_input),
+            tool_success: data.tool_success,
+            tool_result_in: std::mem::take(&mut data.tool_result_in),
             prompt: std::mem::take(&mut data.prompt),
             inject_context: std::mem::take(&mut data.inject_context),
             append_system: std::mem::take(&mut data.append_system),
@@ -1456,6 +1508,7 @@ impl WasmGuest {
             GuestCall::SessionStart => EXPORT_ON_SESSION_START,
             GuestCall::SessionEnd => EXPORT_ON_SESSION_END,
             GuestCall::PreToolUse => EXPORT_ON_PRE_TOOL_USE,
+            GuestCall::PostToolUse => EXPORT_ON_POST_TOOL_USE,
             GuestCall::BeforeAgentStart => EXPORT_ON_BEFORE_AGENT_START,
             GuestCall::BeforeModel => EXPORT_ON_BEFORE_MODEL,
             GuestCall::Stop => EXPORT_ON_STOP,
@@ -2005,6 +2058,35 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
             "input_byte",
             |caller: wasmtime::Caller<'_, HostCtx>, idx: i32| -> i32 {
                 byte_at(&caller.data().tool_input, idx)
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "tool_success",
+            |caller: wasmtime::Caller<'_, HostCtx>| -> i32 {
+                i32::from(caller.data().tool_success)
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    // Host → guest: post_tool result/error preview (read-only; distinct from
+    // set_tool_result which is guest → host for invoke_tool).
+    linker
+        .func_wrap(
+            "hyper_host",
+            "tool_result_len",
+            |caller: wasmtime::Caller<'_, HostCtx>| -> i32 {
+                caller.data().tool_result_in.len() as i32
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "tool_result_byte",
+            |caller: wasmtime::Caller<'_, HostCtx>, idx: i32| -> i32 {
+                byte_at(&caller.data().tool_result_in, idx)
             },
         )
         .map_err(|e| RuntimeError::Module(e.to_string()))?;
@@ -2733,6 +2815,109 @@ mod tests {
             })
             .await;
         assert!(matches!(d.decision, PreToolDecision::Allow));
+    }
+
+    /// Observe-only post_tool: logs when tool_success==0 and returns 0.
+    /// Guest returns 1 if tool_success is wrong (host bug) so the test fails loudly.
+    const POST_TOOL_GUEST: &str = r#"
+        (module
+          (import "hyper_host" "tool_success" (func $tool_success (result i32)))
+          (import "hyper_host" "tool_name_len" (func $name_len (result i32)))
+          (import "hyper_host" "tool_result_len" (func $result_len (result i32)))
+          (import "hyper_host" "log" (func $log (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "post-fail")
+          (func (export "hyper_ext_abi_version") (result i32)
+            i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32)
+            i32.const 0)
+          (func (export "hyper_ext_on_post_tool_use") (result i32)
+            (local $ok i32)
+            (local $nlen i32)
+            (local $rlen i32)
+            (local.set $ok (call $tool_success))
+            (local.set $nlen (call $name_len))
+            (local.set $rlen (call $result_len))
+            ;; name must be non-empty
+            (if (i32.eqz (local.get $nlen))
+              (then (return (i32.const 1))))
+            ;; on failure path: success==0 and result preview non-empty
+            (if (i32.eqz (local.get $ok))
+              (then
+                (if (i32.eqz (local.get $rlen))
+                  (then (return (i32.const 1))))
+                (call $log (i32.const 2) (i32.const 0) (i32.const 9))))
+            i32.const 0)
+        )
+    "#;
+
+    #[tokio::test]
+    async fn post_tool_use_observe_success_and_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "post.wasm", POST_TOOL_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec("post-observer", path, vec![]))
+            .unwrap();
+
+        let ok = rt
+            .dispatch_post_tool_use(&PostToolIn {
+                tool_name: "read_file".into(),
+                success: true,
+                tool_input_json: r#"{"path":"a.rs"}"#.into(),
+                tool_result_preview: r#"{"ok":true}"#.into(),
+            })
+            .await;
+        assert_eq!(ok.len(), 1);
+        match &ok[0] {
+            GuestCallResult::Ok { code: 0, .. } => {}
+            other => panic!("expected Ok(0) on success, got {other:?}"),
+        }
+
+        let fail = rt
+            .dispatch_post_tool_use(&PostToolIn {
+                tool_name: "read_file".into(),
+                success: false,
+                tool_input_json: r#"{"path":"missing"}"#.into(),
+                tool_result_preview: "ENOENT: missing".into(),
+            })
+            .await;
+        assert_eq!(fail.len(), 1);
+        match &fail[0] {
+            GuestCallResult::Ok {
+                code: 0,
+                logs,
+                ..
+            } => {
+                assert!(
+                    logs.iter().any(|l| l.message.contains("post-fail")),
+                    "expected guest log on failure path, logs={logs:?}"
+                );
+            }
+            other => panic!("expected Ok(0) on failure observe, got {other:?}"),
+        }
+
+        // Guests without the export are silently skipped.
+        let bare = r#"
+            (module
+              (func (export "hyper_ext_abi_version") (result i32) i32.const 1)
+              (func (export "hyper_ext_on_session_start") (result i32) i32.const 0)
+            )
+        "#;
+        let path2 = write_wasm(&dir, "bare.wasm", bare);
+        let mut rt2 = ExtensionRuntime::new();
+        rt2.load(&trusted_spec("bare", path2, vec![])).unwrap();
+        let skipped = rt2
+            .dispatch_post_tool_use(&PostToolIn {
+                tool_name: "x".into(),
+                success: true,
+                tool_input_json: String::new(),
+                tool_result_preview: String::new(),
+            })
+            .await;
+        assert!(
+            skipped.is_empty(),
+            "missing export should not appear in results: {skipped:?}"
+        );
     }
 
     /// Static inject via guest memory + set_inject_context.

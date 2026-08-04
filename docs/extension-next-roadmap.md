@@ -51,6 +51,16 @@
 | 34 | SessionActor e2e（deny/allow/tools/stop/before_model/fail-closed/并发） | **done** | `wasm_extension_e2e_tests` |
 | 35 | 指标 → product/dual telemetry 管道 | **done** | `wasm_extension_metrics` / `_blocked` |
 
+### P3.5 — Pi 对照补齐（开发中，不打包）— **进行中**
+
+| # | 事项 | 状态 | 说明 |
+|---|------|------|------|
+| 36 | WASM `post_tool_use` 全链路 | **done** | export + host `tool_success`/`tool_result_*` + shell 挂载 + SDK `#[hyper_hook(post_tool_use)]` |
+| 37 | 对照文档刷新 | **done** | `extension-vs-pi.md` |
+| 38 | 示例 / e2e 覆盖 post_tool | partial | runtime WAT 单测 + template 源码；checked-in wasm 可另编 |
+| 39 | WASM `register_command` | pending | 声明式 commands/ 先顶；动态 slash 需 shell 挂点 |
+| 39b | 热重载 UX 对齐 | pending | reload 已有，可再厚 |
+
 ### P4 — 远期难项（原 P2b / 设计 Phase 4 defer）— **有触发再开**
 
 | # | 事项 | 触发条件 |
@@ -58,8 +68,9 @@
 | 40 | Component Model + wit-bindgen 双轨 | ≥3 真实插件 + 类型需求 |
 | 41 | before_model **rewrite** | 产品明确要且有审计方案 |
 | 42 | 多语言官方模板 | Rust 路径投诉高 / 企业强制 |
-| 43 | 完整 UI Host API（notify/status） | ACP/pager 通道设计就绪 |
+| 43 | 完整 UI Host API（notify/status/keybind） | ACP/pager 通道设计就绪 |
 | 44 | 正式 release bench 与 SLA | 生产流量起来后 |
+| 45 | compaction rewrite（非仅 observe） | 产品明确要且可回滚 |
 
 ---
 
@@ -86,6 +97,8 @@
 
 ## 5. 本文件状态
 
-- **现在：** **P2 + P3 全部关闭**（含 35 telemetry 挂钩）  
-- **下一刀：** 试点真实插件 / 等触发开 P4  
+- **现在：** **P2 + P3 关闭**；**P3.5 进行中**（`post_tool_use` 已落地）  
+- **下一刀（不打包，持续开发）：** `register_command` 设计 / 示例 wasm 重编 / 试点真实插件  
+- **P4：** 仍等触发条件  
 - 清单： [extension-production-checklist.md](./extension-production-checklist.md)  
+- 对照： [extension-vs-pi.md](./extension-vs-pi.md)

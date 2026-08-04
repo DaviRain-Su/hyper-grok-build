@@ -65,6 +65,7 @@ enum HookKind {
     SessionStart,
     SessionEnd,
     PreToolUse,
+    PostToolUse,
     BeforeAgentStart,
     BeforeModel,
     Stop,
@@ -77,13 +78,14 @@ impl HookKind {
             "session_start" => Ok(Self::SessionStart),
             "session_end" => Ok(Self::SessionEnd),
             "pre_tool_use" => Ok(Self::PreToolUse),
+            "post_tool_use" => Ok(Self::PostToolUse),
             "before_agent_start" => Ok(Self::BeforeAgentStart),
             "before_model" => Ok(Self::BeforeModel),
             "stop" => Ok(Self::Stop),
             "pre_compact" => Ok(Self::PreCompact),
             _ => Err(Error::new(
                 ident.span(),
-                "unknown Hyper hook; expected one of: session_start, session_end, pre_tool_use, before_agent_start, before_model, stop, pre_compact",
+                "unknown Hyper hook; expected one of: session_start, session_end, pre_tool_use, post_tool_use, before_agent_start, before_model, stop, pre_compact",
             )),
         }
     }
@@ -93,6 +95,7 @@ impl HookKind {
             Self::SessionStart => "session_start",
             Self::SessionEnd => "session_end",
             Self::PreToolUse => "pre_tool_use",
+            Self::PostToolUse => "post_tool_use",
             Self::BeforeAgentStart => "before_agent_start",
             Self::BeforeModel => "before_model",
             Self::Stop => "stop",
@@ -488,6 +491,11 @@ fn generate_exports(
         HookKind::PreToolUse,
         Ident::new("hyper_ext_on_pre_tool_use", Span::call_site()),
     );
+    let post_tool_use = optional_hook_export(
+        hooks,
+        HookKind::PostToolUse,
+        Ident::new("hyper_ext_on_post_tool_use", Span::call_site()),
+    );
     let before_agent_start = optional_hook_export(
         hooks,
         HookKind::BeforeAgentStart,
@@ -530,6 +538,7 @@ fn generate_exports(
         }
 
         #pre_tool_use
+        #post_tool_use
         #before_agent_start
         #before_model
         #stop

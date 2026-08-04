@@ -64,6 +64,9 @@ pub const EXPORT_ON_SESSION_START: &str = "hyper_ext_on_session_start";
 pub const EXPORT_ON_SESSION_END: &str = "hyper_ext_on_session_end";
 /// Export name: pre-tool gate; return `0` allow, `1` deny (Phase 0: no reason string yet).
 pub const EXPORT_ON_PRE_TOOL_USE: &str = "hyper_ext_on_pre_tool_use";
+/// Export name: post-tool observe; return `0` on success (no gate / no rewrite).
+/// Host provides `tool_name`, `tool_success`, optional `tool_input` / `tool_result` preview.
+pub const EXPORT_ON_POST_TOOL_USE: &str = "hyper_ext_on_post_tool_use";
 /// Export name: before agent start; return `0` on success.
 /// Guest may call `hyper_host.set_inject_context` / `set_append_system` with
 /// pointers into its exported `memory`.
@@ -506,10 +509,30 @@ pub enum PreToolOut {
     Deny { reason: String },
 }
 
+/// Post-tool observe payload (design §5.1 — observe only, no gate/rewrite).
+///
+/// `tool_input_json` / `tool_result_preview` are host-capped at
+/// [`MAX_TOOL_PAYLOAD_BYTES`]; empty strings mean "not provided".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostToolIn {
     pub tool_name: String,
     pub success: bool,
+    pub tool_input_json: String,
+    /// Capped JSON/text preview of the tool result (or error message on failure).
+    pub tool_result_preview: String,
+}
+
+impl PostToolIn {
+    /// Cap large payloads on a char boundary for guest memory reads.
+    pub fn capped(mut self) -> Self {
+        if self.tool_input_json.len() > MAX_TOOL_PAYLOAD_BYTES {
+            truncate_utf8(&mut self.tool_input_json, MAX_TOOL_PAYLOAD_BYTES);
+        }
+        if self.tool_result_preview.len() > MAX_TOOL_PAYLOAD_BYTES {
+            truncate_utf8(&mut self.tool_result_preview, MAX_TOOL_PAYLOAD_BYTES);
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

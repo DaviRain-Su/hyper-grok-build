@@ -105,6 +105,30 @@ macro_rules! export_pre_compact {
     };
 }
 
+/// Export `hyper_ext_on_post_tool_use` (observe-only; no capability required).
+///
+/// Use [`tool_success`](crate::tool_success), [`tool_name`](crate::tool_name),
+/// [`tool_input_json`](crate::tool_input_json), and
+/// [`tool_result_preview`](crate::tool_result_preview) inside the body.
+///
+/// ```ignore
+/// export_post_tool_use!(|| {
+///     if !tool_success() {
+///         log_warn(&format!("tool failed: {}", tool_name()));
+///     }
+///     0
+/// });
+/// ```
+#[macro_export]
+macro_rules! export_post_tool_use {
+    ($body:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn hyper_ext_on_post_tool_use() -> i32 {
+            ($body)()
+        }
+    };
+}
+
 /// Register guest tools via `tool_count` / `describe_tool` / `invoke_tool`.
 ///
 /// Tool short-names are Rust identifiers (`echo` → name `"echo"`).

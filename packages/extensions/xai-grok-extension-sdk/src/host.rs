@@ -12,6 +12,14 @@ unsafe extern "C" {
     fn raw_tool_name_len() -> i32;
     #[link_name = "tool_name_byte"]
     fn raw_tool_name_byte(idx: i32) -> i32;
+    /// `1` if the tool succeeded (meaningful during `post_tool_use`).
+    #[link_name = "tool_success"]
+    fn raw_tool_success() -> i32;
+    /// Host → guest result/error preview for `post_tool_use` (not `set_tool_result`).
+    #[link_name = "tool_result_len"]
+    fn raw_tool_result_len() -> i32;
+    #[link_name = "tool_result_byte"]
+    fn raw_tool_result_byte(idx: i32) -> i32;
     #[link_name = "prompt_len"]
     fn raw_prompt_len() -> i32;
     #[link_name = "prompt_byte"]
@@ -72,6 +80,16 @@ pub fn read_input() -> Vec<u8> {
 
 pub fn read_tool_name() -> String {
     String::from_utf8_lossy(&read_bytes(raw_tool_name_len, raw_tool_name_byte)).into_owned()
+}
+
+/// Whether the tool call succeeded (`post_tool_use` only).
+pub fn tool_success() -> bool {
+    unsafe { raw_tool_success() != 0 }
+}
+
+/// Capped tool result / error preview from the host (`post_tool_use`).
+pub fn read_tool_result_preview() -> String {
+    String::from_utf8_lossy(&read_bytes(raw_tool_result_len, raw_tool_result_byte)).into_owned()
 }
 
 pub fn read_prompt() -> Vec<u8> {
