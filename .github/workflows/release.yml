@@ -325,12 +325,18 @@ jobs:
 
   # Windows-native install.ps1 coverage (local HTTP fixture, binary-only,
   # injected state-failure rollback, malicious zip). Not a static-only gate.
-  # Compiling xai-grok-update pulls xai-grok-tools-api (protobuf), so protoc
-  # setup must match the build job (Windows cannot run the Unix bin/protoc
-  # dotslash launcher — os error 193).
+  # Compiling xai-grok-update pulls xai-grok-shell + tools (+ protobuf), so this
+  # job is heavy: rust-cache + slim debuginfo + a hard timeout are required or
+  # Windows runners sit for hours on a cold compile and block publish while
+  # build artifacts are already ready.
   install-ps1:
     name: install.ps1 (windows-2022)
     runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      # Linking the full shell graph with full debuginfo OOM/thrash on GHA Windows.
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchain (rust-toolchain.toml)
@@ -346,6 +352,10 @@ jobs:
           & $protoc --version
           Add-Content $env:GITHUB_PATH (Join-Path $env:USERPROFILE "protoc\bin")
           Add-Content $env:GITHUB_ENV "PROTOC=$protoc"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: install-ps1-windows
+          shared-key: install-ps1-windows
       - name: Run install.ps1 integration tests
         shell: pwsh
         run: |
@@ -358,12 +368,17 @@ jobs:
   install-sh-macos:
     name: install.sh (macos-14)
     runs-on: macos-14
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup show
       - name: Install dotslash (protoc launcher)
         run: cargo install dotslash --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: install-sh-macos
+          shared-key: install-sh-macos
       - name: Show tar flavor
         run: |
           tar --version 2>&1 | head -3 || true
@@ -379,12 +394,17 @@ jobs:
   install-sh-linux:
     name: install.sh (ubuntu-24.04)
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup show
       - name: Install dotslash (protoc launcher)
         run: cargo install dotslash --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: install-sh-linux
+          shared-key: install-sh-linux
       - name: Show tar flavor
         run: tar --version | head -3
       - name: Run install.sh / community contract tests
