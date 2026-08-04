@@ -413,9 +413,135 @@ jobs:
             --features community-build,community-update-test-hooks \
             --test test_community_update --locked -- --nocapture
 
+  # Desktop (comet) local-link bundles: gpui UI + hyper agent binary for
+  # native Linux/macOS hosts. Reuses the per-target hyper archive from `build`
+  # so we do not recompile the agent. Layout:
+  #   bin/comet  bin/hyper  README.txt
+  # Asset name: hyper-desktop-<version>-<target-triple>.tar.gz
+  desktop:
+    name: desktop (${{ matrix.target }})
+    needs: [build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Version from tag
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "GROK_VERSION=$version" >> "$GITHUB_ENV"
+          echo "HYPER_ARCHIVE=hyper-${version}-${{ matrix.target }}.tar.gz" >> "$GITHUB_ENV"
+          echo "DESKTOP_ARCHIVE=hyper-desktop-${version}-${{ matrix.target }}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Install toolchain (desktop/comet)
+        working-directory: desktop/comet
+        run: rustup show
+
+      - name: Install Linux GUI build deps (gpui)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libwayland-dev libx11-dev libxkbcommon-x11-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libasound2-dev libvulkan-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/comet -> target
+          key: desktop-${{ matrix.target }}
+
+      - name: Download hyper archive for this target
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.HYPER_ARCHIVE }}
+          path: hyper-art
+
+      - name: Extract hyper binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p staging/bin
+          tar -xzf "hyper-art/${HYPER_ARCHIVE}" -C hyper-art
+          # Release tarball may put hyper at root or under .
+          if [ -f hyper-art/hyper ]; then
+            cp hyper-art/hyper staging/bin/hyper
+          else
+            found="$(find hyper-art -type f -name hyper | head -1)"
+            [ -n "$found" ] || { echo "hyper binary missing in archive"; ls -laR hyper-art; exit 1; }
+            cp "$found" staging/bin/hyper
+          fi
+          chmod 0755 staging/bin/hyper
+          ./staging/bin/hyper --version || true
+
+      - name: Build comet (release)
+        working-directory: desktop/comet
+        run: cargo build -p comet --release --locked
+
+      - name: Package desktop archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          comet_bin="desktop/comet/target/release/comet"
+          test -f "$comet_bin" || { echo "missing $comet_bin"; ls -la desktop/comet/target/release/ 2>/dev/null || true; exit 1; }
+          cp "$comet_bin" staging/bin/comet
+          chmod 0755 staging/bin/comet
+          cat > staging/README.txt <<EOF
+          Hyper desktop local-link bundle ${GROK_VERSION} (${{ matrix.target }})
+
+          Contents:
+            bin/comet  — desktop UI + local engine (offline / local-link)
+            bin/hyper  — agent binary (ACP stdio); comet spawns this by default
+
+          Install (from this archive):
+            mkdir -p "\$HOME/.hyper/desktop/bin"
+            cp bin/comet bin/hyper "\$HOME/.hyper/desktop/bin/"
+            ln -sfn "\$HOME/.hyper/desktop/bin/comet" "\$HOME/.local/bin/comet"
+            ln -sfn "\$HOME/.hyper/desktop/bin/hyper" "\$HOME/.local/bin/hyper"
+            export HYPER_AGENT_BIN="\$HOME/.hyper/desktop/bin/hyper"
+            comet
+
+          Or:
+            curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install-desktop.sh | bash
+
+          Data:
+            Desktop engine store: ~/.hyper/desktop  (COMET_DATA_DIR)
+            Hyper agent home:     ~/.grok            (GROK_HOME)
+
+          Cloud multi-device sync is disabled in this fork.
+          EOF
+          if sed --version >/dev/null 2>&1; then
+            sed -i 's/^          //' staging/README.txt
+          else
+            sed -i '' 's/^          //' staging/README.txt
+          fi
+          tar -C staging -czf "${DESKTOP_ARCHIVE}" .
+          ls -lh "${DESKTOP_ARCHIVE}"
+          shasum -a 256 "${DESKTOP_ARCHIVE}" || sha256sum "${DESKTOP_ARCHIVE}"
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.DESKTOP_ARCHIVE }}
+          path: ${{ env.DESKTOP_ARCHIVE }}
+          if-no-files-found: error
+
   release:
     name: publish GitHub Release
-    needs: [build, install-ps1, install-sh-macos, install-sh-linux]
+    needs: [build, desktop, install-ps1, install-sh-macos, install-sh-linux]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -432,9 +558,9 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Refuse to publish unless the exact five platform archives are present
-      # and nothing else (guards missing matrix legs / unexpected extras).
-      - name: Assert exact release asset set
+      # Require the five CLI archives + three desktop bundles (Linux x64/arm64,
+      # macOS arm64). Extra files are rejected.
+      - name: Assert release asset set
         shell: bash
         run: |
           set -euo pipefail
@@ -445,6 +571,9 @@ jobs:
             "hyper-${version}-x86_64-unknown-linux-gnu.tar.gz"
             "hyper-${version}-aarch64-unknown-linux-gnu.tar.gz"
             "hyper-${version}-x86_64-pc-windows-msvc.zip"
+            "hyper-desktop-${version}-aarch64-apple-darwin.tar.gz"
+            "hyper-desktop-${version}-x86_64-unknown-linux-gnu.tar.gz"
+            "hyper-desktop-${version}-aarch64-unknown-linux-gnu.tar.gz"
           )
           cd dist
           ls -l
@@ -463,27 +592,30 @@ jobs:
               exit 1
             fi
           done
-          echo "exact five release archives present"
+          echo "CLI (5) + desktop (3) release archives present"
 
       - name: Generate SHA256SUMS
         working-directory: dist
         run: |
+          set -euo pipefail
           ls -l
+          version="${GITHUB_REF_NAME#v}"
           sha256sum \
-            "hyper-${GITHUB_REF_NAME#v}-aarch64-apple-darwin.tar.gz" \
-            "hyper-${GITHUB_REF_NAME#v}-x86_64-apple-darwin.tar.gz" \
-            "hyper-${GITHUB_REF_NAME#v}-x86_64-unknown-linux-gnu.tar.gz" \
-            "hyper-${GITHUB_REF_NAME#v}-aarch64-unknown-linux-gnu.tar.gz" \
-            "hyper-${GITHUB_REF_NAME#v}-x86_64-pc-windows-msvc.zip" \
+            "hyper-${version}-aarch64-apple-darwin.tar.gz" \
+            "hyper-${version}-x86_64-apple-darwin.tar.gz" \
+            "hyper-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+            "hyper-${version}-aarch64-unknown-linux-gnu.tar.gz" \
+            "hyper-${version}-x86_64-pc-windows-msvc.zip" \
+            "hyper-desktop-${version}-aarch64-apple-darwin.tar.gz" \
+            "hyper-desktop-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+            "hyper-desktop-${version}-aarch64-unknown-linux-gnu.tar.gz" \
             > SHA256SUMS
           cat SHA256SUMS
-          # Exactly five digest lines, no extras.
-          test "$(wc -l < SHA256SUMS | tr -d '[:space:]')" -eq 5
+          test "$(wc -l < SHA256SUMS | tr -d '[:space:]')" -eq 8
 
-      # Final gate before publish: every downloaded artifact must match
-      # SHA256SUMS and still satisfy the release-archive contract (unique root
-      # binary, allowlisted notices, complete bundled/**, no dangerous paths).
-      - name: Verify release artifacts and SHA256SUMS
+      # Contract verifier applies to CLI hyper-* archives only (root binary +
+      # bundled/**). Desktop bundles are bin/comet+hyper layout.
+      - name: Verify CLI release artifacts and SHA256SUMS
         shell: bash
         run: |
           set -euo pipefail
@@ -491,7 +623,9 @@ jobs:
             --bin hyper-verify-release-archive --locked
           verifier="target/debug/hyper-verify-release-archive"
           version="${GITHUB_REF_NAME#v}"
-          args=(--sums dist/SHA256SUMS --strict-names --bundle-root bundled)
+          # Verify digests for every line in SHA256SUMS.
+          (cd dist && sha256sum -c SHA256SUMS)
+          args=(--sums dist/SHA256SUMS --bundle-root bundled)
           for name in \
             "hyper-${version}-aarch64-apple-darwin.tar.gz" \
             "hyper-${version}-x86_64-apple-darwin.tar.gz" \
@@ -523,7 +657,7 @@ jobs:
 
             Unofficial multi-provider community build of [Grok Build](https://github.com/xai-org/grok-build).
 
-            ### Install
+            ### CLI install
 
             ```sh
             # macOS / Linux
@@ -536,3 +670,14 @@ jobs:
             ```
 
             Pin a version: `bash install.sh --version ${{ github.ref_name }}`
+
+            ### Desktop install (local-link UI, macOS arm64 / Linux)
+
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install-desktop.sh | bash
+            # pin: bash install-desktop.sh --version ${{ github.ref_name }}
+            comet
+            ```
+
+            Desktop assets: `hyper-desktop-*-{aarch64-apple-darwin,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu}.tar.gz`
+            (bundles `bin/comet` + `bin/hyper`; offline / no cloud sync).

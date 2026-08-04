@@ -38,9 +38,10 @@ Hyper TUI transcripts stay under `GROK_HOME`. Same agent identity and tools.
 | `/workflow` via Hyper agent in chat | Done (agent-side; see Settings → Hyper) |
 | WASM extensions | Via Hyper agent config (not a second host) |
 | `./scripts/run-desktop.sh` | Done |
-| `./scripts/package-desktop.sh` | Done (local tarball; not in GitHub Release matrix yet) |
+| `./scripts/package-desktop.sh` | Done (local tarball) |
 | CI `desktop.yml` check | Done |
-| Ship `comet` on GitHub Release with `hyper` | Not yet (optional follow-up) |
+| GitHub Release desktop assets | Done — `hyper-desktop-<ver>-<triple>.tar.gz` for macOS arm64 + Linux x64/arm64 |
+| `install-desktop.sh` | Done |
 
 ## Build & run
 

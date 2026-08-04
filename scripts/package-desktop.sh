@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build a portable Hyper desktop (comet) archive next to monorepo release assets.
 #
-# Output: dist/desktop/hyper-desktop-<version>-<triple>.{tar.gz|zip}
-# Does not publish — wire into CI or run manually after ./scripts/run-desktop.sh --release.
+# Output: dist/desktop/hyper-desktop-<version>-<triple>.tar.gz
+# Layout matches GitHub Release desktop assets (bin/comet + bin/hyper).
+# CI: .github/workflows/release.yml job `desktop` publishes the same layout.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
