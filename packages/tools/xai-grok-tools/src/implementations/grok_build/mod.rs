@@ -8,6 +8,7 @@
 //! The [`register_all()`] function is the single entry-point for wiring up
 //! the standard toolset. It inserts shared resources (`Terminal`,
 //! `AvailableSkills`, `BashParams`) and registers every built-in tool.
+pub mod agent_hub;
 pub mod ask_user_question;
 pub mod bash;
 #[path = "deploy_app_stub.rs"]
@@ -33,6 +34,10 @@ pub mod video_gen;
 pub mod web_fetch;
 pub mod web_search;
 pub mod workflow;
+pub use agent_hub::{
+    AGENT_HUB_TOOL_NAME, AgentBus, AgentBusResource, AgentHubTool, AgentSelfIdResource,
+    MAIN_PEER_ID, PeerWakeFn,
+};
 pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
 pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};

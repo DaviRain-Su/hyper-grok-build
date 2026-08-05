@@ -891,6 +891,9 @@ pub(crate) async fn run_shell_child(
     tool_ctx.task_output_token_budget = task_output_budget.clone();
     tool_ctx.sampler_retry_only_before_output = task_output_budget.is_some();
     tool_ctx.monitor_event_buffer = Some(MonitorEventBuffer::default());
+    // Share the root parent agent hub bus; roster id is this subagent's id.
+    tool_ctx.agent_bus = ctx.agent_bus.clone();
+    tool_ctx.agent_self_id = Some(request.id.clone());
     tool_ctx.subagent_depth = child_depth;
     tool_ctx.lsp = ctx.lsp.clone();
     tool_ctx.process_scope = ctx.process_scope.clone();
@@ -1358,6 +1361,9 @@ pub(crate) async fn run_shell_child(
         })
         .await;
     if !promoted {
+        if let Some(bus) = ctx.agent_bus.as_ref() {
+            bus.bus().mark_gone(&request.id);
+        }
         ctx.workspace_ops
             .end_local_session(child_session_id.0.as_ref());
         let result = cancel_pending_shell_child(
@@ -1961,6 +1967,9 @@ pub(crate) async fn run_shell_child(
             );
         }
         (None, None) => {}
+    }
+    if let Some(bus) = ctx.agent_bus.as_ref() {
+        bus.bus().mark_gone(&request.id);
     }
     let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown(
         crate::session::ShutdownKind::Graceful,

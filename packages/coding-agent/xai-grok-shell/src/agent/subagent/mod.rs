@@ -199,6 +199,8 @@ pub(crate) struct SubagentSpawnContext {
     /// goal mode is on — transient `SubagentProgress` ticks the parent
     /// consumes for token accounting without persisting.
     pub parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
+    /// Root-parent peer bus for `agent_hub` (shared Arc with Main + siblings).
+    pub agent_bus: Option<xai_grok_tools::implementations::grok_build::AgentBusResource>,
     /// Parent session info — used to locate parent session directory.
     pub parent_session_info: Option<SessionInfo>,
     /// Subagent roles config for role-based config layering.

@@ -2707,6 +2707,9 @@ impl SessionActor {
                     }
                     cap.start_stream(timestamp_ms);
                 }
+                if let Some(eng) = self.tool_context.ttsr.as_ref() {
+                    eng.reset_turn();
+                }
                 self.chat_state_handle.record_stream_start(timestamp_ms);
             }
             SamplingEvent::FirstToken { .. } => {
@@ -2719,6 +2722,7 @@ impl SessionActor {
                 ..
             } => match channel {
                 SamplingChannel::Text => {
+                    let mut ttsr_hit: Option<crate::session::ttsr::TtsrHit> = None;
                     {
                         let mut cap = self.streaming_turn_capture.lock();
                         if cap.prompt_id.is_none() {
@@ -2731,6 +2735,32 @@ impl SessionActor {
                             cap.attempt_count += 1;
                         }
                         cap.append(false, &text);
+                        if let Some(eng) = self.tool_context.ttsr.as_ref() {
+                            ttsr_hit = eng.check_stream_text(&cap.response_text);
+                        }
+                    }
+                    if let Some(hit) = ttsr_hit {
+                        tracing::info!(
+                            rule = %hit.rule_name,
+                            path = %hit.rule_path.display(),
+                            "ttsr-lite: stream rule matched; queueing injection"
+                        );
+                        if let Ok(mut slot) = self.tool_context.ttsr_pending_injection.lock() {
+                            *slot = Some(hit.injection);
+                        }
+                        // Soft interrupt: cancel the running turn (same path as
+                        // user cancel). Injection is drained at turn boundaries.
+                        let this = self.clone();
+                        tokio::task::spawn_local(async move {
+                            this.cancel_running_task(crate::session::CancelOptions {
+                                cancel_subagents: false,
+                                kill_background_tasks: false,
+                                rewind_if_no_output: false,
+                                trigger: None,
+                                user_initiated: false,
+                            })
+                            .await;
+                        });
                     }
                     self.emit_event(crate::session::events::Event::PhaseChanged {
                         phase: crate::session::events::Phase::StreamingText,

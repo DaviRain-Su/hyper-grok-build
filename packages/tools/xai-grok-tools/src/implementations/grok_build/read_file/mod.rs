@@ -104,6 +104,8 @@ pub(crate) const DESCRIPTION_FULL: &str = r#"Read a file.
 
 Usage:
 - The ${{ params.read.target_file }} parameter can be a relative path in the workspace or an absolute path
+- Internal virtual URLs (same tool): `agent://<subagent_id>` last output, `history://` roster or `history://<id>` concise transcript, `conflict://<n>[/ours|theirs|base|both]` registered merge conflict
+- Suffix `:conflicts` on a normal path registers git conflict markers and returns their conflict:// ids
 - By default, it reads up to {max_lines_read} lines starting from the beginning of the file
 - Line numbers (1-based) appear as anchors in the format LINE_NUMBER→LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line
 - This tool can read PDF files (.pdf), PowerPoint files (.pptx), Jupyter notebooks (.ipynb files), and image files (e.g. PNG, JPG, etc).
@@ -338,6 +340,8 @@ pub(crate) async fn run_read_file(
     invoking_param_names: &crate::types::resources::InvokingToolParamNames,
 ) -> Result<ReadFileOutput, xai_tool_runtime::ToolError> {
     let (cwd, display_cwd, fs, hints_enabled);
+    let session_id;
+    let conflicts;
     {
         let res = resources.lock().await;
         cwd = match cwd_override {
@@ -347,7 +351,81 @@ pub(crate) async fn run_read_file(
         display_cwd = res.get::<DisplayCwd>().map(|d| d.0.clone());
         fs = res.require::<FileSystem>()?.0.clone();
         hints_enabled = res.get::<PathNotFoundHints>().is_some_and(|h| h.0);
+        session_id = res
+            .get::<crate::implementations::grok_build::task::types::SessionIdResource>()
+            .map(|s| s.0.clone());
+        conflicts = res
+            .get::<crate::internal_urls::ConflictRegistryResource>()
+            .cloned();
     }
+
+    // Virtual internal URLs (agent://, history://, conflict://).
+    if crate::internal_urls::parse_internal_url(&input.path).is_some() {
+        let Some(sid) = session_id.clone() else {
+            return Ok(ReadFileOutput::FileReadError(
+                "Internal URLs require a session id (SessionIdResource not installed)".into(),
+            ));
+        };
+        let ctx = crate::internal_urls::ResolveContext {
+            session_id: sid,
+            cwd: cwd.clone(),
+            conflicts: conflicts.clone(),
+        };
+        match crate::internal_urls::resolve_virtual_path(&input.path, &ctx) {
+            Some(Ok(v)) => {
+                let windowed =
+                    crate::internal_urls::apply_line_window(&v.text, input.offset, input.limit);
+                let mut out = raw_text_to_file_content(windowed);
+                if let ReadFileOutput::FileContent(ref mut fc) = out {
+                    fc.absolute_path = std::path::PathBuf::from(&v.display_path);
+                    fc.raw_output = v.text;
+                }
+                return Ok(out);
+            }
+            Some(Err(e)) => return Ok(ReadFileOutput::FileReadError(e)),
+            None => {}
+        }
+    }
+
+    // `path:conflicts` — register git conflict markers and list conflict:// ids.
+    if let Some(base) = input.path.strip_suffix(":conflicts") {
+        let joined = resolve_model_path(&cwd, display_cwd.as_deref(), base);
+        let path = crate::util::fs::try_canonicalize(&joined)
+            .await
+            .unwrap_or(joined);
+        let file_bytes = match fs.read_file(&path).await {
+            Ok(b) => b,
+            Err(e) => {
+                return Ok(ReadFileOutput::FileReadError(format!(
+                    "Failed to read for conflicts: {}, {e}",
+                    path.display()
+                )));
+            }
+        };
+        let text = String::from_utf8_lossy(&file_bytes).into_owned();
+        let Some(reg) = conflicts.as_ref() else {
+            return Ok(ReadFileOutput::FileReadError(
+                "Conflict registry unavailable in this session".into(),
+            ));
+        };
+        let ids = {
+            let mut g = reg.lock();
+            g.register_from_text(path.clone(), &text)
+        };
+        let mut body = format!(
+            "Registered {} conflict(s) in {}:\n",
+            ids.len(),
+            path.display()
+        );
+        for id in &ids {
+            body.push_str(&format!("- conflict://{id}\n"));
+        }
+        if ids.is_empty() {
+            body.push_str("No conflict markers found (<<<<<<< / ======= / >>>>>>>).\n");
+        }
+        return Ok(raw_text_to_file_content(body));
+    }
+
     let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.path);
     let is_skill_markdown = is_skill_markdown(&joined_path);
     let (path, _unicode_note) = match crate::util::fs::try_canonicalize(&joined_path).await {

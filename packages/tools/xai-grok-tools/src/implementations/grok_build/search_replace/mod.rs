@@ -162,6 +162,7 @@ pub(crate) async fn run_search_replace(
         .map(|v| v.0.clone());
     let tool_call_id = ctx.call_id.as_str().to_owned();
     let (cwd, display_cwd, fs, notification_handle, hints_enabled);
+    let conflicts;
     {
         let res = resources.lock().await;
         cwd = match cwd_override {
@@ -172,7 +173,73 @@ pub(crate) async fn run_search_replace(
         fs = res.require::<FileSystem>()?.0.clone();
         notification_handle = res.require::<NotificationHandle>()?.0.clone();
         hints_enabled = res.get::<PathNotFoundHints>().is_some_and(|h| h.0);
+        conflicts = res
+            .get::<crate::internal_urls::ConflictRegistryResource>()
+            .cloned();
     }
+
+    // conflict://N write resolves a registered merge conflict (content or @ours/@theirs).
+    if let Some(url) = crate::internal_urls::parse_internal_url(&input.file_path)
+        && url.scheme == crate::internal_urls::InternalScheme::Conflict
+    {
+        let Some(reg) = conflicts.as_ref() else {
+            return Ok(SearchReplaceOutput::InvalidInput(
+                "conflict:// write requires ConflictRegistryResource".into(),
+            ));
+        };
+        let rest = url.rest.trim();
+        if rest.contains('/') {
+            return Ok(SearchReplaceOutput::InvalidInput(
+                "conflict:// write uses conflict://N only (no /ours suffix)".into(),
+            ));
+        }
+        let id: u32 = match rest.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                return Ok(SearchReplaceOutput::InvalidInput(format!(
+                    "invalid conflict id {rest:?}"
+                )));
+            }
+        };
+        // Prefer new_string body; empty old_string + new_string is the normal create-style write.
+        let content = if !input.new_string.is_empty() {
+            input.new_string.as_str()
+        } else {
+            input.old_string.as_str()
+        };
+        let mut g = reg.lock();
+        match crate::internal_urls::resolve_conflict_write(&mut g, id, content) {
+            Ok((path, new_text)) => {
+                return Ok(SearchReplaceOutput::EditsApplied(
+                    crate::types::output::SearchReplaceEditsApplied {
+                        old_string: input.old_string.clone(),
+                        new_string: content.to_string(),
+                        tool_output_for_prompt: format!(
+                            "Resolved conflict://{id} in {}",
+                            path.display()
+                        ),
+                        tool_output_for_prompt_concise: Some(format!("Resolved conflict://{id}")),
+                        absolute_path: path,
+                        edits: crate::types::output::SearchReplaceEditContextInformation {
+                            details: vec![crate::types::output::SearchReplaceEditDetail {
+                                old_string: String::new(),
+                                old_line: 1,
+                                new_string: new_text.chars().take(200).collect(),
+                                new_line: 1,
+                                context_before: String::new(),
+                                context_after: String::new(),
+                                line_prefix: String::new(),
+                            }],
+                        },
+                        patch: None,
+                        unicode_normalized: false,
+                    },
+                ));
+            }
+            Err(e) => return Ok(SearchReplaceOutput::InvalidInput(e)),
+        }
+    }
+
     let resolved = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
     let path = match crate::util::fs::try_canonicalize(&resolved).await {
         Ok(p) => p,

@@ -48,6 +48,7 @@ use xai_grok_agent::prompt::context::PromptAudience;
 use xai_grok_agent::prompt::skills::SkillsConfig;
 use xai_grok_agent::{Agent, AgentBuilder, CompactionPolicy, ReminderPolicy};
 use xai_grok_tools::computer::types::{AsyncFileSystem, TerminalBackend};
+use xai_grok_tools::implementations::grok_build::AgentBusResource;
 use xai_grok_tools::implementations::grok_build::ask_user_question::types::UserQuestionRequest;
 use xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig;
 use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
@@ -119,6 +120,10 @@ pub(crate) struct AgentRebuildSpec {
     pub tool_params_json: ResolvedToolParamsJson,
     pub subagent_event_tx: Option<UnboundedSender<SubagentEvent>>,
     pub monitor_event_buffer: Option<MonitorEventBuffer>,
+    /// Shared peer bus for `agent_hub` (parent + children).
+    pub agent_bus: Option<AgentBusResource>,
+    /// Roster id for this session on the bus (`Main` or subagent UUID).
+    pub agent_self_id: Option<String>,
     pub user_question_tx: UnboundedSender<UserQuestionRequest>,
     pub subagent_depth: u32,
     pub subagents_max_depth: u32,
@@ -220,6 +225,8 @@ impl AgentRebuildSpec {
             tool_params_json,
             subagent_event_tx,
             monitor_event_buffer,
+            agent_bus,
+            agent_self_id,
             user_question_tx,
             subagent_depth,
             subagents_max_depth,
@@ -364,6 +371,25 @@ impl AgentRebuildSpec {
                 agent.tool_bridge().update_resource(buffer).await;
             }
         }
+        if let Some(bus) = agent_bus.clone() {
+            agent.tool_bridge().update_resource(bus).await;
+            let self_id = agent_self_id
+                .clone()
+                .unwrap_or_else(|| {
+                    xai_grok_tools::implementations::grok_build::MAIN_PEER_ID.to_string()
+                });
+            agent
+                .tool_bridge()
+                .update_resource(
+                    xai_grok_tools::implementations::grok_build::AgentSelfIdResource(self_id),
+                )
+                .await;
+        }
+        // Merge-conflict registry for conflict:// (session-scoped).
+        agent
+            .tool_bridge()
+            .update_resource(xai_grok_tools::internal_urls::ConflictRegistryResource::new())
+            .await;
         agent
             .tool_bridge()
             .update_resource(xai_grok_tools::types::resources::RespectGitignore(
@@ -446,6 +472,8 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         tool_params_json: ResolvedToolParamsJson::default(),
         subagent_event_tx: None,
         monitor_event_buffer: None,
+        agent_bus: None,
+        agent_self_id: None,
         user_question_tx: uq_tx,
         subagent_depth: 0,
         subagents_max_depth: xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH,

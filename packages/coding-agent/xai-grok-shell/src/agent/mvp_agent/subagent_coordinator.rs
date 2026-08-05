@@ -452,6 +452,9 @@ impl MvpAgent {
             background_workflows_enabled: self.cfg.borrow().resolve_workflows().value,
             ask_user_question_enabled,
             parent_cmd_tx: parent_cmd_tx.clone(),
+            agent_bus: parent_handle
+                .as_ref()
+                .and_then(|h| h.tool_context.agent_bus.clone()),
             parent_session_info: parent_handle.as_ref().map(|h| crate::session::info::Info {
                 id: parent_sid.clone(),
                 cwd: h.info.cwd.clone(),

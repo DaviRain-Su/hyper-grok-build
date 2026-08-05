@@ -4253,6 +4253,24 @@ impl MvpAgent {
         tool_ctx.monitor_event_buffer = Some(self.monitor_event_buffer.clone());
         tool_ctx.subagent_depth = 0;
         tool_ctx.auto_wake_enabled = self.cfg.borrow().auto_wake_enabled;
+        // TTSR-lite (default off). Enable with GROK_TTSR_ENABLED=1.
+        {
+            let enabled = std::env::var("GROK_TTSR_ENABLED")
+                .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+                .unwrap_or(false);
+            if enabled {
+                let cwd = std::path::PathBuf::from(&session_info.cwd);
+                tool_ctx.ttsr = Some(std::sync::Arc::new(
+                    crate::session::ttsr::TtsrEngine::load(
+                        crate::session::ttsr::TtsrConfig {
+                            enabled: true,
+                            max_retries_per_turn: 1,
+                        },
+                        &cwd,
+                    ),
+                ));
+            }
+        }
         let support_permission = self.cfg.borrow().features.support_permission;
         let telemetry_enabled = self.product_analytics_enabled();
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());

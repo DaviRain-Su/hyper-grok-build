@@ -15,9 +15,10 @@ pub mod use_tool;
 pub mod web_search;
 pub use grok_build::bash::{BashError, BashToolInput};
 pub use grok_build::{
+    AGENT_HUB_TOOL_NAME, AgentBus, AgentBusResource, AgentHubTool, AgentSelfIdResource,
     AskUserQuestionTool, BashTool, EnterPlanModeTool, ExitPlanModeTool, GrepTool, KillTaskTool,
-    ListDirTool, ReadFileTool, SearchReplaceTool, TaskOutputTool, TaskTool, TodoWriteTool,
-    WaitTasksTool, WebFetchTool, WebSearchTool,
+    ListDirTool, MAIN_PEER_ID, PeerWakeFn, ReadFileTool, SearchReplaceTool, TaskOutputTool,
+    TaskTool, TodoWriteTool, WaitTasksTool, WebFetchTool, WebSearchTool,
 };
 pub use memory::{MemoryGetImpl, MemorySearchImpl};
 pub use opencode::{

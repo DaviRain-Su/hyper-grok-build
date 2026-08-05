@@ -938,6 +938,43 @@ pub(crate) async fn spawn_session_actor(
         }
         Arc::new(TokioMutex::new(state))
     };
+    // Agent hub: one bus per root session tree. Root sessions mint a bus and
+    // register Main with Interject wake; children inherit the parent's bus and
+    // register themselves under their subagent id.
+    {
+        use std::sync::Arc;
+        use xai_grok_tools::implementations::grok_build::{
+            AgentBus, AgentBusResource, MAIN_PEER_ID, PeerWakeFn,
+        };
+        if tool_context.agent_bus.is_none() && !startup_hints.is_subagent {
+            tool_context.agent_bus = Some(AgentBusResource(AgentBus::new()));
+            tool_context.agent_self_id = Some(MAIN_PEER_ID.to_string());
+        }
+        if let Some(bus_res) = tool_context.agent_bus.clone() {
+            let peer_id = tool_context
+                .agent_self_id
+                .clone()
+                .unwrap_or_else(|| MAIN_PEER_ID.to_string());
+            let label = if startup_hints.is_subagent {
+                startup_hints
+                    .subagent_type
+                    .clone()
+                    .unwrap_or_else(|| peer_id.clone())
+            } else {
+                "main".to_string()
+            };
+            let wake_tx = cmd_tx.clone();
+            let wake_peer = peer_id.clone();
+            let wake: PeerWakeFn = Arc::new(move |body: String| {
+                let _ = wake_tx.send(SessionCommand::Interject {
+                    text: body,
+                    id: Some(format!("agent-hub-{wake_peer}")),
+                    images: Vec::new(),
+                });
+            });
+            bus_res.bus().register(peer_id, label, Some(wake));
+        }
+    }
     let rebuild_spec = std::sync::Arc::new(crate::session::agent_rebuild::AgentRebuildSpec {
         working_directory: tool_context.cwd.as_path().to_path_buf(),
         terminal_backend: terminal_backend.clone(),
@@ -984,6 +1021,8 @@ pub(crate) async fn spawn_session_actor(
         tool_params_json: tool_params_json.clone(),
         subagent_event_tx: tool_context.subagent_event_tx.clone(),
         monitor_event_buffer: tool_context.monitor_event_buffer.clone(),
+        agent_bus: tool_context.agent_bus.clone(),
+        agent_self_id: tool_context.agent_self_id.clone(),
         user_question_tx: user_question_tx.clone(),
         subagent_depth: tool_context.subagent_depth,
         subagents_max_depth,

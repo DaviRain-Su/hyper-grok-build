@@ -397,6 +397,61 @@ Use `q`, `Esc`, or click the close button to pop back to the parent view. The pa
 
 ---
 
+## Virtual paths: `agent://`, `history://`, `conflict://`
+
+The `read_file` tool (and `grep` when given a virtual path) understands a few **session-local** schemes:
+
+| URL | Meaning |
+|-----|---------|
+| `agent://<subagent_id>` | Last successful subagent output (`output.json`) |
+| `history://` | Roster of subagents for this parent session |
+| `history://<subagent_id>` | Concise transcript / final output for that subagent |
+| `conflict://` | List registered merge-conflict regions |
+| `conflict://N` | Full marker block for conflict N |
+| `conflict://N/ours` (also `theirs`, `base`, `both`) | One side of the conflict |
+
+Register conflicts by reading a normal file with the `:conflicts` suffix (e.g. `src/foo.rs:conflicts`). Resolve with `search_replace` / write-style edit targeting `conflict://N` and content `@ours`, `@theirs`, `@base`, or free text.
+
+## TTSR-lite (stream rules)
+
+Optional mid-stream course correction (default **off**). Set `GROK_TTSR_ENABLED=1`, then place rules under `.grok/rules/*.md` with frontmatter:
+
+```yaml
+---
+name: no-todo
+condition: "(?i)\\bTODO\\b"
+interruptMode: always
+---
+Do not leave bare TODOs; implement or file a tracked issue.
+```
+
+When the live assistant draft matches `condition`, the stream is cancelled, the rule body is injected once as a system reminder, and the model continues with one automatic retry budget.
+
+## Agent hub (peer messaging)
+
+Within one parent session tree, **Main** and live depth-1 subagents share an in-process **agent hub** bus. Peers can message each other without routing every note through the parent’s switchboard.
+
+The model-facing tool is `agent_hub` (distinct from the workspace remote hub). Ops:
+
+| Op | Behavior |
+|----|----------|
+| `list` | Roster of peer ids, labels, and `running` / `gone` status |
+| `send` | Fire-and-forget prose message to `to` (from `list`); max 8 KiB |
+| `inbox` | Drain this peer’s mailbox (non-blocking) |
+| `wait` | Block until mail arrives or `timeout_ms` (capped at 30s) |
+
+Rules of thumb:
+
+- Call `list` before `send`; never invent peer ids.
+- Prefer plain prose; do not use the hub for questions tools can answer (`grep`, `read_file`, build).
+- Mailbox depth is 32 (oldest dropped); soft rate limit is 20 sends per minute per sender.
+- Delivery may wake a live peer via interjection; finished peers show as `gone` and reject new sends.
+- Nesting is still depth one: children cannot spawn children, but they **can** use `agent_hub` with Main and sibling peers.
+
+Specialists that ship read-only toolsets (`explore`, `oracle`, bundled scout/reviewer-style agents) include `agent_hub` so coordination stays available without shell or edit tools.
+
+---
+
 ## Depth Limits
 
 Only the top-level session spawns subagents. A subagent cannot spawn its own subagents: the maximum nesting depth is one. If a subagent calls `spawn_subagent`, the call fails with a depth-limit error. This keeps the agent tree flat and prevents runaway spawning.

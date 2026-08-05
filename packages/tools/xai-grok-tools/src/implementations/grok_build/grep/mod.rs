@@ -704,6 +704,84 @@ async fn prepare_grep(
         )
     };
 
+    // Virtual internal URLs: search within resolved agent/history/conflict text.
+    if let Some(path) = input.path.as_deref()
+        && crate::internal_urls::parse_internal_url(path).is_some()
+    {
+        let (session_id, conflicts) = {
+            let res = resources.lock().await;
+            (
+                res.get::<crate::implementations::grok_build::task::types::SessionIdResource>()
+                    .map(|s| s.0.clone()),
+                res.get::<crate::internal_urls::ConflictRegistryResource>()
+                    .cloned(),
+            )
+        };
+        let Some(sid) = session_id else {
+            return Ok(GrepStep::Early(GrepSearchOutput {
+                stdout: b"Internal URLs require SessionIdResource".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 2,
+                match_count: 0,
+                file_matches: Vec::new(),
+            }));
+        };
+        let ctx = crate::internal_urls::ResolveContext {
+            session_id: sid,
+            cwd: cwd.clone(),
+            conflicts,
+        };
+        match crate::internal_urls::resolve_virtual_path(path, &ctx) {
+            Some(Ok(v)) => {
+                let re = match regex::RegexBuilder::new(&input.pattern)
+                    .case_insensitive(input.case_insensitive)
+                    .build()
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(GrepStep::Early(GrepSearchOutput {
+                            stdout: format!("invalid regex: {e}").into_bytes(),
+                            stderr: Vec::new(),
+                            exit_code: 2,
+                            match_count: 0,
+                            file_matches: Vec::new(),
+                        }));
+                    }
+                };
+                let mut lines_out = Vec::new();
+                let mut match_count = 0usize;
+                for (i, line) in v.text.lines().enumerate() {
+                    if re.is_match(line) {
+                        match_count += 1;
+                        lines_out.push(format!("{}:{}:{}", v.display_path, i + 1, line));
+                    }
+                }
+                let stdout = if lines_out.is_empty() {
+                    Vec::new()
+                } else {
+                    lines_out.join("\n").into_bytes()
+                };
+                return Ok(GrepStep::Early(GrepSearchOutput {
+                    stdout,
+                    stderr: Vec::new(),
+                    exit_code: if match_count > 0 { 0 } else { 1 },
+                    match_count,
+                    file_matches: Vec::new(),
+                }));
+            }
+            Some(Err(e)) => {
+                return Ok(GrepStep::Early(GrepSearchOutput {
+                    stdout: e.into_bytes(),
+                    stderr: Vec::new(),
+                    exit_code: 2,
+                    match_count: 0,
+                    file_matches: Vec::new(),
+                }));
+            }
+            None => {}
+        }
+    }
+
     // Resolve the model-provided path for the working directory.
     let workdir = resolve_model_path(
         &cwd,

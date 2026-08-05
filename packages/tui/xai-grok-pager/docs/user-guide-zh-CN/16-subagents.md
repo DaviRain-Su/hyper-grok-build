@@ -351,6 +351,50 @@ Grok Build 在智能体屏幕的侧边面板中显示运行中与已完成的工
 
 ---
 
+## 虚拟路径：`agent://` / `history://` / `conflict://`
+
+`read_file`（以及带虚拟 path 的 `grep`）支持会话内方案：
+
+| URL | 含义 |
+|-----|------|
+| `agent://<subagent_id>` | 子智能体最近一次成功输出 |
+| `history://` | 本父会话下的子智能体 roster |
+| `history://<id>` | 精简 transcript / 最终输出 |
+| `conflict://` | 已注册合并冲突列表 |
+| `conflict://N` | 冲突 N 的完整 marker |
+| `conflict://N/ours` 等 | 单侧内容 |
+
+对普通路径加后缀 `:conflicts`（如 `src/foo.rs:conflicts`）可注册 git 冲突标记。用 `search_replace` 写 `conflict://N`，内容为 `@ours` / `@theirs` / `@base` 或自由文本以解决。
+
+## TTSR-lite（流式规则）
+
+可选的中途纠偏（默认 **关**）。设置 `GROK_TTSR_ENABLED=1`，在 `.grok/rules/*.md` 写带 frontmatter 的规则（`condition` 正则 + `interruptMode`）。匹配后会取消当前流、注入规则正文一次，并允许一次自动重试。
+
+## Agent hub（对等消息）
+
+在同一父会话树内，**Main** 与存活的 depth-1 子智能体共享进程内 **agent hub** 总线。对等体可直接互发消息，无需每条都经父会话中转。
+
+面向模型的工具名为 `agent_hub`（与 workspace 远程 hub 不同）。操作：
+
+| Op | 行为 |
+|----|------|
+| `list` | 对等体 roster：id、标签、`running` / `gone` |
+| `send` | 向 `to`（来自 `list`）发纯文本；最大 8 KiB |
+| `inbox` | 排空本端邮箱（非阻塞） |
+| `wait` | 阻塞直到有邮件或 `timeout_ms`（上限 30s） |
+
+使用约定：
+
+- 发送前先 `list`，不要臆造 peer id。
+- 用自然语言；不要用 hub 问工具能回答的问题（`grep`、`read_file`、构建等）。
+- 邮箱深度 32（满则丢最旧）；软限流约每发送方 20 条/分钟。
+- 投递可能通过 interject 唤醒存活对等体；已结束对等体为 `gone`，拒收新消息。
+- 嵌套仍为 depth 1：子智能体不能再 spawn，但可用 `agent_hub` 与 Main / 兄弟通信。
+
+只读 toolset（`explore`、`oracle`、bundled scout/reviewer 等）也包含 `agent_hub`，以便在无 shell/编辑的前提下协调。
+
+---
+
 ## 深度限制
 
 只有顶层会话可以生成子智能体。子智能体不能再生成自己的子智能体：最大嵌套深度为一层。若子智能体调用 `spawn_subagent`，该调用会因深度限制错误而失败。这使智能体树保持扁平，并防止失控生成。

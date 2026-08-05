@@ -177,6 +177,14 @@ pub struct ToolContext {
     /// synthetic user message before the next sampling step.
     pub monitor_event_buffer:
         Option<xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer>,
+    /// Session-tree peer bus for `agent_hub` (Main + depth-1 children share one).
+    pub agent_bus: Option<xai_grok_tools::implementations::grok_build::AgentBusResource>,
+    /// This session's roster id on [`Self::agent_bus`] (`Main` or subagent UUID).
+    pub agent_self_id: Option<String>,
+    /// TTSR-lite engine (time-traveling stream rules). `None` when disabled.
+    pub ttsr: Option<std::sync::Arc<crate::session::ttsr::TtsrEngine>>,
+    /// Pending TTSR injection body after a mid-stream hit (consumed once).
+    pub ttsr_pending_injection: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     pub task_completion_reservations:
         Option<xai_grok_tools::reminders::task_completion::TaskCompletionReservations>,
     pub task_wake_suppressed:
@@ -272,6 +280,10 @@ impl ToolContext {
             is_turn_active: None,
             unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             monitor_event_buffer: None,
+            agent_bus: None,
+            agent_self_id: None,
+            ttsr: None,
+            ttsr_pending_injection: Arc::new(std::sync::Mutex::new(None)),
             task_completion_reservations: None,
             task_wake_suppressed: None,
             synthetic_trace_tx: None,
@@ -313,6 +325,10 @@ impl ToolContext {
             is_turn_active: None,
             unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             monitor_event_buffer: None,
+            agent_bus: None,
+            agent_self_id: None,
+            ttsr: None,
+            ttsr_pending_injection: Arc::new(std::sync::Mutex::new(None)),
             task_completion_reservations: None,
             task_wake_suppressed: None,
             synthetic_trace_tx: None,
@@ -403,6 +419,10 @@ mod tests {
                 is_turn_active: None,
                 unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 monitor_event_buffer: None,
+                agent_bus: None,
+                agent_self_id: None,
+                ttsr: None,
+                ttsr_pending_injection: Arc::new(std::sync::Mutex::new(None)),
                 task_completion_reservations: None,
                 task_wake_suppressed: None,
                 synthetic_trace_tx: None,

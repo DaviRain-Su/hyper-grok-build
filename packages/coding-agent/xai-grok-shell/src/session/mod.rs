@@ -353,6 +353,8 @@ pub mod signals;
 pub(crate) mod slash_commands;
 pub mod storage;
 pub(crate) mod streaming_capture;
+pub(crate) mod ttsr;
+pub(crate) mod p2_scaffolds;
 pub(crate) mod summary;
 pub(crate) mod telemetry;
 #[cfg(feature = "test-support")]

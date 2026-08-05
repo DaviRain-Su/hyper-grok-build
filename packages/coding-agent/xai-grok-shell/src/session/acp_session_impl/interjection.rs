@@ -287,13 +287,24 @@ impl SessionActor {
     /// Returns `true` if any interjections were drained (caller may want to
     /// `continue` the turn loop so the model sees them on the next iteration).
     pub(super) async fn drain_pending_interjections(&self) -> bool {
+        // TTSR-lite: after a mid-stream rule hit cancelled the turn, inject
+        // the rule body once so the next model step can course-correct.
+        let mut drained_any = false;
+        if let Ok(mut slot) = self.tool_context.ttsr_pending_injection.lock()
+            && let Some(injection) = slot.take()
+        {
+            self.push_system_reminder(&injection);
+            drained_any = true;
+            tracing::info!("ttsr-lite: injected stream-rule reminder after cancel");
+        }
         // Manual drain (not `drain_formatted`): skill parsing needs the raw
         // text — parsed post-wrap, the envelope's closing `</user_query>` tag
         // would pollute the trailing skill's args.
         let entries = self.pending_interjections.drain_all();
         if entries.is_empty() {
-            return false;
+            return drained_any;
         }
+        drained_any = true;
 
         for PendingInterjection { text, attachments } in entries {
             // Sanitizer drops `[Image #N: <path>]` → `[Image #N]` before the
@@ -333,6 +344,6 @@ impl SessionActor {
         // next user turn (that field is reserved for fatal aborts). The
         // interjection itself is recorded at enqueue time via
         // `Event::Interjected` (carrying the shared `redirect_kind`).
-        true
+        drained_any
     }
 }

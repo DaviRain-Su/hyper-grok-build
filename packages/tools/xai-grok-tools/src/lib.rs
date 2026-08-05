@@ -22,6 +22,7 @@ pub mod bridge;
 pub mod computer;
 pub mod gitignore;
 pub mod implementations;
+pub mod internal_urls;
 pub mod normalization;
 pub mod notification;
 pub mod persistence;
