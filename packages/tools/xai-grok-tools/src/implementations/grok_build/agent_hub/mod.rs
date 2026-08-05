@@ -356,3 +356,160 @@ impl From<AgentHubOutput> for crate::types::output::ToolOutput {
         crate::types::output::ToolOutput::Text(o.prompt_text().into())
     }
 }
+
+#[cfg(test)]
+mod tool_tests {
+    use super::*;
+    use crate::types::resources::{Resources, SharedResources};
+    use crate::types::tool_metadata::test_ctx;
+
+    fn hub_resources(self_id: &str, bus: AgentBus) -> SharedResources {
+        let mut resources = Resources::new();
+        resources.insert(AgentBusResource(bus));
+        resources.insert(AgentSelfIdResource(self_id.to_string()));
+        resources.into_shared()
+    }
+
+    #[tokio::test]
+    async fn list_send_inbox_via_tool() {
+        let bus = AgentBus::new();
+        bus.register(MAIN_PEER_ID, "main", None);
+        bus.register("scout-1", "scout", None);
+        bus.register("rev-1", "reviewer", None);
+
+        let tool = AgentHubTool;
+        let main = hub_resources(MAIN_PEER_ID, bus.clone());
+
+        let list = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(main.clone()),
+            AgentHubInput {
+                op: AgentHubOp::List,
+                to: None,
+                text: None,
+                reply_to: None,
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(list.ok);
+        assert_eq!(list.peers.as_ref().map(|p| p.len()), Some(3));
+
+        let send = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(main.clone()),
+            AgentHubInput {
+                op: AgentHubOp::Send,
+                to: Some("scout-1".into()),
+                text: Some("look at auth".into()),
+                reply_to: None,
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(send.ok, "{:?}", send.summary);
+        assert!(send.message_id.is_some());
+
+        let scout = hub_resources("scout-1", bus.clone());
+        let inbox = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(scout),
+            AgentHubInput {
+                op: AgentHubOp::Inbox,
+                to: None,
+                text: None,
+                reply_to: None,
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(inbox.ok);
+        let msgs = inbox.messages.expect("messages");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].from, MAIN_PEER_ID);
+        assert_eq!(msgs[0].text, "look at auth");
+    }
+
+    #[tokio::test]
+    async fn send_to_gone_returns_fail_ok_false() {
+        let bus = AgentBus::new();
+        bus.register("a", "a", None);
+        bus.register("b", "b", None);
+        bus.mark_gone("b");
+
+        let tool = AgentHubTool;
+        let out = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(hub_resources("a", bus)),
+            AgentHubInput {
+                op: AgentHubOp::Send,
+                to: Some("b".into()),
+                text: Some("hi".into()),
+                reply_to: None,
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!out.ok);
+        assert!(out.summary.contains("gone"));
+    }
+
+    #[tokio::test]
+    async fn wait_unblocks_on_peer_send() {
+        let bus = AgentBus::new();
+        bus.register("a", "a", None);
+        bus.register("b", "b", None);
+
+        let tool = AgentHubTool;
+        let bus2 = bus.clone();
+        let waiter = tokio::spawn(async move {
+            xai_tool_runtime::Tool::run(
+                &tool,
+                test_ctx(hub_resources("b", bus2)),
+                AgentHubInput {
+                    op: AgentHubOp::Wait,
+                    to: None,
+                    text: None,
+                    reply_to: None,
+                    timeout_ms: Some(2_000),
+                },
+            )
+            .await
+            .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let _ = bus.send("a", "b", "ping wait", None);
+        let out = waiter.await.unwrap();
+        assert!(out.ok);
+        let msgs = out.messages.expect("messages");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text, "ping wait");
+    }
+
+    #[tokio::test]
+    async fn missing_bus_is_invalid_arguments() {
+        let tool = AgentHubTool;
+        let resources = Resources::new().into_shared();
+        let err = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources),
+            AgentHubInput {
+                op: AgentHubOp::List,
+                to: None,
+                text: None,
+                reply_to: None,
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.detail.contains("AgentBusResource") || err.to_string().contains("AgentBus"),
+            "{err:?}"
+        );
+    }
+}

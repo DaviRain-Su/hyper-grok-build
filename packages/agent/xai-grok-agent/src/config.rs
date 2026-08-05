@@ -271,6 +271,8 @@ fn default_grok_build_toolset() -> ToolServerConfig {
             kill_task_tool_config(),
             (&grok_build::TodoWriteTool).into(),
             (&grok_build::AgentHubTool).into(),
+            // DAP adapter stub (inert until a real adapter is wired).
+            (&grok_build::DapDebugTool).into(),
             task_output_tool_config(),
             wait_tasks_tool_config(),
             task_tool_config(),
@@ -297,6 +299,7 @@ fn grok_build_concise_toolset() -> ToolServerConfig {
             kill_task_tool_config(),
             (&grok_build::TodoWriteTool).into(),
             (&grok_build::AgentHubTool).into(),
+            (&grok_build::DapDebugTool).into(),
             task_output_tool_config(),
             (&grok_build::SchedulerCreateTool).into(),
             (&grok_build::SchedulerDeleteTool).into(),

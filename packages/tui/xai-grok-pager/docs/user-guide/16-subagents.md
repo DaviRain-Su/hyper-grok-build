@@ -434,6 +434,22 @@ Do not leave bare TODOs; implement or file a tracked issue.
 
 When the live assistant draft matches `condition`, the stream is cancelled, the rule body is injected once as a system reminder, and the model continues with one automatic retry budget.
 
+## DAP debug stub (`dap_debug`)
+
+The `dap_debug` tool is registered as a **stub** for future Debug Adapter Protocol sessions (`status`, `launch`, `attach`, `control`, `breakpoints`, `evaluate`). Every op currently returns a structured “not implemented” response — use a local debugger via the shell until an adapter process is wired. Reserved config: `[features] dap_debug = true`.
+
+## Collab scaffold
+
+Multi-user collab is config-only for now (no relay process):
+
+```toml
+[collab]
+enabled = false
+relay_url = "wss://collab.example/ws"
+web_url = "https://collab.example"
+display_name = "alice"
+```
+
 ## Agent hub (peer messaging)
 
 Within one parent session tree, **Main** and live depth-1 subagents share an in-process **agent hub** bus. Peers can message each other without routing every note through the parent’s switchboard.

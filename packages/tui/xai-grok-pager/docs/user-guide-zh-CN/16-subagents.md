@@ -377,6 +377,22 @@ ttsr = true
 
 在 `.grok/rules/*.md` 写带 frontmatter 的规则（`condition` 正则 + `interruptMode`）。匹配后会取消当前流、注入规则正文一次，并允许一次自动重试。
 
+## DAP debug stub（`dap_debug`）
+
+`dap_debug` 为 **占位工具**（status / launch / attach / control / breakpoints / evaluate）。当前一律返回 stub 说明；真正调试请用 shell 调本地 debugger。预留配置：`[features] dap_debug = true`。
+
+## Collab 脚手架
+
+多人协作目前仅配置、无 relay 进程：
+
+```toml
+[collab]
+enabled = false
+relay_url = "wss://collab.example/ws"
+web_url = "https://collab.example"
+display_name = "alice"
+```
+
 ## Agent hub（对等消息）
 
 在同一父会话树内，**Main** 与存活的 depth-1 子智能体共享进程内 **agent hub** 总线。对等体可直接互发消息，无需每条都经父会话中转。

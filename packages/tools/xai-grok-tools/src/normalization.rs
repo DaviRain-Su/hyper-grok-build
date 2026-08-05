@@ -130,6 +130,7 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::UpdateGoal(_)
         | ToolInput::Workflow(_)
         | ToolInput::AgentHub(_)
+        | ToolInput::DapDebug(_)
         | ToolInput::Dynamic(_) => return None,
     })
 }

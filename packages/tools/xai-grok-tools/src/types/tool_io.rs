@@ -17,6 +17,7 @@ use crate::implementations::codex::list_dir::tool::CodexListDirInput;
 use crate::implementations::codex::read_file::tool::CodexReadFileInput;
 use crate::implementations::grok_build::agent_hub::AgentHubInput;
 use crate::implementations::grok_build::ask_user_question::AskUserQuestionInput;
+use crate::implementations::grok_build::dap_debug::DapDebugInput;
 use crate::implementations::grok_build::enter_plan_mode::EnterPlanModeInput;
 use crate::implementations::grok_build::exit_plan_mode::ExitPlanModeInput;
 use crate::implementations::grok_build::grep::GrepSearchInput;
@@ -98,6 +99,7 @@ pub enum ToolInput {
     UpdateGoal(UpdateGoalInput),
     Workflow(crate::implementations::grok_build::workflow::WorkflowToolInput),
     AgentHub(AgentHubInput),
+    DapDebug(DapDebugInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),
 }

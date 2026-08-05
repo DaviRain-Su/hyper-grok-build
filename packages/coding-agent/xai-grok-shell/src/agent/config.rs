@@ -1151,6 +1151,52 @@ impl HubConfig {
         self.url.as_ref().is_some_and(|u| !u.trim().is_empty())
     }
 }
+/// `[collab]` section — multi-user collab relay (OMP-inspired scaffold).
+///
+/// No websocket mesh is started yet; these fields are reserved for a future
+/// `/collab` entry point and UI deep links.
+///
+/// ```toml
+/// [collab]
+/// enabled = false
+/// relay_url = "wss://collab.example/ws"
+/// web_url = "https://collab.example"
+/// display_name = "alice"
+/// ```
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CollabConfigToml {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+impl CollabConfigToml {
+    pub(crate) fn resolve(&self) -> crate::session::p2_scaffolds::CollabConfig {
+        crate::session::p2_scaffolds::CollabConfig {
+            enabled: self.enabled.unwrap_or(false),
+            relay_url: self
+                .relay_url
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            web_url: self
+                .web_url
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            display_name: self
+                .display_name
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        }
+    }
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorktreePoolConfig {
@@ -1432,6 +1478,9 @@ pub struct Config {
     /// Computer Hub configuration (`[hub]` in config.toml).
     #[serde(default, skip_serializing)]
     pub hub: HubConfig,
+    /// Multi-user collab scaffold (`[collab]` in config.toml).
+    #[serde(default, skip_serializing)]
+    pub collab: CollabConfigToml,
     #[serde(default, skip_serializing)]
     pub worktree_pool: WorktreePoolConfig,
     #[serde(default, skip_serializing)]
@@ -1840,6 +1889,7 @@ impl Default for Config {
             harness: HarnessConfig::default(),
             relay: RelayConfig::default(),
             hub: HubConfig::default(),
+            collab: CollabConfigToml::default(),
             worktree_pool: WorktreePoolConfig::default(),
             sandbox: SandboxSettingsConfig::default(),
             mcp_servers: std::collections::HashMap::new(),
@@ -5453,6 +5503,10 @@ pub struct Features {
     /// Set under `[features] ttsr = true` in config.toml.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttsr: Option<bool>,
+    /// Advertise / prepare the `dap_debug` tool path for future DAP adapters.
+    /// Today the tool is always a stub; this flag is reserved for enablement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dap_debug: Option<bool>,
     /// Backend-executed tools (web_search, x_search run server-side).
     /// `None` = defer to env / default (true). Set `false` to force
     /// client-side tool execution.
