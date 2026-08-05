@@ -284,11 +284,38 @@ impl SessionActor {
     /// `model_id`, if the models manager still has the entry. Used so a turn
     /// can re-resolve `OLLAMA_API_KEY` etc. even when chat-state still holds a
     /// previous session JWT.
-    fn live_catalog_own_credential(&self, model_id: &str) -> Option<String> {
+    ///
+    /// When `base_url` is provided, only entries whose catalog base matches
+    /// that URL are considered. Bare wire slugs like `deepseek-v4-flash` exist
+    /// under many providers; without this filter the first catalog hit can be
+    /// Ollama (env `OLLAMA_API_KEY`) while the request goes to OpenCode Go.
+    fn live_catalog_own_credential(
+        &self,
+        model_id: &str,
+        base_url: Option<&str>,
+    ) -> Option<String> {
         if model_id.is_empty() {
             return None;
         }
         let models = self.models_manager.models();
+        if let Some(base) = base_url.map(str::trim).filter(|b| !b.is_empty()) {
+            if let Some(entry) = models.get(model_id) {
+                if crate::agent::config::catalog_base_matches_request(&entry.info.base_url, base) {
+                    return entry.own_credential();
+                }
+            }
+            for entry in models.values() {
+                if entry.model == model_id
+                    && crate::agent::config::catalog_base_matches_request(
+                        &entry.info.base_url,
+                        base,
+                    )
+                {
+                    return entry.own_credential();
+                }
+            }
+            return None;
+        }
         crate::agent::config::find_model_by_id(&models, model_id)
             .and_then(|entry| entry.own_credential())
     }
@@ -616,7 +643,10 @@ impl SessionActor {
         }
         // Live catalog own key (env / stamped api_key) preferred over chat-state,
         // which may still hold a previous session JWT after a model switch race.
-        let live_platform_key = self.live_catalog_own_credential(cfg.model.as_str());
+        // Always pass request base_url so bare wire slugs cannot pick up another
+        // provider's env key (e.g. OLLAMA_API_KEY for deepseek-v4-flash).
+        let live_platform_key =
+            self.live_catalog_own_credential(cfg.model.as_str(), Some(cfg.base_url.as_str()));
         let session_token = self
             .auth_manager
             .as_ref()
@@ -761,10 +791,10 @@ impl SessionActor {
         } else if third_party_api_key_route {
             // Ollama / OpenRouter / Fireworks / OpenCode Go / … : never install
             // the xAI session resolver. Prefer, in order:
-            // 1) live catalog own key for the wire model slug
-            // 2) auth.json / env re-resolved from the **request base URL**
-            //    (authoritative when wire model is bare `deepseek-v4-flash`
-            //    and catalog lookup would hit a different provider row)
+            // 1) auth.json / env re-resolved from the **request base URL**
+            //    (authoritative for OpenCode Go host; must beat bare-slug
+            //    catalog hits that pull OLLAMA_API_KEY etc.)
+            // 2) live catalog own key restricted to that same base URL
             // 3) chat-state key that is not the session JWT and not JWT-shaped
             // Empty key fails closed as unauthenticated — better than a false
             // recovery loop that refreshes the wrong credential.
@@ -777,7 +807,7 @@ impl SessionActor {
                         .is_none_or(|session| session != key.as_str())
             });
             (
-                live_platform_key.or(from_endpoint).or(chat_key),
+                from_endpoint.or(live_platform_key).or(chat_key),
                 None,
             )
         } else if use_bearer_resolver {

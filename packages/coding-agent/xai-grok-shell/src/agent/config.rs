@@ -6376,6 +6376,32 @@ pub(crate) fn looks_like_jwt_access_token(key: &str) -> bool {
     key.starts_with("eyJ") && key.bytes().filter(|&b| b == b'.').count() >= 2
 }
 
+/// Whether a catalog entry's base URL is the same platform route as `request_base`.
+///
+/// Used when looking up credentials by bare wire model id so
+/// `deepseek-v4-flash` under Ollama cannot supply `OLLAMA_API_KEY` for an
+/// OpenCode Go request to `https://opencode.ai/zen/go/v1`.
+pub(crate) fn catalog_base_matches_request(catalog_base: &str, request_base: &str) -> bool {
+    let catalog_base = catalog_base
+        .trim()
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    let request_base = request_base
+        .trim()
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    if catalog_base.is_empty() || request_base.is_empty() {
+        return false;
+    }
+    request_base == catalog_base
+        || request_base
+            .strip_prefix(&catalog_base)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || catalog_base
+            .strip_prefix(&request_base)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 /// Re-resolve a third-party platform API key from the **request base URL**
 /// (auth.json `platform/<id>` + env), independent of the bare wire model slug.
 ///
@@ -6386,7 +6412,12 @@ pub(crate) fn looks_like_jwt_access_token(key: &str) -> bool {
 /// Matching by host/path (`opencode.ai/zen/go/v1`) recovers the correct key.
 pub fn resolve_open_platform_api_key_from_endpoint(base_url: &str) -> Option<String> {
     let spec = open_platform_endpoint(base_url)?;
-    let home = xai_grok_config::grok_home();
+    // Prefer the live `$GROK_HOME` env over `grok_home()`'s process-once cache.
+    // Tests (and rare mid-process overrides) set `GROK_HOME` per case; the
+    // OnceLock would otherwise keep the first resolution and miss auth.json.
+    let home = std::env::var_os("GROK_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(xai_grok_config::grok_home);
     for storage_id in provider_credential_storage_ids(spec) {
         if let Some(key) = crate::auth::read_platform_api_key(&home, &storage_id) {
             return Some(key);

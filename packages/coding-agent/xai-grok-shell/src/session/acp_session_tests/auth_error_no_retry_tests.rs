@@ -1577,6 +1577,65 @@ async fn reconstruct_full_config_no_session_resolver_for_open_platform_endpoint(
         .await;
 }
 
+/// Regression: `OLLAMA_API_KEY` is set and bare wire model is `deepseek-v4-flash`.
+/// Catalog bare-slug lookup used to prefer Ollama's env key for OpenCode Go
+/// requests → 401 Invalid API key. Endpoint re-resolve must win.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn reconstruct_full_config_opencode_go_ignores_ollama_env_for_bare_slug() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            crate::auth::store_platform_api_key(
+                dir.path(),
+                "opencode",
+                "sk-opencode-go-correct-key",
+                None,
+            )
+            .unwrap();
+            let _home = xai_grok_test_support::EnvGuard::set(
+                "GROK_HOME",
+                dir.path().to_str().unwrap(),
+            );
+            let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+            // Pollute with the real failure mode from production logs.
+            let _ollama = xai_grok_test_support::EnvGuard::set(
+                "OLLAMA_API_KEY",
+                "e122cf83c6bf4e2e9c173c3bebd9234d.-oiBCiRY52XQ7ieT6_ybgKK3",
+            );
+
+            let (_am_dir, am) = auth_manager_with_valid_token("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4YWkifQ.sig");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "oidc",
+                xai_chat_state::AuthType::SessionToken,
+                "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzdGFsZSJ9.stale".to_string(),
+            )
+            .await;
+
+            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                cfg.base_url = xai_grok_models::OPENCODE_GO_BASE_URL_DEFAULT.into();
+                cfg.model = "deepseek-v4-flash".into();
+                actor.chat_state_handle.update_sampling_config(cfg);
+            }
+
+            let cfg = actor.reconstruct_full_config().await;
+            assert_eq!(
+                cfg.api_key.as_deref(),
+                Some("sk-opencode-go-correct-key"),
+                "must not send OLLAMA_API_KEY to OpenCode Go"
+            );
+            assert!(
+                !cfg.api_key
+                    .as_deref()
+                    .is_some_and(|k| k.contains("7ieT6_ybgKK3")),
+                "leaked ollama key"
+            );
+        })
+        .await;
+}
+
 /// Regression (OpenCode Go): wire model is bare `deepseek-v4-flash` while chat
 /// state still holds a prior xAI OIDC JWT. Reconstruct must re-resolve the
 /// platform key from `https://opencode.ai/zen/go/v1` (auth.json
