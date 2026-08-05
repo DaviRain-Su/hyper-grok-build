@@ -1,6 +1,6 @@
 # Hyper WASM Extensions vs Pi Extensions — 完整度对照
 
-| 日期 | 2026-08-04（post_tool_use 补齐） |
+| 日期 | 2026-08-05（e2e + UX 可见性） |
 |------|----------------------------------|
 | Hyper 参考 | bootstrap ABI + `xai-grok-extension-sdk` + plugin/marketplace |
 | Pi 参考 | TypeScript `ExtensionAPI`（`pi.on` / `registerTool` / packages） |

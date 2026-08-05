@@ -284,7 +284,7 @@ mod tests {
     #[tokio::test]
     async fn sync_and_unregister_wasm_tools_smoke() {
         let wasm = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../xai-grok-extension-runtime/examples/rust-guest-template/extension.wasm");
+            .join("../../extensions/xai-grok-extension-runtime/examples/rust-guest-template/extension.wasm");
         if !wasm.is_file() {
             eprintln!("skip: no rust-guest-template/extension.wasm");
             return;
@@ -335,7 +335,7 @@ mod tests {
     #[tokio::test]
     async fn two_sessions_get_distinct_client_names() {
         let wasm = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../xai-grok-extension-runtime/examples/rust-guest-template/extension.wasm");
+            .join("../../extensions/xai-grok-extension-runtime/examples/rust-guest-template/extension.wasm");
         if !wasm.is_file() {
             return;
         }

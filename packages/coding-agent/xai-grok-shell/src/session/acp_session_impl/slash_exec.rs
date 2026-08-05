@@ -253,6 +253,16 @@ impl SessionActor {
                                     format!("{} MCP servers: blocked", plugin.mcp_server_count)
                                 });
                             }
+                            if plugin.has_runtime {
+                                if plugin.runtime_capabilities.is_empty() {
+                                    components.push("wasm runtime".into());
+                                } else {
+                                    components.push(format!(
+                                        "wasm: {}",
+                                        plugin.runtime_capabilities.join(", ")
+                                    ));
+                                }
+                            }
                             if !components.is_empty() {
                                 lines.push(format!("    {}", components.join(", ")));
                             }
@@ -351,12 +361,24 @@ impl SessionActor {
                     None => String::new(),
                 };
 
+                let wasm_ext = self.extension_runtime.borrow().len();
+                let wasm_tools = self.wasm_registered_tools.borrow().len();
+                let wasm_cmds = self.wasm_registered_commands.borrow().len();
+                let wasm_line = if wasm_ext > 0 || wasm_tools > 0 || wasm_cmds > 0 {
+                    format!(
+                        "\n\n**WASM extensions:** {wasm_ext} loaded, \
+                         {wasm_tools} tool(s), {wasm_cmds} command(s)"
+                    )
+                } else {
+                    String::new()
+                };
+
                 let text = format!(
                     "{}**Session ID:** {}\n\n\
                      **Working directory:** {}\n\n\
                      {}{}\n\n\
                      **Turn:** {}\n\n\
-                     **Context:** {} / {} tokens ({:.0}%)",
+                     **Context:** {} / {} tokens ({:.0}%){}",
                     title_line,
                     self.session_info.id.0,
                     self.session_info.cwd,
@@ -366,6 +388,7 @@ impl SessionActor {
                     ctx.used,
                     ctx.total,
                     context_pct,
+                    wasm_line,
                 );
                 self.send_host_turn_slash_command_output(&text).await;
                 ok_end_turn(0, None)

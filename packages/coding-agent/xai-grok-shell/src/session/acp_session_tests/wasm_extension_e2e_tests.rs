@@ -5,6 +5,8 @@
 //! - `run_stop_gate` with stop-once fixture
 //! - before_model inject via the same dispatch turn uses
 //! - fail-closed trap guest through prepare_tool_call
+//! - `register_command` collect/invoke + slash resolve + ACP catalog
+//! - `post_tool_use` observe dispatch
 
 use super::support::*;
 use super::*;
@@ -14,14 +16,17 @@ use xai_grok_extension_runtime::{ExtensionRuntime, wat_to_wasm};
 use xai_grok_tools::registry::types::ToolConfig;
 
 fn fixture_wasm() -> Option<PathBuf> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../xai-grok-extension-runtime/examples/rust-guest-template/extension.wasm");
+    // shell crate is packages/coding-agent/xai-grok-shell; extensions live under packages/extensions/.
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../../extensions/xai-grok-extension-runtime/examples/rust-guest-template/extension.wasm",
+    );
     path.is_file().then_some(path)
 }
 
 fn stop_once_wasm() -> Option<PathBuf> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../xai-grok-extension-runtime/examples/sdk-stop-once/extension.wasm");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../../extensions/xai-grok-extension-runtime/examples/sdk-stop-once/extension.wasm",
+    );
     path.is_file().then_some(path)
 }
 
@@ -489,6 +494,135 @@ async fn prepare_tool_call_fail_closed_on_trap() {
             }
             let m = actor.extension_runtime.borrow().metrics();
             assert!(m.pre_tool_denies >= 1, "{m}");
+        })
+        .await;
+}
+
+/// Template `hello_wasm` command: collect → session cache → slash resolve → invoke.
+#[tokio::test(flavor = "current_thread")]
+async fn session_actor_register_command_slash_hello_wasm() {
+    let Some(rt) = load_template_runtime(vec![Capability::RegisterCommand]) else {
+        eprintln!("skip: no rust-guest-template/extension.wasm");
+        return;
+    };
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            use xai_grok_tools::implementations::grok_build::LoopFireMode;
+
+            let actor = build_actor_with_read_tool().await;
+            *actor.extension_runtime.borrow_mut() = rt.clone();
+
+            let cmds = rt.collect_registered_commands().await;
+            assert!(
+                cmds.iter().any(|c| c.name == "hello_wasm"),
+                "template should advertise hello_wasm, got {cmds:?}"
+            );
+            *actor.wasm_registered_commands.borrow_mut() = cmds.clone();
+
+            // ACP catalog includes the wasm slash command.
+            let catalog = slash_commands::available_commands(
+                &[],
+                slash_commands::CommandAvailability::default(),
+                &[],
+                &cmds,
+            );
+            assert!(
+                catalog.iter().any(|c| c.name == "hello_wasm"),
+                "hello_wasm missing from available_commands: {:?}",
+                catalog.iter().map(|c| &c.name).collect::<Vec<_>>()
+            );
+
+            // Slash resolve routes to BuiltinAction::WasmCommand.
+            let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new(
+                "/hello_wasm Grok",
+            ))];
+            let outcome = slash_commands::resolve(
+                prompt,
+                &[],
+                slash_commands::CommandAvailability::default(),
+                slash_commands::SkillSlashRewrite::default(),
+                &[],
+                LoopFireMode::Detached,
+                &cmds,
+            );
+            let action = match outcome {
+                Err(SlashCommandOutcome::Builtin(a)) => a,
+                other => panic!("expected Builtin WasmCommand, got {other:?}"),
+            };
+            match action {
+                BuiltinAction::WasmCommand {
+                    extension,
+                    name,
+                    args,
+                } => {
+                    assert_eq!(name, "hello_wasm");
+                    assert_eq!(args, "Grok");
+                    assert_eq!(extension, "e2e-template");
+                    let out = rt
+                        .invoke_registered_command(&extension, &name, &args)
+                        .await
+                        .expect("invoke hello_wasm");
+                    assert!(
+                        out.to_ascii_lowercase().contains("hello")
+                            && out.to_ascii_lowercase().contains("grok"),
+                        "unexpected command output: {out}"
+                    );
+                }
+                other => panic!("expected WasmCommand, got {other:?}"),
+            }
+        })
+        .await;
+}
+
+/// post_tool_use observe on the session runtime (success + failure paths).
+#[tokio::test(flavor = "current_thread")]
+async fn session_actor_post_tool_use_observe() {
+    let Some(rt) = load_template_runtime(vec![]) else {
+        return;
+    };
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = build_actor_with_read_tool().await;
+            *actor.extension_runtime.borrow_mut() = rt;
+
+            let ext_rt = actor.extension_runtime.borrow().clone();
+            let ok = ext_rt
+                .dispatch_post_tool_use(&xai_grok_extension_api::PostToolIn {
+                    tool_name: "read_file".into(),
+                    success: true,
+                    tool_input_json: r#"{"target_file":"a.rs"}"#.into(),
+                    tool_result_preview: r#"{"ok":true}"#.into(),
+                })
+                .await;
+            assert!(
+                !ok.is_empty(),
+                "template exports post_tool_use; expected at least one result"
+            );
+            assert!(
+                ok.iter().all(|r| matches!(
+                    r,
+                    xai_grok_extension_runtime::GuestCallResult::Ok { code: 0, .. }
+                )),
+                "post_tool success path: {ok:?}"
+            );
+
+            let fail = ext_rt
+                .dispatch_post_tool_use(&xai_grok_extension_api::PostToolIn {
+                    tool_name: "read_file".into(),
+                    success: false,
+                    tool_input_json: r#"{"target_file":"missing"}"#.into(),
+                    tool_result_preview: "ENOENT".into(),
+                })
+                .await;
+            assert!(
+                fail.iter().all(|r| matches!(
+                    r,
+                    xai_grok_extension_runtime::GuestCallResult::Ok { code: 0, .. }
+                )),
+                "post_tool failure observe is fail-open: {fail:?}"
+            );
         })
         .await;
 }

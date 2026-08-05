@@ -267,6 +267,16 @@ fn print_component_summary(manifest: &PluginManifest, root: &Path) {
         println!("    wit: {}", rt.wit);
         println!("    capabilities: {caps}");
         println!("    gate_fail: {gate}");
+        if rt.capabilities.iter().any(|c| c == "register_command") {
+            println!(
+                "    tip: register_command → slash commands after trust + /plugins reload"
+            );
+        }
+        if rt.capabilities.iter().any(|c| c == "register_tool") {
+            println!(
+                "    tip: register_tool → model-visible wasm_* tools on the session bridge"
+            );
+        }
     } else if has_runtime {
         println!(
             "  runtime: convention extension.wasm (no capabilities until plugin.json runtime block)"
