@@ -1,0 +1,42 @@
+[
+  {
+    "category": "features",
+    "description": "**Background spawn** can keep unfinished parent work going instead of only polling the child.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Disk-full** is surfaced during live sessions instead of failing opaquely.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Queue reorder** lets any queued item move up or down; send-now never drops earlier queued text.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Disabled MCP stubs** appear only when they can be re-enabled.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**`/resume` search** finds sessions that load via `--resume`.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Restored child sessions** are registered so `--resume` does not 404.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**API errors** show clean TUI banners; Cloudflare 52x and other 5xx sampling errors retry.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**First-party API key** is probed before login is skipped.",
+    "breaking_change": false
+  }
+]

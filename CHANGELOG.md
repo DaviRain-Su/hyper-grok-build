@@ -4,6 +4,29 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.121-r1] — 2026-08-06
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `a5589e9`
+  (monorepo `SOURCE_REV` `4d6d113…`). Notable upstream:
+  - Cleaner TUI error banners for non-200 API failures; Cloudflare 52x / 5xx
+    sampling retries
+  - Disk-full detection during live sessions; first-party API key probe before
+    skipping login
+  - Session list / `/resume` search fixes; restored child session registration
+  - Queue reorder (any item up/down); send-now never drops earlier queued text
+  - Dashboard attach/quit, per-turn agent-row summaries, sticky-header copy
+  - Permission UX: collapsible long bash bodies, full-script showcase, Auto-mode
+    security findings context
+  - Theme: auto over SSH/tmux; pin markdown palette to ANSI16
+  - MCP: show disabled stubs only when re-enableable
+  - Background spawn may continue in-flight parent work
+  - Sandbox provision plan / durable metadata / repos manifest types
+
+### Fixed
+- Hyper package-path merge of upstream rename (`auto_mode` module) and
+  `xai-tool-types` parent-work CTA re-exports after crates→packages layout.
+
 ## [0.2.120-r2] — 2026-08-05
 
 ### Features
