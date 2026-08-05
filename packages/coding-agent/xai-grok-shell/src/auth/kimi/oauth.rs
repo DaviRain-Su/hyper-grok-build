@@ -36,7 +36,7 @@ fn refresh_request_timeout() -> std::time::Duration {
 
 /// Result of `POST /api/oauth/device_authorization`.
 #[derive(Debug, Clone)]
-pub struct DeviceAuthorization {
+pub(crate) struct DeviceAuthorization {
     pub user_code: String,
     pub device_code: String,
     pub verification_uri: Option<String>,

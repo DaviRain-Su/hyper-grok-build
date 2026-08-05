@@ -145,12 +145,12 @@ fn catalog_access_token(auth: GrokAuth) -> Option<String> {
 
 /// Load a usable Copilot access token: cached if valid, otherwise refreshed and
 /// persisted when possible.
-pub async fn ensure_github_copilot_access_token() -> Option<String> {
+pub(super) async fn ensure_github_copilot_access_token() -> Option<String> {
     ensure_github_copilot_auth().await.map(|auth| auth.key)
 }
 
 /// Like [`ensure_github_copilot_access_token`] but returns the whole credential.
-pub async fn ensure_github_copilot_auth() -> Option<GrokAuth> {
+pub(crate) async fn ensure_github_copilot_auth() -> Option<GrokAuth> {
     refresh_github_copilot_auth(false).await
 }
 
@@ -362,11 +362,11 @@ async fn ensure_with_op_timeout() -> Option<GrokAuth> {
     }
 }
 
-pub fn ensure_github_copilot_access_token_blocking() -> Option<String> {
+pub(crate) fn ensure_github_copilot_access_token_blocking() -> Option<String> {
     ensure_github_copilot_auth_blocking().map(|auth| auth.key)
 }
 
-pub fn ensure_github_copilot_auth_blocking() -> Option<GrokAuth> {
+pub(super) fn ensure_github_copilot_auth_blocking() -> Option<GrokAuth> {
     let path = auth_json_path();
     let home = path.parent().unwrap_or(&path);
     let auth = read_github_copilot_auth(home)?;

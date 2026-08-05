@@ -36,7 +36,6 @@ use xai_grok_sampling_types::{
 
 use crate::adapter::BackendAdapter;
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
-use xai_grok_auth::bearer_suffix;
 use crate::events::SamplingErrorInfo;
 use crate::types::ResponsesStreamItem;
 

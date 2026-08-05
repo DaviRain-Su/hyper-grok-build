@@ -174,7 +174,7 @@ pub(crate) fn resolve_default_model(
 ///
 /// `user_selectable` is the caller's gate (`ModelsManager::available` filters
 /// before calling); `hidden_models` config wins over locked display here.
-pub fn available_models(
+pub(crate) fn available_models(
     catalog: &IndexMap<String, ModelEntry>,
     is_session_auth: bool,
 ) -> IndexMap<acp::ModelId, acp::ModelInfo> {

@@ -359,7 +359,7 @@ pub(crate) fn base_url_from_copilot_token(token: &str) -> Option<String> {
     Some(url.trim_end_matches('/').to_owned())
 }
 
-pub fn github_copilot_base_url(token: Option<&str>, enterprise_domain: Option<&str>) -> String {
+pub(crate) fn github_copilot_base_url(token: Option<&str>, enterprise_domain: Option<&str>) -> String {
     if let Some(token) = token
         && let Some(base) = base_url_from_copilot_token(token)
     {

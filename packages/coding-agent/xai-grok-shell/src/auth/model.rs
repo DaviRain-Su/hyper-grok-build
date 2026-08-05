@@ -31,7 +31,7 @@ pub const RADIUS_OAUTH_SCOPE: &str = "oauth/radius";
 
 /// Prefix for third-party platform API keys stored via `/providers` (e.g.
 /// `platform/zai`, `platform/openai`). One scope per platform id.
-pub const PLATFORM_API_KEY_SCOPE_PREFIX: &str = "platform/";
+pub(super) const PLATFORM_API_KEY_SCOPE_PREFIX: &str = "platform/";
 
 /// Canonical auth.json scope for Amazon Bedrock bearer/profile/chain state.
 pub const AMAZON_BEDROCK_AUTH_SCOPE: &str = "platform/amazon-bedrock";

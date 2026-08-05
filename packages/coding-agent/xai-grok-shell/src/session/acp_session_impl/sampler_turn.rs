@@ -299,10 +299,10 @@ impl SessionActor {
         }
         let models = self.models_manager.models();
         if let Some(base) = base_url.map(str::trim).filter(|b| !b.is_empty()) {
-            if let Some(entry) = models.get(model_id) {
-                if crate::agent::config::catalog_base_matches_request(&entry.info.base_url, base) {
-                    return entry.own_credential();
-                }
+            if let Some(entry) = models.get(model_id)
+                && crate::agent::config::catalog_base_matches_request(&entry.info.base_url, base)
+            {
+                return entry.own_credential();
             }
             for entry in models.values() {
                 if entry.model == model_id

@@ -9,21 +9,21 @@ use sha2::Digest as _;
 use crate::auth::model::{AuthMode, GrokAuth};
 
 pub const DEFAULT_RADIUS_GATEWAY: &str = "https://radius.pi.dev";
-pub const CLIENT_ID: &str = "pi-gateway";
-pub const SCOPE: &str = "gateway offline_access";
-pub const REDIRECT_URI: &str = "http://127.0.0.1:1456/oauth/callback";
-pub const CALLBACK_PORT: u16 = 1456;
-pub const CALLBACK_PATH: &str = "/oauth/callback";
-pub const DEVICE_SLOW_DOWN_INCREMENT_SECS: u64 = 5;
+pub(crate) const CLIENT_ID: &str = "pi-gateway";
+pub(crate) const SCOPE: &str = "gateway offline_access";
+pub(crate) const REDIRECT_URI: &str = "http://127.0.0.1:1456/oauth/callback";
+pub(crate) const CALLBACK_PORT: u16 = 1456;
+pub(crate) const CALLBACK_PATH: &str = "/oauth/callback";
+pub(crate) const DEVICE_SLOW_DOWN_INCREMENT_SECS: u64 = 5;
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
-pub struct Pkce {
+pub(crate) struct Pkce {
     pub verifier: String,
     pub challenge: String,
 }
 
-pub fn generate_pkce() -> Pkce {
+pub(crate) fn generate_pkce() -> Pkce {
     let random_bytes: [u8; 32] = rand::random();
     let verifier = URL_SAFE_NO_PAD.encode(random_bytes);
     let challenge = URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
@@ -33,7 +33,7 @@ pub fn generate_pkce() -> Pkce {
     }
 }
 
-pub fn create_state() -> String {
+pub(crate) fn create_state() -> String {
     let bytes: [u8; 16] = rand::random();
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -173,7 +173,7 @@ fn validate_http_url(raw: &str, allow_loopback_http: bool) -> anyhow::Result<Str
     Ok(url.to_string())
 }
 
-pub async fn discover_authorization_endpoint(gateway: &str) -> anyhow::Result<String> {
+pub(crate) async fn discover_authorization_endpoint(gateway: &str) -> anyhow::Result<String> {
     let response = crate::http::shared_client()
         .get(gateway_endpoint(gateway, &["v1", "oauth"])?)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -192,7 +192,7 @@ pub async fn discover_authorization_endpoint(gateway: &str) -> anyhow::Result<St
     validate_http_url(&endpoint, true)
 }
 
-pub fn build_authorize_url(endpoint: &str, challenge: &str, state: &str) -> anyhow::Result<String> {
+pub(crate) fn build_authorize_url(endpoint: &str, challenge: &str, state: &str) -> anyhow::Result<String> {
     let mut url = url::Url::parse(&validate_http_url(endpoint, true)?)?;
     // Pi replaces (rather than appends to) discovery-supplied query params so
     // an endpoint cannot inject duplicate redirect/state/client values.
@@ -210,7 +210,7 @@ pub fn build_authorize_url(endpoint: &str, challenge: &str, state: &str) -> anyh
 }
 
 #[derive(Debug, Clone)]
-pub struct RadiusToken {
+pub(crate) struct RadiusToken {
     pub access: String,
     pub refresh: String,
     pub expires_in_secs: i64,
@@ -280,7 +280,7 @@ fn token_url(gateway: &str) -> anyhow::Result<url::Url> {
     gateway_endpoint(gateway, &["v1", "oauth", "token"])
 }
 
-pub async fn exchange_authorization_code(
+pub(crate) async fn exchange_authorization_code(
     gateway: &str,
     code: &str,
     verifier: &str,
@@ -306,7 +306,7 @@ pub async fn exchange_authorization_code(
 }
 
 #[derive(Debug, Clone)]
-pub struct DeviceAuthorization {
+pub(crate) struct DeviceAuthorization {
     pub device_code: String,
     pub user_code: String,
     pub verification_uri: String,
@@ -327,7 +327,7 @@ fn device_url(gateway: &str) -> anyhow::Result<url::Url> {
     gateway_endpoint(gateway, &["v1", "oauth", "device"])
 }
 
-pub async fn start_device_flow(gateway: &str) -> anyhow::Result<DeviceAuthorization> {
+pub(crate) async fn start_device_flow(gateway: &str) -> anyhow::Result<DeviceAuthorization> {
     let response = crate::http::shared_client()
         .post(device_url(gateway)?)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -367,13 +367,13 @@ pub async fn start_device_flow(gateway: &str) -> anyhow::Result<DeviceAuthorizat
 }
 
 #[derive(Debug)]
-pub enum DevicePollTick {
+pub(crate) enum DevicePollTick {
     Complete(RadiusToken),
     Pending,
     SlowDown { interval: Option<u64> },
 }
 
-pub async fn poll_device_token_once(
+pub(crate) async fn poll_device_token_once(
     gateway: &str,
     device_code: &str,
 ) -> anyhow::Result<DevicePollTick> {
@@ -414,7 +414,7 @@ pub async fn poll_device_token_once(
     }
 }
 
-pub async fn refresh_access_token(gateway: &str, refresh: &str) -> anyhow::Result<RadiusToken> {
+pub(crate) async fn refresh_access_token(gateway: &str, refresh: &str) -> anyhow::Result<RadiusToken> {
     let refresh = refresh.trim();
     if refresh.is_empty() {
         anyhow::bail!("Radius refresh token is empty");
@@ -433,7 +433,7 @@ pub async fn refresh_access_token(gateway: &str, refresh: &str) -> anyhow::Resul
     read_token_response(response, "refresh").await
 }
 
-pub fn credentials_from_token(
+pub(crate) fn credentials_from_token(
     token: RadiusToken,
     previous_refresh: Option<&str>,
     gateway: &str,
