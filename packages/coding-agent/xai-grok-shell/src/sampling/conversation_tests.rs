@@ -48,12 +48,14 @@ fn fork_filter_consecutive_users_with_tool_calls() {
         ConversationItem::user("query"),
         ConversationItem::Assistant(AssistantItem {
             content: String::new().into(),
+            provider_native_state: None,
             tool_calls: vec![ToolCall {
                 id: "tc1".into(),
                 name: "bash".into(),
                 arguments: "{}".into(),
             }],
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         }),
@@ -75,12 +77,14 @@ fn fork_filter_preserves_complete_tool_turn() {
         ConversationItem::user("q"),
         ConversationItem::Assistant(AssistantItem {
             content: String::new().into(),
+            provider_native_state: None,
             tool_calls: vec![ToolCall {
                 id: "tc1".into(),
                 name: "bash".into(),
                 arguments: "{}".into(),
             }],
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         }),
@@ -99,12 +103,14 @@ fn fork_filter_strips_incomplete_tool_turn() {
         ConversationItem::user("q2"),
         ConversationItem::Assistant(AssistantItem {
             content: String::new().into(),
+            provider_native_state: None,
             tool_calls: vec![ToolCall {
                 id: "tc1".into(),
                 name: "bash".into(),
                 arguments: "{}".into(),
             }],
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         }),
@@ -152,6 +158,7 @@ fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
         ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item("plan")),
         ConversationItem::Assistant(AssistantItem {
             content: String::new().into(),
+            provider_native_state: None,
             tool_calls: vec![
                 ToolCall {
                     id: "tc1".into(),
@@ -165,6 +172,7 @@ fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
                 },
             ],
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         }),

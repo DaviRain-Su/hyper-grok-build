@@ -230,4 +230,32 @@ mod tests {
         assert!(!out.ok);
         assert!(out.summary.contains("stub"));
     }
+
+    #[tokio::test]
+    async fn all_ops_return_stub() {
+        for op in [
+            DapDebugOp::Launch,
+            DapDebugOp::Attach,
+            DapDebugOp::Control,
+            DapDebugOp::Breakpoints,
+            DapDebugOp::Evaluate,
+        ] {
+            let out = xai_tool_runtime::Tool::run(
+                &DapDebugTool,
+                test_ctx(Resources::new().into_shared()),
+                DapDebugInput {
+                    op,
+                    program: Some("/bin/true".into()),
+                    adapter: Some("lldb-dap".into()),
+                    command: Some("continue".into()),
+                    expression: Some("1+1".into()),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(out.stub, "{op:?}");
+            assert!(!out.ok, "{op:?}");
+            assert!(out.summary.contains("not implemented"), "{:?}", out.summary);
+        }
+    }
 }

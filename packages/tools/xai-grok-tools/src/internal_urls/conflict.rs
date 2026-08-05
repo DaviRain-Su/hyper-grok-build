@@ -246,4 +246,44 @@ mod tests {
         assert!(!out.contains("<<<<<<<"));
         assert!(reg.get(1).is_none());
     }
+
+    #[test]
+    fn register_multiple_and_resolve_ours() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.rs");
+        let text = "\
+a\n<<<<<<< HEAD\none\n=======\nONE\n>>>>>>> b1\n\
+mid\n<<<<<<< HEAD\ntwo\n=======\nTWO\n>>>>>>> b2\n";
+        std::fs::write(&path, text).unwrap();
+        let mut reg = ConflictRegistry::new();
+        let ids = reg.register_from_text(path.clone(), text);
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(reg.list().len(), 2);
+
+        let (_p, out) = resolve_conflict_write(&mut reg, 1, "@ours").unwrap();
+        assert!(out.contains("one"));
+        assert!(!out.contains("ONE"));
+        // second conflict still present
+        assert!(out.contains("<<<<<<<"));
+        assert!(reg.get(2).is_some());
+        let (_p, out2) = resolve_conflict_write(&mut reg, 2, "@theirs").unwrap();
+        assert!(out2.contains("TWO"));
+        assert!(!out2.contains("<<<<<<<"));
+        assert!(reg.list().is_empty());
+    }
+
+    #[test]
+    fn stale_marker_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.rs");
+        let text = "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> z\n";
+        std::fs::write(&path, text).unwrap();
+        let mut reg = ConflictRegistry::new();
+        let ids = reg.register_from_text(path.clone(), text);
+        assert_eq!(ids, vec![1]);
+        // File edited so marker is gone
+        std::fs::write(&path, "clean\n").unwrap();
+        let err = resolve_conflict_write(&mut reg, 1, "@ours").unwrap_err();
+        assert!(err.contains("stale"), "{err}");
+    }
 }

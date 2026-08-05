@@ -53,7 +53,7 @@ pub enum AgentHubOp {
     Wait,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentHubInput {
     #[schemars(
@@ -511,5 +511,118 @@ mod tool_tests {
             err.detail.contains("AgentBusResource") || err.to_string().contains("AgentBus"),
             "{err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn send_rejects_empty_text_and_missing_to() {
+        let bus = AgentBus::new();
+        bus.register("a", "a", None);
+        bus.register("b", "b", None);
+        let tool = AgentHubTool;
+        let ctx = hub_resources("a", bus);
+
+        let no_to = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(ctx.clone()),
+            AgentHubInput {
+                op: AgentHubOp::Send,
+                to: None,
+                text: Some("hi".into()),
+                reply_to: None,
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!no_to.ok);
+        assert!(no_to.summary.contains("to"), "{}", no_to.summary);
+
+        let empty = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(ctx),
+            AgentHubInput {
+                op: AgentHubOp::Send,
+                to: Some("b".into()),
+                text: Some("   ".into()),
+                reply_to: None,
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!empty.ok);
+        assert!(empty.summary.contains("text"), "{}", empty.summary);
+    }
+
+    #[tokio::test]
+    async fn peer_a_to_peer_b_then_main_sees_reply() {
+        let bus = AgentBus::new();
+        bus.register(MAIN_PEER_ID, "main", None);
+        bus.register("a", "scout", None);
+        bus.register("b", "reviewer", None);
+        let tool = AgentHubTool;
+
+        // A → B
+        let a = hub_resources("a", bus.clone());
+        let sent = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(a),
+            AgentHubInput {
+                op: AgentHubOp::Send,
+                to: Some("b".into()),
+                text: Some("findings ready".into()),
+                reply_to: None,
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(sent.ok);
+
+        // B inbox + reply to Main
+        let b = hub_resources("b", bus.clone());
+        let inbox = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(b.clone()),
+            AgentHubInput {
+                op: AgentHubOp::Inbox,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(inbox.messages.as_ref().map(|m| m.len()), Some(1));
+
+        let reply = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(b),
+            AgentHubInput {
+                op: AgentHubOp::Send,
+                to: Some(MAIN_PEER_ID.into()),
+                text: Some("acked".into()),
+                reply_to: sent.message_id.clone(),
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(reply.ok);
+
+        let main = hub_resources(MAIN_PEER_ID, bus);
+        let main_inbox = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(main),
+            AgentHubInput {
+                op: AgentHubOp::Inbox,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let msgs = main_inbox.messages.expect("msgs");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].from, "b");
+        assert_eq!(msgs[0].text, "acked");
+        assert_eq!(msgs[0].reply_to, sent.message_id);
     }
 }

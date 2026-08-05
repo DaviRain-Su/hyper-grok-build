@@ -501,4 +501,45 @@ mod tests {
         assert!(!is_safe_id("../x"));
         assert!(!is_safe_id("a/b"));
     }
+
+    #[test]
+    fn apply_line_window_edges() {
+        let text = "a\nb\nc";
+        assert_eq!(apply_line_window(text, None, None), "a\nb\nc");
+        assert_eq!(apply_line_window(text, Some(1), Some(1)), "a");
+        assert_eq!(apply_line_window(text, Some(10), Some(5)), "");
+        assert_eq!(apply_line_window(text, Some(0), Some(2)), "a\nb");
+    }
+
+    #[test]
+    fn conflict_read_via_resolve() {
+        use crate::internal_urls::conflict::ConflictRegistryResource;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.rs");
+        let text = "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> br\n";
+        std::fs::write(&path, text).unwrap();
+        let reg = ConflictRegistryResource::new();
+        {
+            let mut g = reg.lock();
+            g.register_from_text(path, text);
+        }
+        let ctx = ResolveContext {
+            session_id: "sess".into(),
+            cwd: dir.path().to_path_buf(),
+            conflicts: Some(reg),
+        };
+        let list = resolve_virtual_path("conflict://", &ctx)
+            .unwrap()
+            .unwrap();
+        assert!(list.text.contains("conflict://1"));
+
+        let ours = resolve_virtual_path("conflict://1/ours", &ctx)
+            .unwrap()
+            .unwrap();
+        assert!(ours.text.contains("ours"));
+        let theirs = resolve_virtual_path("conflict://1/theirs", &ctx)
+            .unwrap()
+            .unwrap();
+        assert!(theirs.text.contains("theirs"));
+    }
 }

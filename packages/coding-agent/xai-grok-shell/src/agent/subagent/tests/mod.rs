@@ -1005,7 +1005,16 @@ fn subagent_output_roundtrips_through_output_json() {
     let output = "line one\nline two with unicode ✓";
     assert!(write_subagent_output(dir.path(), output));
     assert_eq!(read_subagent_output(dir.path()).as_deref(), Some(output));
+    // Prefer plain markdown artifact for agent:// reads.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("output.md"))
+            .ok()
+            .as_deref(),
+        Some(output)
+    );
     assert_eq!(read_subagent_output(&dir.path().join("missing")), None);
+    // Without markdown, corrupt JSON fails closed.
+    let _ = std::fs::remove_file(dir.path().join("output.md"));
     std::fs::write(dir.path().join("output.json"), "not json").expect("corrupt file");
     assert_eq!(read_subagent_output(dir.path()), None);
 }

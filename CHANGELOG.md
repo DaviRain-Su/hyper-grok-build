@@ -4,6 +4,28 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.120-r2] — 2026-08-05
+
+### Features
+- **Agent hub** — Session-scoped peer messaging among Main and depth-1
+  subagents (`agent_hub` tool: list / send / inbox / wait), with Interject
+  wake and lifecycle `mark_gone`. Available to read-only specialists.
+- **Virtual paths** — `agent://<id>` (last subagent output), `history://`
+  roster / concise transcript, and `conflict://` merge-conflict register
+  and resolve (via `path:conflicts` + write/`@ours`/`@theirs`).
+- **TTSR-lite** — Optional mid-stream rule match from `.grok/rules/*.md`
+  (`condition` / `interruptMode`); enable with `GROK_TTSR_ENABLED=1` or
+  `[features] ttsr = true`. One injection retry per turn.
+- **dap_debug stub** — Stable DAP tool surface (status/launch/attach/…)
+  returns structured stub until an adapter is wired.
+- **Collab config scaffold** — `[collab]` keys (`enabled`, `relay_url`,
+  `web_url`, `display_name`) reserved for a future relay (no process yet).
+
+### Tests
+- Tool-level `agent_hub` roundtrips (list/send/inbox/wait, peer reply).
+- Internal URL / conflict registry unit tests; TTSR load + fire-once.
+- Subagent `output.md` preference for `agent://` reads.
+
 ## [0.2.120-r1] — 2026-08-05
 
 ### Changed

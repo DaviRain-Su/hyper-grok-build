@@ -282,4 +282,38 @@ mod tests {
         assert!(rule.condition.is_match("Password: x"));
         assert!(rule.body.contains("Never print"));
     }
+
+    #[test]
+    fn load_from_project_rules_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let rules = root.path().join(".grok").join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("todo.md"),
+            "---\nname: no-todo\ncondition: \"TODO\"\ninterruptMode: always\n---\nNo TODOs.\n",
+        )
+        .unwrap();
+        let eng = TtsrEngine::load(
+            TtsrConfig {
+                enabled: true,
+                max_retries_per_turn: 1,
+            },
+            root.path(),
+        );
+        assert_eq!(eng.rules.len(), 1);
+        assert!(eng.check_stream_text("see TODO here").is_some());
+    }
+
+    #[test]
+    fn disabled_engine_never_fires() {
+        let eng = TtsrEngine::load(
+            TtsrConfig {
+                enabled: false,
+                max_retries_per_turn: 1,
+            },
+            Path::new("/nonexistent"),
+        );
+        assert!(eng.rules.is_empty());
+        assert!(eng.check_stream_text("anything TODO").is_none());
+    }
 }
