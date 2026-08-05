@@ -1572,6 +1572,63 @@ async fn reconstruct_full_config_no_session_resolver_for_open_platform_endpoint(
         .await;
 }
 
+/// Regression (OpenCode Go): wire model is bare `deepseek-v4-flash` while chat
+/// state still holds a prior xAI OIDC JWT. Reconstruct must re-resolve the
+/// platform key from `https://opencode.ai/zen/go/v1` (auth.json
+/// `platform/opencode`), not forward the JWT (→ 401 Invalid API key).
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn reconstruct_full_config_opencode_go_uses_platform_key_not_stale_jwt() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            // Store under the OpenCode credential group (canonical for opencode-go).
+            crate::auth::store_platform_api_key(
+                dir.path(),
+                "opencode",
+                "sk-opencode-go-test-key",
+                None,
+            )
+            .unwrap();
+            let _home = xai_grok_test_support::EnvGuard::set(
+                "GROK_HOME",
+                dir.path().to_str().unwrap(),
+            );
+            let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+
+            // Stale JWT left over from a prior first-party turn in chat-state.
+            let stale_jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzdGFsZSJ9.stale_sig_suffix_xx";
+            let (_am_dir, am) = auth_manager_with_valid_token("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJjdXJyZW50In0.current_sig");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "oidc",
+                xai_chat_state::AuthType::SessionToken,
+                stale_jwt.to_string(),
+            )
+            .await;
+
+            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                cfg.base_url = xai_grok_models::OPENCODE_GO_BASE_URL_DEFAULT.into();
+                // Bare wire id — same shape as sampling_config_for_model().
+                cfg.model = "deepseek-v4-flash".into();
+                actor.chat_state_handle.update_sampling_config(cfg);
+            }
+
+            let cfg = actor.reconstruct_full_config().await;
+            assert!(
+                cfg.bearer_resolver.is_none(),
+                "OpenCode Go must not install xAI session resolver"
+            );
+            assert_eq!(
+                cfg.api_key.as_deref(),
+                Some("sk-opencode-go-test-key"),
+                "must re-resolve platform/opencode key from endpoint, not stale JWT"
+            );
+        })
+        .await;
+}
+
 /// Regression: a 401 from an open-platform endpoint must NOT run the xAI
 /// session-token recovery. The refresher "succeeds" on the wrong credential
 /// and the retry re-sends it, looping to the misleading "Auth recovery

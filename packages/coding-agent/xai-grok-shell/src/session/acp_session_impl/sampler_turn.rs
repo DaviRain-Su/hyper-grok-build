@@ -759,18 +759,27 @@ impl SessionActor {
             // API-key route is the explicit non-OAuth exception.
             (None, None)
         } else if third_party_api_key_route {
-            // Ollama / OpenRouter / Fireworks / … : never install the xAI
-            // session resolver. Prefer a live catalog own key; then a chat
-            // credential that is NOT the current session JWT (stale JWT left
-            // over from a prior first-party turn must not ride to a third
-            // party). Empty key fails closed as unauthenticated — better than
-            // a false recovery loop.
+            // Ollama / OpenRouter / Fireworks / OpenCode Go / … : never install
+            // the xAI session resolver. Prefer, in order:
+            // 1) live catalog own key for the wire model slug
+            // 2) auth.json / env re-resolved from the **request base URL**
+            //    (authoritative when wire model is bare `deepseek-v4-flash`
+            //    and catalog lookup would hit a different provider row)
+            // 3) chat-state key that is not the session JWT and not JWT-shaped
+            // Empty key fails closed as unauthenticated — better than a false
+            // recovery loop that refreshes the wrong credential.
+            let from_endpoint =
+                crate::agent::config::resolve_open_platform_api_key_from_endpoint(&cfg.base_url);
             let chat_key = creds.api_key.filter(|key| {
-                session_token
-                    .as_deref()
-                    .is_none_or(|session| session != key.as_str())
+                !crate::agent::config::looks_like_jwt_access_token(key)
+                    && session_token
+                        .as_deref()
+                        .is_none_or(|session| session != key.as_str())
             });
-            (live_platform_key.or(chat_key), None)
+            (
+                live_platform_key.or(from_endpoint).or(chat_key),
+                None,
+            )
         } else if use_bearer_resolver {
             (
                 creds.api_key,

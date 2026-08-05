@@ -6368,6 +6368,41 @@ pub fn is_third_party_api_key_route(model_id: &str, base_url: &str) -> bool {
     open_platform_endpoint(base_url).is_some() || managed_api_key_provider(model_id).is_some()
 }
 
+/// JWT access tokens start with a shared base64 header (`eyJ…`). Never forward
+/// them as third-party BYOK credentials (OpenCode Go would answer 401
+/// `Invalid API key`).
+pub(crate) fn looks_like_jwt_access_token(key: &str) -> bool {
+    let key = key.trim();
+    key.starts_with("eyJ") && key.bytes().filter(|&b| b == b'.').count() >= 2
+}
+
+/// Re-resolve a third-party platform API key from the **request base URL**
+/// (auth.json `platform/<id>` + env), independent of the bare wire model slug.
+///
+/// `sampling_config.model` is the provider wire id (e.g. `deepseek-v4-flash`),
+/// not the catalog key (`opencode-go/deepseek-v4-flash`). Looking up the bare
+/// slug can hit a different catalog row (e.g. `ollama/deepseek-v4-flash`) that
+/// has no OpenCode key, leaving reconstruct to reuse a stale chat-state JWT.
+/// Matching by host/path (`opencode.ai/zen/go/v1`) recovers the correct key.
+pub fn resolve_open_platform_api_key_from_endpoint(base_url: &str) -> Option<String> {
+    let spec = open_platform_endpoint(base_url)?;
+    let home = xai_grok_config::grok_home();
+    for storage_id in provider_credential_storage_ids(spec) {
+        if let Some(key) = crate::auth::read_platform_api_key(&home, &storage_id) {
+            return Some(key);
+        }
+    }
+    for name in &spec.credentials.env_keys {
+        if let Ok(value) = std::env::var(name) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+    }
+    None
+}
+
 /// Third-party BYOK (api-key) platform owning `base_url`, if any.
 ///
 /// Excludes first-party xAI Direct (`api.x.ai` — xAI session recovery is
