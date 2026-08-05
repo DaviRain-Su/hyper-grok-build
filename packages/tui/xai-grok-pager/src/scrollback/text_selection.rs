@@ -618,10 +618,14 @@ fn render_selection_overlay_impl(
 
     for line in &range.lines {
         let col_ranges: Vec<Range<u16>> = if let Some(geom) = table {
-            // Clipped to content so the highlight matches the trimmed copy.
+            // Snapped to grapheme boundaries and clipped to content so the highlight matches the copy.
             table_selected_cols_for_line(geom, kind, anchor, head, line.block_line_idx)
                 .into_iter()
-                .map(|cols| clip_cols_to_content(&line.text, cols))
+                .map(|cols| {
+                    let snapped = endpoint_start_col(&line.text, cols.start)
+                        ..endpoint_end_col(&line.text, cols.end.saturating_sub(1));
+                    clip_cols_to_content(&line.text, snapped)
+                })
                 .collect()
         } else {
             if line.block_line_idx < start_bl || line.block_line_idx > end_bl {
@@ -808,9 +812,13 @@ pub fn reconstruct_table_selection_text(
             let mut out = String::new();
             for line in l0..=l1 {
                 let text = text_at(line)?;
-                let start = if line == l0 { c0 } else { band.start };
+                let start = if line == l0 {
+                    endpoint_start_col(&text, c0).max(band.start)
+                } else {
+                    band.start
+                };
                 let end = if line == l1 {
-                    c1.saturating_add(1).min(band.end)
+                    endpoint_end_col(&text, c1).min(band.end)
                 } else {
                     band.end
                 };
@@ -880,10 +888,11 @@ pub(crate) fn apply_selection_boundary(
 
 /// Compute the selected column range for a given line based on anchor/head endpoints.
 ///
-/// Shared implementation used by both active drag and persistent selection overlays:
-/// - Single-line: `min(anchor_col, head_col)..max(anchor_col, head_col)+1`
-/// - Multi-line first: `start_col..width`
-/// - Multi-line last: `0..end_col+1`
+/// Shared implementation used by both active drag and persistent selection overlays. Endpoints snap to grapheme
+/// boundaries: starts floor onto the grapheme under the anchor, ends advance past the grapheme under the head.
+/// - Single-line: `floor(min(anchor_col, head_col))..past(max(anchor_col, head_col))`
+/// - Multi-line first: `floor(start_col)..width`
+/// - Multi-line last: `0..past(end_col)`
 /// - Multi-line middle: `0..width` (full line)
 ///
 /// Returns `None` if the line falls outside the anchor/head range.
@@ -908,9 +917,10 @@ fn selected_cols_for_endpoints(
     }
 
     if start_bl == end_bl {
-        let start = min(anchor_col, head_col);
-        let end = max(anchor_col, head_col).saturating_add(1);
-        return Some(start.min(width)..end.min(width));
+        let start = endpoint_start_col(&line.text, min(anchor_col, head_col));
+        return Some(
+            start.min(width)..endpoint_end_col(&line.text, max(anchor_col, head_col)).min(width),
+        );
     }
 
     if bl == start_bl {
@@ -919,17 +929,31 @@ fn selected_cols_for_endpoints(
         } else {
             head_col
         };
-        return Some(start.min(width)..width);
+        return Some(endpoint_start_col(&line.text, start).min(width)..width);
     }
+
     if bl == end_bl {
         let end = if anchor_is_start {
             head_col
         } else {
             anchor_col
         };
-        return Some(0..end.saturating_add(1).min(width));
+        return Some(0..endpoint_end_col(&line.text, end).min(width));
     }
+
     Some(0..width)
+}
+
+/// Exclusive end for a selection that includes the cell at `col`: one column past the grapheme there.
+/// On a padded or empty line `col` can sit past the text, so the result is never less than `col + 1`.
+fn endpoint_end_col(text: &str, col: u16) -> u16 {
+    crate::scrollback::types::col_past_grapheme(text, col).max(col.saturating_add(1))
+}
+
+/// Start of a selection whose first cell is `col`: the first column of the grapheme there, so a wide character is selected whole.
+/// When `col` is past the text, it is returned unchanged.
+fn endpoint_start_col(text: &str, col: u16) -> u16 {
+    crate::scrollback::types::grapheme_cells_at(text, col).map_or(col, |cells| cells.start)
 }
 
 fn selected_cols_for_line_by_block_idx(
@@ -991,25 +1015,26 @@ pub(crate) fn reconstruct_full_selection_text_with_boundaries(
         };
         let width = cols.end.saturating_sub(cols.start);
 
-        // Determine column slice for this line.
+        // Snap endpoints exactly like selected_cols_for_endpoints: `col_range.end == width` decides suffix re-attachment below,
+        // so an unsnapped end stopping mid-character would drop a suffix that the highlight includes.
         let col_range = if start_bl == end_bl {
             let s = min(drag.anchor.col_within_range, drag.head.col_within_range);
-            let e = max(drag.anchor.col_within_range, drag.head.col_within_range).saturating_add(1);
-            s.min(width)..e.min(width)
+            let e = max(drag.anchor.col_within_range, drag.head.col_within_range);
+            endpoint_start_col(&text, s).min(width)..endpoint_end_col(&text, e).min(width)
         } else if idx == start_bl {
             let s = if anchor_is_start {
                 drag.anchor.col_within_range
             } else {
                 drag.head.col_within_range
             };
-            s.min(width)..width
+            endpoint_start_col(&text, s).min(width)..width
         } else if idx == end_bl {
             let e = if anchor_is_start {
                 drag.head.col_within_range
             } else {
                 drag.anchor.col_within_range
             };
-            0..e.saturating_add(1).min(width)
+            0..endpoint_end_col(&text, e).min(width)
         } else {
             0..width
         };
@@ -2270,6 +2295,30 @@ mod tests {
     }
 
     #[test]
+    fn endpoints_snap_to_grapheme_boundaries() {
+        let mut line = make_test_line(5, 0..16);
+        line.text = "需要我帮你做什么".to_string();
+
+        // Ends snap past the glyph: 么 spans [14, 16), so either endpoint cell yields the full range.
+        assert_eq!(selected_cols_for_endpoints(5, 0, 5, 14, &line), Some(0..16));
+        assert_eq!(selected_cols_for_endpoints(5, 0, 5, 15, &line), Some(0..16));
+
+        // Starts floor onto the glyph: 要 spans [2, 4), so an anchor on cell 3 selects from cell 2. The head on 你 ([8, 10)) snaps the end past it.
+        assert_eq!(selected_cols_for_endpoints(5, 3, 5, 8, &line), Some(2..10));
+
+        // Multi-line last and first lines snap the same way.
+        assert_eq!(selected_cols_for_endpoints(2, 4, 5, 14, &line), Some(0..16));
+        assert_eq!(selected_cols_for_endpoints(5, 3, 7, 8, &line), Some(2..16));
+
+        // Padded fixture lines (text narrower than the range) keep raw columns.
+        let padded = make_test_line(5, 0..20);
+        assert_eq!(
+            selected_cols_for_endpoints(5, 3, 5, 10, &padded),
+            Some(3..11)
+        );
+    }
+
+    #[test]
     fn endpoints_multi_line_first_line() {
         let line = make_test_line(2, 0..15);
         // anchor=2, head=5: line 2 is first, selects anchor_col..width
@@ -2939,6 +2988,40 @@ mod tests {
         assert_eq!(
             reconstruct_table_selection_text(&geom, &drag, table_text_at),
             Some("Eng".to_string())
+        );
+    }
+
+    #[test]
+    fn table_cell_copy_snaps_wide_graphemes() {
+        const CJK_LINES: &[&str] = &[
+            "┌────────┬───────┐",
+            "│ 需要我 │ 帮你  │",
+            "└────────┴───────┘",
+        ];
+        let text_at = |i: usize| CJK_LINES.get(i).map(|s| s.to_string());
+        let geom = TableGeometry::detect(text_at, 1).expect("grid");
+
+        // 需 spans [2, 4), 我 spans [6, 8): anchor on 需's second cell, head on 我's first cell.
+        let drag = table_drag((1, 3), (1, 6), SelectionKind::TableCell);
+        assert_eq!(
+            reconstruct_table_selection_text(&geom, &drag, text_at),
+            Some("需要我".to_string())
+        );
+    }
+
+    #[test]
+    fn endpoints_and_slice_agree_with_zero_width_graphemes() {
+        let mut line = make_test_line(5, 0..4);
+        line.text = "x\u{200B}界y".to_string();
+
+        // 界 paints on cells [1, 3): a head on its second cell snaps the end to 3.
+        let cols = selected_cols_for_endpoints(5, 0, 5, 2, &line).expect("in range");
+        assert_eq!(cols, 0..3);
+
+        // The slice keeps the ZWSP attached to 界 and excludes the trailing y.
+        assert_eq!(
+            crate::scrollback::types::slice_display_cols(&line.text, cols.start, cols.end),
+            "x\u{200B}界"
         );
     }
 

@@ -260,6 +260,12 @@ pub(super) fn dispatch_exit_dashboard(app: &mut AppView) -> Vec<Effect> {
     if let Some(d) = app.dashboard.as_mut() {
         d.restore_peek_viewport(&mut app.agents);
         d.close_popup();
+        // Dashboard state is preserved across reopen; clear a leftover exit
+        // alias so the next Enter does not quit.
+        if crate::slash::commands::exit::is_exit_alias(d.dispatch.text()) {
+            d.dispatch.set_text("");
+            d.error_toast = None;
+        }
     }
     log_dashboard_closed(app);
     let preferred = app
@@ -1115,6 +1121,14 @@ pub(super) fn dispatch_dashboard_dispatch(
         return vec![];
     }
     let trimmed = text.trim().to_string();
+    // Match agent-prompt send; do not spawn a session.
+    if crate::slash::commands::exit::is_exit_alias(&trimmed) {
+        if let Some(d) = app.dashboard.as_mut() {
+            d.dispatch.set_text("");
+            d.error_toast = None;
+        }
+        return dispatch(Action::Quit, app);
+    }
     // Reject only an empty / whitespace-only prompt; any non-empty
     // input (even a single character) dispatches a new session. The
     // keyboard path already filters empty input upstream (see
@@ -1254,8 +1268,9 @@ pub(super) fn dispatch_dashboard_dispatch(
 /// limited than the agent view's:
 ///
 ///   - Builtin commands that return `CommandResult::Action(...)` (e.g.
-///     `/dashboard`, `/exit`, `/theme`, `/settings`, `/help`, `/model`,
-///     `/mcps`, `/plugin`, …) are dispatched identically to the agent path.
+///     `/dashboard`, `/exit`, `/quit`, `/theme`, `/settings`, `/help`,
+///     `/model`, `/mcps`, `/plugin`, …) are dispatched identically to the
+///     agent path (`/exit`/`/quit` quit the CLI; `/home` leaves the dashboard).
 ///   - `CommandResult::Message` / `Error` surface as an `error_toast`
 ///     on the dashboard (no scrollback to push into). `Error` strings
 ///     get the `✗` prefix via `set_error_toast`; `Message` strings are

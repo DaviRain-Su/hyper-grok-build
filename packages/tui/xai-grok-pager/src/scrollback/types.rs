@@ -322,6 +322,8 @@ pub fn derive_selection_text(line: &BlockLine) -> String {
     }
 }
 
+/// Slice `text` to the graphemes overlapping the display-column range `[start, end)`. A wide grapheme is kept whole when the
+/// range covers any of its cells; graphemes that only touch a boundary (start at `end` or end at `start`) stay excluded.
 pub fn slice_display_cols(text: &str, start: u16, end: u16) -> String {
     if start >= end || text.is_empty() {
         return String::new();
@@ -347,13 +349,40 @@ pub fn slice_display_cols(text: &str, start: u16, end: u16) -> String {
         if col >= end {
             break;
         }
-        if col >= start && next_col <= end {
-            out.push_str(grapheme);
-        }
+        out.push_str(grapheme);
         col = next_col;
     }
 
     out
+}
+
+/// Display-cell range of the grapheme covering `col`, or `None` when `col` is past the last grapheme.
+/// Zero-width graphemes occupy no cell and never advance the column, matching `slice_display_cols` and the paint path.
+pub fn grapheme_cells_at(text: &str, col: u16) -> Option<std::ops::Range<u16>> {
+    let mut c = 0u16;
+
+    for grapheme in text.graphemes(true) {
+        let width = grapheme_width(grapheme) as u16;
+        if width == 0 {
+            continue;
+        }
+
+        let next = c.saturating_add(width);
+        if next > col {
+            return Some(c..next);
+        }
+        c = next;
+    }
+
+    None
+}
+
+/// Exclusive display column just past the grapheme occupying `col`, or the text's total width when `col` is past the last one.
+pub fn col_past_grapheme(text: &str, col: u16) -> u16 {
+    match grapheme_cells_at(text, col) {
+        Some(cells) => cells.end,
+        None => u16::try_from(text.width()).unwrap_or(u16::MAX),
+    }
 }
 
 pub fn block_line_selectable_width(line: &BlockLine) -> u16 {
@@ -716,6 +745,39 @@ mod tests {
     #[test]
     fn test_slice_display_cols_tab() {
         assert_eq!(slice_display_cols("a\tb", 0, 2), "a\t");
+    }
+
+    #[test]
+    fn test_slice_display_cols_overlap_semantics() {
+        // A grapheme overlapping the range is kept whole: 么 spans [14, 16), so an end of 15 lands mid-glyph.
+        let text = "需要我帮你做什么";
+        assert_eq!(slice_display_cols(text, 0, 15), text);
+        assert_eq!(slice_display_cols(text, 1, 4), "需要");
+
+        // Graphemes that only touch a boundary stay out, so a slice up to a table border excludes the border glyph.
+        assert_eq!(slice_display_cols("ab│cd", 0, 2), "ab");
+        assert_eq!(slice_display_cols("ab│cd", 3, 5), "cd");
+        assert_eq!(slice_display_cols("界x", 2, 3), "x");
+    }
+
+    #[test]
+    fn test_grapheme_cells_at_covers_wide_and_zero_width_chars() {
+        assert_eq!(grapheme_cells_at("需要", 0), Some(0..2));
+        assert_eq!(grapheme_cells_at("需要", 1), Some(0..2));
+        assert_eq!(grapheme_cells_at("需要", 3), Some(2..4));
+        assert_eq!(grapheme_cells_at("需要", 4), None);
+        assert_eq!(grapheme_cells_at("", 0), None);
+
+        // 界 covers [0, 2) despite the leading ZWSP.
+        assert_eq!(grapheme_cells_at("\u{200B}界y", 1), Some(0..2));
+        assert_eq!(grapheme_cells_at("x\u{200B}界y", 2), Some(1..3));
+    }
+
+    #[test]
+    fn test_col_past_grapheme_falls_back_to_total_width() {
+        assert_eq!(col_past_grapheme("abc", 10), 3);
+        assert_eq!(col_past_grapheme("\u{200B}", 0), 0);
+        assert_eq!(col_past_grapheme("", 0), 0);
     }
 
     #[test]

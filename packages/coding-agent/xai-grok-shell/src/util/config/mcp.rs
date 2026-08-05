@@ -223,18 +223,41 @@ pub(crate) fn load_mcp_servers_toml_only(cwd: &std::path::Path) -> Vec<acp::McpS
     load_all_mcp_configs(cwd)
         .into_iter()
         .filter_map(|(name, config)| {
-            let mut config = match config.resolve_setup(preferences.servers.get(&name)) {
-                McpSetupResolution::Resolved(config) => config,
-                McpSetupResolution::Required(_) => return None,
-                McpSetupResolution::Invalid(reason) => {
-                    tracing::warn!(server = %name, error = %reason, "MCP setup config is invalid");
-                    return None;
-                }
-            };
-            config.expand_strings(sub);
-            config.to_acp_mcp_server(name)
+            materialize_mcp_config(&name, config, &preferences, sub, McpEnabledFilter::Respect)
         })
         .collect()
+}
+
+/// Whether materialization respects the config `enabled` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpEnabledFilter {
+    /// Drop when `enabled = false` (live merge / load).
+    Respect,
+    /// Materialize even when `enabled = false` (list stubs / reenable probe).
+    Ignore,
+}
+
+/// Resolve setup, expand strings, and convert to ACP.
+pub(crate) fn materialize_mcp_config(
+    name: &str,
+    mut config: McpServerConfig,
+    preferences: &McpPreferencesFile,
+    sub: &dyn Fn(&str) -> String,
+    enabled_filter: McpEnabledFilter,
+) -> Option<acp::McpServer> {
+    if matches!(enabled_filter, McpEnabledFilter::Ignore) {
+        config.enabled = true;
+    }
+    let mut config = match config.resolve_setup(preferences.servers.get(name)) {
+        McpSetupResolution::Resolved(config) => config,
+        McpSetupResolution::Required(_) => return None,
+        McpSetupResolution::Invalid(reason) => {
+            tracing::warn!(server = %name, error = %reason, "MCP setup config is invalid");
+            return None;
+        }
+    };
+    config.expand_strings(sub);
+    config.to_acp_mcp_server(name)
 }
 
 /// Merge MCP servers from a pre-parsed global config with project-scoped overrides.
@@ -481,6 +504,11 @@ pub struct McpSetupServerEntry {
 
 /// Collect MCP configs that declare a `setup` schema from config and plugins.
 /// Used to surface setup-required rows and drive `x.ai/mcp/setup`.
+///
+/// User/project **TOML** includes `enabled = false` so Space-disabled setup
+/// servers stay visible (`handle_list` derives `session.enabled` from
+/// `disabled_mcp_servers`). Other sources still skip native `enabled = false`
+/// because Space cannot unstick those flags.
 pub(crate) fn collect_mcp_setup_configs(
     cwd: &std::path::Path,
     plugin_registry: Option<&xai_grok_agent::plugins::PluginRegistry>,
@@ -488,7 +516,7 @@ pub(crate) fn collect_mcp_setup_configs(
 ) -> IndexMap<String, McpSetupServerEntry> {
     let mut result = IndexMap::new();
     for (name, (config, scope)) in load_mcp_server_configs_with_project(cwd) {
-        if !config.enabled || config.setup.is_none() {
+        if config.setup.is_none() {
             continue;
         }
         result.insert(
@@ -568,6 +596,8 @@ pub(crate) fn collect_mcp_setup_configs(
                 }
             }
             for (name, config) in plugin_configs {
+                // Native plugin `enabled: false` is not unstuck by Space; skip.
+                // Personal disable uses `disabled_mcp_servers` and leaves this true.
                 if toml_claimed_names.contains(&name) || !config.enabled || config.setup.is_none() {
                     continue;
                 }
@@ -630,6 +660,10 @@ pub(crate) async fn save_mcp_disabled_tools(
 }
 
 /// Like [`save_mcp_server_enabled`], with explicit cwd for project config walks.
+///
+/// On enable, if the project unstick fails after a successful user-tier write,
+/// rolls back whatever was already written and returns the error so callers do
+/// not invent a personal disable that was never part of the prior state.
 pub async fn save_mcp_server_enabled_in(
     server_name: &str,
     enabled: bool,
@@ -649,11 +683,23 @@ pub async fn save_mcp_server_enabled_in(
     // Enable-only: unstick the nearest (winning) project def with
     // `enabled = false` via toml_edit (preserves comments/layout). Disable is
     // personal (user `disabled_mcp_servers`) and must not dirty shared files.
-    if enabled
-        && let Some(path) = nearest_project_mcp_definition(cwd, server_name)
-        && clear_sticky_project_disabled_at(&path, server_name).await?
-    {
-        modified.push(path);
+    if enabled && let Some(path) = nearest_project_mcp_definition(cwd, server_name) {
+        match clear_sticky_project_disabled_at(&path, server_name).await {
+            Ok(true) => modified.push(path),
+            Ok(false) => {}
+            Err(e) => {
+                if let Err(re) =
+                    restore_mcp_server_enabled_after_enable(server_name, &modified).await
+                {
+                    tracing::warn!(
+                        server = server_name,
+                        error = %re,
+                        "failed to roll back partial enable after project unstick error"
+                    );
+                }
+                return Err(e);
+            }
+        }
     }
 
     Ok(modified)
@@ -669,6 +715,30 @@ pub(crate) async fn save_user_mcp_server_enabled(server_name: &str, enabled: boo
     })
     .await
     .map(|_| ())
+}
+
+/// Undo a prior [`save_mcp_server_enabled_in`]`(…, true, …)` using the paths
+/// that call returned. Restores only the tiers that were written.
+///
+/// Restores an **equivalent** disabled state, not necessarily the original
+/// encoding. User-tier restore always goes through
+/// [`save_user_mcp_server_enabled`]`(…, false)` (personal `disabled_mcp_servers`);
+/// project-tier restore re-sticks `enabled = false` via toml_edit. A server that
+/// was disabled only via a sticky project field may therefore pick up a personal
+/// list entry if the user tier was also written during enable.
+pub(crate) async fn restore_mcp_server_enabled_after_enable(
+    server_name: &str,
+    modified_paths: &[PathBuf],
+) -> Result<()> {
+    let user_path = config_path();
+    for path in modified_paths {
+        if path == user_path.as_path() {
+            save_user_mcp_server_enabled(server_name, false).await?;
+        } else {
+            set_sticky_project_disabled_at(path, server_name).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Nearest project config defining `server_name` (cwd last → reverse; nearest wins).
@@ -772,6 +842,46 @@ async fn clear_sticky_project_disabled_at(
         return Ok(false);
     }
     server_table.insert("enabled", toml_edit::value(true));
+
+    let updated = doc.to_string();
+    if updated == original {
+        return Ok(false);
+    }
+    super::persist::atomic_write_string(path, &updated)
+        .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
+    Ok(true)
+}
+
+/// Flip sticky project `enabled = true` → false with toml_edit (comments kept).
+/// Inverse of [`clear_sticky_project_disabled_at`].
+async fn set_sticky_project_disabled_at(path: &std::path::Path, server_name: &str) -> Result<bool> {
+    let original = match tokio::fs::read_to_string(path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(anyhow::anyhow!("failed to read {}: {e}", path.display()));
+        }
+    };
+    let mut doc: toml_edit::DocumentMut = original
+        .parse()
+        .map_err(|e| anyhow::anyhow!("refusing to rewrite unparseable {}: {e}", path.display()))?;
+
+    let Some(servers) = doc
+        .get_mut("mcp_servers")
+        .and_then(|item| item.as_table_like_mut())
+    else {
+        return Ok(false);
+    };
+    let Some(entry) = servers.get_mut(server_name) else {
+        return Ok(false);
+    };
+    let Some(server_table) = entry.as_table_like_mut() else {
+        return Ok(false);
+    };
+    if server_table.get("enabled").and_then(|v| v.as_bool()) != Some(true) {
+        return Ok(false);
+    }
+    server_table.insert("enabled", toml_edit::value(false));
 
     let updated = doc.to_string();
     if updated == original {
@@ -2680,6 +2790,53 @@ enabled = false
             ancestor_body.contains("enabled = false"),
             "shadowed ancestor must stay sticky: {ancestor_body}"
         );
+
+        set_sticky_project_disabled_at(&nearer, "svc")
+            .await
+            .unwrap();
+        let re_stuck = std::fs::read_to_string(&nearer).unwrap();
+        assert!(
+            re_stuck.contains("enabled = false"),
+            "re-stick must set enabled=false: {re_stuck}"
+        );
+        assert!(
+            re_stuck.contains("# keep me"),
+            "re-stick must preserve comments: {re_stuck}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_mcp_server_enabled_after_enable_scopes_tiers() {
+        // Hermetic: only touch a temp project path. Do not call
+        // save_mcp_server_enabled_in (that reads ambient config_path / grok_home).
+        let project = tempfile::tempdir().unwrap();
+        let project_cfg = project.path().join("config.toml");
+        std::fs::write(
+            &project_cfg,
+            r#"
+# keep me
+[mcp_servers.svc]
+command = "true"
+enabled = false
+"#,
+        )
+        .unwrap();
+
+        clear_sticky_project_disabled_at(&project_cfg, "svc")
+            .await
+            .unwrap();
+        let unstuck = std::fs::read_to_string(&project_cfg).unwrap();
+        assert!(unstuck.contains("enabled = true"), "{unstuck}");
+        assert!(unstuck.contains("# keep me"), "{unstuck}");
+
+        // Project-only modified list: restore must re-stick without needing user tier.
+        restore_mcp_server_enabled_after_enable("svc", std::slice::from_ref(&project_cfg))
+            .await
+            .unwrap();
+
+        let project_body = std::fs::read_to_string(&project_cfg).unwrap();
+        assert!(project_body.contains("enabled = false"), "{project_body}");
+        assert!(project_body.contains("# keep me"), "{project_body}");
     }
 
     #[tokio::test]

@@ -24,6 +24,10 @@ pub(crate) type PendingInterjection = xai_interjection_core::PendingInterjection
 /// `x.ai/session/interjection` broadcast, so a live echo would duplicate it.
 pub(crate) const INTERJECT_FALLBACK_PROMPT_PREFIX: &str = "interject-fallback-";
 
+pub(crate) fn is_interject_fallback(prompt_id: &str) -> bool {
+    prompt_id.starts_with(INTERJECT_FALLBACK_PROMPT_PREFIX)
+}
+
 impl SessionActor {
     /// Convert a stranded interjection into a queued prompt turn.
     ///
@@ -61,7 +65,7 @@ impl SessionActor {
         };
         let (respond_to, _) = tokio::sync::oneshot::channel();
         // User message (skips queue_input); invalidate in-flight recap now.
-        self.cancel_pending_recap_for_new_prompt();
+        self.invalidate_side_calls_for_new_prompt();
         let item = InputItem {
             prompt_id,
             prompt_blocks,
@@ -98,21 +102,17 @@ impl SessionActor {
         tracing::info!("Converted stranded interjection into a queued prompt turn");
     }
 
-    /// Flush interjections that missed the completed turn's final drain into
-    /// queued prompt turns (front of the queue, original order). Returns
-    /// whether anything was flushed; the caller kicks
-    /// `maybe_start_running_task`.
-    pub(super) async fn flush_stranded_interjections(&self) -> bool {
+    /// Convert interjections that missed their turn's final drain into queued
+    /// prompt turns, front of the queue in original order. Returns the count.
+    pub(super) async fn flush_stranded_interjections(&self) -> usize {
         let stranded = self.pending_interjections.drain_all();
-        if stranded.is_empty() {
-            return false;
-        }
+        let count = stranded.len();
         // Reversed push_fronts keep entry 0 front-most.
         for entry in stranded.into_iter().rev() {
             self.queue_interjection_fallback_prompt(entry.text, entry.attachments, true)
                 .await;
         }
-        true
+        count
     }
     /// Normalize interjection images for injection (shared pipeline above);
     /// notices append to `wrapped` (TEXT side only). Returns the images to

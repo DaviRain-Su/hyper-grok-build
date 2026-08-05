@@ -27,6 +27,7 @@ mod dispatch;
 /// Display-refresh probe + motion cadence + terminal telemetry at startup.
 mod display_refresh_startup;
 mod effects;
+pub(crate) mod error_display;
 pub mod roster;
 pub mod session_startup;
 pub(crate) mod session_title_resolve;
@@ -671,11 +672,10 @@ pub async fn run(
     let intent = args
         .session_startup_intent()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let materialized = session_startup::materialize_startup(
-        session_startup::MaterializeCtx::from_pager_args(&args),
-        intent,
-    )
-    .await?;
+    let mut materialize_ctx = session_startup::MaterializeCtx::from_pager_args(&args);
+    materialize_ctx.restore_progress_on_stdout =
+        std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let materialized = session_startup::materialize_startup(materialize_ctx, intent).await?;
     if args.chat()
         && let session_startup::MaterializedStartup::Resume { session_id, .. } = &materialized
     {
@@ -1485,8 +1485,8 @@ fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_row: Option<
         let _ = execute!(stderr, crossterm::terminal::EndSynchronizedUpdate);
     });
     crate::theme::reset_cursor_color();
+    disable_mouse_paste_raw();
     if MOUSE_CAPTURE_ENABLED.swap(false, Ordering::AcqRel) {
-        disable_mouse_paste_raw();
         #[cfg(windows)]
         xai_grok_shell::util::with_locked_stderr(|stderr| {
             let _ = execute!(stderr, event::DisableMouseCapture);

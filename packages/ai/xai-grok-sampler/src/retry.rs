@@ -5,14 +5,19 @@
 //!
 //! # Retry behavior summary
 //!
-//! **Retried** (up to [`DEFAULT_MAX_RETRIES`] = 15, ~6 min with 30s backoff cap):
-//! - 500, 502, 503, 504, 520 (server errors)
+//! **Retried** (up to 14 times — attempt [`DEFAULT_MAX_RETRIES`] = 15 is
+//! fatal — ≈5.5 min: every wait, including a server `Retry-After`, is
+//! capped at [`MAX_RETRY_BACKOFF`] and jittered):
+//! - 429 and any 5xx except 525/526 — covers the Cloudflare edge pages
+//!   (520–524 origin unreachable/timed out, 530 edge 1xxx) and upstream
+//!   overload (529). The rule is `RetryPolicy::edge_client`.
 //! - Connection errors (timeout, refused, reset)
 //! - `EventStreamError` / `StreamError` (mid-stream failures)
 //! - `EmptyResponse` (model returned no content/tool calls)
 //!
 //! **Retried with lower cap** ([`RATE_LIMIT_RETRY_THRESHOLD`] = 2):
-//! - 429 (rate limited) — avoids burning long waits
+//! - 429 (rate limited) — waits the full `Retry-After`, so the attempt
+//!   count is what bounds the total wait
 //!
 //! **Special handling**:
 //! - stale model-bound reasoning/signatures/native tool state → strip it and retry once
@@ -20,6 +25,8 @@
 //!
 //! **Not retried** (Fatal immediately):
 //! - 400, 401, 403, 404, 408, 422 (client errors)
+//! - Cloudflare 525/526 (origin TLS handshake / invalid cert) — a broken
+//!   origin certificate never clears on its own
 //! - `Auth` / `InvalidConfiguration` (credential/config issues)
 //! - `IdleTimeout` (model stuck, retry would stall again)
 //! - `Serialization` (response parsing failure)
@@ -29,25 +36,33 @@
 //! - `false` → Fatal immediately, regardless of status code
 //! - `true` / absent → falls through to status-code logic above
 //!
-//! Today CCP's header mirrors the client's `is_retryable()` logic
-//! (4xx except 429 = false, 5xx + 429 = true), so no behavior changes
-//! on merge. The header enables future CCP-side refinements (e.g.
-//! marking content-caused 500s as non-retryable) without client updates.
+//! CCP's header is 429 + any 5xx (`RetryPolicy::server`). Cloudflare's own
+//! 52x pages never carry it, so the client policy above is what applies at
+//! the edge, and 525/526 stay Fatal even if a future header said retry.
 
 use std::time::Duration;
 
-use xai_grok_sampling_types::SamplingError;
+use xai_grok_sampling_types::{SamplingError, is_retryable_api_status};
 
 /// After this many rate-limit (429) retries, escalate to the caller
 /// instead of waiting again. Rate-limit waits can be long and there is
 /// no point burning a long backoff just to be rate-limited again.
 pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = 2;
 
-/// Default max retries when no env or model override is set.
-/// With 30s backoff cap this gives ~6 min of retry budget:
-/// retries 1-4 are exponential (2s+4s+8s+16s ≈ 30s), retries
-/// 5-15 are flat at ~30s each (≈ 5.5 min).
+/// Default retry budget when no env or model override is set: at most 14
+/// retries (the attempt reaching this count is fatal). With the 30s cap:
+/// retries 1-4 exponential (2+4+8+16s ≈ 30s), 5-14 flat ~30s (≈ 5 min) —
+/// ≈ 5.5 min total.
 pub const DEFAULT_MAX_RETRIES: u32 = 15;
+
+/// Longest single wait on the generic retry path — the exponential-backoff
+/// ceiling, and the clamp for a server `Retry-After`. Cloudflare answers 52x
+/// with `Retry-After: 60`–`120`; honoring that verbatim across 14 retries
+/// would stall a turn ~28 min instead of the ~5.5 min budget above. The 429
+/// path deliberately waits the full `Retry-After` instead, bounded by
+/// [`RATE_LIMIT_RETRY_THRESHOLD`] attempts (and by the parse-level 120s cap
+/// on the header).
+pub const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Resolve max API retries from an optional env override, model config,
 /// or default ([`DEFAULT_MAX_RETRIES`]).
@@ -82,16 +97,26 @@ pub fn doom_loop_backoff(retry_count: u32) -> Duration {
     Duration::from_millis(hasher.finish() % 251)
 }
 
-/// Exponential backoff (2s, 4s, 8s, ..., capped 30s) with +/-20% jitter
-/// to prevent thundering-herd retry storms.
+/// Exponential backoff (2s, 4s, 8s, ..., capped at [`MAX_RETRY_BACKOFF`])
+/// with +/-20% jitter to prevent thundering-herd retry storms.
 pub fn retry_backoff_with_jitter(retry_count: u32) -> Duration {
+    let shift = retry_count.saturating_sub(1);
+    let base_ms = 2000u64
+        .checked_shl(shift)
+        .unwrap_or(u64::MAX)
+        .min(MAX_RETRY_BACKOFF.as_millis() as u64);
+    jittered(Duration::from_millis(base_ms))
+}
+
+/// +/-20% jitter around `base`, de-syncing clients that failed at the
+/// same instant (e.g. a mass Cloudflare 52x event during an origin outage).
+fn jittered(base: Duration) -> Duration {
     use std::hash::{Hash, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static JITTER_SEQ: AtomicU64 = AtomicU64::new(0);
 
-    let shift = retry_count.saturating_sub(1);
-    let base_ms = 2000u64.checked_shl(shift).unwrap_or(u64::MAX).min(30_000);
+    let base_ms = base.as_millis() as u64;
     let jitter_range = base_ms / 5;
     let mut hasher = std::hash::DefaultHasher::new();
     JITTER_SEQ.fetch_add(1, Ordering::Relaxed).hash(&mut hasher);
@@ -212,11 +237,8 @@ pub fn classify_error(
     // avoid burning long waits.
     if err.is_rate_limited() {
         let next_attempt = retry_count + 1;
-        let effective_cap = max_retries.min(rate_limit_threshold);
-        if effective_cap == 0 {
-            return RetryDecision::Fatal(clone_error(err));
-        }
-        if next_attempt >= effective_cap {
+        // `next_attempt >= 1` also catches an effective cap of 0.
+        if next_attempt >= max_retries.min(rate_limit_threshold) {
             return RetryDecision::Fatal(clone_error(err));
         }
         let backoff = err
@@ -231,15 +253,18 @@ pub fn classify_error(
 
     // Generic retryable transport / 5xx errors. First retry rebuilds
     // the HTTP client with HTTP/1.1 to escape poisoned HTTP/2 pools;
-    // later retries just back off.
+    // later retries just back off. A server `Retry-After` is honored but
+    // clamped to [`MAX_RETRY_BACKOFF`] (see that constant) and jittered —
+    // during an edge outage every client gets the same `Retry-After` at
+    // the same instant.
     if err.is_retryable() {
         let next_attempt = retry_count + 1;
-        if max_retries == 0 || next_attempt >= max_retries {
+        if next_attempt >= max_retries {
             return RetryDecision::Fatal(clone_error(err));
         }
         let backoff = err
             .retry_after()
-            .map(Duration::from_secs)
+            .map(|secs| jittered(Duration::from_secs(secs).min(MAX_RETRY_BACKOFF)))
             .unwrap_or_else(|| retry_backoff_with_jitter(next_attempt));
         if next_attempt == 1 {
             return RetryDecision::RetryWithClientRebuild { backoff };
@@ -320,8 +345,8 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 413 => " (request too large - try /compact or start new session)",
                 429 => " (rate limited - please wait and retry)",
                 500 => " (server internal error)",
-                #[allow(clippy::manual_range_patterns)]
-                502 | 503 | 504 => " (server unavailable - please retry)",
+                // Any other retryable status (5xx minus origin-TLS 525/526).
+                _ if is_retryable_api_status(*status) => " (server unavailable - please retry)",
                 _ => "",
             };
             format!(
@@ -672,6 +697,69 @@ mod tests {
                 assert!(backoff >= Duration::from_millis(1600));
             }
             other => panic!("expected RetryWithClientRebuild, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_cloudflare_522_is_retryable() {
+        let err = api_err(
+            StatusCode::from_u16(522).unwrap(),
+            "Connection to Grok timed out or was interrupted. (HTTP 522).",
+        );
+        match classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithClientRebuild { .. } => {}
+            other => panic!("expected RetryWithClientRebuild for 522, got {other:?}"),
+        }
+        match classify_error(&err, 1, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Retry { .. } => {}
+            other => panic!("expected Retry for 522 attempt 2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_cloudflare_525_is_fatal_even_with_should_retry_true() {
+        // `x-should-retry: true` is deliberately ignored (only `false` is
+        // honored), so 525/526 stay Fatal whatever a future header says.
+        for should_retry in [None, Some(true)] {
+            let err = SamplingError::Api {
+                status: StatusCode::from_u16(525).unwrap(),
+                message: "Secure connection to Grok failed. (HTTP 525).".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry,
+            };
+            match classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+                RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
+                    assert_eq!(status.as_u16(), 525);
+                }
+                other => panic!("expected Fatal for 525 ({should_retry:?}), got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn classify_clamps_and_jitters_retry_after_on_generic_path_but_not_on_429() {
+        // Cloudflare answers 52x with Retry-After: 60-120. Honoring that
+        // verbatim across 14 retries would stall the turn ~28 min, and an
+        // unjittered wait would re-hit the recovering origin in lockstep.
+        let edge = api_err_with_retry_after(StatusCode::from_u16(522).unwrap(), 120);
+        match classify_error(&edge, 1, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Retry { backoff } => {
+                // 30s clamp with +/-20% jitter.
+                assert!(backoff >= Duration::from_secs(24), "got {backoff:?}");
+                assert!(backoff <= Duration::from_secs(36), "got {backoff:?}");
+            }
+            other => panic!("expected Retry for 522, got {other:?}"),
+        }
+
+        // The 429 path keeps the full wait; its total is bounded by
+        // RATE_LIMIT_RETRY_THRESHOLD attempts and the parse-level 120s cap.
+        let rate_limited = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 120);
+        match classify_error(&rate_limited, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff { backoff, .. } => {
+                assert_eq!(backoff, Duration::from_secs(120));
+            }
+            other => panic!("expected RetryWithBackoff for 429, got {other:?}"),
         }
     }
 

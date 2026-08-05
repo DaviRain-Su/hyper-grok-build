@@ -135,23 +135,7 @@ pub(super) fn dispatch_switch_account(app: &mut AppView) -> Vec<Effect> {
 pub(super) fn scrollback_has_recent_reauth_prompt(
     scrollback: &crate::scrollback::state::ScrollbackState,
 ) -> bool {
-    use crate::scrollback::block::RenderBlock;
-    for idx in (0..scrollback.len()).rev() {
-        match scrollback.entry(idx).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(ev)) => {
-                if matches!(ev.event, SessionEvent::ReAuthRequired) {
-                    return true;
-                }
-            }
-            // Tolerate interleaved system messages in the trailing run.
-            Some(RenderBlock::System(_)) => {}
-            // Stop at the first substantive block: any re-auth prompt for
-            // this turn lives in the trailing events pushed just before the
-            // PromptResponse arrived.
-            _ => break,
-        }
-    }
-    false
+    trailing_session_events(scrollback).any(|(_, ev)| matches!(ev, SessionEvent::ReAuthRequired))
 }
 
 /// True if the trailing run of session/system blocks contains a terminal
@@ -160,24 +144,72 @@ pub(super) fn scrollback_has_recent_reauth_prompt(
 pub(super) fn scrollback_has_recent_context_too_large(
     scrollback: &crate::scrollback::state::ScrollbackState,
 ) -> bool {
+    trailing_session_events(scrollback).any(|(_, ev)| {
+        matches!(
+            ev,
+            SessionEvent::ContextTooLarge | SessionEvent::CompactionFailed { .. }
+        )
+    })
+}
+
+pub(crate) fn scrollback_has_recent_disk_full(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> bool {
+    trailing_session_events(scrollback).any(|(_, ev)| matches!(ev, SessionEvent::DiskFull))
+}
+
+/// True if the trailing run already has a dedicated terminal error banner that
+/// replaces `TurnFailed` (re-auth, context overflow, disk-full, formatted
+/// request failure). `CompactionFailed` is deliberately excluded — it can
+/// appear mid-turn, and a stale one must not swallow an unrelated error's
+/// only surface on the reconcile/viewer rails.
+pub(in crate::app) fn scrollback_has_recent_error_banner(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> bool {
+    trailing_session_events(scrollback).any(|(_, ev)| {
+        matches!(
+            ev,
+            SessionEvent::ReAuthRequired
+                | SessionEvent::ContextTooLarge
+                | SessionEvent::DiskFull
+                | SessionEvent::RequestFailed { .. }
+        )
+    })
+}
+
+/// True if the trailing run already has a formatted [`SessionEvent::RequestFailed`]
+/// banner. Lets `PromptResponse` skip the redundant `TurnFailed`. Deliberately
+/// does NOT match `RetryFailed`: the special cases that keep it (legacy_auth,
+/// encrypted_content_mismatch) keep their pre-existing marker behavior.
+pub(super) fn scrollback_has_recent_request_failed(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> bool {
+    trailing_session_events(scrollback)
+        .any(|(_, ev)| matches!(ev, SessionEvent::RequestFailed { .. }))
+}
+
+/// The trailing run of session events, newest first: yields `(index, event)`
+/// for each session-event block at the tail of the scrollback, skipping
+/// interleaved system messages and stopping at the first substantive block.
+/// Banners for the finishing turn live in this run — pushed just before its
+/// `PromptResponse` arrived.
+pub(super) fn trailing_session_events(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> impl Iterator<Item = (usize, &SessionEvent)> {
     use crate::scrollback::block::RenderBlock;
-    for idx in (0..scrollback.len()).rev() {
-        match scrollback.entry(idx).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(ev)) => {
-                if matches!(
-                    ev.event,
-                    SessionEvent::ContextTooLarge | SessionEvent::CompactionFailed { .. }
-                ) {
-                    return true;
-                }
-            }
-            // Tolerate interleaved system messages in the trailing run.
-            Some(RenderBlock::System(_)) => {}
-            // Stop at the first substantive block.
-            _ => break,
-        }
-    }
-    false
+    (0..scrollback.len())
+        .rev()
+        .map(|idx| (idx, scrollback.entry(idx).map(|e| &e.block)))
+        .take_while(|(_, block)| {
+            matches!(
+                block,
+                Some(RenderBlock::SessionEvent(_) | RenderBlock::System(_))
+            )
+        })
+        .filter_map(|(idx, block)| match block {
+            Some(RenderBlock::SessionEvent(ev)) => Some((idx, &ev.event)),
+            _ => None,
+        })
 }
 
 /// Strip the trailing run of auth-error blocks — the `ReAuthRequired`
@@ -186,26 +218,18 @@ pub(super) fn scrollback_has_recent_context_too_large(
 /// disappears once the user returns to the session. Mirrors the
 /// credit-limit upsell's stale-block strip.
 pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
-    use crate::scrollback::block::RenderBlock;
-    let mut to_remove = Vec::new();
-    for idx in (0..agent.scrollback.len()).rev() {
-        match agent.scrollback.entry(idx).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(ev))
-                if matches!(
-                    &ev.event,
-                    SessionEvent::ReAuthRequired
-                        | SessionEvent::RetryFailed { .. }
-                        | SessionEvent::TurnFailed { .. }
-                ) =>
-            {
-                to_remove.push(idx);
-            }
-            // Skip over other trailing session-event / system blocks.
-            Some(RenderBlock::SessionEvent(_) | RenderBlock::System(_)) => continue,
-            // Stop at the first substantive block.
-            _ => break,
-        }
-    }
+    let to_remove: Vec<usize> = trailing_session_events(&agent.scrollback)
+        .filter(|(_, ev)| {
+            matches!(
+                ev,
+                SessionEvent::ReAuthRequired
+                    | SessionEvent::RequestFailed { .. }
+                    | SessionEvent::RetryFailed { .. }
+                    | SessionEvent::TurnFailed { .. }
+            )
+        })
+        .map(|(idx, _)| idx)
+        .collect();
     for idx in to_remove {
         agent.scrollback.remove_from(idx);
     }

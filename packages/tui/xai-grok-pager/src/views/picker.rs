@@ -2565,27 +2565,41 @@ pub fn render_picker(
     }
 }
 
+/// First selectable index at or after `selected`.
+///
+/// Scans forward from the clamped selection, then restarts from the top when
+/// needed. If every row is non-selectable, both scans stop at the last index,
+/// so that last index is returned. Shared by picker input clamping and modal
+/// render so highlight and footer stay aligned.
+pub fn first_selectable_index(
+    selected: usize,
+    entry_count: usize,
+    non_selectable: &[bool],
+) -> usize {
+    if entry_count == 0 {
+        return 0;
+    }
+    let is_non_sel = |i: usize| non_selectable.get(i).copied().unwrap_or(false);
+    let mut s = selected.min(entry_count - 1);
+    while is_non_sel(s) && s < entry_count - 1 {
+        s += 1;
+    }
+    if is_non_sel(s) {
+        s = 0;
+        while is_non_sel(s) && s < entry_count - 1 {
+            s += 1;
+        }
+    }
+    s
+}
+
 /// Clamp selection to a selectable row after a host changes the picker entries.
 pub fn clamp_picker_selection(
     state: &mut PickerState,
     entry_count: usize,
     non_selectable: &[bool],
 ) {
-    let is_non_sel = |i: usize| non_selectable.get(i).copied().unwrap_or(false);
-    if entry_count > 0 {
-        state.selected = state.selected.min(entry_count.saturating_sub(1));
-        while is_non_sel(state.selected) && state.selected < entry_count - 1 {
-            state.selected += 1;
-        }
-        if is_non_sel(state.selected) {
-            state.selected = 0;
-            while is_non_sel(state.selected) && state.selected < entry_count - 1 {
-                state.selected += 1;
-            }
-        }
-    } else {
-        state.selected = 0;
-    }
+    state.selected = first_selectable_index(state.selected, entry_count, non_selectable);
 }
 
 /// Handle one picker event; hosts re-filter only after [`PickerOutcome::QueryChanged`].

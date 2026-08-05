@@ -154,12 +154,14 @@ async fn persist_ack_waits_for_disk_flush_before_success_inner() {
                     pending_notifications: Vec::new(),
                     notifications_suppressed: false,
                     rewindable: false,
+                    front_message_committed: false,
                     nudges_used_this_session: 0,
                 }),
                 notifications: NotificationSender {
                     gateway: GatewaySender::new(gateway_tx),
                     gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
                     persistence_tx: persistence.tx.clone(),
+                    disk_full: persistence.subscribe_disk_full(),
                 },
                 permissions: PermissionHandle::allow_all(),
                 tool_context,
@@ -321,6 +323,9 @@ async fn persist_ack_waits_for_disk_flush_before_success_inner() {
                 last_recap_main_turn: std::cell::Cell::new(0),
                 recap_in_flight: std::cell::Cell::new(false),
                 recap_epoch: std::cell::Cell::new(0),
+                turn_summary_task: std::cell::RefCell::new(None),
+                turn_summary_generation: std::cell::Cell::new(0),
+                turn_summary_enabled: false,
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
@@ -497,7 +502,7 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     respond_to: flush_tx,
                 })
                 .unwrap();
-            flush_rx.await.unwrap();
+            flush_rx.await.unwrap().unwrap();
             let loaded = storage
                 .load_session_without_updates(&session_info)
                 .await
@@ -649,12 +654,14 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     pending_notifications: Vec::new(),
                     notifications_suppressed: false,
                     rewindable: false,
+                    front_message_committed: false,
                     nudges_used_this_session: 0,
                 }),
                 notifications: NotificationSender {
                     gateway: GatewaySender::new(gateway_tx),
                     gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
                     persistence_tx: persistence.tx.clone(),
+                    disk_full: persistence.subscribe_disk_full(),
                 },
                 permissions: PermissionHandle::allow_all(),
                 tool_context,
@@ -819,6 +826,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 last_recap_main_turn: std::cell::Cell::new(0),
                 recap_in_flight: std::cell::Cell::new(false),
                 recap_epoch: std::cell::Cell::new(0),
+                turn_summary_task: std::cell::RefCell::new(None),
+                turn_summary_generation: std::cell::Cell::new(0),
+                turn_summary_enabled: false,
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
@@ -846,7 +856,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     respond_to: flush_tx,
                 })
                 .unwrap();
-            flush_rx.await.unwrap();
+            flush_rx.await.unwrap().unwrap();
             let storage = crate::session::storage::JsonlStorageAdapter::with_explicit_session_dir(
                 session_dir.path().to_path_buf(),
             );
@@ -911,6 +921,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 pending_notifications: Vec::new(),
                 notifications_suppressed: false,
                 rewindable: false,
+                front_message_committed: false,
                 nudges_used_this_session: 0,
             });
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -942,6 +953,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                         std::sync::atomic::AtomicBool::new(true),
                     ),
                     persistence_tx,
+                    disk_full: crate::session::notifications::idle_disk_full_rx(),
                 },
                 permissions: PermissionHandle::allow_all(),
                 tool_context,
@@ -1126,6 +1138,9 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 last_recap_main_turn: std::cell::Cell::new(0),
                 recap_in_flight: std::cell::Cell::new(false),
                 recap_epoch: std::cell::Cell::new(0),
+                turn_summary_task: std::cell::RefCell::new(None),
+                turn_summary_generation: std::cell::Cell::new(0),
+                turn_summary_enabled: false,
                 session_turn_active: std::sync::Arc::new(
                     std::sync::atomic::AtomicBool::new(false),
                 ),
@@ -1466,26 +1481,6 @@ async fn maybe_inject_interrupt_reminder_injects_once() {
             );
         })
         .await;
-}
-/// Build an `Arc<SessionActor>` whose persistence channel answers the
-/// `FlushAndAck` barrier, so a `handle_prompt` turn driven with a `persist_ack`
-/// resolves deterministically (the bare `build_actor` drops the persistence
-/// receiver, so its flush barrier never completes). Returns the actor; the
-/// gateway/persistence drains run on the `LocalSet` for the test's lifetime.
-async fn actor_with_persistence_drain() -> std::sync::Arc<SessionActor> {
-    let (gateway_tx, mut gateway_rx) =
-        tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
-    tokio::task::spawn_local(async move { while gateway_rx.recv().await.is_some() {} });
-    let (persistence_tx, mut persistence_rx) =
-        tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-    tokio::task::spawn_local(async move {
-        while let Some(msg) = persistence_rx.recv().await {
-            if let PersistenceMsg::FlushAndAck { respond_to } = msg {
-                let _ = respond_to.send(());
-            }
-        }
-    });
-    std::sync::Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await)
 }
 /// Integration (production wiring + ordering): with the one-shot armed, a real
 /// user turn driven through `handle_prompt` injects the interrupt
@@ -2235,6 +2230,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 pending_notifications: Vec::new(),
                 notifications_suppressed: false,
                 rewindable: false,
+                front_message_committed: false,
                 nudges_used_this_session: 0,
             });
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -2266,6 +2262,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                         std::sync::atomic::AtomicBool::new(true),
                     ),
                     persistence_tx,
+                    disk_full: crate::session::notifications::idle_disk_full_rx(),
                 },
                 permissions: PermissionHandle::allow_all(),
                 tool_context,
@@ -2450,6 +2447,9 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 last_recap_main_turn: std::cell::Cell::new(0),
                 recap_in_flight: std::cell::Cell::new(false),
                 recap_epoch: std::cell::Cell::new(0),
+                turn_summary_task: std::cell::RefCell::new(None),
+                turn_summary_generation: std::cell::Cell::new(0),
+                turn_summary_enabled: false,
                 session_turn_active: std::sync::Arc::new(
                     std::sync::atomic::AtomicBool::new(false),
                 ),

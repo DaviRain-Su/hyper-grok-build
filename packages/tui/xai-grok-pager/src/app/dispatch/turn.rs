@@ -407,13 +407,11 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
                 // Rate limits drive a dedicated driver UX via the retry
                 // notifications (already delivered); no extra marker.
                 Some("rate_limit") => None,
-                Some("error") => Some(SessionEvent::TurnFailed {
-                    error: pending
-                        .agent_result
-                        .clone()
-                        .unwrap_or_else(|| "unknown error".into()),
-                    elapsed: Some(elapsed),
-                }),
+                Some("error") => crate::app::turn_completion::turn_failed_event(
+                    &agent.scrollback,
+                    pending.agent_result.as_deref(),
+                    elapsed,
+                ),
                 _ => Some(SessionEvent::TurnCompleted {
                     elapsed: Some(elapsed),
                 }),

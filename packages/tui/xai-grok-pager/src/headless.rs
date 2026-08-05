@@ -540,8 +540,8 @@ async fn open_session(
                 .meta({
                     let mut m = acp::Meta::new();
                     m.insert("noReplay".into(), serde_json::Value::Bool(true));
-                    if let Some(true) = restore_code {
-                        m.insert("x.ai/restore_code".into(), serde_json::Value::Bool(true));
+                    if let Some(rc) = restore_code {
+                        m.insert("x.ai/restore_code".into(), serde_json::Value::Bool(rc));
                     }
                     Some(m)
                 }),
@@ -722,12 +722,14 @@ async fn apply_headless_model_and_effort(
 }
 
 /// Startup-materialization context for headless (`-p`) runs; never chat mode.
+/// `--worktree` is ignored here: headless never creates a worktree, so remote
+/// miss must not take `DeferToWorktree`.
 fn headless_materialize_ctx(
-    has_worktree: bool,
     resume_title_pinned: bool,
+    restore_code: bool,
 ) -> crate::app::session_startup::MaterializeCtx {
     crate::app::session_startup::MaterializeCtx {
-        has_worktree,
+        has_worktree: false,
         allow_remote_restore:
             crate::app::session_startup::MaterializeCtx::default_allow_remote_restore(),
         chat_mode: false,
@@ -736,6 +738,8 @@ fn headless_materialize_ctx(
         } else {
             crate::app::session_startup::TitleResolution::Allowed
         },
+        restore_code,
+        restore_progress_on_stdout: false,
     }
 }
 
@@ -894,19 +898,30 @@ pub async fn run_single_turn(
         resume_most_recent,
         continue_last_session: options.continue_last_session,
         fork_session: options.fork_session,
-        has_worktree: options.worktree.is_some(),
+        // Headless never creates a worktree from `-w`.
+        has_worktree: false,
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let cwd_str = cwd.to_string_lossy().to_string();
     let materialized = session_startup::materialize_startup_for_cwd(
-        headless_materialize_ctx(options.worktree.is_some(), options.resume_title_pinned),
+        headless_materialize_ctx(options.resume_title_pinned, options.restore_code),
         intent,
         &cwd_str,
     )
     .await?;
 
-    let restore_code = options.restore_code.then_some(true);
+    let restore_code = match &materialized {
+        MaterializedStartup::Resume {
+            suppress_code_restore: true,
+            ..
+        }
+        | MaterializedStartup::Fork {
+            suppress_code_restore: true,
+            ..
+        } => Some(false),
+        _ => options.restore_code.then_some(true),
+    };
     let t_session = Instant::now();
     let opened = match materialized {
         MaterializedStartup::NewAuto => open_session(&acp_tx, &cwd, None, None).await,

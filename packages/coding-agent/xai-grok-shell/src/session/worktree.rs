@@ -154,6 +154,13 @@ pub(crate) fn resolve_session_repo_wide(
     let refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
     Ok(resolve_local_session_for_repo(session_id, &refs))
 }
+/// Whether remote worktree resume should fetch/apply the repository snapshot.
+pub(crate) fn remote_worktree_restores_codebase(
+    restore_code: Option<bool>,
+    restore_code_default: bool,
+) -> bool {
+    restore_code.unwrap_or(restore_code_default)
+}
 /// Orchestrate the full "resume session in worktree" flow.
 ///
 /// Shell-side orchestration: composes client ops (session persistence,
@@ -227,6 +234,7 @@ pub(crate) async fn resume_session_in_worktree(
         .await
         .context("fetching session record for remote restore")?;
     let turn = crate::session::restore::resolve_restore_turn(&record, None);
+    let restore_code = remote_worktree_restores_codebase(req.restore_code, restore_code_default);
     let memory_dl_future = crate::session::restore::download_to_tempfile(
         client,
         &req.session_id,
@@ -238,7 +246,10 @@ pub(crate) async fn resume_session_in_worktree(
             "session-state archive restore unavailable in this build"
         ))
     };
-    let (memory_dl, state_dl) = tokio::join!(memory_dl_future, state_dl_future);
+    let (memory_dl, state_dl) = {
+        let _ = restore_code;
+        tokio::join!(memory_dl_future, state_dl_future)
+    };
     let codebase_ok = false;
     let _memory_result =
         crate::session::restore::apply_memory_download(memory_dl, &wt_resp.worktree_path).await;
@@ -252,7 +263,7 @@ pub(crate) async fn resume_session_in_worktree(
     if session_state_result.is_skipped() {
         cleanup_worktree_on_failure(&req.source_cwd, &wt_resp.worktree_path).await;
         anyhow::bail!(
-            "Session {} restored codebase but session-state archive was unavailable -- \
+            "Session {} session-state archive was unavailable -- \
              conversation history cannot be recovered. Retry in a few moments.",
             req.session_id,
         );
@@ -895,6 +906,13 @@ mod tests {
             resolved.resolution_kind,
             LocalSessionResolutionKind::SameRepoDifferentCwd
         );
+    }
+    #[test]
+    fn remote_worktree_codebase_follows_request_then_default() {
+        assert!(!remote_worktree_restores_codebase(Some(false), true));
+        assert!(!remote_worktree_restores_codebase(None, false));
+        assert!(remote_worktree_restores_codebase(None, true));
+        assert!(remote_worktree_restores_codebase(Some(true), false));
     }
     #[tokio::test]
     async fn resume_in_worktree_falls_through_to_remote_when_not_found_locally() {

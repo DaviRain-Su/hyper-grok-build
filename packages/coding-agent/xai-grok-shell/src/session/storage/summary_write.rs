@@ -92,6 +92,10 @@ pub(crate) struct SummaryPatch {
     /// set via `/rename`. Ignored when `generated_title` is also set.
     pub generated_title_if_absent: Option<String>,
     pub cwd_switch_bookkeeping_generation: Option<u64>,
+    /// Per-turn dashboard summary as `(text, prompt_id)`. Outer `Some`
+    /// applies (last-writer-wins); `Some(None)` clears it (conversation
+    /// rewind removed the described work).
+    pub last_turn_summary: Option<Option<(String, String)>>,
 }
 
 impl Summary {
@@ -156,6 +160,11 @@ impl Summary {
         }
         if let Some(collection_id) = &patch.collection_id {
             self.collection_id = Some(collection_id.clone());
+        }
+        if let Some(last_turn_summary) = &patch.last_turn_summary {
+            let (text, prompt_id) = last_turn_summary.clone().unzip();
+            self.last_turn_summary = text;
+            self.last_turn_summary_prompt_id = prompt_id;
         }
         let mut absent_title_applied = false;
         if let Some(title) = &patch.generated_title {

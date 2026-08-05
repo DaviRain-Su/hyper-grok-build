@@ -371,6 +371,12 @@ impl SessionSearchIndex {
     /// Multi-token queries require every token (AND) first; when that
     /// intersection matches nothing the query reruns as an OR so partial
     /// matches still surface. Returns `(results, next_offset, total_estimate)`.
+    ///
+    /// Session-id-shaped queries (full UUID or hyphenated hex prefix) match
+    /// `session_docs.session_id` directly. FTS only indexes title+content, and
+    /// a hyphenated UUID `MATCH` looks for tokens that were never indexed —
+    /// so `/resume` search by id returned nothing while `grok --resume <id>`
+    /// still loaded the session.
     pub fn query(
         &self,
         query: &str,
@@ -379,6 +385,13 @@ impl SessionSearchIndex {
         offset: usize,
         include_content: bool,
     ) -> Result<QueryResult, rusqlite::Error> {
+        if is_session_id_like(query) {
+            let id_hits = self.query_session_id(query, cwd, limit, offset)?;
+            if !id_hits.results.is_empty() || uuid::Uuid::try_parse(query.trim()).is_ok() {
+                return Ok(id_hits);
+            }
+        }
+
         let Some((and_query, or_query)) = Self::build_match_queries(query) else {
             return Ok(QueryResult {
                 results: Vec::new(),
@@ -394,6 +407,60 @@ impl SessionSearchIndex {
             return self.run_match_query(&or_query, cwd, limit, offset, include_content);
         }
         Ok(result)
+    }
+
+    /// Substring match on `session_docs.session_id` (not in the FTS table).
+    fn query_session_id(
+        &self,
+        query: &str,
+        cwd: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<QueryResult, rusqlite::Error> {
+        let needle = query.trim();
+        if needle.is_empty() {
+            return Ok(QueryResult {
+                results: Vec::new(),
+                next_offset: None,
+                total_estimate: Some(0),
+            });
+        }
+
+        let total: i64 = self.db.query_row(
+            "SELECT COUNT(*) FROM session_docs d
+             WHERE instr(lower(d.session_id), lower(?1)) > 0
+               AND (?2 IS NULL OR d.cwd = ?2)",
+            params![needle, cwd],
+            |row| row.get(0),
+        )?;
+
+        let mut stmt = self.db.prepare(
+            "SELECT d.session_id, d.cwd, d.title, d.updated_at
+             FROM session_docs d
+             WHERE instr(lower(d.session_id), lower(?1)) > 0
+               AND (?2 IS NULL OR d.cwd = ?2)
+             ORDER BY d.updated_at DESC, d.session_id ASC
+             LIMIT ?3 OFFSET ?4",
+        )?;
+        let rows = stmt.query_map(params![needle, cwd, limit as i64, offset as i64], |row| {
+            Ok(SessionSearchRow {
+                session_id: row.get(0)?,
+                cwd: row.get(1)?,
+                title: row.get(2)?,
+                updated_at_unix: row.get(3)?,
+                score: 1.0,
+                matched_fields: vec!["session_id".to_string()],
+                snippet: None,
+            })
+        })?;
+        let results: Vec<SessionSearchRow> = rows.collect::<Result<_, _>>()?;
+        let total_usize = usize::try_from(total).unwrap_or(0);
+        let next_offset = (offset + results.len() < total_usize).then_some(offset + results.len());
+        Ok(QueryResult {
+            results,
+            next_offset,
+            total_estimate: Some(total_usize),
+        })
     }
 
     /// Execute one FTS5 MATCH string; `total_estimate` is computed with the
@@ -553,6 +620,17 @@ impl SessionSearchIndex {
         };
         format!("\"{stem}\" *")
     }
+}
+
+/// True when `query` is a UUID or a hyphenated hex prefix long enough to be
+/// an intentional session-id search (not a normal keyword).
+fn is_session_id_like(query: &str) -> bool {
+    let q = query.trim();
+    if uuid::Uuid::try_parse(q).is_ok() {
+        return true;
+    }
+    let stripped: String = q.chars().filter(|&c| c != '-').collect();
+    stripped.len() >= 8 && stripped.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -985,6 +1063,46 @@ mod tests {
         let qr = index.query("python", None, 10, 0, false).unwrap();
         assert_eq!(qr.total_estimate, Some(1));
         assert_eq!(qr.results[0].session_id, "s2");
+    }
+
+    /// `/resume` search types a session UUID; CLI `--resume <id>` works because
+    /// it looks up by id globally. FTS only indexed title+content, so pasting
+    /// the id into search returned nothing (GB-4249).
+    #[test]
+    fn test_query_matches_session_id() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+        let id = "019f870d-6976-7d73-a12a-52e9d4aebcd4";
+        index
+            .upsert_doc(&test_doc(
+                id,
+                "unrelated title",
+                "body text with no identifier",
+            ))
+            .unwrap();
+
+        let qr = index.query(id, None, 10, 0, false).unwrap();
+        assert_eq!(qr.results.len(), 1, "full session id must match");
+        assert_eq!(qr.results[0].session_id, id);
+        assert!(
+            qr.results[0]
+                .matched_fields
+                .iter()
+                .any(|f| f == "session_id")
+        );
+
+        let prefix = index.query("019f870d-6976", None, 10, 0, false).unwrap();
+        assert_eq!(prefix.results.len(), 1, "session id prefix must match");
+        assert_eq!(prefix.results[0].session_id, id);
+
+        let mut other_cwd = test_doc("019f870d-6976-7d73-a12a-ffffffffffff", "other", "unrelated");
+        other_cwd.cwd = "/other".to_string();
+        index.upsert_doc(&other_cwd).unwrap();
+        let scoped = index
+            .query(id, Some("/test/workspace"), 10, 0, false)
+            .unwrap();
+        assert_eq!(scoped.results.len(), 1);
+        assert_eq!(scoped.results[0].session_id, id);
     }
 
     #[test]

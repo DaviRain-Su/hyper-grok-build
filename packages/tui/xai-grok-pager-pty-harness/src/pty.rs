@@ -533,6 +533,16 @@ fn cache_exit_status(
 
 const CLIPBOARD_SINK_ENV_VARS: &[&str] = &["GROK_OSC52_SINK", "LC_GROK_OSC52_SINK"];
 
+/// Host / wrap appearance hints that would make `theme=auto` non-deterministic
+/// in PTY tests (layout depends on the resolved palette).
+const APPEARANCE_ENV_VARS: &[&str] = &[
+    "GROK_APPEARANCE",
+    "LC_GROK_APPEARANCE",
+    "GROK_THEME",
+    "LC_GROK_THEME",
+    "COLORFGBG",
+];
+
 /// Host terminal identity markers stripped from the child environment.
 ///
 /// The pager's terminal detection
@@ -623,6 +633,9 @@ fn apply_child_env(cmd: &mut CommandBuilder, sandbox: Option<&TestSandbox>, env:
     // through `env` after this hygiene pass.
     for sink_var in CLIPBOARD_SINK_ENV_VARS {
         cmd.env_remove(sink_var);
+    }
+    for appearance_var in APPEARANCE_ENV_VARS {
+        cmd.env_remove(appearance_var);
     }
     // Neutralize parent-terminal identity bleed: agent hosts often export
     // TERM_PROGRAM=ghostty/iTerm/etc. (and mux/editor markers) which make
@@ -951,6 +964,9 @@ mod tests {
         for sink_var in CLIPBOARD_SINK_ENV_VARS {
             cmd.env(sink_var, "polluted");
         }
+        for appearance_var in APPEARANCE_ENV_VARS {
+            cmd.env(appearance_var, "polluted");
+        }
         // Sandboxed launches remove unrelated inherited variables before
         // re-applying the baseline and explicit overrides.
         cmd.env("GROK_SCROLL_LOG", "/tmp/scroll.jsonl");
@@ -980,6 +996,12 @@ mod tests {
             assert!(
                 cmd.get_env(sink_var).is_none(),
                 "clipboard sink marker {sink_var} leaked into the child env"
+            );
+        }
+        for appearance_var in APPEARANCE_ENV_VARS {
+            assert!(
+                cmd.get_env(appearance_var).is_none(),
+                "appearance hint {appearance_var} leaked into the child env"
             );
         }
         assert_eq!(

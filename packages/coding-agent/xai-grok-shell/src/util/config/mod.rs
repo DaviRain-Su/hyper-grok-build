@@ -5,6 +5,7 @@ mod campaigns;
 mod hints;
 mod load;
 mod mcp;
+mod mcp_reenable;
 mod permissions;
 mod persist;
 mod resolve;
@@ -21,6 +22,7 @@ pub use campaigns::{
 pub use hints::*;
 pub use load::*;
 pub use mcp::*;
+pub(crate) use mcp_reenable::reenableable_disabled_stubs;
 pub use permissions::*;
 pub use persist::*;
 // `remote` extracted to the `xai-grok-config-types` crate (dependency inversion);

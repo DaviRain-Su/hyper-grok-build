@@ -324,6 +324,55 @@ pub fn is_shift_tab(key: &KeyEvent) -> bool {
     shift_tab_keys().iter().any(|k| k.matches(key))
 }
 
+/// One step of the `Tab` / `Shift+Tab` walk through the rows of whichever
+/// surface owns the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowWalk {
+    Forward,
+    Backward,
+}
+
+impl RowWalk {
+    /// `Tab` / `Shift+Tab` and nothing else: a modifier-bearing Tab belongs to
+    /// whoever binds it, not to the walk.
+    pub fn from_key(key: &KeyEvent) -> Option<Self> {
+        // Shift+Tab first — one of its encodings *is* `Tab` + SHIFT.
+        if is_shift_tab(key) {
+            Some(Self::Backward)
+        } else if KeyShortcut::key(KeyCode::Tab).matches(key) {
+            Some(Self::Forward)
+        } else {
+            None
+        }
+    }
+
+    /// The row this step lands on, wrapping at both ends and clamping an
+    /// out-of-range cursor.
+    #[must_use]
+    pub fn step(self, idx: usize, len: usize) -> usize {
+        let Some(last) = len.checked_sub(1) else {
+            return 0;
+        };
+        let cur = idx.min(last);
+        match self {
+            Self::Forward => {
+                if cur == last {
+                    0
+                } else {
+                    cur + 1
+                }
+            }
+            Self::Backward => {
+                if cur == 0 {
+                    last
+                } else {
+                    cur - 1
+                }
+            }
+        }
+    }
+}
+
 pub fn is_text_input_key(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char(_))
         && (key.modifiers.is_empty()
@@ -433,6 +482,62 @@ mod tests {
         let mut release = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
         assert!(!is_shift_tab(&release));
+    }
+
+    #[test]
+    fn row_walk_reads_every_tab_encoding_and_nothing_else() {
+        use crossterm::event::KeyEvent;
+        let walk = |code, modifiers| RowWalk::from_key(&KeyEvent::new(code, modifiers));
+
+        assert_eq!(
+            walk(KeyCode::Tab, KeyModifiers::NONE),
+            Some(RowWalk::Forward)
+        );
+        for (code, modifiers) in [
+            (KeyCode::BackTab, KeyModifiers::NONE),
+            (KeyCode::BackTab, KeyModifiers::SHIFT),
+            (KeyCode::Tab, KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(
+                walk(code, modifiers),
+                Some(RowWalk::Backward),
+                "{code:?}/{modifiers:?} is Shift+Tab"
+            );
+        }
+
+        assert_eq!(walk(KeyCode::Tab, KeyModifiers::CONTROL), None);
+        assert_eq!(walk(KeyCode::Tab, KeyModifiers::ALT), None);
+        assert_eq!(walk(KeyCode::Char('j'), KeyModifiers::NONE), None);
+
+        let mut release = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        release.kind = KeyEventKind::Release;
+        assert_eq!(RowWalk::from_key(&release), None);
+    }
+
+    #[test]
+    fn row_walk_wraps_at_both_ends() {
+        let steps: Vec<usize> = (0..4)
+            .scan(0, |idx, _| {
+                *idx = RowWalk::Forward.step(*idx, 3);
+                Some(*idx)
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            vec![1, 2, 0, 1],
+            "off the last row, back to the first"
+        );
+        assert_eq!(
+            RowWalk::Backward.step(0, 3),
+            2,
+            "before the first row, round to the last"
+        );
+
+        assert_eq!(RowWalk::Forward.step(0, 1), 0);
+        assert_eq!(RowWalk::Backward.step(0, 1), 0);
+        assert_eq!(RowWalk::Forward.step(0, 0), 0);
+        assert_eq!(RowWalk::Forward.step(99, 3), 0, "clamps, then wraps");
+        assert_eq!(RowWalk::Backward.step(99, 3), 1, "clamps, then steps back");
     }
 
     #[test]

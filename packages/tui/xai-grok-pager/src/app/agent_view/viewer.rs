@@ -98,7 +98,7 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        if in_plan_approval && key.code == KeyCode::Tab && key.modifiers.is_empty() {
+        if in_plan_approval && crate::input::key::RowWalk::from_key(key).is_some() {
             if let Some(ref mut pav) = self.plan_approval_view {
                 pav.focus = PlanApprovalFocus::Prompt;
             }

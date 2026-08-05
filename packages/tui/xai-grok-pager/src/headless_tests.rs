@@ -253,11 +253,15 @@ fn s(v: &str) -> String {
 #[test]
 fn headless_materialize_ctx_stays_non_chat() {
     use crate::app::session_startup::TitleResolution;
-    for has_worktree in [false, true] {
-        for pinned in [false, true] {
-            let ctx = headless_materialize_ctx(has_worktree, pinned);
+    for pinned in [false, true] {
+        for restore_code in [false, true] {
+            let ctx = headless_materialize_ctx(pinned, restore_code);
             assert!(!ctx.chat_mode);
-            assert_eq!(ctx.has_worktree, has_worktree);
+            assert!(
+                !ctx.has_worktree,
+                "headless must not defer remote miss to a worktree it never creates"
+            );
+            assert_eq!(ctx.restore_code, restore_code);
             assert_eq!(
                 ctx.title_resolution,
                 if pinned {
@@ -268,6 +272,33 @@ fn headless_materialize_ctx_stays_non_chat() {
             );
         }
     }
+}
+
+#[test]
+fn headless_remote_miss_restores_conversation_instead_of_deferring_worktree() {
+    use crate::app::session_startup::{RemoteMissPlan, plan_remote_miss};
+    for restore_code in [false, true] {
+        let ctx = headless_materialize_ctx(false, restore_code);
+        assert!(!matches!(
+            plan_remote_miss(ctx, true),
+            RemoteMissPlan::DeferToWorktree { .. }
+        ));
+    }
+    // when asserting the conversation / in-place-refuse arms.
+    let mut conv = headless_materialize_ctx(false, false);
+    conv.allow_remote_restore = true;
+    assert_eq!(
+        plan_remote_miss(conv, true),
+        RemoteMissPlan::RestoreConversation
+    );
+    let mut code = headless_materialize_ctx(false, true);
+    code.allow_remote_restore = true;
+    assert_eq!(
+        plan_remote_miss(code, true),
+        RemoteMissPlan::RejectInPlaceCodeRestore {
+            title_miss_hint: false,
+        }
+    );
 }
 
 #[test]

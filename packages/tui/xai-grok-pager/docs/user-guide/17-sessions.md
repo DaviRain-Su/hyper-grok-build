@@ -68,7 +68,7 @@ Alias: `/exit`. To leave the current session but stay in Grok, use `/home` to re
 /delete
 ```
 
-Confirms, then permanently removes the session history and returns to the welcome screen. From `/resume` or the welcome session list, press `d` then `y`. On the [Agent Dashboard](23-dashboard.md), `Ctrl+X` twice (or hover `[✗]`) permanently deletes.
+Confirms, then permanently removes the session history. Returns to the welcome screen, or to the dashboard when you opened the session from the dashboard. From `/resume` or the welcome session list, press `d` then `y`. On the [Agent Dashboard](23-dashboard.md), `Ctrl+X` twice (or hover `[✗]`) permanently deletes.
 
 ---
 

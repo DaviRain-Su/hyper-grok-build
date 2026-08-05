@@ -62,6 +62,31 @@ pub fn select_protocol(ctx: &TerminalContext) -> NotificationProtocol {
 
 const BEL_BYTE: &[u8] = b"\x07";
 
+/// Strip C0/C1 controls (including BEL and C1 ST) so model-derived titles
+/// cannot terminate OSC/DCS early. Same filter as tab-title construction.
+fn sanitize_osc_text(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// Build the OSC/BEL payload. `None` means emit nothing.
+fn notification_sequence(
+    protocol: NotificationProtocol,
+    title: &str,
+    body: &str,
+) -> Option<Cow<'static, str>> {
+    let title = sanitize_osc_text(title);
+    let body = sanitize_osc_text(body);
+    Some(match protocol {
+        // Body-only protocols fold the title (session name) into the body.
+        // OSC 777 already uses the tab title as subtitle, so keep "Grok".
+        NotificationProtocol::Osc9 => format!("\x1b]9;{body} \u{b7} {title}\x07").into(),
+        NotificationProtocol::Osc99 => format!("\x1b]99;i=grok;{body} \u{b7} {title}\x1b\\").into(),
+        NotificationProtocol::Osc777 => format!("\x1b]777;notify;Grok;{body}\x1b\\").into(),
+        NotificationProtocol::Bel => Cow::Borrowed("\x07"),
+        NotificationProtocol::None => return None,
+    })
+}
+
 /// Build the escape sequence for a notification, then write it to stderr.
 ///
 /// When running under tmux the sequence is wrapped in DCS passthrough so the
@@ -72,16 +97,8 @@ pub fn emit_notification(
     body: &str,
     ctx: &TerminalContext,
 ) {
-    // For body-only protocols (OSC 9, OSC 99), fold the title (session
-    // name) into the body so it's visible.  For OSC 777 (Ghostty), the
-    // tab title already appears as the notification subtitle, so we use
-    // the app name to avoid showing the session name twice.
-    let sequence: Cow<'_, str> = match protocol {
-        NotificationProtocol::Osc9 => format!("\x1b]9;{body} \u{b7} {title}\x07").into(),
-        NotificationProtocol::Osc99 => format!("\x1b]99;i=grok;{body} \u{b7} {title}\x1b\\").into(),
-        NotificationProtocol::Osc777 => format!("\x1b]777;notify;Grok;{body}\x1b\\").into(),
-        NotificationProtocol::Bel => Cow::Borrowed("\x07"),
-        NotificationProtocol::None => return,
+    let Some(sequence) = notification_sequence(protocol, title, body) else {
+        return;
     };
 
     if ctx.is_tmux_backed() {
@@ -329,6 +346,33 @@ mod tests {
     fn emit_osc777_does_not_panic() {
         let ctx = ctx_with_brand(TerminalName::Ghostty);
         emit_notification(NotificationProtocol::Osc777, "title", "body", &ctx);
+    }
+
+    #[test]
+    fn notification_sequence_strips_controls_from_title_and_body() {
+        let seq = notification_sequence(
+            NotificationProtocol::Osc9,
+            "ti\x1btle\u{9c}",
+            "bo\x07dy\x18",
+        )
+        .expect("osc9 yields a sequence");
+        assert_eq!(seq.as_ref(), "\x1b]9;body \u{b7} title\x07");
+    }
+
+    #[test]
+    fn notification_sequence_osc99_and_osc777_strip_controls() {
+        let osc99 = notification_sequence(NotificationProtocol::Osc99, "t\x1b", "b\x07")
+            .expect("osc99 yields a sequence");
+        assert_eq!(osc99.as_ref(), "\x1b]99;i=grok;b \u{b7} t\x1b\\");
+
+        let osc777 = notification_sequence(NotificationProtocol::Osc777, "ignored\x1b", "b\x1body")
+            .expect("osc777 yields a sequence");
+        assert_eq!(osc777.as_ref(), "\x1b]777;notify;Grok;body\x1b\\");
+    }
+
+    #[test]
+    fn notification_sequence_none_is_none() {
+        assert!(notification_sequence(NotificationProtocol::None, "t", "b").is_none());
     }
 
     // --- exhaustive brand coverage in a table-driven test ---

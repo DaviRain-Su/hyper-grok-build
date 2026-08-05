@@ -168,7 +168,7 @@ async fn new_prompt_cancels_in_flight_recap_epoch() {
             let epoch0 = actor.recap_epoch.get();
             assert!(!actor.recap_was_cancelled(epoch0));
 
-            actor.cancel_pending_recap_for_new_prompt();
+            actor.invalidate_side_calls_for_new_prompt();
             assert!(
                 actor.recap_was_cancelled(epoch0),
                 "bumping epoch cancels a recap that captured the prior value"
@@ -197,24 +197,8 @@ async fn queue_input_user_prompt_bumps_recap_epoch() {
 
             let epoch0 = actor.recap_epoch.get();
             let (respond_to, _rx) = tokio::sync::oneshot::channel();
-            actor
-                .queue_input(
-                    vec![],
-                    "user-next".to_string(),
-                    crate::session::plan_mode::PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    false,
-                    None,
-                    /*tool_overrides_update*/ None,
-                    respond_to,
-                    None,
-                    None,
-                )
+            let _ = actor
+                .queue_input(queue_input_request(vec![], "user-next", respond_to))
                 .await;
             assert!(
                 actor.recap_was_cancelled(epoch0),
@@ -237,24 +221,12 @@ async fn queue_input_synthetic_does_not_bump_recap_epoch() {
 
             let epoch0 = actor.recap_epoch.get();
             let (respond_to, _rx) = tokio::sync::oneshot::channel();
-            actor
-                .queue_input(
+            let _ = actor
+                .queue_input(queue_input_request(
                     vec![],
-                    "task-completed-bg-1".to_string(),
-                    crate::session::plan_mode::PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    false,
-                    None,
-                    /*tool_overrides_update*/ None,
+                    "task-completed-bg-1",
                     respond_to,
-                    None,
-                    None,
-                )
+                ))
                 .await;
             assert_eq!(
                 actor.recap_epoch.get(),
@@ -301,7 +273,7 @@ async fn try_commit_recap_cancelled_clears_in_flight_without_watermark() {
             actor.last_recap_main_turn.set(2);
             actor.recap_in_flight.set(true);
             let epoch = actor.recap_epoch.get();
-            actor.cancel_pending_recap_for_new_prompt();
+            actor.invalidate_side_calls_for_new_prompt();
 
             assert!(
                 !actor.try_commit_recap(epoch, 7),
@@ -945,6 +917,178 @@ async fn recap_request_sends_hosted_tools_under_backend_search() {
                 main_turn_specs.len(),
                 "hosted tools augment, not replace, the main turn's function tools"
             );
+        })
+        .await;
+}
+
+// ── Turn-summary task lifecycle (bail / abort-and-respawn) ──────────────
+
+/// A queued follow-up promoted before the post-turn respawn fires is already
+/// running; a snapshot taken now would contain its user message. The entry
+/// gate on `current_prompt_id` bails — that turn's completion re-fires. The
+/// gate also stays inert when the feature is off.
+#[tokio::test(flavor = "current_thread")]
+async fn turn_summary_bails_when_newer_turn_already_running() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _grx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let disabled = std::sync::Arc::new(
+                create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
+            );
+            disabled.restart_turn_summary("pid-off".into());
+            assert!(
+                disabled.turn_summary_task.borrow().is_none(),
+                "feature off: no task spawned"
+            );
+
+            let (gateway_tx, _grx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, mut prx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.turn_summary_enabled = true;
+            let actor = std::sync::Arc::new(actor);
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("pid-next".into());
+
+            actor.restart_turn_summary("pid-done".into());
+
+            assert!(
+                actor.turn_summary_task.borrow().is_none(),
+                "bailed before spawning: the running turn's completion re-fires"
+            );
+            assert!(
+                prx.try_recv().is_err(),
+                "no persistence write for a bailed generation"
+            );
+        })
+        .await;
+}
+
+/// A real user prompt aborts an in-flight summary generation — its result
+/// would describe a conversation the prompt is about to extend. (A newer
+/// completion aborts via `restart_turn_summary` the same way.)
+#[tokio::test(flavor = "current_thread")]
+async fn new_prompt_aborts_in_flight_turn_summary() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _grx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.turn_summary_enabled = true;
+
+            // Stand-in for an in-flight generation: a task parked forever.
+            let task = tokio::task::spawn_local(std::future::pending::<()>());
+            *actor.turn_summary_task.borrow_mut() = Some(task);
+
+            actor.invalidate_side_calls_for_new_prompt();
+
+            assert!(
+                actor.turn_summary_task.borrow().is_none(),
+                "new prompt must abort the in-flight generation"
+            );
+        })
+        .await;
+}
+
+/// Happy path: a successful side-call persists the summary and broadcasts it
+/// transiently, then clears the task slot.
+#[tokio::test(flavor = "current_thread")]
+async fn turn_summary_generate_persists_and_broadcasts() {
+    use xai_grok_test_support::MockInferenceServer;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, mut grx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, mut prx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.turn_summary_enabled = true;
+            let actor = std::sync::Arc::new(actor);
+
+            let server = MockInferenceServer::start().await.unwrap();
+            server.set_response("Fixed the parser race; suite green");
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.base_url = server.url();
+            cfg.api_backend = xai_grok_sampling_types::ApiBackend::Responses;
+            actor.chat_state_handle.update_sampling_config(cfg);
+
+            actor.chat_state_handle.replace_conversation(vec![
+                ConversationItem::system("you are a coding agent"),
+                ConversationItem::user("fix the flaky parser test"),
+                ConversationItem::assistant("patched the race and re-ran the suite"),
+            ]);
+
+            actor.restart_turn_summary("pid-happy".into());
+            assert!(
+                actor.turn_summary_task.borrow().is_some(),
+                "generation task must be registered"
+            );
+
+            // Drive the LocalSet until the task finishes and clears its slot.
+            for _ in 0..200 {
+                if actor.turn_summary_task.borrow().is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                actor.turn_summary_task.borrow().is_none(),
+                "slot must clear when generation finishes"
+            );
+
+            let mut found_persist = false;
+            while let Ok(msg) = prx.try_recv() {
+                if let PersistenceMsg::LastTurnSummary(Some((text, prompt_id))) = msg {
+                    assert_eq!(prompt_id, "pid-happy");
+                    assert!(
+                        text.contains("parser") || text.contains("suite") || !text.is_empty(),
+                        "summary text must be non-empty cleaned model output: {text:?}"
+                    );
+                    found_persist = true;
+                }
+            }
+            assert!(found_persist, "must persist LastTurnSummary with prompt_id");
+
+            let mut found_broadcast = false;
+            while let Ok(msg) = grx.try_recv() {
+                let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg else {
+                    continue;
+                };
+                if args.request.method.as_ref() != "x.ai/session_notification" {
+                    continue;
+                }
+                let value: serde_json::Value =
+                    serde_json::from_str(args.request.params.get()).expect("params json");
+                let update = value.get("update").expect("update object");
+                if update.get("sessionUpdate").and_then(|v| v.as_str()) != Some("last_turn_summary")
+                {
+                    continue;
+                }
+                assert_eq!(
+                    update.get("prompt_id").and_then(|v| v.as_str()),
+                    Some("pid-happy")
+                );
+                let summary = update.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+                assert!(!summary.is_empty(), "broadcast summary must be non-empty");
+                // Transient path must not stamp eventId (reconnect cursor).
+                let meta = value.get("meta");
+                assert!(
+                    meta.and_then(|m| m.get("eventId")).is_none(),
+                    "transient summary must omit eventId: {meta:?}"
+                );
+                found_broadcast = true;
+            }
+            assert!(found_broadcast, "must broadcast LastTurnSummary to gateway");
         })
         .await;
 }

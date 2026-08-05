@@ -23,8 +23,11 @@ const DONE_SENTINEL: &str = "QUESTIONTABDONE";
 const TAB: &[u8] = b"\t";
 /// `BackTab` — the xterm encoding of Shift+Tab.
 const SHIFT_TAB: &[u8] = b"\x1b[Z";
+const RIGHT: &[u8] = b"\x1b[C";
+const ESC: &[u8] = b"\x1b";
 
 const FOCUSED_HINT: &str = "Tab:next answer";
+const PARKED_HINT: &str = "Tab/Space:question";
 
 fn ask_user_question_args() -> String {
     let option =
@@ -111,15 +114,21 @@ fn string_leaves(value: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
-/// Drive a real two-question `ask_user_question` card all the way round its
-/// answer walk, both directions, and submit from where Tab left off.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
-async fn question_tab_cycles_answers() {
+/// Drive the full Tab / Esc / answer-walk contract on a live `ask_user_question`
+/// card. `vim_mode` only changes the seed config — the contract is the same.
+async fn assert_question_tab_contract(vim_mode: bool) {
     let content = ContentController::start().await.expect("start content");
+    if vim_mode {
+        seed_ui_config(&content, "vim_mode = true\nsimple_mode = false");
+    }
+    let call_id = if vim_mode {
+        "call_ask_tab_vim"
+    } else {
+        "call_ask_tab"
+    };
     let _turn = expect_tool_turn(
         &content,
-        "call_ask_tab",
+        call_id,
         "ask_user_question",
         ask_user_question_args(),
     );
@@ -136,6 +145,14 @@ async fn question_tab_cycles_answers() {
     )
     .expect("spawn pager with content");
 
+    let dump = |suffix: &str| {
+        if vim_mode {
+            format!("question_tab_vim_{suffix}")
+        } else {
+            format!("question_tab_{suffix}")
+        }
+    };
+
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
@@ -150,7 +167,63 @@ async fn question_tab_cycles_answers() {
         FIRST_ROWS[0],
         "card opens on the first answer",
     );
-    write_screen_dump_if_requested(&harness, "question_tab_00_card_open");
+    write_screen_dump_if_requested(&harness, &dump("00_card_open"));
+
+    harness.inject_keys(ESC).expect("Esc parks the card");
+    harness
+        .wait_for_text(PARKED_HINT, Duration::from_secs(10))
+        .expect("the bar names the way back into the parked card");
+    assert!(
+        !harness.contains_text(FOCUSED_HINT),
+        "a parked card must not keep advertising keys it will not receive\nscreen:\n{}",
+        harness.screen_contents()
+    );
+    assert!(
+        harness.contains_text(FIRST_ROWS[2]),
+        "the card stays drawn and answerable while parked\nscreen:\n{}",
+        harness.screen_contents()
+    );
+    write_screen_dump_if_requested(&harness, &dump("00b_parked"));
+
+    // Vim mode only: parked j/k are scrollback nav and must not walk the card
+    // behind the pane. (Without vim mode a bare letter focuses the prompt and
+    // types — different path, not part of this contract.)
+    if vim_mode {
+        let parked_cursor = cursor_row(&harness);
+        harness.inject_keys(b"j").expect("parked j");
+        harness.inject_keys(b"k").expect("parked k");
+        assert_eq!(
+            cursor_row(&harness),
+            parked_cursor,
+            "parked j/k must not move the answer cursor\nscreen:\n{}",
+            harness.screen_contents()
+        );
+        assert!(
+            harness.contains_text(PARKED_HINT),
+            "scrollback keeps the keyboard after parked j/k\nscreen:\n{}",
+            harness.screen_contents()
+        );
+    }
+
+    harness.inject_keys(TAB).expect("Tab back into the card");
+    harness
+        .wait_for_text(FOCUSED_HINT, Duration::from_secs(10))
+        .expect("Tab hands the keyboard back");
+    expect_cursor_row(
+        &mut harness,
+        FIRST_ROWS[0],
+        "the walk resumes where it was parked",
+    );
+
+    // Focused j walks answers the same way as Tab — vim mode must not steal it.
+    harness.inject_keys(b"j").expect("focused j");
+    expect_cursor_row(
+        &mut harness,
+        FIRST_ROWS[1],
+        "focused j walks the next answer",
+    );
+    harness.inject_keys(b"k").expect("focused k");
+    expect_cursor_row(&mut harness, FIRST_ROWS[0], "focused k walks back");
 
     harness.inject_keys(b" ").expect("Space marks the answer");
 
@@ -158,32 +231,20 @@ async fn question_tab_cycles_answers() {
         harness.inject_keys(TAB).expect("Tab");
         expect_cursor_row(&mut harness, expected, &format!("Tab #{step}"));
     }
-    write_screen_dump_if_requested(&harness, "question_tab_01_first_question_walked");
+    write_screen_dump_if_requested(&harness, &dump("01_first_question_walked"));
 
-    harness.inject_keys(TAB).expect("Tab into question 2");
-    expect_cursor_row(&mut harness, SECOND_ROWS[0], "Tab crosses into question 2");
-    expect_text(
-        &mut harness,
-        "[2/2]",
-        "question counter follows the answer walk",
-    );
-    write_screen_dump_if_requested(&harness, "question_tab_02_second_question");
-
-    harness.inject_keys(SHIFT_TAB).expect("Shift+Tab back");
-    expect_cursor_row(&mut harness, FIRST_ROWS[3], "Shift+Tab crosses back");
-    harness.inject_keys(TAB).expect("Tab into question 2 again");
-    expect_cursor_row(&mut harness, SECOND_ROWS[0], "and forward again");
-
-    for _ in 0..SECOND_ROWS.len() {
-        harness.inject_keys(TAB).expect("Tab");
-    }
+    harness.inject_keys(TAB).expect("Tab off the last answer");
     expect_cursor_row(
         &mut harness,
         FIRST_ROWS[0],
-        "Tab past the last answer wraps",
+        "Tab past the last answer wraps to the first",
     );
-    expect_text(&mut harness, "[1/2]", "the wrap lands back on question 1");
-    write_screen_dump_if_requested(&harness, "question_tab_03_wrapped_to_first");
+    expect_text(
+        &mut harness,
+        "[1/2]",
+        "the walk never leaves the question on screen",
+    );
+    write_screen_dump_if_requested(&harness, &dump("02_wrapped_to_first"));
     assert!(
         harness.contains_text(FOCUSED_HINT),
         "the card still owns the keyboard after the wrap\nscreen:\n{}",
@@ -193,25 +254,30 @@ async fn question_tab_cycles_answers() {
     harness
         .inject_keys(SHIFT_TAB)
         .expect("Shift+Tab wraps back");
-    expect_cursor_row(&mut harness, SECOND_ROWS[2], "Shift+Tab wraps to the last");
-    expect_text(
+    expect_cursor_row(
         &mut harness,
-        "[2/2]",
-        "the backwards wrap lands on question 2",
+        FIRST_ROWS[3],
+        "before the first answer, Shift+Tab wraps to the last",
     );
-    write_screen_dump_if_requested(&harness, "question_tab_04_wrapped_to_last");
+    expect_text(&mut harness, "[1/2]", "and still inside question 1");
+    write_screen_dump_if_requested(&harness, &dump("03_wrapped_to_last"));
 
-    harness.inject_keys(SHIFT_TAB).expect("Shift+Tab");
+    harness.inject_keys(RIGHT).expect("→ to question 2");
+    expect_cursor_row(&mut harness, SECOND_ROWS[0], "→ crosses into question 2");
+    expect_text(&mut harness, "[2/2]", "→ moves between questions, not Tab");
+    write_screen_dump_if_requested(&harness, &dump("04_second_question"));
+
+    harness.inject_keys(TAB).expect("Tab");
     expect_cursor_row(
         &mut harness,
         SECOND_ROWS[1],
-        "Shift+Tab back onto an answer",
+        "the walk resumes inside question 2",
     );
     harness.inject_keys(b"\r").expect("submit answers");
     harness
         .wait_for_text(DONE_SENTINEL, Duration::from_secs(30))
         .expect("agent turn resumes after the answers");
-    write_screen_dump_if_requested(&harness, "question_tab_99_submitted");
+    write_screen_dump_if_requested(&harness, &dump("99_submitted"));
 
     let mut leaves = Vec::new();
     for body in content.request_bodies() {
@@ -221,7 +287,7 @@ async fn question_tab_cycles_answers() {
         .iter()
         .filter(|leaf| leaf.contains("has answered your questions"))
         .collect();
-    eprintln!("[tool result] {answered:?}");
+    eprintln!("[tool result vim_mode={vim_mode}] {answered:?}");
     for expected in [
         format!("\"{FIRST_QUESTION}\"=\"{}\"", FIRST_ROWS[0]),
         format!("\"{SECOND_QUESTION}\"=\"{}\"", SECOND_ROWS[1]),
@@ -233,4 +299,18 @@ async fn question_tab_cycles_answers() {
     }
 
     harness.quit().expect("clean quit");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
+async fn question_tab_cycles_answers() {
+    assert_question_tab_contract(false).await;
+}
+
+/// Same contract under `[ui].vim_mode = true`: focused j/k walk answers, Esc
+/// parks, parked j/k stay on the scrollback, Tab returns, wrap and submit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
+async fn question_tab_cycles_answers_in_vim_mode() {
+    assert_question_tab_contract(true).await;
 }

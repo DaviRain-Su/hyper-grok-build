@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 
@@ -23,4 +23,16 @@ pub(crate) struct NotificationSender {
     pub gateway_enabled: Arc<AtomicBool>,
     /// Persistence channel for writing updates to disk.
     pub persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
+    pub disk_full: watch::Receiver<bool>,
+}
+
+impl NotificationSender {
+    pub(crate) fn is_disk_full(&self) -> bool {
+        *self.disk_full.borrow()
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn idle_disk_full_rx() -> watch::Receiver<bool> {
+    watch::channel(false).1
 }

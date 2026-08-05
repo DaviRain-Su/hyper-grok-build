@@ -135,7 +135,8 @@ There is **no** “mark completed” command. Row state is derived from the agen
   (same as `/delete`). Hover an idle/done row to swap age for `[✗]` and
   click twice to confirm.
 - In the details view, `/exit` also closes the session (Esc only returns).
-  `/delete` inside an attached agent wipes that session and returns home.
+  `/delete` inside an attached agent wipes that session and returns to the
+  dashboard.
 
 There is no manual complete flag. Use `/exit` to leave a session without
 deleting history.

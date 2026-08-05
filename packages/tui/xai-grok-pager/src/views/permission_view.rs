@@ -22,11 +22,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use xai_grok_workspace::permission::bash_command_splitting::{
     BashCommandHighlights, heredoc_payload_byte_ranges, range_fully_inside,
-    soft_break_offsets_after_operators, split_physical_line_at_soft_breaks,
+    soft_break_offsets_after_operators,
 };
 use xai_grok_workspace::permission::{
-    BashCommandPermission, McpToolPermission, mcp_titleize_segment, mcp_tool_action,
-    mcp_tool_display_name,
+    ALLOW_EDITS_SESSION_OPTION_ID, BashCommandPermission, McpToolPermission, mcp_titleize_segment,
+    mcp_tool_action, mcp_tool_display_name,
 };
 
 use unicode_width::UnicodeWidthStr;
@@ -250,9 +250,9 @@ pub struct PermissionViewState {
     /// prompts, which have dedicated displays.
     pub description: Vec<String>,
 
-    /// Whether the planned-args display is expanded (Ctrl-F toggle).
-    /// Collapsed caps the args at [`MCP_ARGS_COLLAPSED_ROWS`] rows with a
-    /// `... Ctrl-F to expand` indicator.
+    /// Whether the planned-args / bash-command display is expanded (Ctrl-F
+    /// toggle). Collapsed caps each at [`PERMISSION_COLLAPSED_ROWS`] rows
+    /// with a `... Ctrl-F to expand` indicator.
     pub args_expanded: bool,
 
     /// Scroll offset for description area.
@@ -278,16 +278,39 @@ pub struct PermissionViewState {
     pub options_scroll_offset: usize,
 }
 
+/// Exact option id of the scoped bash "Always allow:" row. The pager keys the
+/// ←/→ scope arrows, the `e` pattern editor, and the scope hints off exact
+/// option ids — never off `PermissionOptionKind` alone — so an unrelated
+/// `AllowAlways` option can never receive a scoped-grant action.
+pub const ALLOW_ALWAYS_COMMAND_OPTION_ID: &str = "allow-always-command";
+/// Exact option id of the scoped bash "Never allow:" row. See
+/// [`ALLOW_ALWAYS_COMMAND_OPTION_ID`].
+pub const REJECT_ALWAYS_COMMAND_OPTION_ID: &str = "reject-always-command";
+/// Exact option id of the MCP "Always allow:" row — the ←/→ jump target on
+/// MCP prompts.
+pub const ALLOW_ALWAYS_MCP_OPTION_ID: &str = "allow-always-mcp";
+
 impl PermissionViewState {
     /// Whether the scope selector (← → arrows) is meaningful for this prompt.
     ///
     /// True when:
-    /// - bash: there are 2+ highlighted words to expand/contract between, OR
+    /// - bash: there are 2+ highlighted words to expand/contract between AND
+    ///   the request actually carries a scoped `allow-always-command` /
+    ///   `reject-always-command` row to adjust (stale selection meta without
+    ///   those rows must not advertise arrows), OR
     /// - MCP: the tool name has a `__` separator, so server-scope is reachable.
     pub fn has_adjustable_scope(&self) -> bool {
-        self.bash_highlights
+        let bash_words = self
+            .bash_highlights
             .as_ref()
-            .is_some_and(|h| h.highlighted_words.len() > 1)
+            .is_some_and(|h| h.highlighted_words.len() > 1);
+        let scoped_rows = self.options.iter().any(|o| {
+            matches!(
+                o.option_id.0.as_ref(),
+                ALLOW_ALWAYS_COMMAND_OPTION_ID | REJECT_ALWAYS_COMMAND_OPTION_ID
+            )
+        });
+        (bash_words && scoped_rows)
             || self
                 .mcp_scope
                 .as_ref()
@@ -295,16 +318,83 @@ impl PermissionViewState {
     }
 
     /// Whether this prompt offers the free-form bash pattern editor (`e`): a
-    /// bash command with an `AllowAlways` row to persist the pattern to. The
+    /// bash command with the exact `allow-always-command` row to persist the
+    /// pattern to (the editor's confirm path dispatches through that id). The
     /// height reservation, the render/hint gates, and the `e` key handler must
     /// all use this so they cannot drift (a stale copy would mis-size the
     /// overlay or advertise a key that does nothing).
     pub fn has_editable_bash_pattern(&self) -> bool {
-        self.bash_highlights.is_some()
-            && self
-                .options
-                .iter()
-                .any(|o| o.kind == acp::PermissionOptionKind::AllowAlways)
+        self.bash_highlights.is_some() && self.allow_always_command_idx().is_some()
+    }
+
+    /// Whether `option` is a scoped "don't ask again" row the ←/→ keys adjust
+    /// in place (the cursor stays put there instead of jumping): the exact
+    /// bash allow/never ids, or the MCP allow row on an MCP prompt. Exact-id
+    /// classification keeps the key handler aligned with
+    /// [`Self::has_adjustable_scope`] — a stale `AllowAlways`/`RejectAlways`
+    /// kind alone does not qualify.
+    pub fn is_scoped_option(&self, option: &acp::PermissionOption) -> bool {
+        let id = option.option_id.0.as_ref();
+        if self.mcp_scope.is_some() {
+            id == ALLOW_ALWAYS_MCP_OPTION_ID
+        } else {
+            matches!(
+                id,
+                ALLOW_ALWAYS_COMMAND_OPTION_ID | REJECT_ALWAYS_COMMAND_OPTION_ID
+            )
+        }
+    }
+
+    /// Index of the row the ←/→ keys jump to from a neutral row: the exact
+    /// bash `allow-always-command` row, or `allow-always-mcp` on MCP prompts.
+    /// `None` when no such row exists (e.g. a reject-only option set) — the
+    /// cursor then stays where it is.
+    pub fn scoped_allow_row_idx(&self) -> Option<usize> {
+        let target = if self.mcp_scope.is_some() {
+            ALLOW_ALWAYS_MCP_OPTION_ID
+        } else {
+            ALLOW_ALWAYS_COMMAND_OPTION_ID
+        };
+        self.options
+            .iter()
+            .position(|o| o.option_id.0.as_ref() == target)
+    }
+
+    /// Index of the exact `allow-always-command` row — the only row the bash
+    /// pattern editor may enter on and persist through.
+    pub fn allow_always_command_idx(&self) -> Option<usize> {
+        self.options
+            .iter()
+            .position(|o| o.option_id.0.as_ref() == ALLOW_ALWAYS_COMMAND_OPTION_ID)
+    }
+
+    /// Whether the bash command body wraps past [`PERMISSION_COLLAPSED_ROWS`]
+    /// at `content_w`, making the Ctrl-F expand/collapse toggle meaningful.
+    /// Counts at most one row past the budget — no syntect, no full wrap of a
+    /// huge script — and is independent of the current toggle state so Ctrl-F
+    /// can collapse an expanded view again.
+    pub fn has_collapsible_bash(&self, content_w: usize) -> bool {
+        self.bash_command_raw.as_deref().is_some_and(|raw| {
+            count_raw_bash_rows(raw, content_w, PERMISSION_COLLAPSED_ROWS + 1)
+                > PERMISSION_COLLAPSED_ROWS
+        })
+    }
+
+    /// Whether Ctrl-F has anything to expand/collapse: planned MCP args (the
+    /// JSON payload in `description` — present even when the always-allow
+    /// row is stripped and `mcp_scope` is `None`) or a bash body past the
+    /// collapsed budget. The one gate shared by the key handler and the
+    /// footer hint. Protected-edit prompts also put warning prose in
+    /// `description`, but they carry the session-wide edits row and never a
+    /// bash body, so they must not toggle.
+    pub fn has_collapsible_display(&self, content_w: usize) -> bool {
+        let has_bash_body = self.bash_highlights.is_some() || self.bash_command_raw.is_some();
+        let is_edit_prompt = self
+            .options
+            .iter()
+            .any(|o| o.option_id.0.as_ref() == ALLOW_EDITS_SESSION_OPTION_ID);
+        let mcp_args = !self.description.is_empty() && !has_bash_body && !is_edit_prompt;
+        mcp_args || self.has_collapsible_bash(content_w)
     }
 }
 
@@ -359,13 +449,18 @@ pub fn permission_chrome_height_pub(
 /// Returns the uncapped chrome height. The caller is responsible for
 /// applying a height cap to the overall permission view.
 fn permission_chrome_height(state: &PermissionViewState, content_w: usize) -> u16 {
-    let bash_line_count = bash_display_line_count(state, content_w) as u16;
+    // Bash command body: same `bash_visible_rows` budget as the render, so a
+    // collapsed huge script counts 4 rows + indicator, not its full wrap.
+    let (bash_rows, bash_indicator) = bash_visible_rows(state, content_w);
+    let bash_line_count = bash_rows
+        .saturating_add(bash_indicator as usize)
+        .min(u16::MAX as usize) as u16;
     let mut h: u16 = 1; // vpad top
     if state.subagent_label.is_some() {
         h += 1; // provenance line
     }
     h += 1; // title line
-    h += bash_line_count;
+    h = h.saturating_add(bash_line_count);
     // Planned MCP arguments: same `mcp_args_visible_rows` budget as the
     // render. Clamp before the cast (`as u16` wraps) and saturate the adds
     // so a pathological count can't overflow-panic in debug builds.
@@ -388,8 +483,8 @@ fn permission_chrome_height(state: &PermissionViewState, content_w: usize) -> u1
 ///
 /// Caps at 50% of screen height (min 10, max 80%). The minimum ensures
 /// at least a couple of bash command lines are visible alongside the
-/// option rows. An expanded planned-args display (Ctrl-F) lifts the cap
-/// to the full screen height.
+/// option rows. An expanded planned-args or bash-command display (Ctrl-F)
+/// lifts the cap to the full screen height.
 pub fn permission_view_height(state: &PermissionViewState, screen_h: u16, content_w: usize) -> u16 {
     let chrome_h = permission_chrome_height(state, content_w);
     let options_h = state.options.len() as u16;
@@ -407,10 +502,11 @@ pub fn permission_view_height(state: &PermissionViewState, screen_h: u16, conten
     total.min(cap)
 }
 
-/// Collapsed row budget for the planned-args display, matching the
-/// question tool's `DEFAULT_MAX_CHROME_DESC_LINES`. When truncated, the
-/// last budgeted row is the `... Ctrl-F to expand` indicator.
-pub const MCP_ARGS_COLLAPSED_ROWS: usize = 5;
+/// Collapsed row budget shared by the planned-args display and the bash
+/// command body, matching the question tool's
+/// `DEFAULT_MAX_CHROME_DESC_LINES`. When truncated, the last budgeted row
+/// is the `... Ctrl-F to expand` indicator.
+pub const PERMISSION_COLLAPSED_ROWS: usize = 5;
 
 /// Rows the planned-args display occupies: `(content_rows, show_indicator)`.
 ///
@@ -424,10 +520,43 @@ fn mcp_args_visible_rows(state: &PermissionViewState, content_w: usize) -> (usiz
         .iter()
         .map(|raw| char_wrap_row_count(raw, content_w))
         .sum();
-    if !state.args_expanded && total > MCP_ARGS_COLLAPSED_ROWS {
-        (MCP_ARGS_COLLAPSED_ROWS - 1, true)
+    if !state.args_expanded && total > PERMISSION_COLLAPSED_ROWS {
+        (PERMISSION_COLLAPSED_ROWS - 1, true)
     } else {
         (total, false)
+    }
+}
+
+/// Rows the bash command / MCP tool-name display occupies:
+/// `(content_rows, show_indicator)`.
+///
+/// Bash analogue of [`mcp_args_visible_rows`], sharing the same collapsed
+/// budget. The one row-budget source for the bash body used by chrome
+/// height, render, and mouse hit-testing. Counts wrap rows without syntect;
+/// highlighting preserves text, so the styled render wraps identically.
+fn bash_visible_rows(state: &PermissionViewState, content_w: usize) -> (usize, bool) {
+    if state.bash_highlights.is_some() || state.bash_command_raw.is_some() {
+        let Some(raw) = state.bash_command_raw.as_deref() else {
+            // The display never reconstructs a script from highlight tokens.
+            return (0, false);
+        };
+        if state.args_expanded {
+            return (count_raw_bash_rows(raw, content_w, usize::MAX), false);
+        }
+        // Counting one row past the budget is enough to decide truncation —
+        // a megabyte script is never fully wrapped just to show 4 rows.
+        let capped = count_raw_bash_rows(raw, content_w, PERMISSION_COLLAPSED_ROWS + 1);
+        if capped > PERMISSION_COLLAPSED_ROWS {
+            (PERMISSION_COLLAPSED_ROWS - 1, true)
+        } else {
+            (capped, false)
+        }
+    } else if state.mcp_scope.is_some() {
+        // MCP scope renders as a single line. Themes may differ, but we
+        // know it doesn't wrap because we elide width separately.
+        (1, false)
+    } else {
+        (0, false)
     }
 }
 
@@ -449,27 +578,6 @@ fn char_wrap_row_count(s: &str, width: usize) -> usize {
         cur_empty = false;
     }
     rows
-}
-
-/// Number of wrapped lines the bash/MCP-name display needs (uncapped).
-fn bash_display_line_count(state: &PermissionViewState, content_w: usize) -> usize {
-    if state.bash_highlights.is_some() || state.bash_command_raw.is_some() {
-        build_permission_bash_lines(
-            state.bash_highlights.as_ref(),
-            state.bash_selection_count,
-            state.bash_command_raw.as_deref(),
-            content_w,
-        )
-        .len()
-    } else if let Some(ref scope) = state.mcp_scope {
-        // MCP scope renders as a single line. Themes may differ, but we
-        // know it doesn't wrap because we elide width separately.
-        let _ = content_w;
-        let _ = scope;
-        1
-    } else {
-        0
-    }
 }
 
 // ── Rendering ──────────────────────────────────────────────────────────
@@ -599,21 +707,26 @@ pub fn render_permission_view(
     y += 1;
 
     // Bash command / MCP tool name display: syntax-highlighted and
-    // carefully soft-wrapped. Cap the number of lines so the option rows
-    // always remain visible. Reserve: gap(1) + options + vpad_bottom(1).
+    // carefully soft-wrapped. The row budget is shared with
+    // `permission_chrome_height` via `bash_visible_rows`; a collapsed body
+    // draws only the budgeted rows plus the Ctrl-F indicator, and lines past
+    // the budget are never wrapped or highlighted.
+    let (bash_rows, bash_indicator) = bash_visible_rows(state, content_width as usize);
     let mut bash_lines: Vec<Line<'_>> =
         if state.bash_highlights.is_some() || state.bash_command_raw.is_some() {
             build_permission_bash_lines(
-                state.bash_highlights.as_ref(),
-                state.bash_selection_count,
                 state.bash_command_raw.as_deref(),
                 content_width as usize,
+                bash_rows,
             )
         } else if let Some(ref scope) = state.mcp_scope {
             build_mcp_scope_lines(scope, theme, content_width as usize)
         } else {
             Vec::new()
         };
+    if bash_indicator {
+        bash_lines.push(truncation_indicator_line(theme));
+    }
     // Planned MCP arguments, appended to the same vec so the options
     // visibility cap and trailing ellipsis apply. The row budget is shared
     // with `permission_chrome_height` via `mcp_args_visible_rows`.
@@ -964,98 +1077,25 @@ pub(crate) fn render_bash_command_display_lines(
     command: &str,
     content_width: usize,
 ) -> Vec<Line<'static>> {
-    build_raw_bash_lines(command, content_width)
+    build_raw_bash_lines(command, content_width, usize::MAX)
 }
 
-/// Build the permission-overlay bash command display.
+/// Build the permission-overlay bash command display, at most `max_rows`
+/// wrap rows (the collapsed budget from [`bash_visible_rows`]).
 ///
-/// Prefers the original `raw` command string so spacing, newlines, and
-/// trailing-`\` line continuations survive. Falls back to re-joining
-/// highlight tokens only when raw is missing. Soft-wraps only when a
-/// physical line exceeds `content_width`, preferring breaks at shell
-/// operators (`&&`, `||`, `|`, `;`) over every whitespace boundary.
+/// The body is painted **only** from the original raw command string so
+/// spacing, newlines, comments, and trailing-`\` line continuations survive
+/// exactly as authored. A missing raw command renders no body — the display
+/// never reconstructs a script by space-joining highlight tokens.
 fn build_permission_bash_lines(
-    highlights: Option<&BashCommandHighlights>,
-    selection_count: usize,
     raw: Option<&str>,
     content_width: usize,
+    max_rows: usize,
 ) -> Vec<Line<'static>> {
-    let display = display_command_text(highlights, raw);
-    if display.is_empty() {
-        return Vec::new();
+    match raw {
+        Some(command) => build_raw_bash_lines(command, content_width, max_rows),
+        None => Vec::new(),
     }
-
-    let needs_dim = highlights.is_some_and(|h| {
-        selection_count < h.highlighted_words.len() || !h.prefix.is_empty() || !h.suffix.is_empty()
-    });
-
-    if needs_dim && let Some(h) = highlights {
-        if let Some(ranges) = map_selection_ranges(&display, h, selection_count) {
-            return build_bash_lines_with_selection(&display, &ranges, content_width);
-        }
-        // Mapping onto the raw string failed (token order/shape mismatch).
-        // Do **not** fall through to a fully-bright raw render — that would
-        // drop the selection scope cue. Reconstruct from highlight tokens
-        // and dim by token index instead.
-        return build_bash_lines_from_highlight_tokens(h, selection_count, content_width);
-    }
-
-    build_raw_bash_lines(&display, content_width)
-}
-
-/// Fallback dim path when raw-string token mapping fails: join highlight
-/// tokens with spaces and dim by token selection, then reuse the shared wrap.
-fn build_bash_lines_from_highlight_tokens(
-    h: &BashCommandHighlights,
-    selection_count: usize,
-    content_width: usize,
-) -> Vec<Line<'static>> {
-    let mut full = String::new();
-    let mut ranges: Vec<(usize, usize, bool)> = Vec::new();
-
-    let mut push = |text: &str, selected: bool| {
-        if text.is_empty() {
-            return;
-        }
-        if !full.is_empty() {
-            full.push(' ');
-        }
-        let start = full.len();
-        full.push_str(text);
-        ranges.push((start, full.len(), selected));
-    };
-
-    for t in &h.prefix {
-        push(t, false);
-    }
-    for (i, t) in h.highlighted_words.iter().enumerate() {
-        push(t, i < selection_count);
-    }
-    for t in &h.suffix {
-        push(t, false);
-    }
-
-    if full.is_empty() {
-        return Vec::new();
-    }
-    build_bash_lines_with_selection(&full, &ranges, content_width)
-}
-
-/// Choose the best source text for the bash display.
-///
-/// Raw wins when present (preserves author formatting). Otherwise reconstruct
-/// from highlight tokens with single spaces — last resort only.
-fn display_command_text(highlights: Option<&BashCommandHighlights>, raw: Option<&str>) -> String {
-    if let Some(raw) = raw {
-        let prepared = prepare_bash_display_text(raw);
-        if !prepared.is_empty() {
-            return prepared;
-        }
-    }
-    if let Some(h) = highlights {
-        return reconstruct_from_highlights(h);
-    }
-    String::new()
 }
 
 /// Normalize command text for display without destroying structure.
@@ -1095,58 +1135,38 @@ fn prepare_bash_display_text(command: &str) -> String {
     out
 }
 
-/// Last-resort display when we only have tokenized highlights (no raw script).
-fn reconstruct_from_highlights(h: &BashCommandHighlights) -> String {
-    let mut parts: Vec<&str> =
-        Vec::with_capacity(h.prefix.len() + h.highlighted_words.len() + h.suffix.len());
-    parts.extend(h.prefix.iter().map(String::as_str));
-    parts.extend(h.highlighted_words.iter().map(String::as_str));
-    parts.extend(h.suffix.iter().map(String::as_str));
-    parts.join(" ")
-}
-
-/// Soft-wrap one physical line using tree-sitter-derived break offsets from
-/// the full script. Breaks only at real list/pipeline operators (never
-/// `&&` inside heredocs, quotes, or comments).
+/// Compute the display row string slices for one physical `line`: soft-wraps
+/// at tree-sitter-validated shell operators (`&&` / `||` / `|` / `;`) first,
+/// then quote-aware width wrap within each segment, keeping heredoc payload
+/// lines intact. Every returned slice is a sub-slice of `line` (so a caller
+/// can recover its byte offset via pointer arithmetic), which lets
+/// [`build_raw_bash_lines`] slice already-highlighted spans per row without
+/// ever re-lexing a wrap fragment.
 ///
-/// Continuation rows after an operator soft-break **strip leading whitespace**
-/// so `&&` / `|` do not leave a dangling space on the next display line.
-/// Overlong segments that still exceed width use quote-aware wrapping (do not
-/// break on spaces inside `'...'` / `"..."`), so e.g. `jq '.[] | ...'` stays
-/// intact instead of wrapping at the `|`.
-fn soft_wrap_physical_line(
-    line: &str,
-    line_start: usize,
-    full_breaks: &[usize],
-    heredoc_payload: &[(usize, usize)],
-    content_width: usize,
-) -> Vec<Line<'static>> {
-    highlight_rows(soft_wrap_row_texts(
-        line,
-        line_start,
-        full_breaks,
-        heredoc_payload,
-        content_width,
-    ))
-}
-
-/// Compute the display row string slices for one physical `line`, applying the
-/// same operator-aware + quote-aware wrapping as [`soft_wrap_physical_line`]
-/// but **without** highlighting. Every returned slice is a sub-slice of `line`
-/// (so a caller can recover its byte offset via pointer arithmetic), which lets
-/// the selection-dimming path reuse the identical wrapping decisions.
+/// At most `max_rows` rows are produced, and wrap work stops once the cap is
+/// reached — a collapsed huge one-liner is never fully wrapped, and its
+/// chunk boundaries are discovered lazily rather than materialized. The
+/// capped prefix is identical to the same rows of an uncapped call (packing
+/// is greedy left-to-right).
 fn soft_wrap_row_texts<'a>(
     line: &'a str,
     line_start: usize,
     full_breaks: &[usize],
     heredoc_payload: &[(usize, usize)],
     content_width: usize,
+    max_rows: usize,
 ) -> Vec<&'a str> {
+    if max_rows == 0 {
+        return Vec::new();
+    }
     if content_width == 0 {
         return vec![line];
     }
 
-    if UnicodeWidthStr::width(line) <= content_width {
+    // Bytes bound columns (a char's width never exceeds its UTF-8 length),
+    // so a byte-short line provably fits without any width scan; longer
+    // lines are resolved by the exact per-candidate checks below.
+    if line.len() <= content_width {
         return vec![line];
     }
 
@@ -1157,99 +1177,83 @@ fn soft_wrap_row_texts<'a>(
         return vec![line];
     }
 
-    let chunks = split_physical_line_at_soft_breaks(line, line_start, full_breaks);
+    // Chunk-end boundaries: line-relative operator soft-breaks strictly
+    // inside the line (same filter as the workspace's
+    // `split_physical_line_at_soft_breaks`, whose global offsets arrive
+    // sorted and deduped), then the line end — discovered lazily so a capped
+    // wrap never materializes the chunk list of a huge operator chain.
+    let first_inside = full_breaks.partition_point(|&b| b <= line_start);
+    let mut bounds = full_breaks[first_inside..]
+        .iter()
+        .copied()
+        .take_while(|&b| b < line_end)
+        .map(|b| b - line_start)
+        .filter(|&b| line.is_char_boundary(b))
+        .chain(std::iter::once(line.len()))
+        .peekable();
+
     // No real operators on this line (or parse found none) — quote-aware wrap.
-    if chunks.len() <= 1 {
-        return bash_quote_aware_wrap(line, content_width);
+    if bounds.peek().copied() == Some(line.len()) {
+        return bash_quote_aware_wrap(line, content_width, max_rows);
     }
 
-    // Pack contiguous partitions of `line` into rows that fit the width.
-    // Chunks are contiguous slices, so a packed row is just line[start..end].
-    let mut chunk_starts: Vec<usize> = Vec::with_capacity(chunks.len());
-    {
-        let mut cursor = 0usize;
-        for chunk in &chunks {
-            debug_assert_eq!(&line[cursor..cursor + chunk.len()], *chunk);
-            chunk_starts.push(cursor);
-            cursor += chunk.len();
-        }
-    }
-
-    // Row specs as (start, end) into `line`, then trim for display.
-    let mut row_ranges: Vec<(usize, usize)> = Vec::new();
-    let mut i = 0usize;
-    while i < chunks.len() {
+    // Fused pack+emit: extend each row over whole chunks while it fits,
+    // emit the trimmed row (quote-wrapping a chunk that alone overflows),
+    // and skip the inter-command whitespace before each continuation row.
+    let mut out: Vec<&'a str> = Vec::new();
+    let mut pos = 0usize;
+    let mut first_row = true;
+    while pos < line.len() && out.len() < max_rows {
         // Skip leading whitespace when *starting* a continuation after a
         // previous row — that space belonged between operator and next cmd.
-        let mut start = chunk_starts[i];
-        if !row_ranges.is_empty() {
+        let mut start = pos;
+        if !first_row {
             while start < line.len() && line.as_bytes()[start].is_ascii_whitespace() {
                 start += 1;
             }
-            // Advance i if we skipped entire leading chunks of whitespace.
-            while i < chunks.len() && chunk_starts[i] + chunks[i].len() <= start {
-                i += 1;
+            // Drop boundaries at or before the skipped whitespace.
+            while bounds.peek().is_some_and(|&b| b <= start) {
+                bounds.next();
             }
-            if i >= chunks.len() {
-                break;
-            }
-            // If we partially skipped into the current chunk, use `start`.
-            if chunk_starts[i] < start {
-                // start is inside chunks[i]
-            } else {
-                start = chunk_starts[i];
-            }
-        }
-
-        let mut last_fit = i;
-        let mut j = i;
-        while j < chunks.len() {
-            let end = chunk_starts[j] + chunks[j].len();
-            // Display width from `start` (whitespace-trimmed for continuations).
-            let slice = &line[start..end];
-            if UnicodeWidthStr::width(slice) <= content_width {
-                last_fit = j;
-                j += 1;
-            } else {
+            if start >= line.len() {
                 break;
             }
         }
-        if j == i {
-            // Chunk alone exceeds width — emit rest of this chunk for quote-wrap.
-            let end = chunk_starts[i] + chunks[i].len();
-            row_ranges.push((start, end));
-            i += 1;
-        } else {
-            let end = chunk_starts[last_fit] + chunks[last_fit].len();
-            row_ranges.push((start, end));
-            i = last_fit + 1;
-        }
-    }
+        first_row = false;
 
-    let mut out = Vec::new();
-    for (start, end) in row_ranges {
-        let row = line[start..end].trim_end();
-        // Continuations already had leading ws skipped via `start`; first row
-        // keeps any intentional indent.
-        if UnicodeWidthStr::width(row) <= content_width {
-            out.push(row);
+        let Some(mut end) = bounds.next() else {
+            break;
+        };
+        // Display width from `start` (whitespace-trimmed for continuations).
+        if UnicodeWidthStr::width(&line[start..end]) <= content_width {
+            // Pack subsequent whole chunks while the row still fits.
+            while let Some(&next_end) = bounds.peek() {
+                if UnicodeWidthStr::width(&line[start..next_end]) <= content_width {
+                    end = next_end;
+                    bounds.next();
+                } else {
+                    break;
+                }
+            }
+            // First row keeps any intentional indent; continuations had
+            // leading ws skipped via `start`.
+            out.push(line[start..end].trim_end());
         } else {
-            out.extend(bash_quote_aware_wrap(row, content_width));
+            // Chunk alone exceeds width — quote-wrap the rest of this chunk.
+            let row = line[start..end].trim_end();
+            if UnicodeWidthStr::width(row) <= content_width {
+                out.push(row);
+            } else {
+                out.extend(bash_quote_aware_wrap(
+                    row,
+                    content_width,
+                    max_rows - out.len(),
+                ));
+            }
         }
+        pos = end;
     }
     out
-}
-
-fn highlight_rows<'a, I>(rows: I) -> Vec<Line<'static>>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    rows.into_iter()
-        .map(|row| {
-            let spans = crate::views::tasks_pane::highlight_bash_command(row);
-            Line::from(spans)
-        })
-        .collect()
 }
 
 /// Word-wrap a bash fragment without breaking on whitespace that sits inside
@@ -1259,13 +1263,26 @@ where
 /// inside quotes. If a single unbreakable span (e.g. a long `'...'` literal)
 /// still exceeds `width`, it is emitted as one row (may overflow the panel —
 /// better than splitting `jq '.[] | ...'` mid-expression).
-fn bash_quote_aware_wrap(line: &str, width: usize) -> Vec<&str> {
-    if width == 0 || UnicodeWidthStr::width(line) <= width {
+///
+/// At most `max_rows` rows are produced; the scan returns as soon as the cap
+/// is reached and break points are discovered lazily, so a huge unquoted
+/// line costs only the candidate rows actually considered — never a
+/// full-line width scan or a full break-offset allocation.
+fn bash_quote_aware_wrap(line: &str, width: usize, max_rows: usize) -> Vec<&str> {
+    if max_rows == 0 {
+        return Vec::new();
+    }
+    // Bytes bound columns (a char's width never exceeds its UTF-8 length),
+    // so a byte-short fragment provably fits without any width scan; longer
+    // fragments are resolved by the exact per-candidate checks below.
+    if width == 0 || line.len() <= width {
         return vec![line];
     }
 
-    let break_after = quote_aware_break_points(line);
-    if break_after.is_empty() {
+    // Lazy candidate stream: quote-aware break offsets, then EOL. Nothing
+    // past the last consumed candidate is ever scanned.
+    let mut break_points = QuoteAwareBreakPoints::new(line).peekable();
+    if break_points.peek().is_none() {
         // Nowhere safe to break (entire line is one quoted span, or no spaces).
         return vec![line];
     }
@@ -1275,10 +1292,9 @@ fn bash_quote_aware_wrap(line: &str, width: usize) -> Vec<&str> {
     let mut last_break = 0usize; // exclusive end of content if we break here
 
     // Consider each break point as a candidate end for the current row.
-    let mut candidates = break_after;
-    candidates.push(line.len()); // allow ending at EOL
+    let candidates = break_points.chain(std::iter::once(line.len())); // allow ending at EOL
 
-    for &b in &candidates {
+    for b in candidates {
         if b <= row_start {
             continue;
         }
@@ -1292,6 +1308,9 @@ fn bash_quote_aware_wrap(line: &str, width: usize) -> Vec<&str> {
             let row = line[row_start..last_break].trim_end();
             if !row.is_empty() {
                 rows.push(row);
+                if rows.len() >= max_rows {
+                    return rows;
+                }
             }
             // Next row starts after whitespace at last_break.
             row_start = last_break;
@@ -1310,6 +1329,9 @@ fn bash_quote_aware_wrap(line: &str, width: usize) -> Vec<&str> {
                     let row = line[row_start..force_end].trim_end();
                     if !row.is_empty() {
                         rows.push(row);
+                        if rows.len() >= max_rows {
+                            return rows;
+                        }
                     }
                     row_start = force_end;
                     while row_start < line.len() && line.as_bytes()[row_start].is_ascii_whitespace()
@@ -1324,6 +1346,9 @@ fn bash_quote_aware_wrap(line: &str, width: usize) -> Vec<&str> {
             let row = line[row_start..b].trim_end();
             if !row.is_empty() {
                 rows.push(row);
+                if rows.len() >= max_rows {
+                    return rows;
+                }
             }
             row_start = b;
             while row_start < line.len() && line.as_bytes()[row_start].is_ascii_whitespace() {
@@ -1332,7 +1357,7 @@ fn bash_quote_aware_wrap(line: &str, width: usize) -> Vec<&str> {
             last_break = row_start;
         }
     }
-    if row_start < line.len() {
+    if row_start < line.len() && rows.len() < max_rows {
         let row = line[row_start..].trim_end();
         if !row.is_empty() {
             rows.push(row);
@@ -1341,75 +1366,103 @@ fn bash_quote_aware_wrap(line: &str, width: usize) -> Vec<&str> {
     if rows.is_empty() { vec![line] } else { rows }
 }
 
-/// Byte offsets at the *start* of whitespace runs that are safe soft-wrap
-/// points (outside single/double quotes). The caller ends the current row at
-/// this offset (trimming the run) and skips the whitespace before the next
-/// row. Does not include offsets inside quotes.
-fn quote_aware_break_points(line: &str) -> Vec<usize> {
-    let bytes = line.as_bytes();
-    let mut breaks = Vec::new();
-    let mut i = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_single {
-            if c == b'\'' {
-                in_single = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_double {
-            if c == b'\\' && i + 1 < bytes.len() {
-                i += 2; // skip escape
-                continue;
-            }
-            if c == b'"' {
-                in_double = false;
-            }
-            i += 1;
-            continue;
-        }
-        match c {
-            b'\'' => {
-                in_single = true;
-                i += 1;
-            }
-            b'"' => {
-                in_double = true;
-                i += 1;
-            }
-            b if b.is_ascii_whitespace() => {
-                // Consume the whole whitespace run; break *after* it so the
-                // next row starts at non-ws (caller also trims).
-                let start = i;
-                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                    i += 1;
-                }
-                // Prefer breaking after the whitespace (start of next token).
-                // Also allow break at end of prior token by recording `start`
-                // so the previous row can end before the spaces.
-                if start > 0 {
-                    breaks.push(start);
-                }
-            }
-            _ => i += 1,
-        }
-    }
-    breaks.dedup();
-    breaks
+/// Lazy iterator over byte offsets at the *start* of whitespace runs that
+/// are safe soft-wrap points (outside single/double quotes). The caller ends
+/// the current row at this offset (trimming the run) and skips the
+/// whitespace before the next row. Offsets inside quotes are never yielded;
+/// yields are strictly increasing.
+///
+/// Lazy so a capped [`bash_quote_aware_wrap`] never scans (or allocates)
+/// break points past the ones its visible rows actually consume.
+struct QuoteAwareBreakPoints<'a> {
+    bytes: &'a [u8],
+    i: usize,
+    in_single: bool,
+    in_double: bool,
 }
 
-/// Build syntax-highlighted lines for a (possibly multi-line) bash command.
+impl<'a> QuoteAwareBreakPoints<'a> {
+    fn new(line: &'a str) -> Self {
+        Self {
+            bytes: line.as_bytes(),
+            i: 0,
+            in_single: false,
+            in_double: false,
+        }
+    }
+}
+
+impl Iterator for QuoteAwareBreakPoints<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        while self.i < self.bytes.len() {
+            let c = self.bytes[self.i];
+            if self.in_single {
+                if c == b'\'' {
+                    self.in_single = false;
+                }
+                self.i += 1;
+                continue;
+            }
+            if self.in_double {
+                if c == b'\\' && self.i + 1 < self.bytes.len() {
+                    self.i += 2; // skip escape
+                    continue;
+                }
+                if c == b'"' {
+                    self.in_double = false;
+                }
+                self.i += 1;
+                continue;
+            }
+            match c {
+                b'\'' => {
+                    self.in_single = true;
+                    self.i += 1;
+                }
+                b'"' => {
+                    self.in_double = true;
+                    self.i += 1;
+                }
+                b if b.is_ascii_whitespace() => {
+                    // Consume the whole whitespace run; break *after* it so
+                    // the next row starts at non-ws (caller also trims).
+                    let start = self.i;
+                    while self.i < self.bytes.len() && self.bytes[self.i].is_ascii_whitespace() {
+                        self.i += 1;
+                    }
+                    // Prefer breaking after the whitespace (start of next
+                    // token); `start` lets the previous row end before it.
+                    if start > 0 {
+                        return Some(start);
+                    }
+                }
+                _ => self.i += 1,
+            }
+        }
+        None
+    }
+}
+
+/// Build syntax-highlighted lines for a (possibly multi-line) bash command,
+/// stopping after `max_rows` wrap rows.
 ///
-/// Preserves intentional newlines / `\` continuations. Soft-wraps overlong
-/// physical lines at tree-sitter-validated shell operators (`&&` / `||` /
-/// `|` / `;`), then quote-aware width wrap within each segment.
-fn build_raw_bash_lines(command: &str, content_width: usize) -> Vec<Line<'static>> {
+/// Preserves intentional newlines / `\` continuations. Uses **one** stateful
+/// shell highlighter across all physical lines (so heredocs, open quotes, and
+/// continuations keep their lexer state), advanced exactly once per physical
+/// `\n` line — in order, and only until `max_rows` rows exist, so a collapsed
+/// huge script is never fully highlighted. Overlong lines soft-wrap at
+/// tree-sitter-validated shell operators (`&&` / `||` / `|` / `;`), then
+/// quote-aware width wrap within each segment — wrap rows are sliced out of
+/// the already-highlighted spans and are never re-lexed.
+fn build_raw_bash_lines(
+    command: &str,
+    content_width: usize,
+    max_rows: usize,
+) -> Vec<Line<'static>> {
     let text = prepare_bash_display_text(command);
-    if text.is_empty() {
+    if text.is_empty() || max_rows == 0 {
         return Vec::new();
     }
 
@@ -1418,301 +1471,131 @@ fn build_raw_bash_lines(command: &str, content_width: usize) -> Vec<Line<'static
     let full_breaks = soft_break_offsets_after_operators(&text);
     let heredoc_payload = heredoc_payload_byte_ranges(&text);
 
+    let syntect = crate::syntax::get_syntect();
+    let fallback = Style::default().fg(Theme::current().command);
+    let grammar = if cfg!(windows) { "powershell" } else { "bash" };
+    let mut hl = syntect
+        .highlight_lines_for_token(grammar)
+        .or_else(|| syntect.highlight_lines_for_token("bash"));
+
     let mut out = Vec::new();
     let mut offset = 0usize;
     for (idx, physical) in text.split('\n').enumerate() {
+        // Row budget filled — skip highlighting the rest of the script.
+        if out.len() >= max_rows {
+            break;
+        }
         if idx > 0 {
             offset += 1; // the '\n'
         }
-        out.extend(soft_wrap_physical_line(
+        // Advance the shared lexer state exactly once per physical line —
+        // blank lines included, so multi-line constructs stay in sync.
+        let spans = crate::syntax::highlight_line(physical, &mut hl, syntect, fallback);
+        if physical.is_empty() {
+            out.push(Line::default());
+            continue;
+        }
+        debug_assert_eq!(
+            spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
+            physical,
+            "highlight spans must flatten back to the physical line"
+        );
+        // Cap-aware wrap: only the rows still inside the budget are produced
+        // and sliced, even within one huge physical line.
+        for row in soft_wrap_row_texts(
             physical,
             offset,
             &full_breaks,
             &heredoc_payload,
             content_width,
-        ));
+            max_rows - out.len(),
+        ) {
+            // Rows are sub-slices of `physical`; recover the byte range.
+            let start = (row.as_ptr() as usize) - (physical.as_ptr() as usize);
+            out.push(Line::from(slice_highlighted_spans(
+                &spans,
+                start,
+                start + row.len(),
+            )));
+        }
         offset += physical.len();
     }
     out
 }
 
-/// Map highlight selection onto byte ranges in the display string.
-///
-/// Walks tokens in order (prefix → highlighted_words → suffix), locating each
-/// in the display text while skipping whitespace and `\`-newline continuations.
-/// Returns `None` if any token cannot be found (caller falls back to undimmed).
-fn map_selection_ranges(
-    display: &str,
-    h: &BashCommandHighlights,
-    selection_count: usize,
-) -> Option<Vec<(usize, usize, bool)>> {
-    let mut ranges = Vec::new();
-    let mut pos = 0usize;
-
-    for token in &h.prefix {
-        let (start, end) = find_next_token(display, pos, token)?;
-        ranges.push((start, end, false));
-        pos = end;
+/// Wrap-row count [`build_raw_bash_lines`] would produce, without syntect —
+/// same prepare/parse/soft-wrap pipeline, capped at exactly `max_rows` (the
+/// wrap itself stops at the remaining budget, even inside one huge physical
+/// line).
+fn count_raw_bash_rows(command: &str, content_width: usize, max_rows: usize) -> usize {
+    let text = prepare_bash_display_text(command);
+    if text.is_empty() {
+        return 0;
     }
-    for (i, token) in h.highlighted_words.iter().enumerate() {
-        let (start, end) = find_next_token(display, pos, token)?;
-        ranges.push((start, end, i < selection_count));
-        pos = end;
-    }
-    for token in &h.suffix {
-        let (start, end) = find_next_token(display, pos, token)?;
-        ranges.push((start, end, false));
-        pos = end;
-    }
-
-    Some(ranges)
-}
-
-/// Skip whitespace and shell line-continuations (`\` + newline).
-fn skip_ws_and_continuations(s: &str, mut i: usize) -> usize {
-    let bytes = s.as_bytes();
-    while i < bytes.len() {
-        let c = s[i..].chars().next().expect("i on char boundary");
-        if c.is_whitespace() {
-            i += c.len_utf8();
-            continue;
-        }
-        if c == '\\' {
-            let after = i + 1;
-            // `\` followed by optional horizontal ws then a newline = continuation
-            let mut j = after;
-            while j < bytes.len() {
-                let ch = s[j..].chars().next().expect("j on char boundary");
-                if ch == ' ' || ch == '\t' {
-                    j += ch.len_utf8();
-                    continue;
-                }
-                if ch == '\n' {
-                    i = j + 1;
-                    break;
-                }
-                // Not a line continuation.
-                return i;
-            }
-            if j >= bytes.len() {
-                return i;
-            }
-            continue;
-        }
-        break;
-    }
-    i
-}
-
-/// Locate `token` at the next *in-order* shell position after `from`.
-///
-/// Skips whitespace, line-continuations, and bare list/pipeline operators
-/// (`&&` `||` `|` `;`) that often sit between highlight tokens without being
-/// part of the highlight list themselves. Does **not** free-scan the rest of
-/// the string — a forward substring search would bind the wrong occurrence
-/// (e.g. `test` inside `latest`).
-fn find_next_token(display: &str, from: usize, token: &str) -> Option<(usize, usize)> {
-    if token.is_empty() {
-        return None;
-    }
-    // When the highlight token *is* an operator (e.g. prefix includes "&&"),
-    // do not skip past operators — only skip whitespace/continuations.
-    let i = if is_shell_op_token(token) {
-        skip_ws_and_continuations(display, from)
-    } else {
-        skip_ws_ops_and_continuations(display, from)
-    };
-    if i >= display.len() {
-        return None;
-    }
-    let end = match_token_at(display, i, token)?;
-    Some((i, end))
-}
-
-fn is_shell_op_token(token: &str) -> bool {
-    matches!(token, "&&" | "||" | "|" | ";")
-}
-
-/// Skip whitespace, `\`-newline continuations, and shell list/pipeline
-/// operators that are not themselves mapped highlight tokens.
-fn skip_ws_ops_and_continuations(s: &str, mut i: usize) -> usize {
-    loop {
-        i = skip_ws_and_continuations(s, i);
-        if i >= s.len() {
-            return i;
-        }
-        let rest = &s[i..];
-        if rest.starts_with("&&") || rest.starts_with("||") {
-            i += 2;
-            continue;
-        }
-        if rest.starts_with('|') || rest.starts_with(';') {
-            i += 1;
-            continue;
-        }
-        return i;
-    }
-}
-
-fn match_token_at(display: &str, i: usize, token: &str) -> Option<usize> {
-    if !token_start_boundary(display, i) {
-        return None;
-    }
-    let rest = &display[i..];
-    // Bare token
-    if rest.starts_with(token) {
-        let end = i + token.len();
-        if token_end_boundary(display, end) {
-            return Some(end);
-        }
-    }
-    // Double-quoted (parser stores unquoted content for simple strings)
-    let dq = format!("\"{token}\"");
-    if rest.starts_with(&dq) {
-        let end = i + dq.len();
-        if token_end_boundary(display, end) {
-            return Some(end);
-        }
-    }
-    // Single-quoted
-    let sq = format!("'{token}'");
-    if rest.starts_with(&sq) {
-        let end = i + sq.len();
-        if token_end_boundary(display, end) {
-            return Some(end);
-        }
-    }
-    None
-}
-
-fn token_start_boundary(display: &str, i: usize) -> bool {
-    if i == 0 {
-        return true;
-    }
-    let c = display[..i]
-        .chars()
-        .next_back()
-        .expect("i on char boundary");
-    c.is_whitespace()
-        || matches!(
-            c,
-            '&' | '|' | ';' | '<' | '>' | '(' | ')' | '`' | '\\' | '=' | '"' | '\''
-        )
-}
-
-fn token_end_boundary(display: &str, end: usize) -> bool {
-    if end >= display.len() {
-        return true;
-    }
-    let c = display[end..].chars().next().expect("end on char boundary");
-    c.is_whitespace() || matches!(c, '&' | '|' | ';' | '<' | '>' | '(' | ')' | '`' | '\\')
-}
-
-/// Highlight each display row and apply selection dimming by global offset.
-///
-/// Rows are produced by the **same** operator-aware + quote-aware wrapping as
-/// the undimmed path ([`soft_wrap_row_texts`]), so a partially-selected command
-/// (the common overlay state — `default_scope_count` selects only a couple of
-/// tokens) wraps identically to a fully-selected one: `jq '.[] | ...'` is not
-/// split inside its quotes and operators do not leave dangling continuation
-/// rows. Each row is highlighted independently and dimmed per character using
-/// its byte offset back into `display`.
-fn build_bash_lines_with_selection(
-    display: &str,
-    ranges: &[(usize, usize, bool)],
-    content_width: usize,
-) -> Vec<Line<'static>> {
-    let is_pos_selected = |pos: usize| -> bool {
-        ranges
-            .iter()
-            .find(|(start, end, _)| pos >= *start && pos < *end)
-            .map(|(_, _, sel)| *sel)
-            .unwrap_or_else(|| {
-                ranges
-                    .iter()
-                    .rfind(|(_, end, _)| *end <= pos)
-                    .is_some_and(|(_, _, sel)| *sel)
-            })
-    };
-
-    let full_breaks = soft_break_offsets_after_operators(display);
-    let heredoc_payload = heredoc_payload_byte_ranges(display);
-
-    let mut out = Vec::new();
+    let full_breaks = soft_break_offsets_after_operators(&text);
+    let heredoc_payload = heredoc_payload_byte_ranges(&text);
+    let mut rows = 0usize;
     let mut offset = 0usize;
-    for (line_idx, physical) in display.split('\n').enumerate() {
-        if line_idx > 0 {
+    for (idx, physical) in text.split('\n').enumerate() {
+        if rows >= max_rows {
+            return rows;
+        }
+        if idx > 0 {
             offset += 1; // the '\n'
         }
-        let line_start = offset;
-
-        // Wrap this physical line into display rows using the identical logic
-        // as the undimmed path. Every row is a sub-slice of `physical`, so its
-        // start offset is recoverable via pointer arithmetic.
-        for row in soft_wrap_row_texts(
-            physical,
-            line_start,
-            &full_breaks,
-            &heredoc_payload,
-            content_width,
-        ) {
-            let row_start_in_physical = (row.as_ptr() as usize) - (physical.as_ptr() as usize);
-            let row_global_start = line_start + row_start_in_physical;
-            out.push(highlight_row_with_dim(
-                row,
-                row_global_start,
-                &is_pos_selected,
-            ));
+        if physical.is_empty() {
+            rows += 1;
+        } else {
+            rows += soft_wrap_row_texts(
+                physical,
+                offset,
+                &full_breaks,
+                &heredoc_payload,
+                content_width,
+                max_rows - rows,
+            )
+            .len();
         }
-        offset = line_start + physical.len();
+        offset += physical.len();
+    }
+    rows
+}
+
+/// Slice already-highlighted spans down to the byte range `[start, end)` of
+/// the physical line they were produced from, preserving each span's style.
+///
+/// Boundaries come from `&str` sub-slices of that same line, so they are
+/// always char-aligned; a mid-char boundary would indicate a broken caller
+/// invariant and the affected span is skipped rather than panicking.
+fn slice_highlighted_spans(
+    spans: &[Span<'static>],
+    start: usize,
+    end: usize,
+) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    for span in spans {
+        let span_start = pos;
+        let span_end = pos + span.content.len();
+        pos = span_end;
+        if span_end <= start {
+            continue;
+        }
+        if span_start >= end {
+            break;
+        }
+        let lo = start.max(span_start) - span_start;
+        let hi = end.min(span_end) - span_start;
+        if lo >= hi {
+            continue;
+        }
+        let Some(slice) = span.content.get(lo..hi) else {
+            debug_assert!(false, "row boundary off a char boundary");
+            continue;
+        };
+        out.push(Span::styled(slice.to_owned(), span.style));
     }
     out
-}
-
-/// Syntax-highlight a single display `row` and overlay `Modifier::DIM` on
-/// characters whose global byte offset (`global_start + local`) is not selected.
-fn highlight_row_with_dim(
-    row: &str,
-    global_start: usize,
-    is_pos_selected: &impl Fn(usize) -> bool,
-) -> Line<'static> {
-    let hl_spans = crate::views::tasks_pane::highlight_bash_command(row);
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut pos = 0usize;
-    for span in hl_spans {
-        let text = span.content.into_owned();
-        let base_style = span.style;
-        let mut i = 0;
-        while i < text.len() {
-            let selected = is_pos_selected(global_start + pos + i);
-            let mut j = i + 1;
-            while j < text.len() && is_pos_selected(global_start + pos + j) == selected {
-                j += 1;
-            }
-            let (i_aligned, j_aligned) = (snap_char(&text, i), snap_char(&text, j));
-            if j_aligned > i_aligned {
-                let slice = text[i_aligned..j_aligned].to_owned();
-                let style = if selected {
-                    base_style
-                } else {
-                    base_style.add_modifier(Modifier::DIM)
-                };
-                spans.push(Span::styled(slice, style));
-            }
-            i = j;
-        }
-        pos += text.len();
-    }
-    Line::from(spans)
-}
-
-/// Round a byte index down to the nearest UTF-8 char boundary.
-fn snap_char(s: &str, idx: usize) -> usize {
-    let mut i = idx.min(s.len());
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
 }
 
 /// Render the MCP tool name as a single line with the in-scope segment
@@ -1778,8 +1661,9 @@ fn build_mcp_args_lines(
     out
 }
 
-/// The `... Ctrl-F to expand` indicator line for a collapsed args display.
-/// Styling matches the question tool's truncation indicator.
+/// The `... Ctrl-F to expand` indicator line for a collapsed args or
+/// bash-command display. Styling matches the question tool's truncation
+/// indicator.
 fn truncation_indicator_line(theme: &Theme) -> Line<'static> {
     let style = Style::default().fg(theme.gray).bg(theme.bg_light);
     Line::from(vec![
@@ -2630,12 +2514,12 @@ mod tests {
         assert_eq!(mcp_args_visible_rows(&state, 80), (50, false));
         // Exactly at the budget: no truncation, no indicator.
         state.args_expanded = false;
-        state.description = (0..MCP_ARGS_COLLAPSED_ROWS)
+        state.description = (0..PERMISSION_COLLAPSED_ROWS)
             .map(|i| format!("l{i}"))
             .collect();
         assert_eq!(
             mcp_args_visible_rows(&state, 80),
-            (MCP_ARGS_COLLAPSED_ROWS, false)
+            (PERMISSION_COLLAPSED_ROWS, false)
         );
     }
 
@@ -2654,6 +2538,311 @@ mod tests {
             expanded > screen_h / 2 && expanded <= screen_h,
             "expanded view may grow past 50% up to the screen: {expanded}"
         );
+    }
+
+    /// Bash prompt whose script wraps to 25 rows at width 80 — well past the
+    /// collapsed budget.
+    fn long_bash_state() -> PermissionViewState {
+        let mut state = empty_view_state(None);
+        state.title = "Allow command?".to_string();
+        state.bash_command_raw = Some(
+            (0..25)
+                .map(|i| format!("echo line{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        state.options = vec![acp::PermissionOption::new(
+            acp::PermissionOptionId::new(Arc::from("allow-once")),
+            "Yes, proceed".to_owned(),
+            acp::PermissionOptionKind::AllowOnce,
+        )];
+        state
+    }
+
+    #[test]
+    fn bash_visible_rows_budget_and_boundary() {
+        let mut state = long_bash_state();
+        // 25 one-row lines, collapsed: 4 content rows + indicator.
+        assert_eq!(bash_visible_rows(&state, 80), (4, true));
+        // Expanded: everything, no indicator.
+        state.args_expanded = true;
+        assert_eq!(bash_visible_rows(&state, 80), (25, false));
+        // Exactly at the budget: no truncation, no indicator.
+        state.args_expanded = false;
+        state.bash_command_raw = Some(
+            (0..PERMISSION_COLLAPSED_ROWS)
+                .map(|i| format!("echo l{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        assert_eq!(
+            bash_visible_rows(&state, 80),
+            (PERMISSION_COLLAPSED_ROWS, false)
+        );
+    }
+
+    #[test]
+    fn has_collapsible_bash_thresholds() {
+        let mut state = long_bash_state();
+        assert!(state.has_collapsible_bash(80));
+        // Independent of the toggle so Ctrl-F can collapse again.
+        state.args_expanded = true;
+        assert!(state.has_collapsible_bash(80));
+        // Width-driven wrapping counts too, not just physical lines.
+        state.args_expanded = false;
+        state.bash_command_raw = Some("echo ".repeat(40));
+        assert!(state.has_collapsible_bash(10));
+        assert!(!state.has_collapsible_bash(400));
+        // Short or missing script: nothing to collapse.
+        state.bash_command_raw = Some("echo short".into());
+        assert!(!state.has_collapsible_bash(80));
+        state.bash_command_raw = None;
+        assert!(!state.has_collapsible_bash(80));
+    }
+
+    #[test]
+    fn render_collapses_long_bash_with_ctrl_f_indicator() {
+        // Collapsed: 4 content rows + indicator, options visible.
+        let state = long_bash_state();
+        let text = render_to_text(&state, Rect::new(0, 0, 80, 30));
+        assert!(text.contains("echo line3"), "4th content row:\n{text}");
+        assert!(
+            !text.contains("echo line4"),
+            "5th row must be the indicator:\n{text}"
+        );
+        assert!(
+            text.contains("... Ctrl-F to expand"),
+            "indicator missing:\n{text}"
+        );
+        assert!(
+            text.contains("Yes, proceed"),
+            "options row missing:\n{text}"
+        );
+    }
+
+    #[test]
+    fn render_short_bash_has_no_ctrl_f_indicator() {
+        let mut state = long_bash_state();
+        state.bash_command_raw = Some("echo a\necho b".into());
+        let text = render_to_text(&state, Rect::new(0, 0, 80, 30));
+        assert!(
+            text.contains("echo a") && text.contains("echo b"),
+            "full short script must render:\n{text}"
+        );
+        assert!(
+            !text.contains("Ctrl-F to expand"),
+            "no indicator within the budget:\n{text}"
+        );
+    }
+
+    #[test]
+    fn render_expanded_bash_shows_deep_rows_without_indicator() {
+        let mut state = long_bash_state();
+        state.args_expanded = true;
+        let text = render_to_text(&state, Rect::new(0, 0, 80, 30));
+        assert!(
+            !text.contains("Ctrl-F to expand"),
+            "no indicator when expanded:\n{text}"
+        );
+        assert!(
+            text.contains("echo line20"),
+            "expanded view must show deep rows:\n{text}"
+        );
+        assert!(
+            text.contains("Yes, proceed"),
+            "options row missing:\n{text}"
+        );
+    }
+
+    #[test]
+    fn collapsed_long_bash_chrome_uses_the_budget_not_the_full_wrap() {
+        let mut state = long_bash_state();
+        // vpad(1) + title(1) + 4 budgeted rows + indicator(1) + gap(1).
+        assert_eq!(permission_chrome_height(&state, 80), 8);
+        // Expanded: the full 25-row wrap counts.
+        state.args_expanded = true;
+        assert_eq!(permission_chrome_height(&state, 80), 3 + 25);
+    }
+
+    #[test]
+    fn expanded_bash_lifts_the_view_height_cap() {
+        let mut state = long_bash_state();
+        let screen_h = 40;
+        let collapsed = permission_view_height(&state, screen_h, 80);
+        assert!(
+            collapsed <= screen_h / 2,
+            "collapsed view respects the 50% cap: {collapsed}"
+        );
+        state.args_expanded = true;
+        let expanded = permission_view_height(&state, screen_h, 80);
+        assert!(
+            expanded > screen_h / 2 && expanded <= screen_h,
+            "expanded view may grow past 50% up to the screen: {expanded}"
+        );
+    }
+
+    #[test]
+    fn build_raw_bash_lines_stops_at_max_rows() {
+        let script = (0..100)
+            .map(|i| format!("echo line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rows = build_raw_bash_lines(&script, 80, 4);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(row_text(&rows[3]), "echo line3");
+        assert!(build_raw_bash_lines(&script, 80, 0).is_empty());
+    }
+
+    #[test]
+    fn count_raw_bash_rows_matches_build_and_stops_early() {
+        // The no-syntect counter must agree with the styled builder on
+        // operator soft-breaks, blank lines, and heredoc bodies.
+        let script = "echo one && echo two\n\ncat <<EOF\nbody line stays intact here\nEOF";
+        for w in [10usize, 20, 80] {
+            assert_eq!(
+                count_raw_bash_rows(script, w, usize::MAX),
+                build_raw_bash_lines(script, w, usize::MAX).len(),
+                "width {w}"
+            );
+        }
+        // Capped counting stops at the budget instead of wrapping everything.
+        let long: String = (0..50)
+            .map(|i| format!("echo line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(count_raw_bash_rows(&long, 80, 6), 6);
+    }
+
+    #[test]
+    fn soft_wrap_row_texts_respects_max_rows() {
+        // Quote-aware path: the capped result is a prefix of the uncapped one.
+        let line = "aa bb cc dd ee ff gg hh";
+        let breaks = soft_break_offsets_after_operators(line);
+        let all = soft_wrap_row_texts(line, 0, &breaks, &[], 5, usize::MAX);
+        assert!(all.len() > 3, "expected several rows, got {all:?}");
+        let capped = soft_wrap_row_texts(line, 0, &breaks, &[], 5, 3);
+        assert_eq!(capped.len(), 3);
+        assert_eq!(&all[..3], &capped[..]);
+        assert!(soft_wrap_row_texts(line, 0, &breaks, &[], 5, 0).is_empty());
+
+        // Operator-packed path caps the same way.
+        let op_line = "echo a && echo b && echo c && echo d && echo e";
+        let op_breaks = soft_break_offsets_after_operators(op_line);
+        let op_all = soft_wrap_row_texts(op_line, 0, &op_breaks, &[], 10, usize::MAX);
+        assert!(op_all.len() > 2, "expected several rows, got {op_all:?}");
+        let op_capped = soft_wrap_row_texts(op_line, 0, &op_breaks, &[], 10, 2);
+        assert_eq!(op_capped.len(), 2);
+        assert_eq!(&op_all[..2], &op_capped[..]);
+    }
+
+    #[test]
+    fn collapsed_budget_caps_wrap_rows_inside_one_physical_line() {
+        // One huge physical line: the collapsed count/build paths must stop
+        // at the budget instead of wrapping (and highlighting) all of it.
+        let script = "echo ".repeat(10_000);
+        let rows = build_raw_bash_lines(&script, 10, 4);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            count_raw_bash_rows(&script, 10, PERMISSION_COLLAPSED_ROWS + 1),
+            PERMISSION_COLLAPSED_ROWS + 1
+        );
+
+        // The capped wrap stops right after the last visible row: rows are
+        // sub-slices, so the consumed prefix is measurable by offset.
+        let line = script.trim_end();
+        let capped = soft_wrap_row_texts(line, 0, &[], &[], 10, 4);
+        assert_eq!(capped.len(), 4);
+        let last = capped.last().unwrap();
+        let consumed = (last.as_ptr() as usize - line.as_ptr() as usize) + last.len();
+        assert!(
+            consumed * 100 < line.len(),
+            "capped wrap consumed {consumed} of {} bytes",
+            line.len()
+        );
+
+        let mut state = empty_view_state(None);
+        state.bash_command_raw = Some(script);
+        assert_eq!(bash_visible_rows(&state, 10), (4, true));
+        assert!(state.has_collapsible_bash(10));
+    }
+
+    #[test]
+    fn quote_aware_break_points_are_discovered_lazily() {
+        // The break-point scan must advance only as far as the consumed
+        // candidates — a capped wrap never walks (or allocates) the rest of
+        // a megabyte one-liner.
+        let line = "echo ".repeat(10_000);
+        let mut it = QuoteAwareBreakPoints::new(&line);
+        for _ in 0..8 {
+            it.next().expect("break point");
+        }
+        assert!(it.i < 64, "scanned {} bytes for 8 break points", it.i);
+        // Quote state carries across lazily-yielded breaks.
+        let quoted = "aa 'no break inside' bb cc";
+        let breaks: Vec<usize> = QuoteAwareBreakPoints::new(quoted).collect();
+        assert_eq!(breaks, vec![2, 20, 23]);
+    }
+
+    #[test]
+    fn collapsed_budget_caps_chunk_packing_on_a_huge_operator_line() {
+        // One huge `a && b && …` physical line: the operator-pack path must
+        // stop consuming chunk boundaries at the budget instead of
+        // materializing (and width-checking) every chunk.
+        let script = "echo a && ".repeat(5_000) + "echo a";
+        let breaks = soft_break_offsets_after_operators(&script);
+        assert!(
+            breaks.len() > 1_000,
+            "expected many operator breaks, got {}",
+            breaks.len()
+        );
+        let capped = soft_wrap_row_texts(&script, 0, &breaks, &[], 12, 4);
+        assert_eq!(capped.len(), 4);
+        // The capped rows are the exact prefix of a less-capped call.
+        let wider = soft_wrap_row_texts(&script, 0, &breaks, &[], 12, 8);
+        assert_eq!(&wider[..4], &capped[..]);
+        // Rows are sub-slices, so the consumed prefix is measurable by
+        // offset — it must sit right after the last visible row.
+        let last = capped.last().unwrap();
+        let consumed = (last.as_ptr() as usize - script.as_ptr() as usize) + last.len();
+        assert!(
+            consumed * 100 < script.len(),
+            "capped operator wrap consumed {consumed} of {} bytes",
+            script.len()
+        );
+    }
+
+    #[test]
+    fn has_collapsible_display_discriminates_mcp_args_edit_and_bash() {
+        // MCP args live in `description` even when the always-allow row (and
+        // with it `mcp_scope`) is stripped by remember_tool_approvals=false.
+        let mut mcp = empty_view_state(None);
+        mcp.description = vec!["{".into(), "  \"k\": 1".into(), "}".into()];
+        assert!(mcp.has_collapsible_display(80));
+        // A scoped MCP prompt toggles the same way.
+        mcp.mcp_scope = Some(mcp_state("linear__list", Some("linear"), McpScope::Tool));
+        assert!(mcp.has_collapsible_display(80));
+        // No payload at all: nothing to expand.
+        mcp.description.clear();
+        assert!(!mcp.has_collapsible_display(80));
+
+        // Protected-edit prompts: warning prose + the session-edits row must
+        // not advertise or consume Ctrl-F.
+        let mut edit = empty_view_state(None);
+        edit.description = vec!["Warning: this file is protected".into()];
+        edit.options = vec![acp::PermissionOption::new(
+            acp::PermissionOptionId::new(Arc::from(ALLOW_EDITS_SESSION_OPTION_ID)),
+            "Allow all edits this session".to_owned(),
+            acp::PermissionOptionKind::AllowAlways,
+        )];
+        assert!(!edit.has_collapsible_display(80));
+
+        // A bash body means `description` is not MCP args; only a long
+        // script toggles.
+        let mut bash = empty_view_state(None);
+        bash.bash_command_raw = Some("echo short".into());
+        bash.description = vec!["stray".into()];
+        assert!(!bash.has_collapsible_display(80));
+        assert!(long_bash_state().has_collapsible_display(80));
     }
 
     #[test]
@@ -2781,7 +2970,7 @@ mod tests {
         // backslash stays visible; only the useless newline is dropped.
         let prepared = prepare_bash_display_text("echo a \\\n");
         assert_eq!(prepared, "echo a \\");
-        let rows = build_raw_bash_lines("echo a \\\n", 80);
+        let rows = build_raw_bash_lines("echo a \\\n", 80, usize::MAX);
         assert_eq!(rows.len(), 1, "no trailing blank row");
         // Multiple trailing blank lines after a dangling `\` also collapse.
         assert_eq!(prepare_bash_display_text("echo a \\\n\n"), "echo a \\");
@@ -2792,7 +2981,7 @@ mod tests {
     #[test]
     fn build_raw_bash_lines_keeps_continuation_rows() {
         let raw = "cargo test \\\n  --all \\\n  -- --nocapture";
-        let lines = build_raw_bash_lines(raw, 80);
+        let lines = build_raw_bash_lines(raw, 80, usize::MAX);
         assert!(
             lines.len() >= 3,
             "expected one row per physical line, got {}",
@@ -2830,13 +3019,13 @@ mod tests {
             !breaks.is_empty(),
             "tree-sitter should find the real && operator"
         );
-        let rows = soft_wrap_physical_line(line, 0, &breaks, &[], width);
+        let rows = soft_wrap_row_texts(line, 0, &breaks, &[], width, usize::MAX);
         assert!(
             rows.len() >= 2,
             "expected operator split, got {} rows",
             rows.len()
         );
-        let first = row_text(&rows[0]);
+        let first = rows[0];
         assert!(
             first.contains("&&"),
             "first row should keep the operator: {first:?}"
@@ -2846,7 +3035,7 @@ mod tests {
             "cargo should be on a later row, not packed with git: {first:?}"
         );
         // Continuation must not start with a dangling space from after `&&`.
-        let second = row_text(&rows[1]);
+        let second = rows[1];
         assert!(
             !second.starts_with(' '),
             "no leading space on continuation row: {second:?}"
@@ -2866,8 +3055,8 @@ mod tests {
             breaks.is_empty(),
             "no shell list ops on this fragment: {breaks:?}"
         );
-        let rows = soft_wrap_physical_line(line, 0, &breaks, &[], width);
-        let rendered: Vec<String> = rows.iter().map(row_text).collect();
+        let rows = soft_wrap_row_texts(line, 0, &breaks, &[], width, usize::MAX);
+        let rendered: Vec<String> = rows.iter().map(|r| r.to_string()).collect();
         // The jq filter must never be split at `.[] |`.
         for r in &rendered {
             assert!(
@@ -2889,7 +3078,7 @@ mod tests {
         let line = "prefix_ok_here '.[] | not a pipe' trailing_words_here_too";
         // Width that forces a wrap, but only at spaces *outside* quotes.
         let width = 20;
-        let rows = bash_quote_aware_wrap(line, width);
+        let rows = bash_quote_aware_wrap(line, width, usize::MAX);
         let has_split_inside_quotes = rows.iter().any(|r| {
             // A row that opens a quote without closing it while ending at |
             r.contains(".[]") && !r.contains("not a pipe")
@@ -2905,7 +3094,7 @@ mod tests {
     #[test]
     fn soft_wrap_does_not_break_on_heredoc_body_and() {
         let script = "cat <<EOF && echo after\nfoo && bar inside body\nEOF";
-        let lines = build_raw_bash_lines(script, 80);
+        let lines = build_raw_bash_lines(script, 80, usize::MAX);
         let rendered: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -2939,8 +3128,8 @@ mod tests {
         assert_eq!(breaks.len(), 1, "breaks={breaks:?}");
         let width = 28;
         assert!(UnicodeWidthStr::width(line) > width);
-        let rows = soft_wrap_physical_line(line, 0, &breaks, &[], width);
-        let first: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let rows = soft_wrap_row_texts(line, 0, &breaks, &[], width, usize::MAX);
+        let first = rows[0];
         assert!(
             first.contains(r#""keep && together""#),
             "quoted && must stay on the first row: {first:?}"
@@ -2949,40 +3138,23 @@ mod tests {
     }
 
     #[test]
-    fn display_prefers_raw_over_rejoined_tokens() {
-        let h = BashCommandHighlights {
-            prefix: vec!["cd".into(), "/tmp".into(), "&&".into()],
-            highlighted_words: vec!["git".into(), "status".into()],
-            suffix: vec![],
-        };
-        // Raw keeps the original spacing / layout; rejoined tokens would
-        // become "cd /tmp && git status".
+    fn body_renders_raw_layout_only_and_missing_raw_renders_no_body() {
+        // The body is painted from the raw command alone: original spacing /
+        // continuations survive verbatim (never space-joined tokens).
         let raw = "cd /tmp && \\\n  git status";
-        let display = display_command_text(Some(&h), Some(raw));
-        assert_eq!(display, "cd /tmp && \\\n  git status");
-    }
-
-    #[test]
-    fn map_selection_ranges_across_continuations() {
-        let display = "cd /tmp && \\\n  git status --short";
-        let h = BashCommandHighlights {
-            prefix: vec!["cd".into(), "/tmp".into(), "&&".into()],
-            highlighted_words: vec!["git".into(), "status".into(), "--short".into()],
-            suffix: vec![],
-        };
-        let ranges = map_selection_ranges(display, &h, 2).expect("map tokens");
-        // First two highlighted words selected: git, status
-        let selected: Vec<&str> = ranges
-            .iter()
-            .filter(|(_, _, sel)| *sel)
-            .map(|(s, e, _)| &display[*s..*e])
-            .collect();
-        assert_eq!(selected, vec!["git", "status"]);
+        let lines = build_permission_bash_lines(Some(raw), 200, usize::MAX);
+        let flat: Vec<String> = lines.iter().map(row_text).collect();
+        assert_eq!(flat, vec!["cd /tmp && \\", "  git status"]);
+        // Missing raw → no body at all, no fabricated script.
+        assert!(
+            build_permission_bash_lines(None, 200, usize::MAX).is_empty(),
+            "missing raw must render an empty body"
+        );
     }
 
     #[test]
     fn short_single_line_stays_one_row() {
-        let lines = build_raw_bash_lines("echo hello", 80);
+        let lines = build_raw_bash_lines("echo hello", 80, usize::MAX);
         assert_eq!(lines.len(), 1);
     }
 
@@ -3005,7 +3177,7 @@ mod tests {
             range_fully_inside(body_start, body_start + body_line.len(), &heredoc),
             "body must be classified as heredoc payload"
         );
-        let rows = soft_wrap_row_texts(body_line, body_start, &breaks, &heredoc, width);
+        let rows = soft_wrap_row_texts(body_line, body_start, &breaks, &heredoc, width, usize::MAX);
         assert_eq!(
             rows.len(),
             1,
@@ -3015,154 +3187,292 @@ mod tests {
     }
 
     #[test]
-    fn map_failure_still_dims_via_token_fallback() {
-        // When map_selection_ranges fails, do not render fully bright.
-        // Force a map miss with tokens that cannot appear in the raw string.
-        let raw = "echo hello world";
-        let h = BashCommandHighlights {
-            prefix: vec![],
-            highlighted_words: vec!["definitely_not_in_raw_zzzz".into(), "also_missing".into()],
-            suffix: vec!["extra_suffix_missing".into()],
-        };
-        let lines = build_permission_bash_lines(Some(&h), 1, Some(raw), 200);
-        assert!(!lines.is_empty());
-        let mut has_dim = false;
-        let mut bright = String::new();
-        let mut dim = String::new();
-        for line in &lines {
-            for span in &line.spans {
-                if span.style.add_modifier.contains(Modifier::DIM) {
-                    has_dim = true;
-                    dim.push_str(span.content.as_ref());
-                } else {
-                    bright.push_str(span.content.as_ref());
-                }
-            }
+    fn incomplete_quote_and_heredoc_never_reconstruct_tokens() {
+        // Unparseable scripts (open quote / unterminated heredoc) must still
+        // render the raw text verbatim — never a space-joined token soup.
+        for raw in [
+            "echo \"unterminated\nstill inside the string",
+            "cat <<EOF\nheredoc body with no terminator",
+        ] {
+            let lines = build_permission_bash_lines(Some(raw), 200, usize::MAX);
+            let flat: Vec<String> = lines.iter().map(row_text).collect();
+            let expected: Vec<&str> = raw.split('\n').collect();
+            assert_eq!(flat, expected, "raw text must render verbatim: {raw:?}");
         }
-        assert!(has_dim, "fallback must still dim unselected tokens");
-        // First highlight token selected → bright; rest dimmed.
-        assert!(
-            bright.contains("definitely_not_in_raw_zzzz"),
-            "selected token bright: {bright:?}"
-        );
-        assert!(
-            dim.contains("also_missing") || dim.contains("extra_suffix_missing"),
-            "unselected tokens dim: {dim:?}"
-        );
     }
 
     #[test]
-    fn find_next_token_does_not_bind_later_occurrence() {
-        // Must not attach `test` to the later `test` inside a different word.
-        // Sequence: token "cargo" then "test" — after cargo, only in-order match.
-        let display = "cargo latest && test --all";
-        // From start of "latest", looking for "test" must NOT match the "test"
-        // suffix of "latest" via free scan — only the standalone `test` after &&.
-        let from = display.find("latest").unwrap();
-        // Old buggy free-scan could match inside "latest". New path only accepts
-        // the token at the next shell position after skipping ops/ws.
-        // From `latest`, skip doesn't skip alnum, so match at `latest` for "test"
-        // fails (wrong token), and we return None — whole map fails closed.
-        assert!(
-            find_next_token(display, from, "test").is_none(),
-            "must not match test as a suffix of latest"
-        );
-        // From after "cargo ", we get "latest" not "test".
-        let after_cargo = display.find(' ').unwrap() + 1;
-        assert!(find_next_token(display, after_cargo, "test").is_none());
-        // Correct sequential map from 0 works for the real tokens.
-        let (s, e) = find_next_token(display, 0, "cargo").unwrap();
-        assert_eq!(&display[s..e], "cargo");
-        let (s, e) = find_next_token(display, e, "latest").unwrap();
-        assert_eq!(&display[s..e], "latest");
-        let (s, e) = find_next_token(display, e, "test").unwrap();
-        assert_eq!(&display[s..e], "test");
-    }
-
-    #[test]
-    fn dim_path_wraps_quote_aware_like_undim_path() {
-        // Regression: the REAL overlay path has highlights (Some) + raw (Some)
-        // with a *partial* selection (default_scope_count selects ~2 tokens),
-        // so `needs_dim` is true. Before the fix this path used plain
-        // whitespace `word_wrap`, splitting `jq '.[] | ...'` inside its single
-        // quotes. It must now wrap exactly like the undimmed path.
+    fn body_wraps_identically_regardless_of_scope_state() {
+        // The body is scope-independent: it always paints the raw command with
+        // the same wrapping, and quoted `|` never becomes a wrap point.
         let raw = r#"gh search prs --author=@me --json number,title,url --jq '.[] | "\(.state)\t#\(.number)\t\(.url)"'"#;
-        let h = BashCommandHighlights {
-            prefix: vec![],
-            highlighted_words: vec![
-                "gh".into(),
-                "search".into(),
-                "prs".into(),
-                "--author=@me".into(),
-                "--json".into(),
-                "number,title,url".into(),
-                "--jq".into(),
-                r#".[] | "\(.state)\t#\(.number)\t\(.url)""#.into(),
-            ],
-            suffix: vec![],
-        };
         let width = 60;
-        // selection_count = 2 -> partial selection -> dim path.
-        let dim_lines = build_permission_bash_lines(Some(&h), 2, Some(raw), width);
-        let dim_rows: Vec<String> = dim_lines.iter().map(row_text).collect();
-        for r in &dim_rows {
+        let body_rows: Vec<String> = build_permission_bash_lines(Some(raw), width, usize::MAX)
+            .iter()
+            .map(row_text)
+            .collect();
+        for r in &body_rows {
             assert!(
                 !(r.trim_end().ends_with(".[]") || r.trim_end().ends_with(".[] |")),
-                "jq filter split inside quotes under dim path; rows={dim_rows:?}"
+                "jq filter split inside quotes; rows={body_rows:?}"
             );
         }
-        // The dimmed rows must match the undimmed wrapping row-for-row.
-        let undim_rows: Vec<String> = build_raw_bash_lines(raw, width)
+        let raw_rows: Vec<String> = build_raw_bash_lines(raw, width, usize::MAX)
             .iter()
             .map(row_text)
             .collect();
         assert_eq!(
-            dim_rows, undim_rows,
-            "dim path must wrap identically to undim path"
+            body_rows, raw_rows,
+            "overlay body must be exactly the raw render"
+        );
+    }
+
+    /// Synthetic multi-step dump script mirroring the field report shape:
+    /// comments, a blank separator, a probe `ls`, `rm && mkdir`, and a long
+    /// `./bazelw test … | tee … | tail` pipeline with stderr redirects.
+    fn dump_script_twin() -> &'static str {
+        "# Probe the outputs dir\n\
+         ls /tmp/hw-test-outputs 2>/dev/null\n\
+         \n\
+         # Reset scratch dir and run the suite\n\
+         rm -rf /tmp/hw-test-outputs && mkdir -p /tmp/hw-test-outputs\n\
+         ./bazelw test //hw-tests/integration/... --test_output=errors 2>&1 | tee /tmp/hw-test-outputs/run.log | tail -n 40"
+    }
+
+    /// Foreground color of the span covering `byte_idx` of the line's text.
+    fn fg_at(line: &Line<'_>, byte_idx: usize) -> Option<ratatui::style::Color> {
+        let mut pos = 0usize;
+        for span in &line.spans {
+            let end = pos + span.content.len();
+            if byte_idx < end {
+                return span.style.fg;
+            }
+            pos = end;
+        }
+        None
+    }
+
+    #[test]
+    fn full_script_body_preserves_structure_without_dim() {
+        let script = dump_script_twin();
+        let lines = build_permission_bash_lines(Some(script), 400, usize::MAX);
+        let flat: Vec<String> = lines.iter().map(row_text).collect();
+        // One display row per physical line at a wide width, in source order —
+        // comments and operators verbatim, nothing flattened or re-joined.
+        let expected: Vec<&str> = script.split('\n').collect();
+        assert_eq!(flat, expected, "body must be the raw script, line for line");
+        // The blank separator stays an empty row.
+        assert_eq!(flat[2], "");
+        // No selection dimming anywhere in the body.
+        for line in &lines {
+            for span in &line.spans {
+                assert!(
+                    !span.style.add_modifier.contains(Modifier::DIM),
+                    "body span {:?} must not be DIM",
+                    span.content
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_rows_keep_the_unwrapped_line_styles() {
+        // The exact fg comparisons below span two renders; hold the pin so a
+        // concurrent test cannot flip the process-global theme between them.
+        let _theme = crate::theme::cache::pin_theme();
+        let script = dump_script_twin();
+        // Unwrapped reference: one row per physical line at a very wide width.
+        let wide = build_permission_bash_lines(Some(script), 400, usize::MAX);
+        let bazel_row = wide
+            .iter()
+            .find(|l| row_text(l).starts_with("./bazelw"))
+            .expect("bazelw line");
+        let bazel_text = row_text(bazel_row);
+        let test_fg = fg_at(bazel_row, bazel_text.find(" test ").unwrap() + 1);
+        let target_fg = fg_at(bazel_row, bazel_text.find("//hw-tests").unwrap());
+        let comment_row = wide
+            .iter()
+            .find(|l| row_text(l).starts_with('#'))
+            .expect("comment line");
+        let comment_fg = fg_at(comment_row, 0);
+
+        // Width 12 wraps right after `./bazelw`, so `test` and `//hw-tests/…`
+        // each start a wrap row. Their fg must equal the fg they had on the
+        // unwrapped physical line — wrap rows are sliced, never re-lexed.
+        let narrow = build_permission_bash_lines(Some(script), 12, usize::MAX);
+        let wrapped_test = narrow
+            .iter()
+            .find(|l| row_text(l) == "test")
+            .expect("wrapped `test` row");
+        assert_eq!(
+            fg_at(wrapped_test, 0),
+            test_fg,
+            "wrapped `test` must keep its unwrapped fg"
+        );
+        let wrapped_target = narrow
+            .iter()
+            .find(|l| row_text(l).starts_with("//hw-tests"))
+            .expect("wrapped //hw-tests row");
+        assert_eq!(
+            fg_at(wrapped_target, 0),
+            target_fg,
+            "wrapped `//hw-tests` must keep its unwrapped fg"
+        );
+        // When the theme distinguishes comments from arguments, the wrapped
+        // `//hw-tests` row must not pick up the comment color (the old
+        // re-lex-per-wrap-row bug made `//…` read as a comment).
+        if target_fg != comment_fg {
+            assert_ne!(
+                fg_at(wrapped_target, 0),
+                comment_fg,
+                "wrapped `//hw-tests` must not use the comment fg"
+            );
+        }
+    }
+
+    #[test]
+    fn execute_header_display_matches_overlay_body() {
+        // The execute tool-call header and the overlay body share one
+        // renderer; text and styles must match row for row at every width.
+        let script = dump_script_twin();
+        for width in [12usize, 40, 400] {
+            assert_eq!(
+                render_bash_command_display_lines(script, width),
+                build_permission_bash_lines(Some(script), width, usize::MAX),
+                "width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn interior_blank_line_renders_empty_row() {
+        let lines = build_raw_bash_lines("echo a\n\necho b", 80, usize::MAX);
+        assert_eq!(lines.len(), 3, "blank separator must keep its row");
+        assert_eq!(lines[1].width(), 0, "separator row must be empty");
+        assert_eq!(row_text(&lines[0]), "echo a");
+        assert_eq!(row_text(&lines[2]), "echo b");
+    }
+
+    #[test]
+    fn heredoc_payload_stays_one_row_at_narrow_width() {
+        // Heredoc bodies are payload, not shell syntax: no space-wrap even
+        // when the panel is narrower than the body line, and the stateful
+        // highlighter must hand the text back unchanged.
+        let script = "cat <<EOF\nthis heredoc body line is much wider than the panel\nEOF";
+        let lines = build_raw_bash_lines(script, 20, usize::MAX);
+        let flat: Vec<String> = lines.iter().map(row_text).collect();
+        assert_eq!(
+            flat,
+            vec![
+                "cat <<EOF",
+                "this heredoc body line is much wider than the panel",
+                "EOF"
+            ]
         );
     }
 
     #[test]
-    fn dim_path_preserves_selection_dimming() {
-        // The first `selection_count` highlighted words render *without* DIM;
-        // everything else is dimmed. Verify dimming survives the new per-row
-        // highlight path.
-        let raw = "git status --short && cargo test --workspace";
-        let h = BashCommandHighlights {
+    fn stale_highlights_without_scoped_rows_disable_scope_ui() {
+        // A request can carry bash selection meta while the scoped
+        // allow/never rows are absent (multi-command script, gate off, or a
+        // stale client). The scope affordances must fail closed on the exact
+        // option ids, not on the meta or on the AllowAlways kind.
+        let mut state = empty_view_state(None);
+        state.bash_command_raw = Some("git status && cargo test".to_owned());
+        state.bash_highlights = Some(BashCommandHighlights {
             prefix: vec![],
-            highlighted_words: vec!["git".into(), "status".into(), "--short".into()],
-            suffix: vec![
-                "&&".into(),
-                "cargo".into(),
-                "test".into(),
-                "--workspace".into(),
-            ],
-        };
-        // Select only `git status` (2 tokens); the rest must be dimmed.
-        let lines = build_permission_bash_lines(Some(&h), 2, Some(raw), 200);
-        let mut dim_text = String::new();
-        let mut bright_text = String::new();
-        for line in &lines {
-            for span in &line.spans {
-                if span.style.add_modifier.contains(Modifier::DIM) {
-                    dim_text.push_str(span.content.as_ref());
-                } else {
-                    bright_text.push_str(span.content.as_ref());
+            highlighted_words: vec!["git".into(), "status".into()],
+            suffix: vec![],
+        });
+        state.bash_selection_count = 2;
+        state.options = vec![
+            acp::PermissionOption::new(
+                acp::PermissionOptionId::new(Arc::from("allow-once")),
+                "Yes, proceed".to_owned(),
+                acp::PermissionOptionKind::AllowOnce,
+            ),
+            acp::PermissionOption::new(
+                acp::PermissionOptionId::new(Arc::from("reject-once")),
+                "No".to_owned(),
+                acp::PermissionOptionKind::RejectOnce,
+            ),
+        ];
+        assert!(!state.has_adjustable_scope(), "no scoped rows -> no arrows");
+        assert!(
+            !state.has_editable_bash_pattern(),
+            "no allow-always-command -> no `e` editor"
+        );
+
+        // An AllowAlways row with a *different* id must not re-enable them.
+        state.options.push(acp::PermissionOption::new(
+            acp::PermissionOptionId::new(Arc::from("always-allow")),
+            "always allow".to_owned(),
+            acp::PermissionOptionKind::AllowAlways,
+        ));
+        assert!(
+            !state.has_adjustable_scope(),
+            "generic always-allow id must not enable arrows"
+        );
+        assert!(
+            !state.has_editable_bash_pattern(),
+            "generic always-allow id must not enable the editor"
+        );
+
+        // The exact scoped ids restore both affordances.
+        state.options.push(acp::PermissionOption::new(
+            acp::PermissionOptionId::new(Arc::from("allow-always-command")),
+            "Always allow: git status".to_owned(),
+            acp::PermissionOptionKind::AllowAlways,
+        ));
+        assert!(state.has_adjustable_scope());
+        assert!(state.has_editable_bash_pattern());
+    }
+
+    #[test]
+    fn reject_always_command_alone_enables_arrows_but_not_editor() {
+        // The pattern editor persists through `allow-always-command`
+        // specifically; the arrows adjust either scoped row.
+        let mut state = empty_view_state(None);
+        state.bash_command_raw = Some("cargo test --workspace".to_owned());
+        state.bash_highlights = Some(BashCommandHighlights {
+            prefix: vec![],
+            highlighted_words: vec!["cargo".into(), "test".into()],
+            suffix: vec![],
+        });
+        state.bash_selection_count = 2;
+        state.options = vec![acp::PermissionOption::new(
+            acp::PermissionOptionId::new(Arc::from("reject-always-command")),
+            "Never allow: cargo test".to_owned(),
+            acp::PermissionOptionKind::RejectAlways,
+        )];
+        assert!(state.has_adjustable_scope());
+        assert!(
+            !state.has_editable_bash_pattern(),
+            "editor requires the exact allow-always-command row"
+        );
+    }
+
+    #[test]
+    fn body_never_dims_any_span() {
+        // The body carries no selection state: no span may be DIM, whatever
+        // the script shape (single command, list, pipeline, comments).
+        for raw in [
+            "git status --short && cargo test --workspace",
+            "# comment first\ncargo test",
+            "ps aux | grep pattern",
+        ] {
+            for width in [20usize, 200] {
+                for line in build_permission_bash_lines(Some(raw), width, usize::MAX) {
+                    for span in &line.spans {
+                        assert!(
+                            !span.style.add_modifier.contains(Modifier::DIM),
+                            "body span {:?} must not be DIM ({raw:?} @ {width})",
+                            span.content
+                        );
+                    }
                 }
             }
         }
-        assert!(
-            bright_text.contains("git") && bright_text.contains("status"),
-            "selected tokens must be bright: bright={bright_text:?}"
-        );
-        assert!(
-            dim_text.contains("cargo") && dim_text.contains("workspace"),
-            "unselected suffix must be dimmed: dim={dim_text:?}"
-        );
-        assert!(
-            !bright_text.contains("cargo"),
-            "cargo must not be bright: bright={bright_text:?}"
-        );
     }
 
     #[test]
@@ -3177,32 +3487,22 @@ mod tests {
     }
 
     #[test]
-    fn tiny_widths_do_not_panic_dim_and_undim() {
+    fn tiny_widths_do_not_panic() {
         // width 0 and width 1 must never panic (empty rows / mid-char indices).
         let raw = "git status --short && cargo test --workspace | grep ok";
-        let h = BashCommandHighlights {
-            prefix: vec![],
-            highlighted_words: vec!["git".into(), "status".into(), "--short".into()],
-            suffix: vec!["&&".into(), "cargo".into(), "test".into()],
-        };
         for w in [0usize, 1, 2, 3] {
-            let _ = build_raw_bash_lines(raw, w);
-            let _ = build_permission_bash_lines(Some(&h), 2, Some(raw), w);
-            // Multi-byte content must not panic on mid-char snapping either.
-            let _ = build_raw_bash_lines("échø 'ünîcødé && stüff' && lß", w);
+            let _ = build_raw_bash_lines(raw, w, usize::MAX);
+            let _ = build_permission_bash_lines(Some(raw), w, usize::MAX);
+            // Multi-byte content must not panic on mid-char slicing either.
+            let _ = build_raw_bash_lines("échø 'ünîcødé && stüff' && lß", w, usize::MAX);
         }
     }
 
     #[test]
-    fn dim_path_multiline_continuation_no_panic_and_dims() {
+    fn multiline_continuation_wraps_without_delimiter_soft_breaks() {
         let raw = "cd /tmp && \\\n  git status --short --branch --verbose --long";
-        let h = BashCommandHighlights {
-            prefix: vec!["cd".into(), "/tmp".into(), "&&".into()],
-            highlighted_words: vec!["git".into(), "status".into(), "--short".into()],
-            suffix: vec!["--branch".into(), "--verbose".into(), "--long".into()],
-        };
         // Narrow width forces wrapping of the continuation line.
-        let lines = build_permission_bash_lines(Some(&h), 2, Some(raw), 20);
+        let lines = build_permission_bash_lines(Some(raw), 20, usize::MAX);
         assert!(!lines.is_empty());
         let rows: Vec<String> = lines.iter().map(row_text).collect();
         // Delimiter soft-breaks are disabled — no row should end at `&&` solely
@@ -3274,7 +3574,7 @@ mod tests {
             println!();
 
             for &w in &widths {
-                let rows = build_raw_bash_lines(cmd, w);
+                let rows = build_raw_bash_lines(cmd, w, usize::MAX);
                 let texts: Vec<String> = rows.iter().map(line_plain_text).collect();
                 println!("RENDER w={w}  ({} rows)", texts.len());
                 for (ri, t) in texts.iter().enumerate() {

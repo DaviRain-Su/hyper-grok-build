@@ -269,9 +269,32 @@ impl acp::Agent for MvpAgent {
                 );
             }
         }
-        let has_external_api_key = auth_method::should_advertise_xai_api_key(
+        let preferred_method_early = self.cfg.borrow().grok_com_config.preferred_method;
+        let xai_api_base_url = self.cfg.borrow().endpoints.xai_api_base_url.clone();
+        let has_byok = self
+            .models_manager
+            .models()
+            .values()
+            .any(crate::agent::config::ModelEntry::has_own_credentials);
+        let first_party_env_ok = if crate::auth::should_probe_first_party_env_key(
+            disable_api_key_auth,
+            has_byok,
+            auth_method::has_xai_api_key_env(),
+            preferred_method_early.is_some(),
+        ) {
+            crate::auth::first_party_env_key_allows_advertise(
+                    &xai_api_base_url,
+                    crate::auth::DEFAULT_PROBE_TIMEOUT,
+                )
+                .await
+        } else {
+            true
+        };
+        self.auth_manager.set_first_party_env_api_key_ok(first_party_env_ok);
+        let has_external_api_key = auth_method::should_advertise_xai_api_key_with_env_ok(
             disable_api_key_auth,
             self.models_manager.models().values(),
+            first_party_env_ok,
         );
         let init_has_current = self.auth_manager.current().is_some();
         let init_is_expired = self.auth_manager.is_expired();
@@ -329,7 +352,7 @@ impl acp::Agent for MvpAgent {
                 "auth: advertising grok.com auth method",
             );
         }
-        let preferred_method = self.cfg.borrow().grok_com_config.preferred_method;
+        let preferred_method = preferred_method_early;
         let has_external_api_key = match preferred_method {
             Some(crate::auth::PreferredAuthMethod::Oidc) => false,
             _ => has_external_api_key,
@@ -356,6 +379,7 @@ impl acp::Agent for MvpAgent {
                 "grok_home": crate::util::grok_home::grok_home().display().to_string(),
                 "HOME": std::env::var("HOME").unwrap_or_else(|_| "(unset)".into()),
                 "has_external_api_key": has_external_api_key,
+                "first_party_env_api_key_ok": first_party_env_ok,
                 "disable_api_key_auth": disable_api_key_auth,
                 "has_cached_token": has_cached_token,
                 "has_enterprise_oidc": has_enterprise_oidc,

@@ -39,6 +39,8 @@ mod transcript;
 mod turn;
 mod voice;
 
+pub(crate) use auth::scrollback_has_recent_disk_full;
+pub(in crate::app) use auth::scrollback_has_recent_error_banner;
 pub(crate) use billing::{
     UPSELL_ACTION_DISMISS, UPSELL_ACTION_SWITCH_MODEL, UPSELL_URL_PAYG, UPSELL_URL_UPGRADE,
     is_credit_limit_error,

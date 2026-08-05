@@ -5,7 +5,9 @@
 //! its output, and writes their payload to the local system clipboard. Useful
 //! for containerized or remote shells (`docker exec`, `kubectl exec`, ...)
 //! whose clipboard cannot otherwise reach the user — especially in terminals
-//! that do not handle OSC 52 themselves (for example Apple Terminal).
+//! that do not handle OSC 52 themselves (for example Apple Terminal). Also
+//! stamps `LC_GROK_APPEARANCE` from the local OS theme so a remote
+//! `theme = "auto"` can resolve over SSH + tmux.
 //!
 //! Resolvable programs spawn directly. On Unix, commands a direct spawn cannot
 //! run — a single shell-quoted string (`grok wrap "mycli ssh host"`) or a shell

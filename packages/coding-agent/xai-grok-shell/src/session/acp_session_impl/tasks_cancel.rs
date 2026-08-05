@@ -224,7 +224,8 @@ impl SessionActor {
     /// Cancel the running turn for a send-now prompt: Ctrl+C parity (kills the
     /// turn's foreground command; background tasks, subagents, and the queue
     /// survive). Flushes the replay buffer before teardown so streamed chunks
-    /// persist; the caller's `maybe_start_running_task` then promotes the prompt.
+    /// persist; the caller's `maybe_start_running_task` then promotes the new
+    /// front (a flushed interjection fallback runs ahead of the send-now prompt).
     pub(super) async fn cancel_turn_for_send_now(
         &self,
         replay_buffer: &mut crate::agent::update_chunk_merge::ReplayBuffer,
@@ -232,7 +233,15 @@ impl SessionActor {
         if let Some(notification) = replay_buffer.flush() {
             self.emit_buffered(notification).await;
         }
-        self.pending_interjections.clear();
+        // Flush, don't clear: the pager already painted the text and said "Interjection sent".
+        let flushed = self.flush_stranded_interjections().await;
+        if flushed > 0 {
+            xai_grok_telemetry::unified_log::info(
+                "shell.prompt.send_now_flushed_interjections",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({ "count": flushed })),
+            );
+        }
         self.cancel_running_task(crate::session::CancelOptions {
             trigger: Some(crate::session::CancelTrigger::SendNow),
             ..Default::default()
@@ -401,7 +410,14 @@ impl SessionActor {
                 state.clear_pending_notifications();
             }
 
-            let rewound_input = if rewind_if_no_output && state.rewindable {
+            // Only a client-visible user front may pop (the wire carries no
+            // prompt id, so this is an origin check); other fronts take a
+            // plain cancel rather than silently losing their message.
+            let front_is_user_row = state.pending_inputs.front().is_some_and(|f| {
+                matches!(f.origin, crate::session::PromptOrigin::User)
+                    && !super::interjection::is_interject_fallback(&f.prompt_id)
+            });
+            let rewound_input = if rewind_if_no_output && state.rewindable && front_is_user_row {
                 if let Some(task) = state.running_task.take() {
                     task.abort();
                 }

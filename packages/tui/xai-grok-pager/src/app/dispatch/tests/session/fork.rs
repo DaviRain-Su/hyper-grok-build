@@ -41,6 +41,7 @@ fn worktree_forked_sets_session_id_eagerly_and_emits_load() {
             code_restored: false,
             restore_summary: None,
             restore_degree: None,
+            resume_session_id: Some("orig-sess".into()),
         }),
         &mut app,
     );
@@ -89,6 +90,7 @@ fn worktree_forked_with_restore_shows_summary_in_scrollback() {
                 "checked out abc12345, staged: true, unstaged: false, untracked: 3".into(),
             ),
             restore_degree: Some(xai_grok_workspace::session::git::RestoreDegree::Full),
+            resume_session_id: Some("orig-sess".into()),
         }),
         &mut app,
     );
@@ -143,6 +145,7 @@ fn worktree_forked_with_restore_failure_shows_warning_banner() {
                 "restore aborted (checkout failed); stash skipped: MERGE_HEAD present".into(),
             ),
             restore_degree: None,
+            resume_session_id: Some("orig-fail".into()),
         }),
         &mut app,
     );
@@ -198,6 +201,7 @@ fn fork_initiation_supersedes_open_reload_window() {
             agent_id: id,
             new_session_id: acp::SessionId::new("sess-fork"),
             cwd: std::path::PathBuf::from("/tmp"),
+            parent_session_id: acp::SessionId::new("sess-old"),
         }),
         &mut app,
     );
@@ -1029,6 +1033,111 @@ fn dispatch_new_session_worktree_mode_never_skips_modal_and_creates_in_cwd() {
 }
 
 #[test]
+fn fork_session_ready_retargets_suppress_from_parent_to_child() {
+    let mut app = fork_test_app();
+    insert_placeholder_agent(&mut app, AgentId(1));
+    app.agents.get_mut(&AgentId(1)).unwrap().session.session_id = None;
+    app.suppress_code_restore_once = Some("parent-sid".into());
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ForkSessionReady {
+            agent_id: AgentId(1),
+            new_session_id: "child-sid".into(),
+            cwd: PathBuf::from("/tmp/forked"),
+            parent_session_id: acp::SessionId::new("parent-sid"),
+        }),
+        &mut app,
+    );
+    assert_eq!(app.suppress_code_restore_once.as_deref(), Some("child-sid"));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::LoadSession { session_id, .. }] if session_id == "child-sid"
+    ));
+    let flags_restore = crate::app::event_loop::take_load_restore_code(&mut app, &effects);
+    assert_eq!(flags_restore, Some(false));
+    assert!(app.suppress_code_restore_once.is_none());
+}
+
+#[test]
+fn fork_session_ready_does_not_retarget_unrelated_suppress() {
+    let mut app = fork_test_app();
+    insert_placeholder_agent(&mut app, AgentId(1));
+    app.agents.get_mut(&AgentId(1)).unwrap().session.session_id = None;
+    app.suppress_code_restore_once = Some("other-sid".into());
+    dispatch(
+        Action::TaskComplete(TaskResult::ForkSessionReady {
+            agent_id: AgentId(1),
+            new_session_id: "child-sid".into(),
+            cwd: PathBuf::from("/tmp/forked"),
+            parent_session_id: acp::SessionId::new("parent-sid"),
+        }),
+        &mut app,
+    );
+    assert_eq!(app.suppress_code_restore_once.as_deref(), Some("other-sid"));
+}
+
+#[test]
+fn worktree_forked_retargets_suppress_to_child() {
+    let mut app = test_app_git();
+    dispatch(
+        Action::NewWorktreeSession {
+            load_session_id: Some("orig-sess".into()),
+            label: None,
+            git_ref: None,
+        },
+        &mut app,
+    );
+    app.suppress_code_restore_once = Some("orig-sess".into());
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::WorktreeForked {
+            agent_id: AgentId(0),
+            session_id: acp::SessionId::new("forked-sess-1"),
+            worktree_path: PathBuf::from("/tmp/grok-worktrees/pager-fork"),
+            session_cwd: PathBuf::from("/tmp/grok-worktrees/pager-fork/sub"),
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            resume_session_id: Some("orig-sess".into()),
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.suppress_code_restore_once.as_deref(),
+        Some("forked-sess-1")
+    );
+    let flags_restore = crate::app::event_loop::take_load_restore_code(&mut app, &effects);
+    assert_eq!(flags_restore, Some(false));
+    assert!(app.suppress_code_restore_once.is_none());
+}
+
+#[test]
+fn worktree_forked_does_not_retarget_unrelated_suppress() {
+    let mut app = test_app_git();
+    dispatch(
+        Action::NewWorktreeSession {
+            load_session_id: Some("orig-sess".into()),
+            label: None,
+            git_ref: None,
+        },
+        &mut app,
+    );
+    app.suppress_code_restore_once = Some("other-sid".into());
+    dispatch(
+        Action::TaskComplete(TaskResult::WorktreeForked {
+            agent_id: AgentId(0),
+            session_id: acp::SessionId::new("forked-sess-1"),
+            worktree_path: PathBuf::from("/tmp/grok-worktrees/pager-fork"),
+            session_cwd: PathBuf::from("/tmp/grok-worktrees/pager-fork/sub"),
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            resume_session_id: Some("orig-sess".into()),
+        }),
+        &mut app,
+    );
+    assert_eq!(app.suppress_code_restore_once.as_deref(), Some("other-sid"));
+}
+
+#[test]
 fn fork_session_ready_emits_load_session_with_new_id() {
     let mut app = fork_test_app();
     // Plant a placeholder fork agent (mirroring what dispatch_fork
@@ -1040,6 +1149,7 @@ fn fork_session_ready_emits_load_session_with_new_id() {
             agent_id: AgentId(1),
             new_session_id: "new-sid-123".into(),
             cwd: PathBuf::from("/tmp/forked"),
+            parent_session_id: acp::SessionId::new("test-session"),
         }),
         &mut app,
     );
@@ -1097,6 +1207,7 @@ fn fork_session_ready_refuses_local_build_under_chat_mode() {
             agent_id: AgentId(1),
             new_session_id: session_id.clone().into(),
             cwd: cwd.clone(),
+            parent_session_id: acp::SessionId::new("test-session"),
         }),
         &mut app,
     );

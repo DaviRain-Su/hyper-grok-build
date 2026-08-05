@@ -253,6 +253,8 @@ fn pinned_local_ctx() -> crate::app::session_startup::MaterializeCtx {
         allow_remote_restore: false,
         chat_mode: false,
         title_resolution: crate::app::session_startup::TitleResolution::PinnedPreSandbox,
+        restore_code: false,
+        restore_progress_on_stdout: false,
     }
 }
 

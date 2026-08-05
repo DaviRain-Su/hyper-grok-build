@@ -472,6 +472,14 @@ impl SessionActor {
                 target_prompt_index: target_index,
                 created_at: chrono::Utc::now().to_rfc3339(),
             });
+
+            // The summary describes turns the rewind just removed; an
+            // in-flight generation would re-persist one for them.
+            self.abort_turn_summary();
+            let _ = self
+                .notifications
+                .persistence_tx
+                .send(PersistenceMsg::LastTurnSummary(None));
         }
 
         // Update the file state tracker to reflect the rewind.
@@ -565,7 +573,7 @@ impl SessionActor {
                     respond_to: flush_tx,
                 })
                 .is_err()
-                || flush_rx.await.is_err()
+                || !matches!(flush_rx.await, Ok(Ok(())))
             {
                 anyhow::bail!("history repaired in memory but the persistence flush failed");
             }

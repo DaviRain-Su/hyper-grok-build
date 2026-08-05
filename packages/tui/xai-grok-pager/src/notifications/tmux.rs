@@ -1,19 +1,6 @@
-use crate::terminal::TerminalContext;
-
-/// Wrap an escape sequence in tmux DCS passthrough.
-///
-/// Doubles any embedded ESC bytes so the inner terminal sees them verbatim
-/// once tmux strips the outer passthrough envelope.
-pub fn tmux_passthrough(sequence: &str) -> String {
-    let escaped = sequence.replace('\x1b', "\x1b\x1b");
-    format!("\x1bPtmux;{escaped}\x1b\\")
-}
-
-/// Returns `true` when the session is tmux-backed and the server version
-/// is 3.3 or later (the minimum for reliable DCS passthrough).
-pub fn passthrough_available(ctx: &TerminalContext) -> bool {
-    ctx.is_tmux_backed() && ctx.is_tmux_version_or_later(3, 3)
-}
+pub use xai_grok_pager_render::terminal::{
+    passthrough_available, tmux_passthrough_str as tmux_passthrough,
+};
 
 #[cfg(test)]
 mod tests {

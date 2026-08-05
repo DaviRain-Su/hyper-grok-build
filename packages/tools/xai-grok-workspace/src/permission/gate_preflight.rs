@@ -20,7 +20,8 @@ pub(crate) struct GatePreflight {
     bash_command: Option<GateDecision>,
     shell_file: Option<GateDecision>,
     /// Auto mode + a fail-closed gate Ask with no rule match: the classifier
-    /// arbitrates (Allow runs, Block prompts). A rule-match Ask never defers.
+    /// may run (Allow executes, Block denies within budget). A rule-match Ask
+    /// never defers.
     defers_gate_ask: bool,
 }
 
@@ -91,8 +92,8 @@ impl GatePreflight {
         !self.policy_forced_prompt() || self.defers_gate_ask()
     }
 
-    /// Deferral is active: a classifier Block must prompt (never silently
-    /// deny, no denial-budget consumption).
+    /// Deferral is active: fail-closed Ask may be classified; Block denies
+    /// within budget (not prompt-binding, not budget-exempt).
     pub(crate) fn defers_gate_ask(&self) -> bool {
         self.defers_gate_ask
     }
@@ -151,15 +152,14 @@ mod tests {
         let cwd = Path::new("/work");
         let bash = |cmd: &str| AccessKind::Bash(cmd.to_owned());
 
-        // Fail-closed gate Ask in auto mode: admitted to the classifier, Block
-        // stays prompt-binding, trigger follows the classifier outcome.
+        // Fail-closed Ask in auto: classified; Block denies within budget; trigger follows classifier outcome.
         let deferred = GatePreflight::evaluate(Some(&policy), &bash("echo \"$(date)\""), cwd, true);
         assert!(deferred.policy_forced_prompt());
         assert!(deferred.admits_auto_classifier());
         assert!(deferred.defers_gate_ask());
         assert_eq!(
-            deferred.prompt_trigger(Some(reasons::AUTO_CLASSIFIER_BLOCK)),
-            Some(reasons::AUTO_CLASSIFIER_BLOCK)
+            deferred.prompt_trigger(Some(reasons::AUTO_CLASSIFIER_DENY)),
+            Some(reasons::AUTO_CLASSIFIER_DENY)
         );
 
         // Same request outside auto mode: nothing admits the classifier and

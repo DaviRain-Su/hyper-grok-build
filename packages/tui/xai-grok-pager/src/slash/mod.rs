@@ -1319,6 +1319,38 @@ pub fn is_command_complete(line: &str, registry: &CommandRegistry) -> bool {
     !invocation.args.trim().is_empty()
 }
 
+/// True when Enter should send `text` unchanged.
+///
+/// Accept turns `/doctor` into `/doctor ` and opens the arg menu. Skip accept
+/// only when the highlighted row is the typed command (or an alias of it).
+pub(crate) fn is_typed_slash_selected(
+    snap: &SlashSnapshot,
+    text: &str,
+    registry: &CommandRegistry,
+) -> bool {
+    if !snap.cursor_in_command {
+        return false;
+    }
+    let Some(invocation) = parse_invocation(text) else {
+        return false;
+    };
+    if !invocation.args.is_empty() || !is_command_complete(text, registry) {
+        return false;
+    }
+    let Some(typed) = registry.get_for_dispatch(invocation.token) else {
+        return false;
+    };
+    match snap.selection() {
+        None => true,
+        Some(row) => {
+            row.command_name().eq_ignore_ascii_case(invocation.token)
+                || registry
+                    .get_for_dispatch(row.command_name())
+                    .is_some_and(|selected| selected.name() == typed.name())
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Mid-text inline slash token scanning
 // ---------------------------------------------------------------------------

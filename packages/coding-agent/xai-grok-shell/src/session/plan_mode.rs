@@ -172,6 +172,19 @@ impl PlanModeTracker {
     pub fn is_active(&self) -> bool {
         self.state == PlanModeState::Active
     }
+    /// The prompt mode the session is in according to this tracker.
+    ///
+    /// The prompt-mode mirrors follow the tracker, never the other way round,
+    /// and a restored tracker is the only thing that knows a resumed session is
+    /// still planning. Seeding a mirror `Agent` under a restored `Active` makes
+    /// the first prompt resolve `Agent` and reconcile the plan mode away.
+    pub(crate) fn session_prompt_mode(&self) -> PromptMode {
+        if self.is_active() {
+            PromptMode::Plan
+        } else {
+            PromptMode::Agent
+        }
+    }
     /// Returns the absolute path to the plan file.
     pub fn plan_file_path(&self) -> &Path {
         &self.plan_file_path
@@ -1061,6 +1074,23 @@ mod tests {
         let restored = PlanModeTracker::from_snapshot(PathBuf::from("/tmp/test-session"), snap);
         assert_eq!(restored.state(), PlanModeState::Active);
         assert!(!restored.should_use_full_reminder());
+    }
+    /// A resumed session that was planning still reports `Plan`. The mirrors
+    /// are seeded from this at spawn: seeding `Agent` instead makes the first
+    /// prompt resolve `Agent`, reconcile, and drop the plan mode silently.
+    #[test]
+    fn session_prompt_mode_follows_a_restored_active_tracker() {
+        let mut t = test_tracker();
+        t.enter_pending();
+        t.activate();
+        let restored = PlanModeTracker::from_snapshot(PathBuf::from("/tmp/test"), t.snapshot());
+        assert_eq!(restored.state(), PlanModeState::Active);
+        assert_eq!(restored.session_prompt_mode(), PromptMode::Plan);
+        assert_eq!(
+            test_tracker().session_prompt_mode(),
+            PromptMode::Agent,
+            "an inactive tracker is agent mode"
+        );
     }
     #[test]
     fn snapshot_pending_collapses_to_inactive() {

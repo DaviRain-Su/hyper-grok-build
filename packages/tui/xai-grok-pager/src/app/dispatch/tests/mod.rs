@@ -139,6 +139,7 @@ fn test_app() -> AppView {
         new_session_worktree_mode: crate::app::app_view::WorktreeMode::Never,
         fork_worktree_mode: crate::app::app_view::WorktreeMode::Ask,
         restore_code: None,
+        suppress_code_restore_once: None,
         resume_local_miss: None,
         agent_override: None,
         bootstrap_acp_commands: Vec::new(),
@@ -776,6 +777,7 @@ fn make_picker_entry(id: &str, cwd: &str) -> crate::app::app_view::SessionPicker
         branch: None,
         repo_name: "repo".into(),
         worktree_label: None,
+        last_turn_summary: None,
         card_detail: None,
     }
 }

@@ -110,7 +110,10 @@ async fn shutdown_workflows(session: &SessionActor) {
         return;
     }
     match tokio::time::timeout(std::time::Duration::from_secs(2), ack).await {
-        Ok(Ok(())) => {}
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(%error, "workflow shutdown persistence flush failed")
+        }
         Ok(Err(_)) => {
             tracing::warn!("workflow shutdown persistence actor dropped flush ack")
         }
@@ -412,7 +415,17 @@ pub(super) async fn run_session(
                     }
                     let (turn_succeeded, suppress_goal_continuation, infra_pause_message) =
                         SessionActor::post_turn_goal_degradation_plan(&result);
-                    session.handle_completion(prompt_id, result).await;
+                    // A `RemovedFromQueue` completion never started a turn, so
+                    // there is nothing to summarize below.
+                    let turn_ran = !matches!(
+                        &result,
+                        Ok(PromptTurnOk {
+                            completion_kind: PromptCompletionKind::RemovedFromQueue,
+                            ..
+                        })
+                    );
+                    let completed_prompt_id = prompt_id.clone();
+                    let owned_completion = session.handle_completion(prompt_id, result).await;
                     // Drain any monitor events that were routed to the mid-turn buffer
                     // but arrived after the turn ended (race between is_turn_active and buffer push).
                     session.drain_monitor_buffer_to_pending().await;
@@ -433,11 +446,9 @@ pub(super) async fn run_session(
                     // aimed at the turn that just completed. That holds
                     // because this arm runs in the same serialized actor loop
                     // as `SessionCommand::Interject` (no live turn's buffer
-                    // can be stolen mid-stream), and the Cancel arm clears
-                    // the buffer before its completion arrives. If the
-                    // select arms are ever reordered or the Cancel clear
-                    // moves, re-audit this flush.
-                    if session.flush_stranded_interjections().await {
+                    // can be stolen mid-stream), and both cancel paths drain
+                    // the buffer before their completion arrives.
+                    if session.flush_stranded_interjections().await > 0 {
                         tracing::info!("Flushed stranded interjection(s) into prompt turns");
                     }
                     SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
@@ -457,6 +468,17 @@ pub(super) async fn run_session(
                         tokio::task::spawn_local(async move {
                             s.maybe_fire_laziness_check().await;
                         });
+                    }
+                    // Per-turn dashboard summary (display-only side-call);
+                    // spawned so the actor loop keeps accepting commands.
+                    // `turn_succeeded` keeps cancelled/errored/refused turns
+                    // from triggering a fresh model call (a user who hit
+                    // Ctrl+C wants model activity to stop), and
+                    // `owned_completion` keeps a stale completion — a turn
+                    // the Cancel path already finalized — from summarizing
+                    // work the user aborted.
+                    if turn_ran && turn_succeeded && owned_completion {
+                        session.restart_turn_summary(completed_prompt_id);
                     }
                 }
                 maybe_cmd = cmd_rx.recv() => {
@@ -690,7 +712,23 @@ pub(super) async fn run_session(
                                 None => (None, None),
                             };
                             let cancel_for_send_now = session
-                                .queue_input(prompt_blocks, prompt_id, prompt_mode, trace_gcs_config, artifact_tracker, client_identifier, screen_mode, verbatim, json_schema, send_now, task_wake_fallback, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx)
+                                .queue_input(QueueInputRequest {
+                                    prompt_blocks,
+                                    prompt_id,
+                                    prompt_mode,
+                                    trace_gcs_config,
+                                    artifact_tracker,
+                                    client_identifier,
+                                    screen_mode,
+                                    verbatim,
+                                    json_schema,
+                                    send_now,
+                                    task_wake_fallback,
+                                    tool_overrides_update,
+                                    respond_to,
+                                    persist_ack,
+                                    parsed_prompt_tx,
+                                })
                                 .await;
                             if cancel_for_send_now {
                                 session.cancel_turn_for_send_now(&mut replay_buffer).await;
@@ -993,9 +1031,14 @@ pub(super) async fn run_session(
                             if let Some(notification) = replay_buffer.flush() {
                                 session.emit_buffered(notification).await;
                             }
-                            // Clear pending interjections — the turn is being
-                            // cancelled, so they have no active turn to inject into.
+                            // Clear, don't flush: converting interjections to
+                            // prompt turns would restart the model after a stop.
                             session.pending_interjections.clear();
+                            // Do not abort turn summary here. Summaries spawn only
+                            // after a successful turn, so an in-flight call describes
+                            // that prior success. Cancel targets the current turn;
+                            // under show-until-replaced the prior line should still
+                            // finish. New real prompts and rewind abort separately.
                             let suppress_task_wakes =
                                 matches!(options.trigger, Some(crate::session::CancelTrigger::CtrlC));
                             session.cancel_running_task(options).await;
@@ -2164,6 +2207,9 @@ pub(super) async fn run_session(
                             if let Some(notification) = replay_buffer.flush() {
                                 session.emit_buffered(notification).await;
                             }
+                            // Session is ending: do not leave a side-call
+                            // holding an Arc into this actor.
+                            session.abort_turn_summary();
                             // This arm returns; an unanswered turn would race
                             // teardown and report `EndTurn` for unfinished work.
                             if kind == crate::session::ShutdownKind::CancelRunningTurn {

@@ -301,6 +301,31 @@
     }
 
     #[test]
+    fn apply_retry_state_disk_full_pushes_session_event() {
+        use xai_grok_shell::extensions::notification::{
+            DISK_FULL_ERROR_TYPE, DISK_FULL_USER_MESSAGE,
+        };
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: DISK_FULL_ERROR_TYPE.into(),
+                message: DISK_FULL_USER_MESSAGE.into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        match scrollback.last().map(|e| &e.block) {
+            Some(RenderBlock::SessionEvent(ev)) => {
+                assert!(matches!(ev.event, SessionEvent::DiskFull));
+                assert_eq!(ev.event.message(), DISK_FULL_USER_MESSAGE);
+            }
+            other => panic!("expected DiskFull session event, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn apply_retry_state_credit_limit_exhausted_preserves_in_flight_prompt() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
@@ -343,7 +368,7 @@
         });
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "proxy_error".into(),
+                error_type: "api".into(),
                 message: "status 403: run out of credits".into(),
             },
             &mut session,
@@ -372,7 +397,7 @@
         });
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "proxy_error".into(),
+                error_type: "api".into(),
                 message:
                     "API error (status 402 Payment Required): Grok Build usage balance exhausted"
                         .into(),
@@ -399,7 +424,7 @@
         });
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "server_error".into(),
+                error_type: "api".into(),
                 message: "internal server error".into(),
             },
             &mut session,
@@ -436,7 +461,7 @@
         ));
         // Unrelated failures must not be treated as re-authable.
         assert!(!is_reauthable_failure(
-            Some("server_error"),
+            Some("api"),
             "internal server error"
         ));
         assert!(!is_reauthable_failure(Some("api"), "model not found"));
@@ -535,22 +560,62 @@
         ));
     }
 
-    /// Non-auth terminal failures still render the standard RetryFailed.
+    /// Non-auth terminal failures render the formatted RequestFailed banner
+    /// (same visual treatment as 401 re-auth), not a raw RetryFailed dump.
     #[test]
-    fn apply_retry_state_generic_failure_still_shows_retry_failed() {
+    fn apply_retry_state_generic_failure_shows_request_failed_banner() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "server_error".into(),
-                message: "internal server error".into(),
+                error_type: "api".into(),
+                message: r#"API error (status 500 Internal Server Error): {"error":"upstream exploded"}"#.into(),
             },
             &mut session,
             &mut scrollback, false);
-        assert!(matches!(
-            last_session_event(&scrollback),
-            Some(SessionEvent::RetryFailed { .. })
-        ));
+        match last_session_event(&scrollback) {
+            Some(SessionEvent::RequestFailed {
+                status,
+                headline,
+                detail,
+            }) => {
+                assert_eq!(status, Some(500));
+                assert_eq!(headline, "Server error (500)");
+                assert_eq!(
+                    detail,
+                    "Something went wrong on our side. Wait a minute and send again."
+                );
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_retry_state_403_shows_clean_denied_banner() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "api".into(),
+                message: "API error (status 403 Forbidden): Access to the chat endpoint is denied"
+                    .into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        match last_session_event(&scrollback) {
+            Some(SessionEvent::RequestFailed {
+                status,
+                headline,
+                detail,
+            }) => {
+                assert_eq!(status, Some(403));
+                assert_eq!(headline, "Request denied (403)");
+                assert_eq!(detail, "Access to the chat endpoint is denied");
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
     }
 
     /// A context overflow surfaces the actionable `ContextTooLarge` prompt (not the
@@ -574,6 +639,32 @@
                 Some(SessionEvent::ContextTooLarge)
             ),
             "context overflow must surface the actionable ContextTooLarge prompt"
+        );
+    }
+
+    /// Overflow-shaped copy without `error_type=context_length` must not take
+    /// the ContextTooLarge path — the shell is what tags overflow.
+    #[test]
+    fn apply_retry_state_overflow_copy_without_type_is_not_context_too_large() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "api".into(),
+                message: "API error (status 500): the prompt is too long for this model's \
+                          context window"
+                    .into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        assert!(
+            matches!(
+                last_session_event(&scrollback),
+                Some(SessionEvent::RequestFailed { .. })
+            ),
+            "without error_type=context_length this is a generic banner, not overflow UX"
         );
     }
 

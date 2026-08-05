@@ -1018,6 +1018,20 @@ impl StorageAdapter for JsonlStorageAdapter {
         )
         .await
     }
+    async fn set_last_turn_summary(
+        &self,
+        info: &Info,
+        summary: Option<(String, String)>,
+    ) -> io::Result<()> {
+        self.apply_summary_patch(
+            info,
+            super::summary_write::SummaryPatch {
+                last_turn_summary: Some(summary),
+                ..Default::default()
+            },
+        )
+        .await
+    }
     async fn append_update(&self, info: &Info, update: &super::SessionUpdate) -> io::Result<()> {
         self.append_update_commit_aware(info, update)
             .await

@@ -21,6 +21,7 @@ supports-color = { workspace = true }
 syntect = { workspace = true }
 two-face = { workspace = true }
 textwrap = { workspace = true }
+unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
 url = { workspace = true }
 xai-grok-markdown-core = { workspace = true }

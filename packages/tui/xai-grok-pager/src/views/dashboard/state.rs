@@ -1518,6 +1518,16 @@ impl DashboardState {
         self.selected_idle_overflow = false;
     }
 
+    /// Follow session overlay attach from `previous` to `new_id` when
+    /// attach already names `previous`. No-op otherwise so overlay chrome
+    /// is never invented. Keeps row focus aligned with attach.
+    pub fn repoint_attach_if_on(&mut self, previous: AgentId, new_id: AgentId) {
+        if self.attached_agent == Some(previous) {
+            self.attached_agent = Some(new_id);
+            self.focus_row(DashboardRowId::TopLevel(new_id));
+        }
+    }
+
     /// Focus the section header identified by `key` — the third cursor
     /// target alongside rows and the `[+ New Agent]` button. Clears the
     /// row selection and button focus so exactly one cursor is active.

@@ -301,7 +301,7 @@ impl AgentView {
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
-        if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+        if crate::input::key::RowWalk::from_key(key).is_some() {
             let focus = self.plan_approval_view.as_ref().map(|p| p.focus);
             match focus {
                 Some(PlanApprovalFocus::Prompt) | Some(PlanApprovalFocus::Commenting) => {

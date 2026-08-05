@@ -9,10 +9,17 @@
 //! directly.  Relative luminance (ITU-R BT.709) classifies the background as
 //! dark or light.
 //!
+//! tmux ≥ 3.2 intercepts a *bare* OSC 11 query from a pane and answers it
+//! (3.4 also snapshots the outer terminal colour on attach). Always send the
+//! bare query first. DCS wrapping is a short fallback only: `allow-passthrough`
+//! is off by default, and even when on the outer reply lands on tmux's tty
+//! rather than the pane. Do not wrap inside an editor `:terminal` — libvterm
+//! would paint the envelope as garbage.
+//!
 //! This is a **startup-only** fallback — it must NOT be called once
 //! crossterm's `EventStream` is active, as both compete for stdin in raw
-//! mode.  The live `SystemAppearanceWatcher` uses only
-//! `dark-light::detect()`.
+//! mode.  The live `SystemAppearanceWatcher` uses only desktop + env
+//! detection.
 
 use super::system_appearance::SystemAppearance;
 use std::time::Duration;
@@ -25,6 +32,12 @@ const LUMINANCE_THRESHOLD: f64 = 0.5;
 
 /// Timeout for reading the OSC 11 response from the terminal.
 const OSC11_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Upper bound for the DCS-wrapped retry. The wrap is usually swallowed, so
+/// it must not add another full [`OSC11_TIMEOUT`] to startup.
+const OSC11_WRAP_TIMEOUT: Duration = Duration::from_millis(80);
+
+const OSC11_QUERY: &[u8] = b"\x1b]11;?\x07";
 
 /// Detect system appearance by querying the terminal's background color.
 ///
@@ -42,13 +55,27 @@ pub fn detect_via_osc11() -> Option<SystemAppearance> {
         return None;
     }
 
-    if !crate::terminal::probe::write_query(b"\x1b]11;?\x07") {
-        return None;
+    // Bare first: tmux answers OSC 11 from the pane. Wrapping first is a
+    // regression when passthrough is off (default) or the reply never
+    // re-enters the pane.
+    if let Some(appearance) = query_osc11(OSC11_QUERY, OSC11_TIMEOUT) {
+        return Some(appearance);
     }
 
-    let response = read_osc_response(OSC11_TIMEOUT)?;
-    let (r, g, b) = parse_osc11_rgb(&response)?;
+    if crate::terminal::should_wrap_osc11(crate::terminal::terminal_context()) {
+        let wrapped = crate::terminal::tmux_passthrough(OSC11_QUERY);
+        query_osc11(&wrapped, OSC11_WRAP_TIMEOUT)
+    } else {
+        None
+    }
+}
 
+fn query_osc11(query: &[u8], timeout: Duration) -> Option<SystemAppearance> {
+    if !crate::terminal::probe::write_query(query) {
+        return None;
+    }
+    let response = read_osc_response(timeout)?;
+    let (r, g, b) = parse_osc11_rgb(&response)?;
     Some(classify_luminance(r, g, b))
 }
 
@@ -414,6 +441,19 @@ mod tests {
         let s: f64 = 128.0 / 255.0;
         let expected = ((s + 0.055) / 1.055).powf(2.4);
         assert!((result - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn wrap_retry_timeout_is_shorter_than_primary() {
+        assert!(OSC11_WRAP_TIMEOUT < OSC11_TIMEOUT);
+    }
+
+    #[test]
+    fn wrapped_osc11_query_matches_tmux_passthrough() {
+        assert_eq!(
+            crate::terminal::tmux_passthrough(OSC11_QUERY),
+            b"\x1bPtmux;\x1b\x1b]11;?\x07\x1b\\"
+        );
     }
 
     // -- detect_via_osc11 (graceful degradation) -----------------------------

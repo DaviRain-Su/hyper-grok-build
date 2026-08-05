@@ -1620,6 +1620,319 @@ mod tests {
         );
     }
 
+    /// Split rendered table lines into logical rows of per-column cell text,
+    /// concatenating wrapped fragments *without* inserting spaces so that
+    /// hard-split tokens reconstruct exactly.
+    fn reconstruct_table_cells(lines: &[String]) -> Vec<Vec<String>> {
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut current: Option<Vec<String>> = None;
+        for line in lines {
+            if let Some(inner) = line.strip_prefix('│').and_then(|l| l.strip_suffix('│')) {
+                let cells: Vec<&str> = inner.split('│').collect();
+                let row = current.get_or_insert_with(|| vec![String::new(); cells.len()]);
+                for (acc, fragment) in row.iter_mut().zip(cells) {
+                    acc.push_str(fragment.trim());
+                }
+            } else if let Some(row) = current.take() {
+                // Border or separator line closes the logical row.
+                rows.push(row);
+            }
+        }
+        if let Some(row) = current.take() {
+            rows.push(row);
+        }
+        rows
+    }
+
+    /// A six-column table of unbreakable tokens must reflow inside cells and
+    /// grow taller — never exceed the width budget or lose the right border.
+    #[test]
+    fn test_table_six_col_unbreakable_tokens_fit_width_50_40_30() {
+        use unicode_width::UnicodeWidthStr;
+
+        let md = "| Alpha | Bravo | Ident | DeptName | RoleName | Amount |\n\
+                  |---|---|---|---|---|---|\n\
+                  | LongalphaToken | TokenTwo | ID-AA1001 | EngineeringOps | ManagerRole | $145,000 |\n\n";
+
+        let (output_full, _) = render_markdown_ratatui_full(md, test_style::STYLE, true, None);
+        let full_lines = lines_to_text(&output_full.lines);
+        let full_max_width = full_lines.iter().map(|l| l.width()).max().unwrap_or(0);
+
+        for narrow in [50usize, 40, 30] {
+            assert!(
+                full_max_width > narrow,
+                "fixture must be naturally wider than {narrow}, got {full_max_width}"
+            );
+
+            let mut buffers = crate::MarkdownBuffers::new();
+            let (output, _) = crate::render_markdown_ratatui_with_buffers_width(
+                md,
+                test_style::STYLE,
+                true,
+                &mut buffers,
+                None,
+                Some(narrow),
+            );
+            let lines = lines_to_text(&output.lines);
+            assert!(!lines.is_empty(), "table should render at width {narrow}");
+
+            let first_width = lines.first().map(|l| l.width()).unwrap_or(0);
+            for (i, line) in lines.iter().enumerate() {
+                let w = line.width();
+                assert!(w <= narrow, "line {i} width {w} exceeds {narrow}: {line:?}");
+                assert_eq!(
+                    w, first_width,
+                    "line {i} width {w} != {first_width}: {line:?}"
+                );
+                let right_edge = line.trim_end().chars().last();
+                assert!(
+                    matches!(right_edge, Some('│' | '┐' | '┘' | '┤')),
+                    "line {i} lost its right border at width {narrow}: {line:?}"
+                );
+            }
+
+            // Width pressure must add visual lines (taller rows), not clip.
+            let content_lines = lines.iter().filter(|l| l.starts_with('│')).count();
+            assert!(
+                content_lines > 2,
+                "cells should wrap onto extra visual lines at width {narrow}, got {content_lines}"
+            );
+            assert!(
+                lines.len() > full_lines.len(),
+                "table should grow taller at width {narrow}: {} vs {} lines",
+                lines.len(),
+                full_lines.len()
+            );
+
+            // Every token must survive the reflow in its own column — each
+            // body cell is a single token, so reconstruction is exact.
+            let rows = reconstruct_table_cells(&lines);
+            assert_eq!(rows.len(), 2, "header + one body row, got {rows:#?}");
+            assert_eq!(
+                rows[1],
+                [
+                    "LongalphaToken",
+                    "TokenTwo",
+                    "ID-AA1001",
+                    "EngineeringOps",
+                    "ManagerRole",
+                    "$145,000",
+                ],
+                "body cells must reconstruct exactly at width {narrow}"
+            );
+        }
+    }
+
+    /// Hard splits must fall on grapheme boundaries — CJK, VS16 emoji, and
+    /// ZWJ clusters stay intact and every line fits the assigned width.
+    /// Fixtures are single unbreakable words so the word separator never
+    /// contributes break points of its own.
+    #[test]
+    fn test_wrap_cell_text_grapheme_hard_split_stays_within_width() {
+        use unicode_segmentation::UnicodeSegmentation;
+        use unicode_width::UnicodeWidthStr;
+
+        for text in [
+            "你好世界⚠\u{FE0F}",
+            "编码测试👩\u{200D}🚀",
+            "你好世👩\u{200D}🚀。",
+        ] {
+            let widest = text.graphemes(true).map(|g| g.width()).max().unwrap_or(0);
+            // Representable width: at least the widest single grapheme.
+            let width = widest.max(4);
+
+            let lines = crate::parse::MarkdownParser::wrap_cell_text(text, width);
+            assert!(!lines.is_empty(), "wrap must never return an empty vec");
+            assert!(
+                lines.len() > 1,
+                "fixture should force a hard split: {text:?} at width {width}"
+            );
+            for line in &lines {
+                assert!(
+                    line.width() <= width,
+                    "line {line:?} wider than {width} for {text:?}"
+                );
+            }
+            assert_eq!(
+                lines.concat(),
+                text,
+                "no graphemes may be dropped or reordered"
+            );
+
+            // Every split point must be a grapheme boundary of the source.
+            let boundaries: std::collections::HashSet<usize> = text
+                .grapheme_indices(true)
+                .map(|(i, _)| i)
+                .chain(std::iter::once(text.len()))
+                .collect();
+            let mut offset = 0usize;
+            for line in &lines {
+                offset += line.len();
+                assert!(
+                    boundaries.contains(&offset),
+                    "split at byte {offset} falls inside a grapheme of {text:?}"
+                );
+            }
+        }
+    }
+
+    /// A markdown link hard-wrapped across visual lines keeps one shared
+    /// hyperlink id + url, in-bounds column ranges, and link styling on
+    /// every fragment.
+    #[test]
+    fn test_table_hard_wrapped_styled_link_keeps_id_and_bounds() {
+        use unicode_width::UnicodeWidthStr;
+
+        let md = "| L |\n|---|\n| [clickmenowplease](https://example.com) |\n\n";
+        let narrow = 12;
+
+        let mut buffers = crate::MarkdownBuffers::new();
+        let (output, _) = crate::render_markdown_ratatui_with_buffers_width(
+            md,
+            test_style::STYLE,
+            true,
+            &mut buffers,
+            None,
+            Some(narrow),
+        );
+        let lines = lines_to_text(&output.lines);
+
+        for (i, line) in lines.iter().enumerate() {
+            assert!(
+                line.width() <= narrow,
+                "line {i} exceeds width {narrow}: {line:?}"
+            );
+        }
+
+        // All label characters survive the hard wrap (no inserted spaces).
+        let rows = reconstruct_table_cells(&lines);
+        assert!(
+            rows.iter().any(|r| r.concat().contains("clickmenowplease")),
+            "label must reconstruct intact: {rows:#?}"
+        );
+
+        let links: Vec<_> = output
+            .hyperlinks
+            .iter()
+            .filter(|h| h.url == "https://example.com")
+            .collect();
+        assert!(
+            links.len() >= 2,
+            "wrapped label should produce multiple link fragments: {links:#?}"
+        );
+        let first_id = links[0].id;
+        for link in &links {
+            assert_eq!(link.id, first_id, "fragments must share one link id");
+            let line = &lines[link.line_index];
+            assert!(
+                link.column_range.end <= line.width(),
+                "range {:?} exceeds line {} width {}: {line:?}",
+                link.column_range,
+                link.line_index,
+                line.width()
+            );
+        }
+
+        // Label fragments keep link styling instead of default spans.
+        let default_style = ratatui::style::Style::default();
+        let styled_fragments = output
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter(|span| {
+                let content = span.content.trim();
+                !content.is_empty()
+                    && "clickmenowplease".contains(content)
+                    && span.style != default_style
+            })
+            .count();
+        assert!(
+            styled_fragments >= 2,
+            "wrapped label fragments must keep link styling"
+        );
+    }
+
+    /// Hard-split fragments must project source spans from a monotonic
+    /// cursor: a linked run followed by a plain run of the same substring
+    /// ("aa") must not re-match earlier bytes — that leaks link style and
+    /// hyperlink ranges into the plain fragment.
+    #[test]
+    fn test_table_hard_split_adjacent_link_and_plain_spans_stay_separate() {
+        // Cell "x aaaaaa" wraps at content width 2 into fragments
+        // "x" / "aa" / "aa" / "aa": two linked, then one plain.
+        let md = "| A |\n|---|\n| x [aaaa](https://example.com)aa |\n\n";
+
+        let mut buffers = crate::MarkdownBuffers::new();
+        let (output, _) = crate::render_markdown_ratatui_with_buffers_width(
+            md,
+            test_style::STYLE,
+            true,
+            &mut buffers,
+            None,
+            Some(6),
+        );
+        let lines = lines_to_text(&output.lines);
+
+        // Each content line renders its fragment as exactly one span — a
+        // mis-projected fragment straddles two source spans and splits.
+        let fragment_spans: Vec<Vec<&str>> = output
+            .lines
+            .iter()
+            .zip(&lines)
+            .filter(|(_, text)| text.starts_with('│'))
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .filter(|c| !c.contains('│') && !c.trim().is_empty())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            fragment_spans,
+            [["A"], ["x"], ["aa"], ["aa"], ["aa"]],
+            "fragments must not straddle span boundaries: {lines:#?}"
+        );
+
+        // Only the two linked fragments carry hyperlinks, sharing one id and
+        // covering exactly the linked text on their lines.
+        let links: Vec<_> = output
+            .hyperlinks
+            .iter()
+            .filter(|h| h.url == "https://example.com")
+            .collect();
+        assert_eq!(links.len(), 2, "plain fragment must not link: {links:#?}");
+        assert_eq!(links[0].id, links[1].id, "fragments must share one link id");
+        for link in &links {
+            // All chars on these lines are one display cell wide.
+            let line = &lines[link.line_index];
+            let covered: String = line
+                .chars()
+                .skip(link.column_range.start)
+                .take(link.column_range.len())
+                .collect();
+            assert_eq!(
+                covered, "aa",
+                "hyperlink range must cover exactly the linked text: {line:?}"
+            );
+        }
+
+        // The trailing plain "aa" must render unstyled (no link leak).
+        let last_link_line = links.iter().map(|l| l.line_index).max().unwrap_or(0);
+        let plain_line = &output.lines[last_link_line + 1];
+        let default_style = ratatui::style::Style::default();
+        for span in &plain_line.spans {
+            let content = span.content.trim();
+            if !content.is_empty() && !span.content.contains('│') {
+                assert_eq!(content, "aa", "plain fragment content: {plain_line:?}");
+                assert_eq!(
+                    span.style, default_style,
+                    "plain fragment must not inherit link styling"
+                );
+            }
+        }
+    }
+
     /// Table source map: rendered line numbers must not exceed the table's
     /// actual source line count, and must map to the correct source lines.
     #[test]

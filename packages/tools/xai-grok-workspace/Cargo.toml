@@ -105,10 +105,14 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 tempfile = { workspace = true }
 zstd = { workspace = true }
+wait-timeout = { workspace = true }
 
 # Only referenced by the Unix self-daemonize path (fork/setsid/dup2/chdir).
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = { workspace = true, features = ["signal", "process"] }
 
 # Only referenced by the Windows self-daemonize path (SetStdHandle).
 [target.'cfg(windows)'.dependencies]

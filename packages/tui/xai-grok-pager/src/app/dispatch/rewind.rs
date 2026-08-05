@@ -598,6 +598,11 @@ pub(super) fn dispatch_rewind_success(
     let stashed_draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
 
     if !is_files_only {
+        // The summary describes turns the rewind just removed (the shell
+        // clears its persisted copy on the same branch). Bump gen so a
+        // late SessionMetaFromDisk hydrate cannot restore the pre-rewind
+        // summary.json value into the cleared field.
+        agent.set_last_turn_summary(None);
         let target_idx = find_user_prompt_entry_for_shell_index(&agent.scrollback, target);
         if let Some(anchor_idx) = target_idx {
             let removed = agent.scrollback.remove_from(anchor_idx);

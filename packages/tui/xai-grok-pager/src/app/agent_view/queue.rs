@@ -88,13 +88,11 @@ impl AgentView {
     }
 
     /// Whether an explicit send-now dispatched right now will actually cancel
-    /// the running turn shell-side (`cancel_running_turn = send_now &&
-    /// turn_running && !goal_active`) — the arming predicate for
-    /// [`Self::expect_send_now_cancel`]. During an active goal the shell only
-    /// promotes the prompt (no cancel), so arming would leave a stale
-    /// expectation that suppresses a later real cancel's marker.
+    /// the running turn shell-side. Also requires the front committed so a
+    /// spared send-now does not paint under later output from that front.
     pub(crate) fn expects_send_now_cancel(&self) -> bool {
         self.session.state.is_turn_running()
+            && self.front_message_committed
             && !self
                 .goal_state
                 .as_ref()

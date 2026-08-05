@@ -111,6 +111,7 @@ pub(crate) fn restore_code_from_toml(root: &TomlValue) -> Option<bool> {
 }
 
 /// Resolve restore_code: local config > remote settings > default (`false`).
+/// Used when the client omits `restoreCode` on the wire.
 pub(crate) fn resolve_restore_code(
     raw_config: &TomlValue,
     remote: Option<&RemoteSettings>,

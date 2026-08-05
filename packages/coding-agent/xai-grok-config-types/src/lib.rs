@@ -850,7 +850,7 @@ pub struct RemoteSettings {
     #[serde(default)]
     pub worktree_type: Option<String>,
     /// Server-recommended default for `restore_code` in worktree resume.
-    /// Fallback when no local `[cli] restore_code` is set in config.toml.
+    /// Applied only when the client omits `restoreCode`.
     #[serde(default)]
     pub restore_code: Option<bool>,
     /// When `Some(true)`, Ctrl+C before the first server activity rewinds
@@ -861,6 +861,11 @@ pub struct RemoteSettings {
     /// Optional remote kill-switch; shell defaults ON when unset (set `false` to disable).
     #[serde(default)]
     pub session_recap: Option<bool>,
+    /// Enables the per-turn dashboard summary (one-line "what happened last
+    /// turn" generated at turn end). Optional remote kill-switch; shell
+    /// defaults ON when unset (set `false` to disable).
+    #[serde(default)]
+    pub turn_summary: Option<bool>,
     /// Enables the `ask_user_question` tool. Optional remote kill-switch:
     /// `Some(false)` strips the tool; `Some(true)` or absent → the shell
     /// default (ON). Feature-flagged via remote settings.

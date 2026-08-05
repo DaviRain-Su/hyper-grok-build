@@ -59,6 +59,198 @@ pub fn fuzzy_matches_hook(hook: &xai_hooks_plugins_types::HookInfo, query: &str)
         || hook.url.as_ref().is_some_and(|u| fuzzy_matches(u, query))
 }
 
+/// Case-insensitive string order without intermediate allocations.
+/// Equal ignoring case falls back to the original byte order for stability.
+fn cmp_str_ci(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ai = a.chars().flat_map(char::to_lowercase);
+    let mut bi = b.chars().flat_map(char::to_lowercase);
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return a.cmp(b),
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) if x != y => return x.cmp(&y),
+            _ => {}
+        }
+    }
+}
+
+fn hook_row_label(hook: &xai_hooks_plugins_types::HookInfo) -> String {
+    let matcher = hook
+        .matcher
+        .as_deref()
+        .map(|m| format!(" /{m}"))
+        .unwrap_or_default();
+    format!("on:{}{matcher}", hook.event)
+}
+
+/// Logical source kind for hook group rank (independent of display copy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum HookSourceKind {
+    Project = 0,
+    Global = 1,
+    Claude = 2,
+    Plugin = 3,
+    Custom = 4,
+}
+
+/// Label plus kind for a hooks source directory.
+#[derive(Debug, Clone)]
+struct HookSourceMeta {
+    label: String,
+    kind: HookSourceKind,
+}
+
+impl HookSourceMeta {
+    fn is_custom(&self) -> bool {
+        self.kind == HookSourceKind::Custom
+    }
+}
+
+/// Sort key for hook source groups: kind rank, then A–Z label, then path.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HookGroupSortKey<'a> {
+    kind: HookSourceKind,
+    label_lower: String,
+    source_dir: &'a str,
+}
+
+fn hook_group_sort_key<'a>(source_dir: &'a str, meta: &HookSourceMeta) -> HookGroupSortKey<'a> {
+    HookGroupSortKey {
+        kind: meta.kind,
+        label_lower: meta.label.to_lowercase(),
+        source_dir,
+    }
+}
+
+fn is_official_marketplace_source(source: &xai_hooks_plugins_types::MarketplaceScanResult) -> bool {
+    source.source_name == xai_grok_plugin_marketplace::OFFICIAL_SOURCE_NAME
+        || xai_grok_plugin_marketplace::is_official_source_url(&source.source_url_or_path)
+}
+
+/// One marketplace source in display order with plugins sorted A–Z.
+#[derive(Debug, Clone)]
+pub(crate) struct MarketplaceSourceView {
+    pub source_index: usize,
+    pub plugin_indices: Vec<usize>,
+}
+
+/// Official source first, then A–Z by `source_name`; plugins A–Z within each.
+pub(crate) fn ordered_marketplace_view(
+    sources: &[xai_hooks_plugins_types::MarketplaceScanResult],
+) -> Vec<MarketplaceSourceView> {
+    let mut source_order: Vec<usize> = (0..sources.len()).collect();
+    let source_keys: Vec<(bool, String)> = sources
+        .iter()
+        .map(|s| {
+            (
+                is_official_marketplace_source(s),
+                s.source_name.to_lowercase(),
+            )
+        })
+        .collect();
+    source_order.sort_by(|&a, &b| match (source_keys[a].0, source_keys[b].0) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => source_keys[a]
+            .1
+            .cmp(&source_keys[b].1)
+            .then_with(|| a.cmp(&b)),
+    });
+    source_order
+        .into_iter()
+        .map(|si| {
+            let names: Vec<String> = sources[si]
+                .plugins
+                .iter()
+                .map(|p| p.name.to_lowercase())
+                .collect();
+            let mut plugin_order: Vec<usize> = (0..sources[si].plugins.len()).collect();
+            plugin_order.sort_by(|&a, &b| names[a].cmp(&names[b]).then_with(|| a.cmp(&b)));
+            MarketplaceSourceView {
+                source_index: si,
+                plugin_indices: plugin_order,
+            }
+        })
+        .collect()
+}
+
+/// Collapse key for the Workflows block on the Skills tab.
+const SKILLS_WORKFLOWS_GROUP_KEY: &str = "Workflows";
+
+/// Group header for a skill scope/source.
+#[derive(Debug, Clone)]
+struct SkillGroup {
+    rank: u8,
+    label: String,
+}
+
+/// Project → User → Plugin → Bundled → Server → Config.
+fn skill_group(skill: &SkillInfo) -> SkillGroup {
+    use xai_grok_tools::implementations::skills::types::SkillScope;
+    use xai_grok_tools::types::config_source::ConfigSource;
+
+    if let Some(ref cs) = skill.config_source {
+        return match cs {
+            ConfigSource::Project { .. } => SkillGroup {
+                rank: 0,
+                label: "Project".into(),
+            },
+            ConfigSource::User { .. } => SkillGroup {
+                rank: 1,
+                label: "User".into(),
+            },
+            ConfigSource::Plugin { plugin_name, .. } => SkillGroup {
+                rank: 2,
+                label: format!("Plugin: {plugin_name}"),
+            },
+            ConfigSource::Bundled { .. } => SkillGroup {
+                rank: 3,
+                label: "Bundled".into(),
+            },
+            ConfigSource::Server { .. } => SkillGroup {
+                rank: 4,
+                label: "Server".into(),
+            },
+            ConfigSource::Builtin
+            | ConfigSource::ConfigToml { .. }
+            | ConfigSource::ClaudeJson { .. }
+            | ConfigSource::McpJson { .. }
+            | ConfigSource::Cli { .. }
+            | ConfigSource::Managed { .. } => SkillGroup {
+                rank: 5,
+                label: "Config".into(),
+            },
+        };
+    }
+    match skill.scope {
+        SkillScope::Local | SkillScope::Repo => SkillGroup {
+            rank: 0,
+            label: "Project".into(),
+        },
+        SkillScope::User => SkillGroup {
+            rank: 1,
+            label: "User".into(),
+        },
+        SkillScope::Plugin => SkillGroup {
+            rank: 2,
+            label: format!(
+                "Plugin: {}",
+                skill.plugin_name.as_deref().unwrap_or("unknown")
+            ),
+        },
+        SkillScope::Bundled => SkillGroup {
+            rank: 3,
+            label: "Bundled".into(),
+        },
+        SkillScope::Server => SkillGroup {
+            rank: 4,
+            label: "Server".into(),
+        },
+    }
+}
+
 /// Word-wrap text into lines that fit within `max_w` characters.
 ///
 /// Splits on newlines first, then wraps each paragraph at word boundaries.
@@ -94,34 +286,6 @@ fn word_wrap(text: &str, max_w: usize) -> Vec<&str> {
         }
     }
     result
-}
-
-/// Source-level search gate shared by the marketplace count, resolve, and
-/// navigation helpers: empty query, or any plugin name fuzzy-matches.
-pub(crate) fn source_has_matching_plugin(
-    source: &xai_hooks_plugins_types::MarketplaceScanResult,
-    query: &str,
-) -> bool {
-    query.is_empty() || source.plugins.iter().any(|p| fuzzy_matches(&p.name, query))
-}
-
-/// Count marketplace plugins that match the search query.
-pub fn filtered_marketplace_count(
-    sources: &[xai_hooks_plugins_types::MarketplaceScanResult],
-    query: &str,
-) -> usize {
-    // Match the renderer's indexing: non-matching sources take plugins.len().max(1)
-    // slots (no header), matching sources take 1 (header) + plugins.len().
-    sources
-        .iter()
-        .map(|s| {
-            if !source_has_matching_plugin(s, query) {
-                s.plugins.len().max(1)
-            } else {
-                1 + s.plugins.len()
-            }
-        })
-        .sum()
 }
 
 /// Test fixture: a minimal `PluginInfo` shared by the pager's plugin tests.
@@ -174,11 +338,29 @@ impl PluginGroup {
             label: label.to_string(),
         }
     }
+
+    fn into_sort_key(self) -> PluginGroupSortKey {
+        PluginGroupSortKey {
+            rank: self.rank,
+            label_lower: self.label.to_lowercase(),
+            label: self.label,
+            key: self.key,
+        }
+    }
 }
 
-/// Plugins bucketed by `(rank, label, key)` group sort key for the Plugins tab.
+/// Sort key for plugin origin groups (rank, then A–Z label).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PluginGroupSortKey {
+    rank: u8,
+    label_lower: String,
+    label: String,
+    key: String,
+}
+
+/// Plugins bucketed by group sort key for the Plugins tab.
 type GroupedPlugins<'a> = std::collections::BTreeMap<
-    (u8, String, String),
+    PluginGroupSortKey,
     Vec<(usize, &'a xai_hooks_plugins_types::PluginInfo)>,
 >;
 
@@ -250,134 +432,18 @@ pub fn plugin_group(plugin: &xai_hooks_plugins_types::PluginInfo) -> PluginGroup
     }
 }
 
-/// Resolve a flat marketplace index to (source_index, plugin) or just source_index.
-///
-/// This is the single source of truth for flat-index → item mapping. All code
-/// that needs to identify which source header or plugin a flat index refers to
-/// (ToggleExpand, Install, Uninstall) must go through this function so the
-/// index arithmetic stays consistent with the rendering and navigation helpers.
-pub fn resolve_marketplace_index<'a>(
-    sources: &'a [xai_hooks_plugins_types::MarketplaceScanResult],
-    target: usize,
-    query: &str,
-    collapsed_sources: &std::collections::HashSet<usize>,
-) -> Option<MarketplaceHit<'a>> {
-    let mut idx = 0usize;
-    for (si, source) in sources.iter().enumerate() {
-        if !source_has_matching_plugin(source, query) {
-            idx += source.plugins.len().max(1);
-            continue;
-        }
-        // Source header.
-        if idx == target {
-            return Some(MarketplaceHit::SourceHeader { source_index: si });
-        }
-        idx += 1;
-
-        let source_is_collapsed = collapsed_sources.contains(&si) && query.is_empty();
-        if source.plugins.is_empty() || source.error.is_some() || source_is_collapsed {
-            idx += source.plugins.len().max(1);
-            continue;
-        }
-        for plugin in &source.plugins {
-            if idx == target && fuzzy_matches(&plugin.name, query) {
-                return Some(MarketplaceHit::Plugin {
-                    source_index: si,
-                    source,
-                    plugin,
-                });
-            }
-            idx += 1;
-        }
-    }
-    None
+/// Group + order hooks the same way the renderer does.
+struct HookGroupView<'a> {
+    source_dir: &'a str,
+    label: String,
+    indices: Vec<usize>,
 }
 
-/// What a flat marketplace index resolved to.
-#[derive(Debug)]
-pub enum MarketplaceHit<'a> {
-    /// The index points at a source header row.
-    SourceHeader { source_index: usize },
-    /// The index points at a specific plugin inside a source.
-    Plugin {
-        source_index: usize,
-        source: &'a xai_hooks_plugins_types::MarketplaceScanResult,
-        plugin: &'a xai_hooks_plugins_types::MarketplacePluginEntry,
-    },
-}
-/// Find the next selectable marketplace index at or after `start`.
-pub fn next_matching_marketplace(
-    sources: &[xai_hooks_plugins_types::MarketplaceScanResult],
-    start: usize,
-    query: &str,
-    collapsed_sources: &std::collections::HashSet<usize>,
-) -> Option<usize> {
-    let mut idx = 0;
-    for (si, source) in sources.iter().enumerate() {
-        if !source_has_matching_plugin(source, query) {
-            idx += source.plugins.len().max(1);
-            continue;
-        }
-        // Source header.
-        if idx >= start {
-            return Some(idx);
-        }
-        idx += 1;
-        let source_is_collapsed = collapsed_sources.contains(&si) && query.is_empty();
-        if source.plugins.is_empty() || source.error.is_some() || source_is_collapsed {
-            idx += source.plugins.len().max(1);
-            continue;
-        }
-        for plugin in &source.plugins {
-            if fuzzy_matches(&plugin.name, query) && idx >= start {
-                return Some(idx);
-            }
-            idx += 1;
-        }
-    }
-    None
-}
-
-/// Find the previous selectable marketplace index at or before `start`.
-pub fn prev_matching_marketplace(
-    sources: &[xai_hooks_plugins_types::MarketplaceScanResult],
-    start: usize,
-    query: &str,
-    collapsed_sources: &std::collections::HashSet<usize>,
-) -> Option<usize> {
-    let mut result = None;
-    let mut idx = 0;
-    for (si, source) in sources.iter().enumerate() {
-        if !source_has_matching_plugin(source, query) {
-            idx += source.plugins.len().max(1);
-            continue;
-        }
-        // Source header.
-        if idx <= start {
-            result = Some(idx);
-        }
-        idx += 1;
-        let source_is_collapsed = collapsed_sources.contains(&si) && query.is_empty();
-        if source.plugins.is_empty() || source.error.is_some() || source_is_collapsed {
-            idx += source.plugins.len().max(1);
-            continue;
-        }
-        for plugin in &source.plugins {
-            if fuzzy_matches(&plugin.name, query) && idx <= start {
-                result = Some(idx);
-            }
-            idx += 1;
-        }
-    }
-    result
-}
-
-/// Build merged hook groups (same grouping as the renderer uses).
 fn build_hook_groups<'a>(
     hooks: &'a [xai_hooks_plugins_types::HookInfo],
     filter: StatusFilter,
     query: &str,
-) -> Vec<(&'a str, Vec<usize>)> {
+) -> Vec<HookGroupView<'a>> {
     let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
     for (i, hook) in hooks.iter().enumerate() {
         if !fuzzy_matches_hook(hook, query) {
@@ -392,100 +458,28 @@ fn build_hook_groups<'a>(
             groups.push((&hook.source_dir, vec![i]));
         }
     }
-    groups
-}
-
-/// Find the next visible hook index after `current`, skipping collapsed groups.
-pub fn next_visible_hook(
-    hooks: &[xai_hooks_plugins_types::HookInfo],
-    current: usize,
-    collapsed: &std::collections::HashSet<String>,
-    filter: StatusFilter,
-    query: &str,
-) -> Option<usize> {
-    if hooks.is_empty() {
-        return None;
+    let mut metas: Vec<HookSourceMeta> = groups
+        .iter()
+        .map(|(dir, _)| classify_hook_source(dir))
+        .collect();
+    let group_keys: Vec<HookGroupSortKey<'_>> = groups
+        .iter()
+        .zip(metas.iter())
+        .map(|((dir, _), meta)| hook_group_sort_key(dir, meta))
+        .collect();
+    let mut group_order: Vec<usize> = (0..groups.len()).collect();
+    group_order.sort_by(|&a, &b| group_keys[a].cmp(&group_keys[b]));
+    let mut ordered: Vec<HookGroupView<'a>> = Vec::with_capacity(groups.len());
+    for gi in group_order {
+        let (source_dir, mut indices) = std::mem::take(&mut groups[gi]);
+        indices.sort_by_cached_key(|&i| (hook_row_label(&hooks[i]).to_lowercase(), i));
+        ordered.push(HookGroupView {
+            source_dir,
+            label: std::mem::take(&mut metas[gi].label),
+            indices,
+        });
     }
-    let groups = build_hook_groups(hooks, filter, query);
-    // Find which group `current` belongs to.
-    let mut current_group_idx = None;
-    for (gi, (_source_dir, indices)) in groups.iter().enumerate() {
-        if indices.contains(&current) {
-            current_group_idx = Some(gi);
-            break;
-        }
-    }
-    if let Some(gi) = current_group_idx {
-        let (source_dir, indices) = &groups[gi];
-        // If group is expanded, try to move within the group.
-        if !collapsed.contains(*source_dir)
-            && let Some(&next) = indices.iter().find(|&&i| i > current)
-        {
-            return Some(next);
-        }
-        // Move to next group's first hook.
-        if gi + 1 < groups.len() {
-            return groups[gi + 1].1.first().copied();
-        }
-    } else {
-        // current not found (filtered out): find first group with any index > current.
-        for (_source_dir, indices) in &groups {
-            if let Some(&next) = indices.iter().find(|&&i| i > current) {
-                return Some(next);
-            }
-        }
-    }
-    None
-}
-
-/// Find the previous visible hook index before `current`, skipping collapsed groups.
-pub fn prev_visible_hook(
-    hooks: &[xai_hooks_plugins_types::HookInfo],
-    current: usize,
-    collapsed: &std::collections::HashSet<String>,
-    filter: StatusFilter,
-    query: &str,
-) -> Option<usize> {
-    if hooks.is_empty() {
-        return None;
-    }
-    let groups = build_hook_groups(hooks, filter, query);
-    // Find which group `current` belongs to.
-    let mut current_group_idx = None;
-    for (gi, (_source_dir, indices)) in groups.iter().enumerate() {
-        if indices.contains(&current) {
-            current_group_idx = Some(gi);
-            break;
-        }
-    }
-    if let Some(gi) = current_group_idx {
-        let (source_dir, indices) = &groups[gi];
-        // If group is expanded, try to move within the group.
-        if !collapsed.contains(*source_dir)
-            && let Some(&prev) = indices.iter().rev().find(|&&i| i < current)
-        {
-            return Some(prev);
-        }
-        // Move to previous group's representative.
-        if gi > 0 {
-            let (prev_dir, prev_indices) = &groups[gi - 1];
-            return if collapsed.contains(*prev_dir) {
-                prev_indices.first().copied()
-            } else {
-                prev_indices.last().copied()
-            };
-        }
-    } else {
-        // current not found: find last index < current across all groups.
-        let mut best: Option<usize> = None;
-        for (_source_dir, indices) in &groups {
-            if let Some(&prev) = indices.iter().rev().find(|&&i| i < current) {
-                best = Some(prev);
-            }
-        }
-        return best;
-    }
-    None
+    ordered
 }
 
 // ---------------------------------------------------------------------------
@@ -1813,10 +1807,14 @@ pub struct ExtensionsModalState {
     pub plugins_collapsed_groups: std::collections::HashSet<String>,
     /// See [`Self::seed_plugin_groups_once`].
     pub plugins_groups_seeded: bool,
-    /// Collapsed marketplace entries (by flat plugin index). Default collapsed.
-    pub marketplace_collapsed: std::collections::HashSet<usize>,
     /// Collapsed marketplace sources (by source index). Default collapsed.
     pub marketplace_collapsed_sources: std::collections::HashSet<usize>,
+    /// Collapsed skill source groups (by [`SkillGroup::label`] / Workflows key).
+    pub skills_collapsed_groups: std::collections::HashSet<String>,
+    /// See [`Self::seed_skills_groups_once`].
+    pub skills_groups_seeded: bool,
+    /// See [`Self::seed_workflows_group_once`].
+    pub workflows_group_seeded: bool,
     /// Expanded skill entries (by skill index). Skills start collapsed.
     pub skills_expanded: std::collections::HashSet<usize>,
     /// Status filter for the plugins tab.
@@ -1895,10 +1893,12 @@ impl ExtensionsModalState {
             mcps_section_collapse_initialized: false,
             skills_visible_map: Vec::new(),
             skills_expanded: std::collections::HashSet::new(),
+            skills_collapsed_groups: std::collections::HashSet::new(),
+            skills_groups_seeded: false,
+            workflows_group_seeded: false,
             hooks_collapsed_groups: std::collections::HashSet::new(),
             plugins_collapsed_groups: std::collections::HashSet::new(),
             plugins_groups_seeded: false,
-            marketplace_collapsed: std::collections::HashSet::new(),
             marketplace_collapsed_sources: std::collections::HashSet::new(),
             plugins_filter: StatusFilter::default(),
             mcps_filter: StatusFilter::default(),
@@ -1955,10 +1955,6 @@ impl ExtensionsModalState {
         self.picker_state.hovered = None;
     }
 
-    /// Whether a group header at picker index `sel` with the given
-    /// `group_key` is currently expanded (children visible).
-    ///
-    /// The answer depends on the active tab: Hooks use
     /// Seed the all-collapsed default for plugin source groups exactly once.
     ///
     /// Called from both plugin-data delivery channels (list fetch and the
@@ -1972,9 +1968,34 @@ impl ExtensionsModalState {
         self.plugins_groups_seeded = true;
     }
 
-    /// `hooks_collapsed_groups`, Marketplace uses
-    /// `marketplace_collapsed_sources` (or `picker_state.expanded` for
-    /// error-source headers), and other tabs use `picker_state.expanded`.
+    /// Seed default-collapsed skill source groups exactly once.
+    ///
+    /// Unions [`SkillGroup::label`] keys into `skills_collapsed_groups` so a
+    /// prior Workflows expand/collapse (seeded independently) is preserved.
+    /// Later reloads leave the set alone.
+    pub fn seed_skills_groups_once(&mut self, skills: &[SkillInfo]) {
+        if self.skills_groups_seeded {
+            return;
+        }
+        for skill in skills {
+            self.skills_collapsed_groups
+                .insert(skill_group(skill).label);
+        }
+        self.skills_groups_seeded = true;
+    }
+
+    /// Seed default-collapsed Workflows header once (independent of skills load).
+    pub fn seed_workflows_group_once(&mut self) {
+        if self.workflows_group_seeded {
+            return;
+        }
+        self.skills_collapsed_groups
+            .insert(SKILLS_WORKFLOWS_GROUP_KEY.to_string());
+        self.workflows_group_seeded = true;
+    }
+
+    /// Whether a group header at picker index `sel` with the given
+    /// `group_key` is currently expanded (children visible).
     pub fn is_group_expanded(&self, sel: usize, group_key: &str) -> bool {
         let searching = !self.picker_state.query().is_empty();
 
@@ -1985,6 +2006,7 @@ impl ExtensionsModalState {
             ExtensionsTab::Plugins => {
                 searching || !self.plugins_collapsed_groups.contains(group_key)
             }
+            ExtensionsTab::Skills => searching || !self.skills_collapsed_groups.contains(group_key),
             ExtensionsTab::Marketplace => {
                 let source_has_error = group_key
                     .parse::<usize>()
@@ -2019,7 +2041,6 @@ impl ExtensionsModalState {
                     false
                 }
             }
-            _ => self.picker_state.expanded.contains(&sel),
         }
     }
 
@@ -2286,6 +2307,13 @@ pub(crate) fn mcp_section_children_hidden(
 /// Returns `(label, is_custom)` where `is_custom` means the source was added
 /// via hooks-paths and can be removed.
 pub fn derive_source_label(source_dir: &str) -> (String, bool) {
+    let meta = classify_hook_source(source_dir);
+    let is_custom = meta.is_custom();
+    (meta.label, is_custom)
+}
+
+/// Classify a hooks `source_dir` into a display label and stable kind rank.
+fn classify_hook_source(source_dir: &str) -> HookSourceMeta {
     let grok = xai_grok_config::grok_home();
     let source_path = std::path::Path::new(source_dir);
     // Plugin / installed-plugin dirs, under the user grok home (GROK_HOME-aware)
@@ -2316,21 +2344,33 @@ pub fn derive_source_label(source_dir: &str) -> (String, bool) {
             .map(|w| w[2].clone())
     };
     if let Some(name) = plugin_name("plugins").or_else(|| plugin_name("installed-plugins")) {
-        return (format!("Plugin: {name}"), false);
+        return HookSourceMeta {
+            label: format!("Plugin: {name}"),
+            kind: HookSourceKind::Plugin,
+        };
     }
     // Global hooks under $GROK_HOME/hooks
     let global_hooks = grok.join("hooks");
     let global_str = global_hooks.display().to_string();
     if source_dir == global_str || source_dir.starts_with(&format!("{global_str}/")) {
-        return ("Global hooks".into(), false);
+        return HookSourceMeta {
+            label: "Global hooks".into(),
+            kind: HookSourceKind::Global,
+        };
     }
     // Settings under .claude/
     if source_dir.contains("/.claude/") {
-        return ("Claude settings".into(), false);
+        return HookSourceMeta {
+            label: "Claude settings".into(),
+            kind: HookSourceKind::Claude,
+        };
     }
     // Project hooks
     if source_dir.ends_with("/.grok/hooks") || source_dir.contains("/.grok/hooks/") {
-        return ("Project hooks".into(), false);
+        return HookSourceMeta {
+            label: "Project hooks".into(),
+            kind: HookSourceKind::Project,
+        };
     }
     // Custom directory — removable
     let display = {
@@ -2349,17 +2389,29 @@ pub fn derive_source_label(source_dir: &str) -> (String, bool) {
             format!("Custom: {source_dir}")
         }
     };
-    (display, true)
+    HookSourceMeta {
+        label: display,
+        kind: HookSourceKind::Custom,
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Entry builders — convert tab data into Vec<PickerEntry> for render_picker
 // ---------------------------------------------------------------------------
 
-/// Data needed to build entries for a tab. Avoids borrow conflicts with state.
+/// One skill row after filter + group-then-A–Z sort.
+#[derive(Debug, Clone)]
+struct SkillMatch {
+    skill_index: usize,
+    /// True when the query hit name/label/author (not description-only).
+    name_hit: bool,
+    group_rank: u8,
+    group_label: String,
+}
+
+/// Ordered skill matches for the Skills tab (group labels included).
 struct SkillsEntryData {
-    /// (skill_index, is_name_match)
-    matches: Vec<(usize, bool)>,
+    matches: Vec<SkillMatch>,
 }
 
 fn filter_and_sort_skills(
@@ -2367,34 +2419,62 @@ fn filter_and_sort_skills(
     query: &str,
     filter: StatusFilter,
 ) -> SkillsEntryData {
-    let mut matches: Vec<(usize, bool)> = Vec::new();
+    let mut matches: Vec<SkillMatch> = Vec::new();
     let query_lower = query.to_lowercase();
     for (si, skill) in skills.iter().enumerate() {
         if !filter.matches(skill.enabled) {
             continue;
         }
+        let group = skill_group(skill);
         if query.is_empty() {
-            matches.push((si, true));
-        } else {
-            let desc_text = skill
-                .short_description
-                .as_deref()
-                .unwrap_or(&skill.description);
-            let desc_lower = desc_text.to_lowercase();
-            let author_lower = skill.author.as_deref().unwrap_or("").to_lowercase();
-            // Plugin skills differ in label (shown) vs name (slash id); match either.
-            let name_hit = skill.label().to_lowercase().contains(&query_lower)
-                || skill.name.to_lowercase().contains(&query_lower);
-            let desc_hit = desc_lower.contains(&query_lower);
-            let author_hit = !author_lower.is_empty() && author_lower.contains(&query_lower);
-            if name_hit || author_hit {
-                matches.push((si, true));
-            } else if desc_hit {
-                matches.push((si, false));
-            }
+            matches.push(SkillMatch {
+                skill_index: si,
+                name_hit: true,
+                group_rank: group.rank,
+                group_label: group.label,
+            });
+            continue;
+        }
+        let desc_text = skill
+            .short_description
+            .as_deref()
+            .unwrap_or(&skill.description);
+        let desc_lower = desc_text.to_lowercase();
+        let author_lower = skill.author.as_deref().unwrap_or("").to_lowercase();
+        // Plugin skills differ in label (shown) vs name (slash id); match either.
+        let name_hit = skill.label().to_lowercase().contains(&query_lower)
+            || skill.name.to_lowercase().contains(&query_lower);
+        let desc_hit = desc_lower.contains(&query_lower);
+        let author_hit = !author_lower.is_empty() && author_lower.contains(&query_lower);
+        if name_hit || author_hit {
+            matches.push(SkillMatch {
+                skill_index: si,
+                name_hit: true,
+                group_rank: group.rank,
+                group_label: group.label,
+            });
+        } else if desc_hit {
+            matches.push(SkillMatch {
+                skill_index: si,
+                name_hit: false,
+                group_rank: group.rank,
+                group_label: group.label,
+            });
         }
     }
-    matches.sort_by_key(|&(_, is_name)| !is_name);
+    // Rank → case-insensitive group → exact label (stable when case differs) →
+    // name hits before desc-only → A–Z label. Renderer keys headers on exact
+    // `group_label`, so case-differing names stay separate groups.
+    matches.sort_by_cached_key(|m| {
+        (
+            m.group_rank,
+            m.group_label.to_lowercase(),
+            m.group_label.clone(),
+            !m.name_hit,
+            skills[m.skill_index].label().to_lowercase(),
+            m.skill_index,
+        )
+    });
     SkillsEntryData { matches }
 }
 
@@ -2628,50 +2708,89 @@ pub fn render_extensions_modal(
                 if let TabDataState::Loaded(ref skills) = state.skills_data {
                     let filtered =
                         filter_and_sort_skills(skills, state.picker_state.query(), filter);
-                    for &(si, _) in &filtered.matches {
-                        let skill = &skills[si];
-                        let source = skill_source_str(skill);
-                        entry_labels.push(skill.label().to_string());
-                        let right = match &skill.author {
-                            Some(a) if !a.is_empty() => format!("({} · {})", source, a),
-                            _ => format!("({})", source),
-                        };
-                        entry_right_labels.push(right);
-                        // Short description as description_lines.
-                        let desc = skill
-                            .short_description
-                            .as_deref()
-                            .unwrap_or(&skill.description);
-                        if desc.is_empty() {
-                            entry_desc_lines.push(vec![]);
-                        } else {
-                            entry_desc_lines.push(vec![desc.to_string()]);
+                    let searching = !state.picker_state.query().is_empty();
+                    // Bucket matches by group while preserving filter order.
+                    let mut group_order: Vec<String> = Vec::new();
+                    let mut by_group: std::collections::HashMap<String, Vec<&SkillMatch>> =
+                        std::collections::HashMap::new();
+                    for m in &filtered.matches {
+                        if !by_group.contains_key(&m.group_label) {
+                            group_order.push(m.group_label.clone());
                         }
+                        by_group.entry(m.group_label.clone()).or_default().push(m);
+                    }
+                    for group_label in &group_order {
+                        let members = by_group
+                            .get(group_label)
+                            .map(|v| v.as_slice())
+                            .unwrap_or(&[]);
+                        let collapsed =
+                            !searching && state.skills_collapsed_groups.contains(group_label);
+                        let count = members.len();
+                        entry_labels.push(if count == 1 {
+                            format!("{group_label} (1 skill)")
+                        } else {
+                            format!("{group_label} ({count} skills)")
+                        });
+                        entry_right_labels.push(String::new());
+                        entry_desc_lines.push(vec![]);
                         entry_summary_lines.push(vec![]);
-                        // Fields for expanded view.
-                        let mut fields = vec![("path".to_string(), skill.path.clone())];
-                        if let Some(ref a) = skill.author
-                            && !a.is_empty()
-                        {
-                            fields.push(("author".to_string(), a.clone()));
-                        }
-                        if let Some(ref tools) = skill.allowed_tools
-                            && !tools.is_empty()
-                        {
-                            fields.push(("tools".to_string(), tools.join(", ")));
-                        }
-                        entry_fields.push(fields);
+                        entry_fields.push(vec![]);
+                        // Selectable collapsible header (same as MCP / plugins).
                         entry_is_header.push(false);
-                        entry_dimmed.push(!skill.enabled);
+                        entry_dimmed.push(false);
                         entry_indent.push(0);
-                        entry_data_indices.push(Some(si));
-                        entry_group_keys.push(None);
-                        if !skill.enabled {
-                            entry_badge_text.push("[disabled]".into());
-                            entry_badge_color.push(Some(theme.accent_error));
-                        } else {
-                            entry_badge_text.push(String::new());
-                            entry_badge_color.push(None);
+                        entry_data_indices.push(None);
+                        entry_group_keys.push(Some(group_label.clone()));
+                        entry_badge_text.push(String::new());
+                        entry_badge_color.push(None);
+                        if collapsed {
+                            continue;
+                        }
+                        for m in members {
+                            let si = m.skill_index;
+                            let skill = &skills[si];
+                            let source = skill_source_str(skill);
+                            entry_labels.push(skill.label().to_string());
+                            let right = match &skill.author {
+                                Some(a) if !a.is_empty() => format!("({} · {})", source, a),
+                                _ => format!("({})", source),
+                            };
+                            entry_right_labels.push(right);
+                            let desc = skill
+                                .short_description
+                                .as_deref()
+                                .unwrap_or(&skill.description);
+                            if desc.is_empty() {
+                                entry_desc_lines.push(vec![]);
+                            } else {
+                                entry_desc_lines.push(vec![desc.to_string()]);
+                            }
+                            entry_summary_lines.push(vec![]);
+                            let mut fields = vec![("path".to_string(), skill.path.clone())];
+                            if let Some(ref a) = skill.author
+                                && !a.is_empty()
+                            {
+                                fields.push(("author".to_string(), a.clone()));
+                            }
+                            if let Some(ref tools) = skill.allowed_tools
+                                && !tools.is_empty()
+                            {
+                                fields.push(("tools".to_string(), tools.join(", ")));
+                            }
+                            entry_fields.push(fields);
+                            entry_is_header.push(false);
+                            entry_dimmed.push(!skill.enabled);
+                            entry_indent.push(1);
+                            entry_data_indices.push(Some(si));
+                            entry_group_keys.push(None);
+                            if !skill.enabled {
+                                entry_badge_text.push("[disabled]".into());
+                                entry_badge_color.push(Some(theme.accent_error));
+                            } else {
+                                entry_badge_text.push(String::new());
+                                entry_badge_color.push(None);
+                            }
                         }
                     }
                 } else if let TabDataState::Error(ref msg) = state.skills_data {
@@ -2691,7 +2810,7 @@ pub fn render_extensions_modal(
                 match state.workflows_data {
                     TabDataState::Loaded(ref workflows) => {
                         let query_lower = state.picker_state.query().to_lowercase();
-                        let visible: Vec<&WorkflowInfo> = workflows
+                        let mut visible: Vec<&WorkflowInfo> = workflows
                             .iter()
                             .filter(|workflow| workflow.has_usable_command_name())
                             .filter(|w| {
@@ -2700,43 +2819,56 @@ pub fn render_extensions_modal(
                                     || w.description.to_lowercase().contains(&query_lower)
                             })
                             .collect();
+                        visible.sort_by(|a, b| cmp_str_ci(&a.name, &b.name));
                         if !visible.is_empty() {
-                            entry_labels.push("Workflows".to_string());
+                            let searching = !state.picker_state.query().is_empty();
+                            let collapsed = !searching
+                                && state
+                                    .skills_collapsed_groups
+                                    .contains(SKILLS_WORKFLOWS_GROUP_KEY);
+                            let count = visible.len();
+                            entry_labels.push(if count == 1 {
+                                "Workflows (1 workflow)".to_string()
+                            } else {
+                                format!("Workflows ({count} workflows)")
+                            });
                             entry_right_labels.push(String::new());
                             entry_desc_lines.push(vec![]);
                             entry_summary_lines.push(vec![]);
                             entry_fields.push(vec![]);
-                            entry_is_header.push(true);
+                            entry_is_header.push(false);
                             entry_dimmed.push(false);
                             entry_indent.push(0);
                             entry_data_indices.push(None);
-                            entry_group_keys.push(None);
+                            entry_group_keys.push(Some(SKILLS_WORKFLOWS_GROUP_KEY.to_string()));
                             entry_badge_text.push(String::new());
                             entry_badge_color.push(None);
-                            for wf in visible {
-                                entry_labels.push(wf.name.clone());
-                                entry_right_labels.push(format!("({})", wf.source));
-                                if wf.description.is_empty() {
-                                    entry_desc_lines.push(vec![]);
-                                } else {
-                                    entry_desc_lines.push(vec![wf.description.clone()]);
+                            if !collapsed {
+                                for wf in visible {
+                                    entry_labels.push(wf.name.clone());
+                                    entry_right_labels.push(format!("({})", wf.source));
+                                    if wf.description.is_empty() {
+                                        entry_desc_lines.push(vec![]);
+                                    } else {
+                                        entry_desc_lines.push(vec![wf.description.clone()]);
+                                    }
+                                    entry_summary_lines.push(vec![]);
+                                    let mut fields = Vec::new();
+                                    if let Some(ref p) = wf.path {
+                                        fields.push(("path".to_string(), p.clone()));
+                                    }
+                                    if let Some(ref w) = wf.when_to_use {
+                                        fields.push(("when to use".to_string(), w.clone()));
+                                    }
+                                    entry_fields.push(fields);
+                                    entry_is_header.push(false);
+                                    entry_dimmed.push(false);
+                                    entry_indent.push(1);
+                                    entry_data_indices.push(None);
+                                    entry_group_keys.push(None);
+                                    entry_badge_text.push(String::new());
+                                    entry_badge_color.push(None);
                                 }
-                                entry_summary_lines.push(vec![]);
-                                let mut fields = Vec::new();
-                                if let Some(ref p) = wf.path {
-                                    fields.push(("path".to_string(), p.clone()));
-                                }
-                                if let Some(ref w) = wf.when_to_use {
-                                    fields.push(("when to use".to_string(), w.clone()));
-                                }
-                                entry_fields.push(fields);
-                                entry_is_header.push(false);
-                                entry_dimmed.push(false);
-                                entry_indent.push(0);
-                                entry_data_indices.push(None);
-                                entry_group_keys.push(None);
-                                entry_badge_text.push(String::new());
-                                entry_badge_color.push(None);
                             }
                         }
                     }
@@ -2759,7 +2891,6 @@ pub fn render_extensions_modal(
             }
             ExtensionsTab::Plugins => {
                 if let TabDataState::Loaded(ref response) = state.plugins_data {
-                    // Group plugins by source.
                     let mut groups = GroupedPlugins::new();
                     for (pi, plugin) in response.plugins.iter().enumerate() {
                         if !fuzzy_matches(&plugin.name, state.picker_state.query()) {
@@ -2770,11 +2901,18 @@ pub fn render_extensions_modal(
                         }
                         let group = plugin_group(plugin);
                         groups
-                            .entry((group.rank, group.label, group.key))
+                            .entry(group.into_sort_key())
                             .or_default()
                             .push((pi, plugin));
                     }
-                    for ((_, label, group_key), plugins) in &groups {
+                    for plugins in groups.values_mut() {
+                        plugins.sort_by(|a, b| {
+                            cmp_str_ci(&a.1.name, &b.1.name).then_with(|| a.0.cmp(&b.0))
+                        });
+                    }
+                    for (group_key, plugins) in &groups {
+                        let label = &group_key.label;
+                        let group_key = &group_key.key;
                         // While searching we ignore previous collapse state so
                         // every plugin inside the group can be seen and matched.
                         let searching = !state.picker_state.query().is_empty();
@@ -2858,31 +2996,21 @@ pub fn render_extensions_modal(
             }
             ExtensionsTab::Hooks => {
                 if let TabDataState::Loaded(ref data) = state.hooks_data {
-                    // Group hooks by source_dir.
-                    let mut groups: std::collections::BTreeMap<
-                        String,
-                        Vec<(usize, &xai_hooks_plugins_types::HookInfo)>,
-                    > = std::collections::BTreeMap::new();
-                    for (i, hook) in data.hooks.iter().enumerate() {
-                        if !fuzzy_matches_hook(hook, state.picker_state.query()) {
-                            continue;
-                        }
-                        if !state.hooks_filter.matches(!hook.disabled) {
-                            continue;
-                        }
-                        groups
-                            .entry(hook.source_dir.clone())
-                            .or_default()
-                            .push((i, hook));
-                    }
-                    for (source_dir, hooks) in &groups {
-                        let (label, _is_custom) = derive_source_label(source_dir);
+                    let groups = build_hook_groups(
+                        &data.hooks,
+                        state.hooks_filter,
+                        state.picker_state.query(),
+                    );
+                    for group in &groups {
+                        let source_dir = group.source_dir;
+                        let label = &group.label;
+                        let indices = &group.indices;
                         // While searching we ignore previous collapse state so
                         // every hook inside the group can be seen and matched.
                         let searching = !state.picker_state.query().is_empty();
                         let collapsed =
                             !searching && state.hooks_collapsed_groups.contains(source_dir);
-                        entry_labels.push(format!("{} ({} hooks)", label, hooks.len()));
+                        entry_labels.push(format!("{} ({} hooks)", label, indices.len()));
                         entry_right_labels.push(String::new());
                         entry_desc_lines.push(vec![]);
                         entry_summary_lines.push(vec![]);
@@ -2891,20 +3019,15 @@ pub fn render_extensions_modal(
                         entry_dimmed.push(false); // headers
                         entry_indent.push(0);
                         entry_data_indices.push(None);
-                        entry_group_keys.push(Some(source_dir.clone()));
+                        entry_group_keys.push(Some(source_dir.to_string()));
                         entry_badge_text.push(String::new());
                         entry_badge_color.push(None);
                         if collapsed {
                             continue;
                         }
-                        for &(hi, hook) in hooks {
-                            let event_str = hook.event.to_string();
-                            let matcher_str = hook
-                                .matcher
-                                .as_deref()
-                                .map(|m| format!(" /{m}"))
-                                .unwrap_or_default();
-                            entry_labels.push(format!("on:{}{}", event_str, matcher_str));
+                        for &hi in indices {
+                            let hook = &data.hooks[hi];
+                            entry_labels.push(hook_row_label(hook));
                             let cmd = hook
                                 .command
                                 .as_deref()
@@ -2947,7 +3070,10 @@ pub fn render_extensions_modal(
             }
             ExtensionsTab::Marketplace => {
                 if let TabDataState::Loaded(ref data) = state.marketplace_data {
-                    for (si, source) in data.sources.iter().enumerate() {
+                    for view in ordered_marketplace_view(&data.sources) {
+                        let si = view.source_index;
+                        let plugin_order = &view.plugin_indices;
+                        let source = &data.sources[si];
                         // Force all marketplace sources open while searching so their
                         // plugins are considered for matching and displayed.
                         let searching = !state.picker_state.query().is_empty();
@@ -2981,7 +3107,8 @@ pub fn render_extensions_modal(
                         if collapsed {
                             continue;
                         }
-                        for plugin in &source.plugins {
+                        for &pi in plugin_order {
+                            let plugin = &source.plugins[pi];
                             if !fuzzy_matches(&plugin.name, state.picker_state.query()) {
                                 continue;
                             }
@@ -3277,18 +3404,13 @@ pub fn render_extensions_modal(
     let non_selectable = build_entry_non_selectable(&entry_is_header, &entry_group_keys);
     let non_selectable_clickable = build_entry_non_selectable_clickable(&entry_group_keys);
 
-    // Clamp selection against this frame's entry list for footer labels.
-    // Do not write it to `state` until after `render_modal_window` succeeds:
-    // an early return below would otherwise leave `picker_state.selected`
-    // clamped while `entry_data_indices` / `entry_group_keys` stay stale
-    // (published only post-paint), desyncing `selected_data_index()` and
-    // toggle dispatch until a later full frame.
+    // Min-clamp and skip rows marked non-selectable for this frame's footer +
+    // highlight. Do not write to `state` until after `render_modal_window`
+    // succeeds — early return would desync `selected` from entry maps
+    // published only post-paint.
     let entry_count = entry_labels.len();
-    let selected = if entry_count == 0 {
-        0
-    } else {
-        state.picker_state.selected.min(entry_count - 1)
-    };
+    let selected =
+        picker::first_selectable_index(state.picker_state.selected, entry_count, &non_selectable);
 
     // Build per-tab action keys for the footer shortcuts.
     // Space enable/disable uses the freshly built entry-mapping locals
@@ -4839,7 +4961,7 @@ mod tests {
         // Only enabled skills: native + hello (lint is disabled).
         assert_eq!(result.matches.len(), 2);
         // Verify the correct skills are returned: native (index 0) and hello (index 1).
-        let indices: Vec<usize> = result.matches.iter().map(|m| m.0).collect();
+        let indices: Vec<usize> = result.matches.iter().map(|m| m.skill_index).collect();
         assert!(indices.contains(&0), "native skill should be present");
         assert!(
             indices.contains(&1),
@@ -4859,7 +4981,7 @@ mod tests {
         ];
         let result = filter_and_sort_skills(&skills, "hello", StatusFilter::All);
         assert_eq!(result.matches.len(), 1);
-        assert_eq!(result.matches[0].0, 1); // index of hello
+        assert_eq!(result.matches[0].skill_index, 1); // index of hello
     }
 
     #[test]
@@ -5722,94 +5844,6 @@ mod tests {
     }
 
     #[test]
-    fn next_visible_hook_filter_enabled() {
-        let hooks = vec![
-            make_hook("a", "/src", true),  // disabled
-            make_hook("b", "/src", false), // enabled
-            make_hook("c", "/src", true),  // disabled
-        ];
-        let collapsed = std::collections::HashSet::new();
-        // From index 0, next enabled hook is index 1.
-        assert_eq!(
-            next_visible_hook(&hooks, 0, &collapsed, StatusFilter::Enabled, ""),
-            Some(1)
-        );
-        // From index 1, no enabled hook after it.
-        assert_eq!(
-            next_visible_hook(&hooks, 1, &collapsed, StatusFilter::Enabled, ""),
-            None
-        );
-    }
-
-    #[test]
-    fn prev_visible_hook_filter_enabled() {
-        let hooks = vec![
-            make_hook("a", "/src", false), // enabled
-            make_hook("b", "/src", true),  // disabled
-            make_hook("c", "/src", false), // enabled
-        ];
-        let collapsed = std::collections::HashSet::new();
-        // From index 2, prev enabled hook is index 0.
-        assert_eq!(
-            prev_visible_hook(&hooks, 2, &collapsed, StatusFilter::Enabled, ""),
-            Some(0)
-        );
-        // From index 0, no enabled hook before it.
-        assert_eq!(
-            prev_visible_hook(&hooks, 0, &collapsed, StatusFilter::Enabled, ""),
-            None
-        );
-    }
-
-    #[test]
-    fn next_visible_hook_filter_disabled() {
-        let hooks = vec![
-            make_hook("a", "/src", false), // enabled
-            make_hook("b", "/src", true),  // disabled
-            make_hook("c", "/src", false), // enabled
-        ];
-        let collapsed = std::collections::HashSet::new();
-        // From index 0, next disabled hook is index 1.
-        assert_eq!(
-            next_visible_hook(&hooks, 0, &collapsed, StatusFilter::Disabled, ""),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn next_visible_hook_filter_all_same_as_unfiltered() {
-        let hooks = vec![
-            make_hook("a", "/src", false),
-            make_hook("b", "/src", true),
-            make_hook("c", "/src", false),
-        ];
-        let collapsed = std::collections::HashSet::new();
-        assert_eq!(
-            next_visible_hook(&hooks, 0, &collapsed, StatusFilter::All, ""),
-            Some(1)
-        );
-        assert_eq!(
-            next_visible_hook(&hooks, 1, &collapsed, StatusFilter::All, ""),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn next_visible_hook_filter_across_groups() {
-        let hooks = vec![
-            make_hook("a", "/src1", true),  // disabled, group 1
-            make_hook("b", "/src2", false), // enabled, group 2
-        ];
-        let collapsed = std::collections::HashSet::new();
-        // With Enabled filter, hook 0 is excluded. Only hook 1 is in groups.
-        // Starting from hook 0 (filtered out), should find hook 1.
-        assert_eq!(
-            next_visible_hook(&hooks, 0, &collapsed, StatusFilter::Enabled, ""),
-            Some(1)
-        );
-    }
-
-    #[test]
     fn build_hook_groups_respects_filter() {
         let hooks = vec![
             make_hook("a", "/src", false),   // enabled
@@ -5817,15 +5851,17 @@ mod tests {
             make_hook("c", "/other", false), // enabled
         ];
         let groups = build_hook_groups(&hooks, StatusFilter::Enabled, "");
-        // Two groups: /src with [0], /other with [2]. Hook 1 excluded.
+        // Two custom groups, ordered A–Z by display label: /other before /src.
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].1, vec![0]);
-        assert_eq!(groups[1].1, vec![2]);
+        assert_eq!(groups[0].source_dir, "/other");
+        assert_eq!(groups[0].indices, vec![2]);
+        assert_eq!(groups[1].source_dir, "/src");
+        assert_eq!(groups[1].indices, vec![0]);
 
         let groups_disabled = build_hook_groups(&hooks, StatusFilter::Disabled, "");
         // One group: /src with [1].
         assert_eq!(groups_disabled.len(), 1);
-        assert_eq!(groups_disabled[0].1, vec![1]);
+        assert_eq!(groups_disabled[0].indices, vec![1]);
     }
 
     #[test]
@@ -5882,28 +5918,6 @@ mod tests {
                     name: "subagent-driven-development",
                     description: Some("Fast iteration with two-stage review"),
                     has_agents: true,
-                    ..Default::default()
-                }
-                .build(),
-            ],
-            error: None,
-        }
-    }
-
-    /// Second marketplace source for multi-source tests.
-    fn local_plugins_source() -> xai_hooks_plugins_types::MarketplaceScanResult {
-        xai_hooks_plugins_types::MarketplaceScanResult {
-            source_name: "local-plugins".into(),
-            source_kind: "local".into(),
-            source_url_or_path: "/home/user/.grok/marketplace/local".into(),
-            plugins: vec![
-                TestPlugin {
-                    name: "my-linter",
-                    version: Some("0.1.0"),
-                    description: Some("Custom linting rules"),
-                    author: None,
-                    has_hooks: true,
-                    install_status: "installed",
                     ..Default::default()
                 }
                 .build(),
@@ -5976,235 +5990,6 @@ mod tests {
                 remote_subdir: None,
             }
         }
-    }
-
-    // ── Marketplace: filtered_marketplace_count ─────────────────────
-
-    #[test]
-    fn marketplace_count_no_query_returns_total_slots() {
-        let sources = vec![superpowers_source()];
-        // With no query: 1 header + 5 plugins = 6
-        assert_eq!(filtered_marketplace_count(&sources, ""), 6);
-    }
-
-    #[test]
-    fn marketplace_count_query_matches_subset() {
-        let sources = vec![superpowers_source()];
-        // "debug" matches "systematic-debugging" — source has matching plugins,
-        // so it contributes 1 header + 5 plugin slots = 6.
-        assert_eq!(filtered_marketplace_count(&sources, "debug"), 6);
-    }
-
-    #[test]
-    fn marketplace_count_query_no_matches_uses_plugin_len() {
-        let sources = vec![superpowers_source()];
-        // "zzzzz" matches nothing. Source has no matching plugins,
-        // so it contributes plugins.len().max(1) = 5.
-        assert_eq!(filtered_marketplace_count(&sources, "zzzzz"), 5);
-    }
-
-    #[test]
-    fn marketplace_count_multi_source() {
-        let sources = vec![superpowers_source(), local_plugins_source()];
-        // No query: source0 = 1 + 5 = 6, source1 = 1 + 1 = 2 → 8
-        assert_eq!(filtered_marketplace_count(&sources, ""), 8);
-    }
-
-    // ── Marketplace: next_matching_marketplace ──────────────────────
-
-    #[test]
-    fn marketplace_next_from_start_finds_header() {
-        let sources = vec![superpowers_source()];
-        let collapsed = std::collections::HashSet::new();
-        // First selectable item is the source header at index 0.
-        assert_eq!(
-            next_matching_marketplace(&sources, 0, "", &collapsed),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn marketplace_next_skips_to_plugin() {
-        let sources = vec![superpowers_source()];
-        let collapsed = std::collections::HashSet::new();
-        // From index 1, next match is the first plugin "superpowers" at index 1.
-        assert_eq!(
-            next_matching_marketplace(&sources, 1, "", &collapsed),
-            Some(1)
-        );
-        // Index 2 = "brainstorming"
-        assert_eq!(
-            next_matching_marketplace(&sources, 2, "", &collapsed),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn marketplace_next_with_query_skips_non_matching_plugins() {
-        let sources = vec![superpowers_source()];
-        let collapsed = std::collections::HashSet::new();
-        // "debug" matches only "systematic-debugging" (index 4 in flat layout:
-        // header=0, superpowers=1, brainstorming=2, tdd=3, debugging=4).
-        // Starting from 0, first hit is the header (source has matches).
-        let first = next_matching_marketplace(&sources, 0, "debug", &collapsed);
-        assert_eq!(first, Some(0));
-        // Starting from 1, find the matching plugin at index 4 ("systematic-debugging").
-        let plugin = next_matching_marketplace(&sources, 1, "debug", &collapsed);
-        assert_eq!(plugin, Some(4));
-    }
-
-    #[test]
-    fn marketplace_next_past_end_returns_none() {
-        let sources = vec![superpowers_source()];
-        let collapsed = std::collections::HashSet::new();
-        assert_eq!(
-            next_matching_marketplace(&sources, 100, "", &collapsed),
-            None
-        );
-    }
-
-    // ── Marketplace: prev_matching_marketplace ──────────────────────
-
-    #[test]
-    fn marketplace_prev_from_last_finds_last_plugin() {
-        let sources = vec![superpowers_source()];
-        let collapsed = std::collections::HashSet::new();
-        // Last plugin "subagent-driven-development" is at index 5.
-        let last = prev_matching_marketplace(&sources, 5, "", &collapsed);
-        assert_eq!(last, Some(5));
-    }
-
-    #[test]
-    fn marketplace_prev_from_plugin_finds_header() {
-        let sources = vec![superpowers_source()];
-        let collapsed = std::collections::HashSet::new();
-        // From index 0 (header), prev should be the header itself.
-        assert_eq!(
-            prev_matching_marketplace(&sources, 0, "", &collapsed),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn marketplace_prev_with_query_skips_non_matching() {
-        let sources = vec![superpowers_source()];
-        let collapsed = std::collections::HashSet::new();
-        // "brainstorming" matches only plugin at index 2.
-        let prev = prev_matching_marketplace(&sources, 5, "brainstorming", &collapsed);
-        // "brainstorming" is at index 2 (header=0, superpowers=1, brainstorming=2).
-        assert_eq!(prev, Some(2));
-    }
-
-    // ── Marketplace: resolve_marketplace_index ──────────────────────
-
-    #[test]
-    fn resolve_index_zero_is_source_header() {
-        let sources = vec![superpowers_source()];
-        let collapsed = std::collections::HashSet::new();
-        let hit = resolve_marketplace_index(&sources, 0, "", &collapsed);
-        assert!(matches!(
-            hit,
-            Some(MarketplaceHit::SourceHeader { source_index: 0 })
-        ));
-    }
-
-    #[test]
-    fn resolve_index_one_is_first_plugin() {
-        let sources = vec![superpowers_source()];
-        let collapsed = std::collections::HashSet::new();
-        let hit = resolve_marketplace_index(&sources, 1, "", &collapsed);
-        match hit {
-            Some(MarketplaceHit::Plugin {
-                source_index,
-                plugin,
-                ..
-            }) => {
-                assert_eq!(source_index, 0);
-                assert_eq!(plugin.name, "superpowers");
-            }
-            other => panic!("expected Plugin hit for 'superpowers', got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn resolve_index_last_plugin() {
-        let sources = vec![superpowers_source()];
-        let collapsed = std::collections::HashSet::new();
-        // Index 5 = last plugin "subagent-driven-development".
-        let hit = resolve_marketplace_index(&sources, 5, "", &collapsed);
-        match hit {
-            Some(MarketplaceHit::Plugin {
-                source_index,
-                plugin,
-                ..
-            }) => {
-                assert_eq!(source_index, 0);
-                assert_eq!(plugin.name, "subagent-driven-development");
-            }
-            other => panic!("expected Plugin hit for 'subagent-driven-development', got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn resolve_index_out_of_range_returns_none() {
-        let sources = vec![superpowers_source()];
-        let collapsed = std::collections::HashSet::new();
-        assert!(resolve_marketplace_index(&sources, 99, "", &collapsed).is_none());
-    }
-
-    #[test]
-    fn resolve_index_multi_source_second_header() {
-        let sources = vec![superpowers_source(), local_plugins_source()];
-        let collapsed = std::collections::HashSet::new();
-        // Source 0: header(0) + 5 plugins(1..5) = indices 0..5
-        // Source 1: header(6) + 1 plugin(7) = indices 6..7
-        let hit = resolve_marketplace_index(&sources, 6, "", &collapsed);
-        assert!(matches!(
-            hit,
-            Some(MarketplaceHit::SourceHeader { source_index: 1 })
-        ));
-        let hit = resolve_marketplace_index(&sources, 7, "", &collapsed);
-        match hit {
-            Some(MarketplaceHit::Plugin {
-                source_index,
-                plugin,
-                ..
-            }) => {
-                assert_eq!(source_index, 1);
-                assert_eq!(plugin.name, "my-linter");
-            }
-            other => panic!("expected Plugin hit for 'my-linter', got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn resolve_index_with_query_skips_non_matching_source() {
-        let sources = vec![superpowers_source(), local_plugins_source()];
-        let collapsed = std::collections::HashSet::new();
-        // "linter" matches only the local-plugins source. The superpowers source
-        // has no matching plugins, so it contributes plugins.len().max(1)=5 slots
-        // that are all None. The local-plugins header starts at index 5.
-        let hit = resolve_marketplace_index(&sources, 5, "linter", &collapsed);
-        assert!(matches!(
-            hit,
-            Some(MarketplaceHit::SourceHeader { source_index: 1 })
-        ));
-    }
-
-    #[test]
-    fn resolve_index_collapsed_source_skips_plugins() {
-        let sources = vec![superpowers_source()];
-        let mut collapsed = std::collections::HashSet::new();
-        collapsed.insert(0usize); // collapse the superpowers source
-        // Header is still at index 0.
-        let hit = resolve_marketplace_index(&sources, 0, "", &collapsed);
-        assert!(matches!(
-            hit,
-            Some(MarketplaceHit::SourceHeader { source_index: 0 })
-        ));
-        // Index 1 is no longer a plugin — plugins are skipped when collapsed.
-        let hit = resolve_marketplace_index(&sources, 1, "", &collapsed);
-        assert!(hit.is_none());
     }
 
     // ── Marketplace: resolve_marketplace_selection ───────────────────
@@ -6476,7 +6261,7 @@ mod tests {
     // ── Marketplace: error source rendering ─────────────────────────
 
     #[test]
-    fn marketplace_error_source_has_zero_plugins() {
+    fn marketplace_error_source_renders_header_with_error_badge() {
         let error_source = xai_hooks_plugins_types::MarketplaceScanResult {
             source_name: "broken-source".into(),
             source_kind: "git".into(),
@@ -6484,10 +6269,10 @@ mod tests {
             plugins: vec![],
             error: Some("failed to clone: repository not found".into()),
         };
-        let sources = vec![superpowers_source(), error_source];
-        // No query: source0 = 1+5=6, error_source = 1+0=1 (has_matching=true
-        // because query is empty, so 1 header + 0 plugins) → 7
-        assert_eq!(filtered_marketplace_count(&sources, ""), 7);
+        let mut state = marketplace_modal_state(error_source);
+        let buf = render_marketplace_into_buffer(&mut state, 100, 40);
+        assert!(buffer_count(&buf, "broken-source") >= 1);
+        assert!(buffer_count(&buf, "[error]") >= 1);
     }
 
     // ── Marketplace: components rendering + search ──────────────────
@@ -6626,38 +6411,6 @@ mod tests {
                 "lsp servers"
             ]
         );
-    }
-
-    #[test]
-    fn marketplace_nav_and_resolve_agree_with_count_on_name_query() {
-        let sources = vec![superpowers_source(), local_plugins_source()];
-        let collapsed = std::collections::HashSet::new();
-        let query = "linter";
-        // source0 (no match) = 5 slots; source1 = 1 header + 1 plugin.
-        assert_eq!(filtered_marketplace_count(&sources, query), 7);
-        assert_eq!(
-            next_matching_marketplace(&sources, 0, query, &collapsed),
-            Some(5)
-        );
-        assert_eq!(
-            next_matching_marketplace(&sources, 6, query, &collapsed),
-            Some(6)
-        );
-        assert_eq!(
-            prev_matching_marketplace(&sources, 6, query, &collapsed),
-            Some(6)
-        );
-        match resolve_marketplace_index(&sources, 6, query, &collapsed) {
-            Some(MarketplaceHit::Plugin {
-                source_index,
-                plugin,
-                ..
-            }) => {
-                assert_eq!(source_index, 1);
-                assert_eq!(plugin.name, "my-linter");
-            }
-            other => panic!("expected name-matched plugin hit, got {other:?}"),
-        }
     }
 
     // ── Marketplace: collapsed/expanded row rendering ────────────────
@@ -6980,10 +6733,12 @@ mod tests {
                 None,
             ]
         );
+        // Within the shared marketplace group, children are A–Z by name:
+        // catalog-tool (1) before installed-tool (2).
         assert_eq!(
             state.entry_data_indices,
             vec![None, Some(0), None, Some(1), Some(2)],
-            "children keep data order within their group"
+            "children A–Z by name within their group (catalog before installed)"
         );
 
         state
@@ -7175,6 +6930,344 @@ mod tests {
         assert!(
             state.picker_state.link_band.is_none(),
             "confirmation must not record a connectors link hit band"
+        );
+    }
+
+    #[test]
+    fn first_selectable_index_skips_headers() {
+        // Generic list with a non-selectable first row, then two selectable rows.
+        let non_sel = [true, false, false];
+        assert_eq!(picker::first_selectable_index(0, 3, &non_sel), 1);
+        assert_eq!(picker::first_selectable_index(1, 3, &non_sel), 1);
+        assert_eq!(picker::first_selectable_index(5, 3, &non_sel), 2); // min-clamp to last
+        assert_eq!(picker::first_selectable_index(0, 1, &[true]), 0); // only non-selectable
+        assert_eq!(picker::first_selectable_index(0, 0, &[]), 0);
+    }
+
+    #[test]
+    fn skills_groups_default_collapsed_and_selectable() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        let skills = vec![make_skill("alpha", "a"), make_skill("beta", "b")];
+        state.seed_skills_groups_once(&skills);
+        state.skills_data = TabDataState::Loaded(skills);
+        state.workflows_data = TabDataState::Loaded(vec![]);
+        state.picker_state.selected = 0;
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        assert_eq!(
+            state.entry_group_keys.first().and_then(|k| k.as_deref()),
+            Some("User"),
+            "first row is collapsible User group"
+        );
+        assert!(
+            !state.entry_non_selectable.first().copied().unwrap_or(true),
+            "group headers are selectable"
+        );
+        assert_eq!(
+            state
+                .entry_data_indices
+                .iter()
+                .filter(|d| d.is_some())
+                .count(),
+            0,
+            "children hidden while collapsed"
+        );
+        assert!(
+            state
+                .entry_labels_cache
+                .iter()
+                .any(|l| l.starts_with("User (")),
+            "collapsed header still visible"
+        );
+        // Expand User and re-render.
+        state.skills_collapsed_groups.remove("User");
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        assert!(
+            state.entry_data_indices.iter().any(|d| d.is_some()),
+            "children visible after expand"
+        );
+    }
+
+    #[test]
+    fn workflows_default_collapsed_when_skills_loading_or_error() {
+        let mk_wf = || WorkflowInfo {
+            name: "fix-ci".into(),
+            description: "Fix CI".into(),
+            when_to_use: None,
+            source: "builtin".into(),
+            path: None,
+        };
+        // Skills still loading: tab is a spinner (no list), but seed must still
+        // mark Workflows collapsed so the first paint after skills fails is collapsed.
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.seed_workflows_group_once();
+        state.skills_data = TabDataState::Loading;
+        state.workflows_data = TabDataState::Loaded(vec![mk_wf()]);
+        assert!(
+            state
+                .skills_collapsed_groups
+                .contains(SKILLS_WORKFLOWS_GROUP_KEY),
+            "workflows seed independent of skills load"
+        );
+
+        // Skills failed: list paints; workflows children stay hidden.
+        let mut state_err = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state_err.seed_workflows_group_once();
+        state_err.skills_data = TabDataState::Error("boom".into());
+        state_err.workflows_data = TabDataState::Loaded(vec![mk_wf()]);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state_err, None, false, 0);
+        assert!(
+            state_err
+                .entry_labels_cache
+                .iter()
+                .any(|l| l.starts_with("Workflows (")),
+            "workflows header visible when skills Error"
+        );
+        assert!(
+            !state_err.entry_labels_cache.iter().any(|l| l == "fix-ci"),
+            "workflows children hidden while collapsed (skills Error)"
+        );
+    }
+
+    #[test]
+    fn seed_skills_unions_without_wiping_workflows_expand() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.seed_workflows_group_once();
+        // User expanded Workflows before skills arrived.
+        state
+            .skills_collapsed_groups
+            .remove(SKILLS_WORKFLOWS_GROUP_KEY);
+        let skills = vec![make_skill("alpha", "a")];
+        state.seed_skills_groups_once(&skills);
+        assert!(
+            !state
+                .skills_collapsed_groups
+                .contains(SKILLS_WORKFLOWS_GROUP_KEY),
+            "skills seed must not re-collapse a user-expanded Workflows group"
+        );
+        assert!(
+            state.skills_collapsed_groups.contains("User"),
+            "skills seed still collapses skill source groups"
+        );
+    }
+
+    #[test]
+    fn plugins_sort_az_by_name_within_group() {
+        use xai_hooks_plugins_types::PluginOrigin;
+        let mut state = plugins_modal_state(vec![
+            make_plugin_with_origin("Zebra", PluginOrigin::UserGrok),
+            make_plugin_with_origin("alpha", PluginOrigin::UserGrok),
+            make_plugin_with_origin("MID", PluginOrigin::UserGrok),
+        ]);
+        let _buf = render_plugins_into_buffer(&mut state, 100, 40);
+        assert_eq!(
+            state.entry_labels_cache,
+            vec![
+                "User (3 plugins)".to_string(),
+                "alpha".to_string(),
+                "MID".to_string(),
+                "Zebra".to_string(),
+            ]
+        );
+        // Display order is A–Z; indices still point at original data slots.
+        assert_eq!(
+            state.entry_data_indices,
+            vec![None, Some(1), Some(2), Some(0)]
+        );
+    }
+
+    #[test]
+    fn ordered_marketplace_view_pins_official_then_az() {
+        let mp = |name: &str, url: &str, err: Option<&str>, plugins: &[&'static str]| {
+            xai_hooks_plugins_types::MarketplaceScanResult {
+                source_name: name.into(),
+                source_kind: "git".into(),
+                source_url_or_path: url.into(),
+                plugins: plugins
+                    .iter()
+                    .copied()
+                    .map(|n| {
+                        TestPlugin {
+                            name: n,
+                            install_status: "installed",
+                            ..Default::default()
+                        }
+                        .build()
+                    })
+                    .collect(),
+                error: err.map(str::to_string),
+            }
+        };
+        let sources = vec![
+            mp("zeta-mp", "https://example.com/zeta", Some("boom"), &[]),
+            mp(
+                "xAI Official",
+                xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL,
+                None,
+                &["zeta", "alpha"],
+            ),
+            mp("alpha-mp", "https://example.com/alpha", None, &[]),
+        ];
+        let view = ordered_marketplace_view(&sources);
+        let names: Vec<_> = view
+            .iter()
+            .map(|v| sources[v.source_index].source_name.as_str())
+            .collect();
+        assert_eq!(names, ["xAI Official", "alpha-mp", "zeta-mp"]);
+        let plugin_names: Vec<_> = view[0]
+            .plugin_indices
+            .iter()
+            .map(|&pi| sources[view[0].source_index].plugins[pi].name.as_str())
+            .collect();
+        assert_eq!(plugin_names, ["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn skills_groups_then_az_by_label() {
+        let mut project_z = make_skill("zzz-proj", "project skill");
+        project_z.scope = xai_grok_tools::implementations::skills::types::SkillScope::Local;
+        project_z.config_source = Some(
+            xai_grok_tools::types::config_source::ConfigSource::Project {
+                path: std::path::PathBuf::from("/repo/.grok/skills/zzz"),
+            },
+        );
+        project_z.display_name = Some("zeta-proj".into());
+
+        let mut project_a = make_skill("aaa-proj", "other project");
+        project_a.scope = xai_grok_tools::implementations::skills::types::SkillScope::Repo;
+        project_a.config_source = Some(
+            xai_grok_tools::types::config_source::ConfigSource::Project {
+                path: std::path::PathBuf::from("/repo/.grok/skills/aaa"),
+            },
+        );
+        project_a.display_name = Some("alpha-proj".into());
+
+        let mut user_a = make_skill("user-alpha", "user a");
+        user_a.display_name = Some("alpha-user".into());
+        let plugin = make_plugin_skill("pb", "plugin b", "beta-plugin");
+
+        let skills = vec![user_a, plugin, project_z, project_a];
+        let result = filter_and_sort_skills(&skills, "", StatusFilter::All);
+        let labels: Vec<_> = result
+            .matches
+            .iter()
+            .map(|m| skills[m.skill_index].label().to_string())
+            .collect();
+        assert_eq!(labels, ["alpha-proj", "zeta-proj", "alpha-user", "pb"]);
+
+        // Headers come from render; keep one check that they appear.
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.skills_data = TabDataState::Loaded(skills);
+        state.workflows_data = TabDataState::Loaded(vec![]);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        assert!(
+            state
+                .entry_labels_cache
+                .iter()
+                .any(|l| l.starts_with("Project ("))
+        );
+        assert!(
+            state
+                .entry_labels_cache
+                .iter()
+                .any(|l| l.starts_with("User ("))
+        );
+        assert!(
+            state
+                .entry_labels_cache
+                .iter()
+                .any(|l| l.starts_with("Plugin: beta-plugin ("))
+        );
+    }
+
+    #[test]
+    fn skills_sort_az_uses_label_not_slash_name() {
+        let mut a = make_skill("zzz", "desc a");
+        a.display_name = Some("aaa".into());
+        let b = make_skill("mmm", "desc b");
+        let skills = vec![a, b];
+        let result = filter_and_sort_skills(&skills, "", StatusFilter::All);
+        assert_eq!(skills[result.matches[0].skill_index].label(), "aaa");
+        assert_eq!(skills[result.matches[1].skill_index].label(), "mmm");
+    }
+
+    #[test]
+    fn workflows_sort_az_by_name() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.skills_data = TabDataState::Loaded(vec![]);
+        state.workflows_data = TabDataState::Loaded(vec![
+            WorkflowInfo {
+                name: "zeta-wf".into(),
+                description: "Z".into(),
+                when_to_use: None,
+                source: "builtin".into(),
+                path: None,
+            },
+            WorkflowInfo {
+                name: "alpha-wf".into(),
+                description: "A".into(),
+                when_to_use: None,
+                source: "builtin".into(),
+                path: None,
+            },
+        ]);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        assert_eq!(
+            state.entry_labels_cache,
+            ["Workflows (2 workflows)", "alpha-wf", "zeta-wf"]
+        );
+    }
+
+    #[test]
+    fn hooks_group_and_row_order() {
+        let mut h_stop = make_hook("stop-hook", "/tmp/hooks-src", false);
+        h_stop.event = xai_hooks_plugins_types::HookEvent::Stop;
+        let mut h_pre = make_hook("pre-hook", "/tmp/hooks-src", false);
+        h_pre.event = xai_hooks_plugins_types::HookEvent::PreToolUse;
+        h_pre.matcher = Some("Bash".into());
+        let mut h_notify = make_hook("notify-hook", "/tmp/hooks-src", false);
+        h_notify.event = xai_hooks_plugins_types::HookEvent::Notification;
+
+        let hooks = vec![
+            make_hook("c", "/zzz/custom", false),
+            h_stop,
+            make_hook("a", "/repo/.grok/hooks", false),
+            h_pre,
+            h_notify,
+            make_hook("b", "/aaa/custom", false),
+        ];
+        let groups = build_hook_groups(&hooks, StatusFilter::All, "");
+        // Project first, then Custom groups A–Z by path (incl. /tmp/hooks-src).
+        let dirs: Vec<_> = groups.iter().map(|g| g.source_dir).collect();
+        assert_eq!(
+            dirs,
+            [
+                "/repo/.grok/hooks",
+                "/aaa/custom",
+                "/tmp/hooks-src",
+                "/zzz/custom"
+            ]
+        );
+
+        let custom_group = groups
+            .iter()
+            .find(|g| g.source_dir == "/tmp/hooks-src")
+            .expect("custom source");
+        let labels: Vec<_> = custom_group
+            .indices
+            .iter()
+            .map(|&i| hook_row_label(&hooks[i]))
+            .collect();
+        assert_eq!(
+            labels,
+            ["on:Notification", "on:Pre-Tool Use /Bash", "on:Stop"]
         );
     }
 }

@@ -1,6 +1,9 @@
 //! Prompt and bash-command submission dispatchers and reload-window helpers.
 
-use super::auth::{scrollback_has_recent_context_too_large, scrollback_has_recent_reauth_prompt};
+use super::auth::{
+    scrollback_has_recent_context_too_large, scrollback_has_recent_disk_full,
+    scrollback_has_recent_reauth_prompt, scrollback_has_recent_request_failed,
+};
 use super::billing::is_credit_limit_error;
 use super::ctx::with_active_agent;
 use super::interject;
@@ -482,6 +485,7 @@ pub(super) fn dispatch_send_prompt_inner(
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
+    let leader_mode = app.leader_mode;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -769,7 +773,7 @@ pub(super) fn dispatch_send_prompt_inner(
             drain_prompt_state_to_last_queued(agent);
             agent.prompt.set_text("");
         }
-    } else if !literal && matches!(trimmed, "exit" | "quit" | ":q" | ":q!" | ":wq" | ":wq!") {
+    } else if !literal && crate::slash::commands::exit::is_exit_alias(trimmed) {
         if consume_input {
             agent.prompt.set_text("");
         }
@@ -822,7 +826,7 @@ pub(super) fn dispatch_send_prompt_inner(
             .recognized_token_ranges(&text, &agent.session.models);
 
         let immediate_server_send =
-            immediate_server_send_eligible(agent) && agent.prompt.images.is_empty();
+            immediate_server_send_eligible(agent, leader_mode) && agent.prompt.images.is_empty();
         tracing::debug!(
             target: "qtrace",
             pid = std::process::id(),
@@ -838,13 +842,13 @@ pub(super) fn dispatch_send_prompt_inner(
             "plain prompt send routing decision",
         );
 
-        // Parked + held occupancy → append; empty held → cancel-and-send.
+        // Occupancy/park flags: only the image branch below immediately send-nows on an empty held wait.
         let parked_sendable_wait = agent.is_parked_on_sendable_wait();
         let hold_behind_existing_queue = parked_sendable_wait && agent.has_held_user_queue();
 
         // Images can't ride immediate server-send; empty-held park still send-nows.
         if !immediate_server_send
-            && immediate_server_send_eligible(agent)
+            && immediate_server_send_eligible(agent, leader_mode)
             && !agent.prompt.images.is_empty()
             && parked_sendable_wait
             && !hold_behind_existing_queue
@@ -871,10 +875,7 @@ pub(super) fn dispatch_send_prompt_inner(
             // `running_prompt_id` adoption + turn-start shim), the ACP gate must
             // treat its deltas as ours, not adopt them as another client's turn.
             agent.note_self_originated_prompt(&prompt_id);
-
-            if parked_sendable_wait && !hold_behind_existing_queue {
-                agent.arm_send_now_expectation(prompt_id.clone());
-            }
+            // Plain image-free sends stay unarmed: shell queue state and cancelTrigger decide disposition.
 
             if consume_input {
                 // Plain prompt: no images to drain. Clear textarea + record
@@ -989,6 +990,7 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let leader_mode = app.leader_mode;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -1012,7 +1014,7 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     // into the shared queue with `kind="bash"`. On `running_prompt_id`
     // adoption the turn-start shim sets `bash_turn` (no user block). The IDLE
     // case is unchanged: enqueue locally + drain instantly.
-    let bash_immediate = immediate_server_send_eligible(agent);
+    let bash_immediate = immediate_server_send_eligible(agent, leader_mode);
     tracing::debug!(
         target: "qtrace",
         pid = std::process::id(),
@@ -1246,25 +1248,50 @@ pub(super) fn handle_prompt_response(
         // block, so the generic TurnFailed + error toast are redundant. Derived
         // from the scrollback (mirrors reauth), not a session flag.
         let context_overflow = scrollback_has_recent_context_too_large(&agent.scrollback);
+        let disk_full_from_error = result
+            .as_ref()
+            .err()
+            .is_some_and(|e| crate::app::effects::is_disk_full_error(e));
+        if disk_full_from_error && !scrollback_has_recent_disk_full(&agent.scrollback) {
+            agent
+                .scrollback
+                .push_block(RenderBlock::session_event(SessionEvent::DiskFull));
+        }
+        let disk_full = disk_full_from_error || scrollback_has_recent_disk_full(&agent.scrollback);
         // Fallback: if the retry notification didn't set the flag,
         // detect credit-limit denials (legacy 403 or pool 402) from
         // the PromptResponse error + HTTP status. Covers races where
         // the retry notification arrives after the PromptResponse.
+        // The error text is already banner-formatted ("Request failed (402) —
+        // …"), so recover the status from it when the field is absent.
         let credit_limit_blocked = agent.session.credit_limit_blocked
-            || result
-                .as_ref()
-                .err()
-                .is_some_and(|e| is_credit_limit_error(http_status, e));
+            || result.as_ref().err().is_some_and(|e| {
+                let status =
+                    http_status.or_else(|| crate::app::error_display::parse_http_status(e));
+                is_credit_limit_error(status, e)
+            });
         // A 401/auth failure already surfaced an actionable
         // `ReAuthRequired` prompt via the RetryState handler (which
         // runs before this PromptResponse). Suppress the redundant
         // "Turn failed" block + error toast so only the prompt shows.
+        // "(401)" matches both the raw "Unauthorized (401)" dump and the
+        // banner-formatted "Request failed (401) — …" text.
         let reauth_prompted = scrollback_has_recent_reauth_prompt(&agent.scrollback)
             || (http_status == Some(401)
-                && result
-                    .as_ref()
-                    .err()
-                    .is_some_and(|e| e.contains("Unauthorized (401)")));
+                && result.as_ref().err().is_some_and(|e| e.contains("(401)")));
+        let request_failed_shown = scrollback_has_recent_request_failed(&agent.scrollback);
+        // A dedicated prompt/modal/banner replaces the generic TurnFailed
+        // marker and error toast (rate limit, free-usage paywall, model
+        // incompatibility, credit 402/403, 401 re-auth, context overflow,
+        // disk-full, or a formatted RequestFailed banner from RetryState).
+        let dedicated_ux_shown = rate_limited
+            || free_usage_blocked
+            || model_incompatible
+            || credit_limit_blocked
+            || reauth_prompted
+            || context_overflow
+            || disk_full
+            || request_failed_shown;
         let elapsed = agent.turn_elapsed();
 
         {
@@ -1342,20 +1369,9 @@ pub(super) fn handle_prompt_response(
                 // form here — only wake markers use the honest `None` form.
                 elapsed: Some(elapsed.unwrap_or_default()),
             }),
-            (Err(_), _)
-                if rate_limited
-                    || free_usage_blocked
-                    || model_incompatible
-                    || credit_limit_blocked
-                    || reauth_prompted
-                    || context_overflow =>
-            {
-                // Skip TurnFailed when a dedicated prompt/modal shows instead
-                // (rate limit, free-usage paywall, model incompatibility,
-                // credit 403, 401 re-auth, or a terminal context-window
-                // overflow).
-                None
-            }
+            (Err(_), _) if dedicated_ux_shown => None,
+            // `err` is already banner-formatted by `format_acp_error` at the
+            // producer — the single formatting owner. Don't re-format here.
             (Err(err), _) => Some(SessionEvent::TurnFailed {
                 error: err.clone(),
                 elapsed,
@@ -1377,14 +1393,7 @@ pub(super) fn handle_prompt_response(
                 };
                 Some((NotificationEventKind::TurnComplete, body))
             }
-            (Err(err), _)
-                if !rate_limited
-                    && !free_usage_blocked
-                    && !model_incompatible
-                    && !credit_limit_blocked
-                    && !reauth_prompted
-                    && !context_overflow =>
-            {
+            (Err(err), _) if !dedicated_ux_shown => {
                 Some((NotificationEventKind::AgentError, format!("Error: {err}")))
             }
             _ => None,
@@ -1509,28 +1518,19 @@ pub(super) fn handle_prompt_response(
         // prompt is retried automatically; otherwise the upsell
         // is shown.
         if credit_limit_blocked {
-            // Strip stale "Retry failed" / "Turn failed" error blocks
-            // that were pushed before the credit-limit was detected.
-            // Walk backwards from the end and remove matching events.
-            let mut to_remove = Vec::new();
-            for idx in (0..agent.scrollback.len()).rev() {
-                match agent.scrollback.entry(idx).map(|e| &e.block) {
-                    Some(crate::scrollback::block::RenderBlock::SessionEvent(ev))
-                        if matches!(
-                            &ev.event,
-                            SessionEvent::RetryFailed { .. } | SessionEvent::TurnFailed { .. }
-                        ) =>
-                    {
-                        to_remove.push(idx);
-                    }
-                    // Stop at the first non-error block.
-                    Some(
-                        crate::scrollback::block::RenderBlock::SessionEvent(_)
-                        | crate::scrollback::block::RenderBlock::System(_),
-                    ) => continue,
-                    _ => break,
-                }
-            }
+            // Strip stale error blocks that were pushed before the
+            // credit-limit was detected.
+            let to_remove: Vec<usize> = super::auth::trailing_session_events(&agent.scrollback)
+                .filter(|(_, ev)| {
+                    matches!(
+                        ev,
+                        SessionEvent::RequestFailed { .. }
+                            | SessionEvent::RetryFailed { .. }
+                            | SessionEvent::TurnFailed { .. }
+                    )
+                })
+                .map(|(idx, _)| idx)
+                .collect();
             for idx in to_remove {
                 agent.scrollback.remove_from(idx);
             }

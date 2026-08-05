@@ -26,7 +26,7 @@ use tokio::sync::Semaphore;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::bytes::Bytes;
 use tokio_util::io::ReaderStream;
-use xai_circuit_breaker::{BreakerConfig, BreakerOpen, CircuitBreaker, Outcome};
+use xai_circuit_breaker::{BreakerConfig, BreakerOpen, CircuitBreaker, Outcome, RetryPolicy};
 use xai_grok_auth::AuthCredentialProvider;
 
 use crate::circuit_breaker_observer::TracingObserver;
@@ -206,7 +206,7 @@ impl std::error::Error for HttpUploadError {}
 
 /// Result of checking if an HTTP response should be retried.
 struct ResponseCheck {
-    /// Whether the error is retryable (429, 5xx).
+    /// Whether the error is retryable (edge rule — see `is_retryable_status`).
     pub is_retryable: bool,
     /// Retry-After header value if present.
     pub retry_after: Option<Duration>,
@@ -337,10 +337,26 @@ fn parse_retry_after(response: &reqwest::Response) -> Option<Duration> {
     None
 }
 
-/// Determine if an HTTP status code is retryable.
+/// Whether an HTTP status is retryable. Proxy-mode uploads cross the same
+/// Cloudflare edge as sampling, so they share its rule (429 + 5xx, minus
+/// origin-TLS 525/526).
 #[inline]
 fn is_retryable_status(status: u16) -> bool {
-    matches!(status, 429 | 500 | 502 | 503 | 504)
+    RetryPolicy::edge_client().should_retry(status)
+}
+
+#[cfg(test)]
+mod retry_status_tests {
+    use super::is_retryable_status;
+
+    /// Pins the upload path to the edge rule; the exhaustive per-status
+    /// matrix lives in `xai-circuit-breaker`'s `edge_client` tests.
+    #[test]
+    fn uploads_use_the_edge_retry_rule() {
+        assert!(is_retryable_status(522));
+        assert!(!is_retryable_status(525));
+        assert!(!is_retryable_status(413));
+    }
 }
 
 /// Static credentials for the proxy-mode upload path when no `AuthManager`

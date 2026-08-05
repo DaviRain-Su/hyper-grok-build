@@ -9,6 +9,18 @@ pub(super) fn prompt_mode_from_session_mode_id(session_mode_id: &acp::SessionMod
         SessionMode::Default => PromptMode::Agent,
     }
 }
+/// Inverse of [`prompt_mode_from_session_mode_id`]: the mode id a client
+/// displays for a prompt mode. Needed wherever a transition the client did not
+/// drive has to be reported back to it.
+pub(super) fn session_mode_id_from_prompt_mode(prompt_mode: PromptMode) -> acp::SessionModeId {
+    use xai_grok_tools::types::SessionMode;
+    let mode = match prompt_mode {
+        PromptMode::Plan => SessionMode::Plan,
+        PromptMode::Ask => SessionMode::Ask,
+        PromptMode::Agent => SessionMode::Default,
+    };
+    acp::SessionModeId::new(mode.as_id())
+}
 /// Pass-through twin: no toolset in this build carries a plan-gated tool.
 pub(super) fn filter_cursor_tools_by_plan_mode(
     defs: Vec<ToolDefinition>,
@@ -137,11 +149,39 @@ impl SessionActor {
             self.chat_state_handle.replace_conversation(conversation);
         }
     }
+    /// Settle the mode a turn runs in, applying the prompt's declaration when
+    /// it made one.
+    ///
+    /// Only a real user turn declares a mode. A synthetic turn — a background
+    /// task wake, a goal summary, a notification drain — is constructed
+    /// internally with a placeholder `PromptMode::Agent` that reads as "the
+    /// user asked for agent mode", so reconciling one ends plan mode just by
+    /// waking the session: a background task finishing while you were planning
+    /// was enough to do it. Those turns inherit the session's mode instead.
+    ///
+    /// Returns the resolved mode rather than echoing the argument, so a
+    /// synthetic turn is also *recorded* under the mode it really ran in.
+    pub(super) fn resolve_turn_prompt_mode(
+        &self,
+        origin: &crate::session::PromptOrigin,
+        declared: PromptMode,
+    ) -> PromptMode {
+        if !origin.is_synthetic() {
+            self.reconcile_plan_mode_with_prompt(declared);
+        }
+        *self.current_prompt_mode.lock()
+    }
     /// Bring the plan-mode tracker into agreement with the prompt's mode.
     ///
     /// Mirrors `handle_session_mode` but driven from `_meta.mode` on the
     /// prompt — the only signal the client sends. Both transitions are
     /// idempotent, so `set_mode`-driven flows are unaffected.
+    ///
+    /// Like `handle_session_mode`, a real transition here emits a
+    /// `CurrentModeUpdate`. Without it a client that carries its mode on the
+    /// prompt could enter or leave plan mode with no signal at all — and since
+    /// the same line is what lands in `updates.jsonl`, a later replay could not
+    /// recover the mode either.
     pub(super) fn reconcile_plan_mode_with_prompt(&self, prompt_mode: PromptMode) {
         use crate::session::plan_mode::PlanModeState;
         *self.current_prompt_mode.lock() = prompt_mode;
@@ -150,6 +190,7 @@ impl SessionActor {
                 let entered = self.plan_mode.lock().enter_pending();
                 if entered {
                     self.persist_plan_mode_state();
+                    self.enqueue_current_mode_update(session_mode_id_from_prompt_mode(prompt_mode));
                 }
             }
             PromptMode::Agent | PromptMode::Ask => {
@@ -160,6 +201,7 @@ impl SessionActor {
                 if was_plan {
                     self.plan_mode.lock().user_exit(false);
                     self.persist_plan_mode_state();
+                    self.enqueue_current_mode_update(session_mode_id_from_prompt_mode(prompt_mode));
                 }
             }
         }

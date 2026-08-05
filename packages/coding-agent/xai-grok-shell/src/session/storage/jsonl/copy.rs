@@ -525,6 +525,19 @@ fn fork_summary(
         agent_name: source.agent_name,
         sandbox_profile: source.sandbox_profile,
         reasoning_effort: source.reasoning_effort,
+        // Full forks keep the parent's last turn. Partial forks
+        // (`target_prompt_index`) may drop that turn, so clear the summary
+        // rather than showing work that is not in the child conversation.
+        last_turn_summary: if options.target_prompt_index.is_some() {
+            None
+        } else {
+            source.last_turn_summary
+        },
+        last_turn_summary_prompt_id: if options.target_prompt_index.is_some() {
+            None
+        } else {
+            source.last_turn_summary_prompt_id
+        },
     }
 }
 

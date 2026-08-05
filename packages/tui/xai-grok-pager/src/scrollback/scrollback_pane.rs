@@ -15,8 +15,11 @@ use crate::scrollback::render::{ScratchBuffer, render_scrolled_entries_with_sele
 use crate::scrollback::selection::{RenderOutput, ScrollInfo, SelectionBox};
 use crate::scrollback::state::{ScrollbackState, ViewMode};
 use crate::scrollback::sticky::{PromptDescriptor, StickyHeaderLayout, compute_sticky_layout};
-use crate::scrollback::text_selection::ResolvedSelectionBoundaries;
-use crate::scrollback::types::{BlockContext, DisplayMode};
+use crate::scrollback::text_selection::{
+    ResolvedSelectableLine, ResolvedSelectionBoundaries, ResolvedSelectionModel,
+    VisibleBlockGeometry,
+};
+use crate::scrollback::types::{BlockContext, DisplayMode, derive_selection_text, selectable_cols};
 use crate::theme::Theme;
 
 /// Scrollback pane widget.
@@ -50,6 +53,32 @@ pub struct ScrollbackPane {
 pub(crate) struct RenderOutputWithSelectionBoundaries {
     pub(crate) output: RenderOutput,
     pub(crate) selection_boundaries: ResolvedSelectionBoundaries,
+}
+
+/// Screen-coordinate selection data for one sticky header: the header paints outside the content renderer, so it publishes this itself.
+#[derive(Debug)]
+struct StickyHeaderSelection {
+    lines: Vec<ResolvedSelectableLine>,
+    block: VisibleBlockGeometry,
+}
+
+/// Header rows precede every content entry, keeping `visible_blocks` sorted by `entry_idx` as drag autoscroll expects.
+fn prepend_header_selection(
+    model: &mut ResolvedSelectionModel,
+    headers: Vec<StickyHeaderSelection>,
+) {
+    let mut merged = ResolvedSelectionModel::default();
+    let blocks: Vec<VisibleBlockGeometry> = headers
+        .into_iter()
+        .map(|header| {
+            header.lines.into_iter().for_each(|l| merged.push_line(l));
+            header.block
+        })
+        .collect();
+
+    // splice(0..0, ..) cannot panic: an empty range at index 0 is in bounds for any vec.
+    model.ranges.splice(0..0, merged.ranges);
+    model.visible_blocks.splice(0..0, blocks);
 }
 
 impl ScrollbackPane {
@@ -398,6 +427,9 @@ impl ScrollbackPane {
 
         // Render pushed header (if any) - this one is being pushed off
         // Also track selection info for pushed headers
+        // Sticky descriptors carry absolute indices; the selection model is relative to the rendered range (`render_content` remaps the same way).
+        let selection_idx = |entry_idx: usize| entry_idx.saturating_sub(entry_range.start);
+        let mut header_selection: Vec<StickyHeaderSelection> = Vec::new();
         let mut pushed_header_selection_box: Option<SelectionBox> = None;
         if let Some(ref pushed) = sticky.pushed {
             let visible_height = pushed.visible_height();
@@ -409,18 +441,19 @@ impl ScrollbackPane {
                     width: area.width,
                     height: visible_height,
                 };
-                self.render_sticky_header(
+                header_selection.extend(self.render_sticky_header(
                     buf,
                     header_area,
                     state,
                     pushed.entry_idx,
+                    selection_idx(pushed.entry_idx),
                     theme,
                     pushed.render_height,
                     pushed.clip_top,
                     scratch,
                     self.is_active && state.selected() == Some(pushed.entry_idx),
                     self.mouse_pos,
-                );
+                ));
 
                 // Fade out the pushed header as it's being pushed off.
                 // The fade makes the transition smoother visually.
@@ -466,18 +499,19 @@ impl ScrollbackPane {
                     width: area.width,
                     height: visible_height,
                 };
-                self.render_sticky_header(
+                header_selection.extend(self.render_sticky_header(
                     buf,
                     header_area,
                     state,
                     pinned.entry_idx,
+                    selection_idx(pinned.entry_idx),
                     theme,
                     pinned.render_height,
                     pinned.clip_top,
                     scratch,
                     self.is_active && state.selected() == Some(pinned.entry_idx),
                     self.mouse_pos,
-                );
+                ));
 
                 // For selection, use HorizontalLayout to match content entries' selection width
                 let layout = HorizontalLayout::new(header_area, layout_cfg);
@@ -557,6 +591,13 @@ impl ScrollbackPane {
                 ..Default::default()
             }
         };
+        prepend_header_selection(&mut output.output.selection_model, header_selection);
+        // A header-only viewport skips the content renderer, so publish the (zero-height, pane-bottom) content
+        // rect here; drag autoscroll reads it to tell "all chrome" apart from "no frame yet".
+        if output.output.selection_model.content_area == Rect::default() {
+            output.output.selection_model.content_area = content_area;
+        }
+
         // Publish the gap row this frame's pinned header actually produced
         // (None during push transitions and degenerate tiny viewports).
         output.output.sticky_gap_row = sticky.gap_row().filter(|row| *row < area.height);
@@ -614,6 +655,7 @@ impl ScrollbackPane {
     ///
     /// - `render_height`: Total height budget for the block (including vpads)
     /// - `clip_top`: If > 0, clips rendered output from top (for push effect)
+    /// - `selection_entry_idx`: `entry_idx` rebased onto the rendered range (the selection model's key space)
     #[allow(clippy::too_many_arguments)]
     fn render_sticky_header(
         &self,
@@ -621,18 +663,17 @@ impl ScrollbackPane {
         area: Rect,
         state: &ScrollbackState, // Now immutable! No entry mutation needed.
         entry_idx: usize,
+        selection_entry_idx: usize,
         theme: &Theme,
         render_height: u16,
         clip_top: u16,
         scratch: &mut ScratchBuffer,
         is_selected: bool,
         mouse_pos: Option<(u16, u16)>,
-    ) {
+    ) -> Option<StickyHeaderSelection> {
         let appearance = state.appearance();
 
-        let Some(entry) = state.entry(entry_idx) else {
-            return;
-        };
+        let entry = state.entry(entry_idx)?;
 
         let layout = HorizontalLayout::new(area, &appearance.scrollback.layout);
 
@@ -677,7 +718,13 @@ impl ScrollbackPane {
             cwd,
         );
 
-        if clip_top > 0 {
+        // Published `block_line_idx` values index this budgeted output, while copy re-derives them without `max_lines`; only equal when ignored.
+        debug_assert!(
+            entry.block.is_user_prompt(),
+            "only max_lines-insensitive blocks (user prompts) may be sticky"
+        );
+
+        let rendered_lines = if clip_top > 0 {
             // For pushed headers being pushed OFF screen:
             // - The TOP rows disappear first (pushed up, out of view)
             // - The BOTTOM rows stay visible longest
@@ -688,7 +735,7 @@ impl ScrollbackPane {
             let visible_height = render_height.saturating_sub(clip_top);
 
             if visible_height == 0 {
-                return;
+                return None;
             }
 
             // Use reusable scratch buffer (avoids allocation per frame)
@@ -696,13 +743,14 @@ impl ScrollbackPane {
             let scratch_area = Rect::new(0, 0, area.width, render_height);
 
             // Render full header to scratch using existing method
-            Self::render_entry_with_ctx_static(
+            let mut lines = Self::render_entry_with_ctx_static(
                 entry,
                 &ctx,
                 theme,
                 scratch_area,
                 scratch_buf,
                 mouse_pos,
+                selection_entry_idx,
             );
 
             // Copy visible rows (after clip_top) to output buffer
@@ -717,16 +765,57 @@ impl ScrollbackPane {
                     }
                 }
             }
+
+            // Rebase the scratch-space rows onto the screen: rows above `clip_top` were never copied, so they are not selectable.
+            lines.retain_mut(|line| {
+                if line.screen_y < clip_top {
+                    return false;
+                }
+                line.screen_y = area.y + (line.screen_y - clip_top);
+                line.screen_x = line.screen_x.saturating_add(area.x);
+                true
+            });
+            lines
         } else {
             // No clipping needed - render directly with max_lines
-            Self::render_entry_with_ctx_static(entry, &ctx, theme, area, buf, mouse_pos);
-        }
+            Self::render_entry_with_ctx_static(
+                entry,
+                &ctx,
+                theme,
+                area,
+                buf,
+                mouse_pos,
+                selection_entry_idx,
+            )
+        };
+
+        // Text reaching the last header row means more may be hidden below.
+        let bottom_clipped = rendered_lines
+            .last()
+            .is_some_and(|last| last.screen_y + 1 >= area.y + area.height);
+        Some(StickyHeaderSelection {
+            block: VisibleBlockGeometry {
+                entry_idx: selection_entry_idx,
+                area: layout.entry_area(),
+                content_area: layout.content,
+                selection_area: layout.selection_area(),
+                // Copy re-renders the block at this width.
+                content_width: content_width_for_block,
+                top_clipped: clip_top > 0,
+                bottom_clipped,
+                // Text selection only: a block drag anchored here would sweep in the off-screen entries the pinned prompt scrolled past.
+                drag_startable: false,
+            },
+            lines: rendered_lines,
+        })
     }
 
     /// Render an entry with a specific BlockContext (for max_lines support).
     /// Static method to avoid borrow issues.
     ///
     /// `mouse_pos` is forwarded for timestamp hover expansion in sticky headers.
+    ///
+    /// Returns a selectable line per painted row, in `area`/`buf` coordinates (a scratch render yields scratch rows for the caller to rebase).
     fn render_entry_with_ctx_static(
         entry: &ScrollbackEntry,
         ctx: &BlockContext,
@@ -734,7 +823,8 @@ impl ScrollbackPane {
         area: Rect,
         buf: &mut Buffer,
         mouse_pos: Option<(u16, u16)>,
-    ) {
+        selection_entry_idx: usize,
+    ) -> Vec<ResolvedSelectableLine> {
         use crate::scrollback::types::BlockBackground;
 
         let layout = HorizontalLayout::new(area, &ctx.appearance.scrollback.layout);
@@ -802,13 +892,29 @@ impl ScrollbackPane {
             y += 1;
         }
 
-        // Render content lines in the actual content area (after left padding)
-        for line in &output.lines {
+        // `block_line_idx` counts every line, painted or not.
+        let mut selection_lines = Vec::new();
+        for (block_line_idx, line) in output.lines.iter().enumerate() {
             if y >= content_area.y + content_area.height {
                 break;
             }
             // Render line in the content area (not overlapping with accent)
             buf.set_line_safe(content_area.x, y, &line.content, content_area.width);
+            if let (Some(range_id), Some(cols)) = (
+                line.selection_range,
+                selectable_cols(&line.content, &line.selectable),
+            ) {
+                selection_lines.push(ResolvedSelectableLine {
+                    entry_idx: selection_entry_idx,
+                    range_id,
+                    block_line_idx,
+                    screen_y: y,
+                    screen_x: content_area.x,
+                    selectable_cols: cols,
+                    text: derive_selection_text(line),
+                    joiner_to_previous: line.joiner.clone(),
+                });
+            }
             y += 1;
         }
 
@@ -883,6 +989,8 @@ impl ScrollbackPane {
                 }
             }
         }
+
+        selection_lines
     }
 
     // Shared Rendering Helpers
@@ -1264,6 +1372,114 @@ fn paint_expandable_indicator(
 #[cfg(test)]
 mod tests {
     use super::verb_member_indicator_row;
+    use super::*;
+    use crate::appearance::AppearanceConfig;
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::scrollback::state::ScrollbackState;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn render_model(state: &mut ScrollbackState, area: Rect) -> ResolvedSelectionModel {
+        state.prepare_layout(area.width, area.height);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::default();
+        let pane = ScrollbackPane::new().active(true);
+        pane.render_with_scratch(area, &mut buf, state, &mut scratch)
+            .selection_model
+    }
+
+    // Pinned-header selectability is covered end to end by the sticky_header_drag_copy_pty e2e; only the
+    // pushed/clip rebase branch needs a unit test (the PTY case never drags during a push).
+
+    /// A pushed header paints through a scratch buffer, so its lines must be rebased onto the rows that reached the screen; clipped rows are dropped.
+    #[test]
+    fn pushed_sticky_header_lines_are_rebased_onto_visible_rows() {
+        let area = Rect::new(0, 0, 80, 12);
+        let mut state = ScrollbackState::new();
+        let mut appearance = AppearanceConfig::default();
+        appearance.scrollback.blocks.prompt.vpad = false;
+        appearance.scrollback.blocks.prompt.show_prefix = false;
+        state.set_appearance(appearance);
+        // Two turns: the second prompt pushes the first one's header off.
+        state.push_block(RenderBlock::user_prompt(
+            "FIRSTPROMPT line one\nFIRSTPROMPT line two",
+        ));
+        for i in 0..6 {
+            state.push_block(RenderBlock::stub(
+                format!("first response {i}"),
+                ratatui::style::Color::Blue,
+            ));
+        }
+        state.push_block(RenderBlock::user_prompt("SECONDPROMPT"));
+        for i in 0..20 {
+            state.push_block(RenderBlock::stub(
+                format!("second response {i}"),
+                ratatui::style::Color::Blue,
+            ));
+        }
+        state.prepare_layout(area.width, area.height);
+
+        // Sweep every reachable scroll offset; the clipped-frame counter binds the assertions to the rebase branch.
+        let mut saw_clipped_push = false;
+        let mut checked_clipped_lines = 0usize;
+        let mut trace: Vec<String> = Vec::new();
+        let max_scroll = state.scroll_info().2;
+        for scroll in 1..=max_scroll {
+            state.set_scroll_offset(scroll);
+            let model = render_model(&mut state, area);
+            let Some(sticky) = state.sticky_layout() else {
+                continue;
+            };
+            trace.push(format!("scroll={scroll} sticky={sticky:?}"));
+            let Some(pushed) = sticky.pushed else {
+                continue;
+            };
+            saw_clipped_push |= pushed.clip_top > 0;
+            let visible = pushed.visible_height();
+            let band = area.y..area.y + visible;
+            for range in model
+                .ranges
+                .iter()
+                .filter(|r| r.entry_idx == pushed.entry_idx)
+            {
+                for line in &range.lines {
+                    if pushed.clip_top > 0 {
+                        checked_clipped_lines += 1;
+                    }
+                    assert!(
+                        band.contains(&line.screen_y),
+                        "pushed-header line at row {} escapes its visible band \
+                         {band:?} (scroll={scroll})",
+                        line.screen_y
+                    );
+                    assert!(
+                        line.text.contains("FIRSTPROMPT"),
+                        "the rebased row must carry the pushed prompt's text, got {:?}",
+                        line.text
+                    );
+                    let hit = model.hit_test_text_exact(line.screen_x, line.screen_y);
+                    assert_eq!(
+                        hit.map(|h| h.entry_idx),
+                        Some(pushed.entry_idx),
+                        "pushed-header row {} must hit-test back to the header entry \
+                         (scroll={scroll})",
+                        line.screen_y
+                    );
+                }
+            }
+        }
+        let trace = trace.join("\n");
+        assert!(
+            saw_clipped_push,
+            "the sweep never reached a top-clipped push\n{trace}"
+        );
+        assert!(
+            checked_clipped_lines > 0,
+            "a top-clipped header published no selectable line, so every \
+             rebase assertion was skipped\n{trace}"
+        );
+    }
 
     // Pins the "caret offset ignores clipping" fix: the member caret
     // sits one row below the slot top only while the header row is visible.

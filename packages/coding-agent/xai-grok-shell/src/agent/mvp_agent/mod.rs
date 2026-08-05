@@ -721,6 +721,9 @@ struct RetainedResources {
         tokio::sync::mpsc::UnboundedReceiver<PermissionEvent>,
     >,
 }
+/// Per-resident-session `(title, last_turn_summary)` display cache; see
+/// `resident_roster_titles`.
+type RosterDisplayCache = HashMap<String, (Option<String>, Option<String>)>;
 pub struct MvpAgent {
     /// LEADER-SAFE(shared): `Send + Sync` mirror of per-session activity for the
     /// leader's auto-update checker, which cannot read the `!Send` maps. Expires
@@ -728,10 +731,10 @@ pub struct MvpAgent {
     pub(crate) activity: crate::agent::activity::AgentActivity,
     /// LEADER-SAFE(per-session).
     session_registry: SessionRegistry,
-    /// Title per resident session id, refreshed each `build_roster`. Lets the
-    /// synchronous roster deltas reuse the title instead of emitting an empty
-    /// one — `resident_roster_entry` can't read disk.
-    resident_roster_titles: RefCell<HashMap<String, String>>,
+    /// `(title, last_turn_summary)` per resident session id, refreshed each
+    /// `build_roster`. Lets the synchronous roster deltas reuse both instead
+    /// of emitting empty ones — `resident_roster_entry` can't read disk.
+    resident_roster_titles: RefCell<RosterDisplayCache>,
     pub(crate) initialize_request: OnceLock<acp::InitializeRequest>,
     pub(crate) gateway: GatewaySender,
     /// Agent configuration. LEADER-SAFE(init-once): never mutated after construction.

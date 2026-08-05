@@ -886,8 +886,9 @@ pub fn render_todo_badge_spans(
     ));
     Some(spans)
 }
-/// Space:prompt hint — shared across multiple scrollback hint branches.
-fn space_prompt_hint() -> HintItem {
+/// The scrollback's default focus hint: `Space` leaves for the prompt. A
+/// parked blocking card replaces it with its own (pinned) route back.
+pub fn prompt_focus_hint() -> HintItem {
     use crate::input::key::KeyShortcut;
     use crossterm::event::{KeyCode, KeyModifiers};
     HintItem {
@@ -908,9 +909,15 @@ fn space_prompt_hint() -> HintItem {
 ///
 /// `group_header_label` ("expand"/"collapse") marks a selected group header;
 /// it replaces the fold and Enter:open hints with a single Enter toggle hint.
+///
+/// `focus_hint` is how the scrollback says the keyboard can leave it —
+/// [`prompt_focus_hint`], or a caller-supplied replacement. A pinned one
+/// leads the bar and is offered once; an unpinned one is offered only in the
+/// selection states where moving on is the useful next step.
 #[allow(clippy::too_many_arguments)]
 pub fn build_hints(
     active_pane: ActivePane,
+    focus_hint: HintItem,
     prompt: &PromptWidget,
     registry: &ActionRegistry,
     is_editing_queued: bool,
@@ -1122,6 +1129,14 @@ pub fn build_hints(
         }
         ActivePane::Scrollback => {
             let mut hints = Vec::new();
+            if focus_hint.pinned {
+                hints.push(focus_hint.clone());
+            }
+            let offer_focus_hint = |hints: &mut Vec<HintItem>| {
+                if !focus_hint.pinned {
+                    hints.push(focus_hint.clone());
+                }
+            };
             let nothing_special = !selected_is_agent_message
                 && !selected_is_user_prompt
                 && !selected_is_credit_limit
@@ -1129,13 +1144,13 @@ pub fn build_hints(
                 && group_header_label.is_none()
                 && !selected_supports_fullscreen;
             if nothing_special {
-                hints.push(space_prompt_hint());
+                offer_focus_hint(&mut hints);
             }
             if selected_is_credit_limit {
                 if let Some(key) = registry.key_for(ActionId::OpenBlockViewer) {
                     hints.push(HintItem::new(key, rust_i18n::t!("hints.open")));
                 }
-                hints.push(space_prompt_hint());
+                offer_focus_hint(&mut hints);
             }
             if selected_is_agent_message {
                 if vim_mode
@@ -1144,7 +1159,7 @@ pub fn build_hints(
                 {
                     hints.push(HintItem::new(key, rust_i18n::t!("hints.copy")));
                 }
-                hints.push(space_prompt_hint());
+                offer_focus_hint(&mut hints);
             }
             if selected_is_user_prompt {
                 let user_collapsed = fold_label == Some("expand");
@@ -1160,7 +1175,7 @@ pub fn build_hints(
                     hints.push(HintItem::new(key, fold_hint_label_l10n(thinking_label)));
                 }
                 if !user_collapsed {
-                    hints.push(space_prompt_hint());
+                    offer_focus_hint(&mut hints);
                 }
             }
             let user_collapsed_already_pushed =
@@ -1317,6 +1332,7 @@ mod tests {
     ) -> Vec<HintItem> {
         build_hints(
             ActivePane::Scrollback,
+            prompt_focus_hint(),
             &PromptWidget::default(),
             registry,
             false,
@@ -1350,6 +1366,7 @@ mod tests {
         let registry = ActionRegistry::defaults();
         let hints = build_hints(
             ActivePane::Scrollback,
+            prompt_focus_hint(),
             &PromptWidget::default(),
             &registry,
             false,
@@ -1385,6 +1402,7 @@ mod tests {
         let registry = ActionRegistry::defaults();
         let hints = build_hints(
             ActivePane::Scrollback,
+            prompt_focus_hint(),
             &PromptWidget::default(),
             &registry,
             false,
@@ -1550,6 +1568,7 @@ mod tests {
         }
         build_hints(
             ActivePane::Scrollback,
+            prompt_focus_hint(),
             &PromptWidget::default(),
             registry,
             false,
@@ -1654,6 +1673,7 @@ mod tests {
         let registry = ActionRegistry::defaults();
         let hints = build_hints(
             ActivePane::Prompt,
+            prompt_focus_hint(),
             &PromptWidget::default(),
             &registry,
             false,
@@ -1699,6 +1719,7 @@ mod tests {
         let registry = ActionRegistry::defaults();
         build_hints(
             ActivePane::Prompt,
+            prompt_focus_hint(),
             &prompt,
             &registry,
             false,
@@ -1759,6 +1780,7 @@ mod tests {
             let registry = ActionRegistry::defaults();
             let hints = build_hints(
                 ActivePane::Prompt,
+                prompt_focus_hint(),
                 &prompt,
                 &registry,
                 false,
@@ -1806,6 +1828,7 @@ mod tests {
         {
             let hints = build_hints(
                 ActivePane::Prompt,
+                prompt_focus_hint(),
                 &prompt,
                 &registry,
                 false,
@@ -1851,6 +1874,7 @@ mod tests {
         let search = ScrollbackSearchState::open();
         let hints = build_hints(
             ActivePane::Scrollback,
+            prompt_focus_hint(),
             &PromptWidget::default(),
             &registry,
             false,
@@ -1902,6 +1926,7 @@ mod tests {
         prompt.textarea.insert_str("edited row");
         let hints = build_hints(
             ActivePane::Prompt,
+            prompt_focus_hint(),
             &prompt,
             &registry,
             true,

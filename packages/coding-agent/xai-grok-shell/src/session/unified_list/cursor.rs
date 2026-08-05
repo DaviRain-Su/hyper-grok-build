@@ -231,6 +231,7 @@ mod tests {
             git_root_dir: None,
             git_remotes: Vec::new(),
             source_workspace_dir: None,
+            last_turn_summary: None,
             session_kind: None,
         };
         merged_session_to_row(m, facet_registry())

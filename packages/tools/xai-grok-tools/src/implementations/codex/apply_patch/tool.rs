@@ -35,7 +35,7 @@ You MUST include a header to specify the action you are taking.
 Each operation starts with one of three headers:
 
 *** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
-*** Delete File: <path> - remove an existing file. Nothing follows.
+*** Delete File: <path> - remove an existing file. No hunks follow this header.
 *** Update File: <path> - patch an existing file in place (optionally with a rename).
 
 May be immediately followed by *** Move to: <new path> if you want to rename the file.
@@ -90,9 +90,9 @@ A full patch can combine several operations:
 
 It is important to remember:
 
+- Every patch MUST start with *** Begin Patch and end with *** End Patch, including delete-only patches
 - You must include a header with your intended action (Add/Delete/Update)
 - You must prefix new lines with `+` even when creating a new file
-- File references can only be relative, NEVER ABSOLUTE.
 "#;
 
 // ─── Input ───────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@
 
 pub mod cache;
 pub mod color_support;
+pub mod env_appearance;
 mod grokday;
 mod groknight;
 pub mod md_style;
@@ -661,11 +662,13 @@ impl Theme {
             paste_bg: canvas_bg,
             scrollbar_bg: canvas_bg,
 
-            // ── Borders: dim (idle) → muted (selection) → high-contrast (active) ──
+            // ── Borders: muted (idle prompt) → muted (selection) → high-contrast (active) ──
             // The four-tier truecolor border hierarchy collapses onto
             // three ANSI16 slots:
-            //   - `prompt_border` (idle text-input frame) → `dim_fg`,
-            //     softest readable border on each canvas.
+            //   - `prompt_border` (idle text-input frame) → `muted_fg`,
+            //     not `dim_fg`. DarkGray (ANSI 8) is tuned near-bg on
+            //     many palettes, so a dim idle frame vanishes the same
+            //     way table chrome did (GB-3759).
             //   - `hover_border` (transient mouse-hover) → `DarkGray`,
             //     stable across both polarities so a hover band reads
             //     consistently.
@@ -674,7 +677,7 @@ impl Theme {
             //     screaming.
             //   - `prompt_border_active` (focused) → `high_contrast_fg`,
             //     maximum contrast so focus always pops.
-            prompt_border: dim_fg,
+            prompt_border: muted_fg,
             prompt_border_active: high_contrast_fg,
             selection_border: muted_fg,
             hover_border: Color::DarkGray,
@@ -683,6 +686,11 @@ impl Theme {
             scrollbar_fg: muted_fg,
 
             // ── Foreground / text hierarchy ─────────────────────────────
+            // Prompt textarea + chrome captions use these directly (and
+            // blend_color cannot mix named ANSI, so they must already
+            // be readable slots).
+            text_primary: high_contrast_fg,
+            text_secondary: muted_fg,
             md_text: high_contrast_fg,
             // Selected user-prompt `>` (drives the user selection accent
             // and the OSC 12 cursor color) takes max-contrast fg so the
@@ -745,6 +753,26 @@ impl Theme {
             warning: yellow,
             path: yellow,
             accent_plan: yellow,
+
+            // Markdown content: naive Basic quantize lands GrokNight
+            // md_code / md_muted / h4–h6 on DarkGray (ANSI 8). Many
+            // palettes tune that slot near the background, so inline
+            // code and table borders vanish over ssh+tmux (GB-3759).
+            // `md_muted` uses muted_fg, not dim_fg — format_table also
+            // stacks DIM on table borders.
+            md_heading_h1: cyan,
+            md_heading_h2: blue,
+            md_heading_h3: magenta,
+            md_heading_h4: high_contrast_fg,
+            md_heading_h5: muted_fg,
+            md_heading_h6: muted_fg,
+            md_code: cyan,
+            md_muted: muted_fg,
+            md_task_checked: green,
+            md_task_unchecked: muted_fg,
+            link_fg: blue,
+            diff_equal_fg: muted_fg,
+            diff_gutter_fg: muted_fg,
             ..self
         }
     }
@@ -936,11 +964,13 @@ mod tests {
         let t = Theme::groknight().ansi16_chrome_overrides(true);
         assert_eq!(t.bg_light, Color::DarkGray);
         assert_eq!(t.bg_highlight, Color::DarkGray);
-        // Idle prompt border sits at `dim_fg` (DarkGray on dark canvas);
+        // Idle prompt border sits at `muted_fg` (Gray on dark canvas);
         // focused border jumps to max-contrast White.
-        assert_eq!(t.prompt_border, Color::DarkGray);
+        assert_eq!(t.prompt_border, Color::Gray);
         assert_eq!(t.prompt_border_active, Color::White);
         assert_eq!(t.md_text, Color::White);
+        assert_eq!(t.text_primary, Color::White);
+        assert_eq!(t.text_secondary, Color::Gray);
         // Two-tier grey: secondary text (`gray`) reads at the muted
         // slot (silver), `gray_dim` reads at the dim slot (DarkGray) —
         // see `ansi16_overrides_gray_hierarchy_collapses_to_two_slots`.
@@ -952,16 +982,17 @@ mod tests {
     fn ansi16_overrides_light_inverts_high_contrast_and_elevated_bg() {
         // Light canvas inverts polarity: elevated bg reads darker
         // (silver step from white), high-contrast fg is Black, muted
-        // fg is DarkGray, and the dim slot (`prompt_border`, `gray_dim`)
-        // flips to silver — see
-        // `ansi16_overrides_gray_hierarchy_collapses_to_two_slots`.
+        // fg is DarkGray, and the dim slot (`gray_dim`) flips to silver
+        // — see `ansi16_overrides_gray_hierarchy_collapses_to_two_slots`.
         use ratatui::style::Color;
         let t = Theme::grokday().ansi16_chrome_overrides(false);
         assert_eq!(t.bg_light, Color::Gray);
         assert_eq!(t.bg_highlight, Color::Gray);
-        assert_eq!(t.prompt_border, Color::Gray);
+        assert_eq!(t.prompt_border, Color::DarkGray);
         assert_eq!(t.prompt_border_active, Color::Black);
         assert_eq!(t.md_text, Color::Black);
+        assert_eq!(t.text_primary, Color::Black);
+        assert_eq!(t.text_secondary, Color::DarkGray);
         assert_eq!(t.gray, Color::DarkGray);
         assert_eq!(t.gray_dim, Color::Gray);
     }
@@ -995,6 +1026,64 @@ mod tests {
         assert_eq!(t_light.accent_error, Color::Red);
         assert_eq!(t_light.accent_success, Color::Green);
         assert_eq!(t_light.accent_running, Color::Magenta);
+    }
+
+    #[test]
+    fn ansi16_overrides_md_palette_never_lands_on_dark_gray() {
+        // GB-3759: on a dark canvas no md field may land on DarkGray,
+        // the slot palettes tune near their background.
+        use ratatui::style::Color;
+        let t = Theme::groknight().ansi16_chrome_overrides(true);
+        for (name, c) in [
+            ("md_heading_h1", t.md_heading_h1),
+            ("md_heading_h2", t.md_heading_h2),
+            ("md_heading_h3", t.md_heading_h3),
+            ("md_heading_h4", t.md_heading_h4),
+            ("md_heading_h5", t.md_heading_h5),
+            ("md_heading_h6", t.md_heading_h6),
+            ("md_code", t.md_code),
+            ("md_muted", t.md_muted),
+            ("md_task_checked", t.md_task_checked),
+            ("md_task_unchecked", t.md_task_unchecked),
+            ("link_fg", t.link_fg),
+            ("diff_equal_fg", t.diff_equal_fg),
+            ("diff_gutter_fg", t.diff_gutter_fg),
+        ] {
+            assert_ne!(
+                c,
+                Color::DarkGray,
+                "{name} must not land on DarkGray on a dark canvas \
+                 (invisible on palettes that tune ANSI 8 near-bg)"
+            );
+            assert!(
+                !matches!(c, Color::Rgb(..) | Color::Indexed(_)),
+                "{name} must be a named ANSI16 color, got {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ansi16_overrides_md_palette_polarity_aware_hues() {
+        use ratatui::style::Color;
+        let t_dark = Theme::groknight().ansi16_chrome_overrides(true);
+        assert_eq!(t_dark.md_code, Color::LightCyan);
+        assert_eq!(t_dark.md_muted, Color::Gray);
+        assert_eq!(t_dark.md_heading_h1, Color::LightCyan);
+        assert_eq!(t_dark.md_heading_h2, Color::LightBlue);
+        assert_eq!(t_dark.md_heading_h3, Color::LightMagenta);
+        assert_eq!(t_dark.md_heading_h4, Color::White);
+        assert_eq!(t_dark.link_fg, Color::LightBlue);
+        assert_eq!(t_dark.md_task_checked, Color::LightGreen);
+
+        let t_light = Theme::grokday().ansi16_chrome_overrides(false);
+        assert_eq!(t_light.md_code, Color::Cyan);
+        assert_eq!(t_light.md_muted, Color::DarkGray);
+        assert_eq!(t_light.md_heading_h1, Color::Cyan);
+        assert_eq!(t_light.md_heading_h2, Color::Blue);
+        assert_eq!(t_light.md_heading_h3, Color::Magenta);
+        assert_eq!(t_light.md_heading_h4, Color::Black);
+        assert_eq!(t_light.link_fg, Color::Blue);
+        assert_eq!(t_light.md_task_checked, Color::Green);
     }
 
     #[test]
@@ -1143,25 +1232,23 @@ mod tests {
     #[test]
     fn ansi16_overrides_border_hierarchy_is_distinct() {
         // Border hierarchy:
-        //   prompt_border (dim, idle) → muted (selection) → high-contrast (focused)
-        // On dark canvas, `prompt_border` and `hover_border` share
-        // `DarkGray` (one tier above canvas), `selection_border` takes
-        // `Gray` (silver), and `prompt_border_active` takes `White`.
-        // On light canvas, `prompt_border` takes `Gray` (silver — sits
-        // closest to White), and `selection_border` + `hover_border`
-        // both take `DarkGray`. The selection-vs-active distinction
-        // survives in both polarities via `prompt_border_active`.
+        //   prompt_border (muted, idle) → muted (selection) → high-contrast (focused)
+        // On dark canvas, idle prompt and selection share `Gray` (silver)
+        // so the frame survives palettes that tune ANSI 8 near-bg;
+        // `hover_border` stays `DarkGray`, `prompt_border_active` is `White`.
+        // On light canvas, `prompt_border` / `selection_border` /
+        // `hover_border` all sit on `DarkGray`; focus is `Black`.
         use ratatui::style::Color;
         let t_dark = Theme::groknight().ansi16_chrome_overrides(true);
         assert_eq!(t_dark.hover_border, Color::DarkGray);
-        assert_eq!(t_dark.prompt_border, Color::DarkGray);
+        assert_eq!(t_dark.prompt_border, Color::Gray);
         assert_eq!(t_dark.selection_border, Color::Gray);
         assert_eq!(t_dark.prompt_border_active, Color::White);
         assert_ne!(t_dark.selection_border, t_dark.prompt_border_active);
 
         let t_light = Theme::grokday().ansi16_chrome_overrides(false);
         assert_eq!(t_light.hover_border, Color::DarkGray);
-        assert_eq!(t_light.prompt_border, Color::Gray);
+        assert_eq!(t_light.prompt_border, Color::DarkGray);
         assert_eq!(t_light.selection_border, Color::DarkGray);
         assert_eq!(t_light.prompt_border_active, Color::Black);
         assert_ne!(t_light.selection_border, t_light.prompt_border_active);

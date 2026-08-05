@@ -51,7 +51,7 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::HydrateSessionTitleFromDisk { .. }))
+            .any(|e| matches!(e, Effect::HydrateSessionMetaFromDisk { .. }))
     );
     assert!(
         effects
@@ -87,9 +87,11 @@ fn session_title_hydration_auto_leaves_display_name_none() {
     );
     let id = AgentId(0);
     dispatch(
-        Action::TaskComplete(TaskResult::SessionTitleFromDisk {
+        Action::TaskComplete(TaskResult::SessionMetaFromDisk {
             agent_id: id,
             title: Some(("Auto Title".into(), false)),
+            last_turn_summary: None,
+            last_turn_summary_gen: 0,
         }),
         &mut app,
     );
@@ -112,9 +114,11 @@ fn session_title_hydration_manual_restores_display_name_cold_cache_only() {
     );
     let id = AgentId(0);
     dispatch(
-        Action::TaskComplete(TaskResult::SessionTitleFromDisk {
+        Action::TaskComplete(TaskResult::SessionMetaFromDisk {
             agent_id: id,
             title: Some(("Disk Title".into(), true)),
+            last_turn_summary: None,
+            last_turn_summary_gen: 0,
         }),
         &mut app,
     );
@@ -125,9 +129,11 @@ fn session_title_hydration_manual_restores_display_name_cold_cache_only() {
     }
     app.agents.get_mut(&id).unwrap().display_name = Some("Fresh Rename".into());
     dispatch(
-        Action::TaskComplete(TaskResult::SessionTitleFromDisk {
+        Action::TaskComplete(TaskResult::SessionMetaFromDisk {
             agent_id: id,
             title: Some(("Stale Disk Title".into(), true)),
+            last_turn_summary: None,
+            last_turn_summary_gen: 0,
         }),
         &mut app,
     );
@@ -147,15 +153,85 @@ fn session_title_hydration_ignores_blank_title() {
     );
     let id = AgentId(0);
     dispatch(
-        Action::TaskComplete(TaskResult::SessionTitleFromDisk {
+        Action::TaskComplete(TaskResult::SessionMetaFromDisk {
             agent_id: id,
             title: Some(("   ".into(), true)),
+            last_turn_summary: None,
+            last_turn_summary_gen: 0,
         }),
         &mut app,
     );
     let agent = &app.agents[&id];
     assert!(agent.display_name.is_none());
     assert!(agent.generated_session_title.is_none());
+}
+/// The persisted last-turn summary hydrates cold-cache only: a value already
+/// set by a live `LastTurnSummary` delivery (always newer than any disk read)
+/// must not be overwritten by the slower disk result.
+#[test]
+fn last_turn_summary_hydration_is_cold_cache_only() {
+    let mut app = test_app();
+    dispatch(
+        Action::LoadSession("sess-title".into(), None, false),
+        &mut app,
+    );
+    let id = AgentId(0);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionMetaFromDisk {
+            agent_id: id,
+            title: None,
+            last_turn_summary: Some("From disk".into()),
+            last_turn_summary_gen: 0,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id].last_turn_summary.as_deref(),
+        Some("From disk")
+    );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .set_last_turn_summary(Some("Live delivery".into()));
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionMetaFromDisk {
+            agent_id: id,
+            title: None,
+            last_turn_summary: Some("Stale disk read".into()),
+            last_turn_summary_gen: 0,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id].last_turn_summary.as_deref(),
+        Some("Live delivery"),
+        "hydration is a cold-cache fallback, never an overwrite"
+    );
+}
+/// A rewind that clears `last_turn_summary` while disk hydration is in flight
+/// must not be undone by the late pre-rewind `summary.json` value.
+#[test]
+fn last_turn_summary_hydration_does_not_restore_after_rewind_clear() {
+    let mut app = test_app();
+    dispatch(
+        Action::LoadSession("sess-title".into(), None, false),
+        &mut app,
+    );
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().set_last_turn_summary(None);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionMetaFromDisk {
+            agent_id: id,
+            title: None,
+            last_turn_summary: Some("Pre-rewind disk summary".into()),
+            last_turn_summary_gen: 0,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id].last_turn_summary, None,
+        "stale disk hydrate must not re-apply a summary rewind already cleared"
+    );
 }
 /// A resumed session whose replay left entries marked running (bg tasks,
 /// scheduler runs, tools cut off when the previous process died) must
@@ -439,7 +515,7 @@ fn session_loaded_without_restore_no_summary() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::HydrateSessionTitleFromDisk { .. }))
+            .any(|e| matches!(e, Effect::HydrateSessionMetaFromDisk { .. }))
     );
     assert!(
         effects

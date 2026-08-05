@@ -27,7 +27,7 @@ use self::types::*;
 use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
 #[allow(unused_imports)]
-use crate::types::resources::SharedResources;
+use crate::types::resources::{SessionFolder, SharedResources};
 use crate::types::tool::{ToolKind, ToolNamespace};
 use regex::Regex;
 use xai_tool_types::{SubagentCompletedOutput, SubagentIsolationMode, TaskToolInput};
@@ -40,6 +40,102 @@ pub fn effective_max_subagent_depth(resources: &crate::types::resources::Resourc
         .get::<MaxSubagentDepth>()
         .map(|d| d.0)
         .unwrap_or(MAX_SUBAGENT_DEPTH)
+}
+
+fn user_text_from_json(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| {
+                b.get("text")
+                    .and_then(|t| t.as_str())
+                    .map(str::to_string)
+                    .or_else(|| b.as_str().map(str::to_string))
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn normalize_user_ask(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(start) = t.find("<user_query>") {
+        let after = &t[start + "<user_query>".len()..];
+        let body = after.split("</user_query>").next().unwrap_or(after).trim();
+        if body.is_empty() {
+            return None;
+        }
+        return Some(body.to_string());
+    }
+    if t.starts_with("<system")
+        || t.starts_with("<user_info>")
+        || t.starts_with("<git_status>")
+        || t.starts_with("<open_and_recently")
+    {
+        return None;
+    }
+    Some(t.to_string())
+}
+
+/// Recent parent user asks from `chat_history.jsonl` (oldest → newest).
+async fn recent_user_asks(resources: &SharedResources) -> Vec<String> {
+    let folder = {
+        let guard = resources.lock().await;
+        guard.get::<SessionFolder>().map(|s| s.0.clone())
+    };
+    let Some(folder) = folder else {
+        return Vec::new();
+    };
+    let path = folder.join("chat_history.jsonl");
+    let Ok(text) = tokio::fs::read_to_string(path).await else {
+        return Vec::new();
+    };
+    let mut asks = Vec::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let kind = v
+            .get("type")
+            .or_else(|| v.get("role"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        if kind != "user" {
+            continue;
+        }
+        // Auto-continue / stop-hook / recovery injections are typed `user`
+        // but are not parent asks. Counting them burns lookback and can
+        // drop leftover exec outside the window (common after compaction).
+        if v.get("synthetic_reason").is_some_and(|x| !x.is_null()) {
+            continue;
+        }
+        let Some(content) = v.get("content") else {
+            continue;
+        };
+        if let Some(ask) = normalize_user_ask(&user_text_from_json(content)) {
+            asks.push(ask);
+        }
+    }
+    const KEEP: usize = 12;
+    if asks.len() > KEEP {
+        asks[asks.len() - KEEP..].to_vec()
+    } else {
+        asks
+    }
+}
+
+async fn detect_continue_parent_work(
+    resources: &SharedResources,
+    description: &str,
+    prompt: &str,
+) -> bool {
+    let asks = recent_user_asks(resources).await;
+    xai_tool_types::should_continue_parent_work(&asks, description, prompt)
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -465,12 +561,15 @@ impl xai_tool_runtime::Tool for TaskTool {
                 .await
                 .unwrap_or_else(|| "get_task_output".to_string());
 
+            let continue_parent =
+                detect_continue_parent_work(&resources, &input.description, &input.prompt).await;
             return Ok(ToolOutput::Text(
                 xai_tool_types::format_subagent_started_background(
                     &id,
                     &input.subagent_type,
                     &input.description,
                     &task_output_name,
+                    continue_parent,
                 )
                 .into(),
             ));
@@ -510,18 +609,20 @@ impl xai_tool_runtime::Tool for TaskTool {
                 ""
             };
 
-            return Ok(ToolOutput::Text(
-                format!(
-                    "Subagent took longer than the foreground budget and was moved to the \
+            let mut text = format!(
+                "Subagent took longer than the foreground budget and was moved to the \
                  background to keep the conversation responsive. It is still running{notify_clause}.\n\
                  subagent_id: {id}\n\
                  type: {}\n\
                  description: {}\n\n\
                  Use {task_output_name} with task_ids=[\"{id}\"] and timeout_ms to wait for results.",
-                    input.subagent_type, input.description,
-                )
-                .into(),
-            ));
+                input.subagent_type, input.description,
+            );
+            if detect_continue_parent_work(&resources, &input.description, &input.prompt).await {
+                text.push_str("\n\n");
+                text.push_str(xai_tool_types::BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK);
+            }
+            return Ok(ToolOutput::Text(text.into()));
         }
 
         // 6. Return result
@@ -917,7 +1018,10 @@ mod tests {
     #[tokio::test]
     async fn auto_backgrounded_result_returns_task_id_text() {
         let (backend, mut rx) = make_backend();
-        let mut resources = resources_for_task(backend);
+        let (mut resources, _dir) = resources_with_parent_exec(
+            backend,
+            "run bazel test //hw5:op_chain then spawn a skill agent",
+        );
         let wait_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         struct WaitProbe(Arc<std::sync::atomic::AtomicBool>);
         impl Drop for WaitProbe {
@@ -970,6 +1074,12 @@ mod tests {
                     "should instruct the model to wait: {}",
                     text.text
                 );
+                assert!(
+                    text.text
+                        .contains(xai_tool_types::BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK),
+                    "auto-bg result must keep in-flight parent work: {}",
+                    text.text
+                );
             }
             other => panic!("expected Text output, got {other:?}"),
         }
@@ -1011,6 +1121,38 @@ mod tests {
         resources.insert(CurrentPromptIdResource("prompt-123".to_string()));
         resources.insert(TaskModelValidator::new(|_| None));
         resources
+    }
+
+    /// Seed `chat_history.jsonl` so leftover-parent detection can fire.
+    fn resources_with_parent_exec(
+        backend: SubagentBackendResource,
+        user_ask: &str,
+    ) -> (Resources, tempfile::TempDir) {
+        resources_with_chat_history(
+            backend,
+            &[serde_json::json!({
+                "type": "user",
+                "content": format!("<user_query>{user_ask}</user_query>"),
+            })],
+        )
+    }
+
+    fn resources_with_chat_history(
+        backend: SubagentBackendResource,
+        rows: &[serde_json::Value],
+    ) -> (Resources, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut body = String::new();
+        for row in rows {
+            body.push_str(&row.to_string());
+            body.push('\n');
+        }
+        std::fs::write(dir.path().join("chat_history.jsonl"), body).expect("write chat_history");
+        let mut resources = resources_for_task(backend);
+        resources.insert(crate::types::resources::SessionFolder(
+            dir.path().to_path_buf(),
+        ));
+        (resources, dir)
     }
 
     #[tokio::test]
@@ -1225,7 +1367,8 @@ mod tests {
     #[tokio::test]
     async fn background_spawn_succeeds_when_coordinator_accepts() {
         let (backend, mut rx) = make_backend();
-        let resources = resources_for_task(backend);
+        let (resources, _dir) =
+            resources_with_parent_exec(backend, "CI still fails, fix and gt submit /pr-babysit");
 
         let drain = tokio::spawn(async move {
             if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
@@ -1250,6 +1393,113 @@ mod tests {
         match result {
             ToolOutput::Text(text) => {
                 assert!(text.text.contains("Subagent started in background"));
+                assert!(
+                    text.text
+                        .contains(xai_tool_types::BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK),
+                    "background spawn must keep in-flight parent work: {}",
+                    text.text
+                );
+            }
+            other => panic!("expected text output, got {other:?}"),
+        }
+
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
+    }
+
+    #[tokio::test]
+    async fn background_spawn_omits_cta_when_review_is_the_only_ask() {
+        let (backend, mut rx) = make_backend();
+        let (resources, _dir) =
+            resources_with_parent_exec(backend, "review this PR https://github.com/x/y/pull/1");
+
+        let drain = tokio::spawn(async move {
+            if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
+                let _ = boxed.respond_with(|boxed| SubagentResult {
+                    success: true,
+                    output: std::sync::Arc::from(""),
+                    subagent_id: boxed.id.clone(),
+                    child_session_id: boxed.id.clone(),
+                    ..Default::default()
+                });
+            }
+        });
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources.into_shared()),
+            task_input("general-purpose", true),
+        )
+        .await
+        .expect("background spawn should succeed");
+
+        match result {
+            ToolOutput::Text(text) => {
+                assert!(text.text.contains("Subagent started in background"));
+                assert!(
+                    !text
+                        .text
+                        .contains(xai_tool_types::BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK),
+                    "review-only ask must not get continue-parent CTA: {}",
+                    text.text
+                );
+            }
+            other => panic!("expected text output, got {other:?}"),
+        }
+
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
+    }
+
+    #[tokio::test]
+    async fn background_spawn_ignores_synthetic_user_rows_in_lookback() {
+        let (backend, mut rx) = make_backend();
+        let (resources, _dir) = resources_with_chat_history(
+            backend,
+            &[
+                serde_json::json!({
+                    "type": "user",
+                    "content": "<user_query>CI still fails, fix and gt submit</user_query>",
+                }),
+                serde_json::json!({
+                    "type": "user",
+                    "synthetic_reason": "auto_continue",
+                    "content": "Continue with the work described in the summary above.",
+                }),
+                serde_json::json!({
+                    "type": "user",
+                    "synthetic_reason": "stop_hook_feedback",
+                    "content": "hook: stop",
+                }),
+            ],
+        );
+
+        let drain = tokio::spawn(async move {
+            if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
+                let _ = boxed.respond_with(|boxed| SubagentResult {
+                    success: true,
+                    output: std::sync::Arc::from(""),
+                    subagent_id: boxed.id.clone(),
+                    child_session_id: boxed.id.clone(),
+                    ..Default::default()
+                });
+            }
+        });
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources.into_shared()),
+            task_input("general-purpose", true),
+        )
+        .await
+        .expect("background spawn should succeed");
+
+        match result {
+            ToolOutput::Text(text) => {
+                assert!(
+                    text.text
+                        .contains(xai_tool_types::BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK),
+                    "synthetic rows must not hide leftover exec: {}",
+                    text.text
+                );
             }
             other => panic!("expected text output, got {other:?}"),
         }

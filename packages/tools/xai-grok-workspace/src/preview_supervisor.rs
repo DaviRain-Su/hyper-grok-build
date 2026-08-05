@@ -669,6 +669,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
+    use tokio::net::TcpSocket;
+
     use super::*;
 
     fn sample_cfg() -> PreviewArgs {
@@ -917,8 +919,9 @@ mod tests {
         let donated = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = watch::channel(false);
         let counter = Arc::clone(&donated);
+        let closed = ReservedRefusedPort::open();
         let handle = tokio::spawn(scrape_metrics_loop(
-            reserved_closed_port().await,
+            closed.port,
             Duration::from_millis(5),
             rx,
             move |_| {
@@ -996,10 +999,10 @@ mod tests {
         assert!(tracker.snapshot().idle_since_ms.is_none());
 
         // Nothing is listening on this port, so every scrape classifies Absent.
-        let port = reserved_closed_port().await;
+        let closed = ReservedRefusedPort::open();
         let (tx, rx) = watch::channel(false);
         let loop_handle = tokio::spawn(scrape_activity_loop(
-            port,
+            closed.port,
             Arc::clone(&tracker),
             Duration::from_millis(10),
             rx,
@@ -1055,10 +1058,10 @@ mod tests {
         let tracker = Arc::new(ActivityTracker::new().with_preview_activity_window_ms(50));
         tracker.set_preview_attached(1, 0);
 
-        let port = reserved_closed_port().await;
+        let closed = ReservedRefusedPort::open();
         let (tx, rx) = watch::channel(false);
         let loop_handle = tokio::spawn(scrape_activity_loop(
-            port,
+            closed.port,
             Arc::clone(&tracker),
             Duration::from_millis(10),
             rx,
@@ -1131,13 +1134,27 @@ mod tests {
             .expect("build client")
     }
 
-    async fn reserved_closed_port() -> u16 {
-        let probe = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("reserve");
-        let port = probe.local_addr().expect("addr").port();
-        drop(probe);
-        port
+    /// Bind an ephemeral loopback port without `listen`. Connects are refused
+    /// and no sibling test can steal the port — dropping a listener and racing
+    /// `scrape_activity` previously let `serve_incrementing_stamp` take it and
+    /// yield `Stamp { last_activity_ms: 1 }` instead of `Absent`.
+    struct ReservedRefusedPort {
+        port: u16,
+        _socket: TcpSocket,
+    }
+
+    impl ReservedRefusedPort {
+        fn open() -> Self {
+            let socket = TcpSocket::new_v4().expect("open v4 tcp socket");
+            socket
+                .bind((Ipv4Addr::LOCALHOST, 0).into())
+                .expect("bind ephemeral loopback");
+            let port = socket.local_addr().expect("local addr").port();
+            Self {
+                port,
+                _socket: socket,
+            }
+        }
     }
 
     async fn serve_canned(status_line: &'static str, body: &'static str, repeat: bool) -> u16 {
@@ -1225,13 +1242,9 @@ mod tests {
 
     #[tokio::test]
     async fn scrape_activity_treats_a_closed_port_as_absent_not_error() {
-        let probe = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("reserve");
-        let port = probe.local_addr().expect("addr").port();
-        drop(probe);
+        let closed = ReservedRefusedPort::open();
         assert_eq!(
-            scrape_activity(&scrape_client(), &activity_url(port)).await,
+            scrape_activity(&scrape_client(), &activity_url(closed.port)).await,
             ScrapeOutcome::Absent,
             "a refused connection (proxy absent) must be a quiet no-op, not BadResponse"
         );

@@ -752,7 +752,7 @@ async fn interject_queued_prompt_noop_without_running_turn() {
             }
             // current_prompt_id is None → no turn running.
 
-            actor
+            let _ = actor
                 .handle_interject_queued_prompt("p1", 0, None, None)
                 .await;
 
@@ -788,7 +788,7 @@ async fn interject_queued_prompt_stale_version_noop() {
                 .expect("current_prompt_id mutex poisoned") = Some("running".into());
 
             // Version 99 != live version 0 → no-op.
-            actor
+            let _ = actor
                 .handle_interject_queued_prompt("p1", 99, None, None)
                 .await;
 
@@ -834,7 +834,7 @@ async fn interject_after_cancel_does_nothing_and_keeps_prompt_queued() {
                 .await;
 
             // p1 would start next; the interject lands in the gap where no turn runs yet.
-            actor
+            let _ = actor
                 .handle_interject_queued_prompt("p1", 0, None, None)
                 .await;
 
@@ -883,7 +883,7 @@ async fn interject_queued_prompt_with_new_text_no_running_turn_saves_edit() {
             }
             // current_prompt_id is None → no turn running.
 
-            actor
+            let _ = actor
                 .handle_interject_queued_prompt("p1", 0, None, Some("EDITED text"))
                 .await;
 
@@ -913,7 +913,7 @@ async fn interject_queued_prompt_with_new_text_no_running_turn_saves_edit() {
 
             // Stale version gets NO fallback even without a running turn —
             // a concurrent edit won and losing ours is correct LWW.
-            actor
+            let _ = actor
                 .handle_interject_queued_prompt("p1", 99, None, Some("LOSER edit"))
                 .await;
             let state = actor.state.lock().await;
@@ -1029,7 +1029,7 @@ async fn interject_queued_bash_row_noop_keeps_row_queued() {
                 .lock()
                 .expect("current_prompt_id mutex poisoned") = Some("running".into());
 
-            actor
+            let _ = actor
                 .handle_interject_queued_prompt("p1", 0, None, None)
                 .await;
 
@@ -1075,7 +1075,7 @@ async fn interject_queued_bash_row_with_new_text_saves_edit() {
                 .lock()
                 .expect("current_prompt_id mutex poisoned") = Some("running".into());
 
-            actor
+            let _ = actor
                 .handle_interject_queued_prompt("p1", 0, None, Some("ls -la"))
                 .await;
 
@@ -1107,7 +1107,7 @@ async fn interject_queued_prompt_with_new_text_stale_version_full_noop() {
                 .lock()
                 .expect("current_prompt_id mutex poisoned") = Some("running".into());
 
-            actor
+            let _ = actor
                 .handle_interject_queued_prompt("p1", 99, None, Some("EDITED text"))
                 .await;
 
@@ -1136,6 +1136,7 @@ async fn queue_input_send_now_inserts_behind_running_front_and_requests_cancel()
                 let mut state = actor.state.lock().await;
                 state.pending_inputs.push_back(user_item("running", "A"));
                 state.running_task = Some(running_task_stub("running"));
+                state.front_message_committed = true;
                 state.pending_inputs.push_back(user_item("held", "A"));
             }
             *actor
@@ -1145,23 +1146,14 @@ async fn queue_input_send_now_inserts_behind_running_front_and_requests_cancel()
 
             let (respond_to, _prx) = oneshot::channel();
             let cancel = actor
-                .queue_input(
-                    vec![acp::ContentBlock::Text(acp::TextContent::new("now"))],
-                    "d-now".to_string(),
-                    PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    /* send_now */ true,
-                    None,
-                    /*tool_overrides_update*/ None,
-                    respond_to,
-                    None,
-                    None,
-                )
+                .queue_input(QueueInputRequest {
+                    send_now: true,
+                    ..queue_input_request(
+                        vec![acp::ContentBlock::Text(acp::TextContent::new("now"))],
+                        "d-now",
+                        respond_to,
+                    )
+                })
                 .await;
             assert!(cancel, "send-now behind a running turn must cancel it");
 
@@ -1207,23 +1199,14 @@ async fn queue_input_stacked_send_now_prompts_insert_fifo_during_goal_turn() {
             for id in ["sn-1", "sn-2"] {
                 let (respond_to, _prx) = oneshot::channel();
                 let cancel = actor
-                    .queue_input(
-                        vec![acp::ContentBlock::Text(acp::TextContent::new(id))],
-                        id.to_string(),
-                        PromptMode::Agent,
-                        None,
-                        None,
-                        None,
-                        None,
-                        false,
-                        None,
-                        /* send_now */ true,
-                        None,
-                        /*tool_overrides_update*/ None,
-                        respond_to,
-                        None,
-                        None,
-                    )
+                    .queue_input(QueueInputRequest {
+                        send_now: true,
+                        ..queue_input_request(
+                            vec![acp::ContentBlock::Text(acp::TextContent::new(id))],
+                            id,
+                            respond_to,
+                        )
+                    })
                     .await;
                 assert!(!cancel, "goal turns promote send-now but never cancel");
             }
@@ -1261,46 +1244,22 @@ async fn queue_input_auto_send_now_only_inside_wait_window() {
 
             let (respond_to, _p1) = oneshot::channel();
             let cancel = actor
-                .queue_input(
+                .queue_input(queue_input_request(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("early"))],
-                    "pre-wait".to_string(),
-                    PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    false,
-                    None,
-                    /*tool_overrides_update*/ None,
+                    "pre-wait",
                     respond_to,
-                    None,
-                    None,
-                )
+                ))
                 .await;
             assert!(!cancel, "pre-wait rows must not cancel the turn");
 
             actor.tool_context.blocking_wait_depth.set_depth_for_test(1);
             let (respond_to, _p2) = oneshot::channel();
             let cancel = actor
-                .queue_input(
+                .queue_input(queue_input_request(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("mid-wait"))],
-                    "d-mid".to_string(),
-                    PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    false,
-                    None,
-                    /*tool_overrides_update*/ None,
+                    "d-mid",
                     respond_to,
-                    None,
-                    None,
-                )
+                ))
                 .await;
             assert!(
                 !cancel,
@@ -1332,6 +1291,7 @@ async fn queue_input_auto_send_now_when_wait_and_held_queue_empty() {
                 let mut state = actor.state.lock().await;
                 state.pending_inputs.push_back(user_item("running", "A"));
                 state.running_task = Some(running_task_stub("running"));
+                state.front_message_committed = true;
             }
             *actor
                 .current_prompt_id
@@ -1341,23 +1301,11 @@ async fn queue_input_auto_send_now_when_wait_and_held_queue_empty() {
 
             let (respond_to, _p) = oneshot::channel();
             let cancel = actor
-                .queue_input(
+                .queue_input(queue_input_request(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("first"))],
-                    "first".to_string(),
-                    PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    false,
-                    None,
-                    /*tool_overrides_update*/ None,
+                    "first",
                     respond_to,
-                    None,
-                    None,
-                )
+                ))
                 .await;
             assert!(cancel, "first prompt during empty-held wait must cancel");
 
@@ -1380,23 +1328,11 @@ async fn queue_input_auto_send_now_when_wait_and_held_queue_empty() {
             drop(state);
             let (respond_to, _p2) = oneshot::channel();
             let cancel2 = actor
-                .queue_input(
+                .queue_input(queue_input_request(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("second"))],
-                    "second".to_string(),
-                    PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    false,
-                    None,
-                    /*tool_overrides_update*/ None,
+                    "second",
                     respond_to,
-                    None,
-                    None,
-                )
+                ))
                 .await;
             assert!(!cancel2, "second prompt with held row must not cancel");
             let state = actor.state.lock().await;
@@ -1429,6 +1365,7 @@ async fn queue_input_auto_send_now_during_foreground_subagent_await_window() {
                 let mut state = actor.state.lock().await;
                 state.pending_inputs.push_back(user_item("running", "A"));
                 state.running_task = Some(running_task_stub("running"));
+                state.front_message_committed = true;
             }
             *actor
                 .current_prompt_id
@@ -1447,23 +1384,11 @@ async fn queue_input_auto_send_now_during_foreground_subagent_await_window() {
 
             let (respond_to, _p1) = oneshot::channel();
             let cancel = actor
-                .queue_input(
+                .queue_input(queue_input_request(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("preempt"))],
-                    "during-await".to_string(),
-                    PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    false,
-                    None,
-                    /*tool_overrides_update*/ None,
+                    "during-await",
                     respond_to,
-                    None,
-                    None,
-                )
+                ))
                 .await;
             assert!(
                 cancel,
@@ -1479,23 +1404,11 @@ async fn queue_input_auto_send_now_during_foreground_subagent_await_window() {
 
             let (respond_to, _p2) = oneshot::channel();
             let cancel = actor
-                .queue_input(
+                .queue_input(queue_input_request(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("later"))],
-                    "after-await".to_string(),
-                    PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    false,
-                    None,
-                    /*tool_overrides_update*/ None,
+                    "after-await",
                     respond_to,
-                    None,
-                    None,
-                )
+                ))
                 .await;
             assert!(
                 !cancel,
@@ -1537,23 +1450,14 @@ async fn queue_input_send_now_exempts_synthetic_and_goal_turns() {
 
             let (respond_to, _p1) = oneshot::channel();
             let cancel = actor
-                .queue_input(
-                    vec![acp::ContentBlock::Text(acp::TextContent::new("done"))],
-                    "task-completed-bg1".to_string(),
-                    PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    true,
-                    None,
-                    false,
-                    None,
-                    /*tool_overrides_update*/ None,
-                    respond_to,
-                    None,
-                    None,
-                )
+                .queue_input(QueueInputRequest {
+                    verbatim: true,
+                    ..queue_input_request(
+                        vec![acp::ContentBlock::Text(acp::TextContent::new("done"))],
+                        "task-completed-bg1",
+                        respond_to,
+                    )
+                })
                 .await;
             assert!(!cancel, "synthetic prompts must never cancel the turn");
 
@@ -1563,23 +1467,14 @@ async fn queue_input_send_now_exempts_synthetic_and_goal_turns() {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             let (respond_to, _p2) = oneshot::channel();
             let cancel = actor
-                .queue_input(
-                    vec![acp::ContentBlock::Text(acp::TextContent::new("nudge"))],
-                    "d-goal".to_string(),
-                    PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    true,
-                    None,
-                    /*tool_overrides_update*/ None,
-                    respond_to,
-                    None,
-                    None,
-                )
+                .queue_input(QueueInputRequest {
+                    send_now: true,
+                    ..queue_input_request(
+                        vec![acp::ContentBlock::Text(acp::TextContent::new("nudge"))],
+                        "d-goal",
+                        respond_to,
+                    )
+                })
                 .await;
             assert!(!cancel, "goal turns must not be cancelled by send-now");
             let state = actor.state.lock().await;
@@ -1604,6 +1499,7 @@ async fn queue_send_now_promotes_row_and_requests_cancel() {
                 let mut state = actor.state.lock().await;
                 state.pending_inputs.push_back(user_item("running", "A"));
                 state.running_task = Some(running_task_stub("running"));
+                state.front_message_committed = true;
                 state.pending_inputs.push_back(user_item("held", "A"));
                 state.pending_inputs.push_back(bash_item("b1", "A", "ls"));
             }
@@ -1683,6 +1579,7 @@ async fn queue_input_send_now_pins_front_on_running_task_identity() {
                 let mut state = actor.state.lock().await;
                 state.pending_inputs.push_back(user_item("finished", "A"));
                 state.running_task = Some(running_task_stub("finished"));
+                state.front_message_committed = true;
             }
             // Completion-race window: current_prompt_id cleared, front finished but unpopped.
             *actor
@@ -1692,23 +1589,14 @@ async fn queue_input_send_now_pins_front_on_running_task_identity() {
 
             let (respond_to, _prx) = oneshot::channel();
             let cancel = actor
-                .queue_input(
-                    vec![acp::ContentBlock::Text(acp::TextContent::new("now"))],
-                    "d-now".to_string(),
-                    PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    /* send_now */ true,
-                    None,
-                    /*tool_overrides_update*/ None,
-                    respond_to,
-                    None,
-                    None,
-                )
+                .queue_input(QueueInputRequest {
+                    send_now: true,
+                    ..queue_input_request(
+                        vec![acp::ContentBlock::Text(acp::TextContent::new("now"))],
+                        "d-now",
+                        respond_to,
+                    )
+                })
                 .await;
             assert!(
                 cancel,
@@ -2084,6 +1972,397 @@ async fn set_tool_overrides_publishes_the_inheritance_cell_before_any_turn() {
                     .map(|o| (*o).clone()),
                 Some(cutoff),
                 "seeding must publish the inheritance cell before any turn runs",
+            );
+        })
+        .await;
+}
+
+/// Queue a plain-text send-now prompt, returning the shell's cancel decision.
+async fn queue_text_send_now(actor: &SessionActor, id: &str) -> bool {
+    let (respond_to, _rx) = oneshot::channel();
+    actor
+        .queue_input(QueueInputRequest {
+            send_now: true,
+            ..queue_input_request(
+                vec![acp::ContentBlock::Text(acp::TextContent::new(id))],
+                id,
+                respond_to,
+            )
+        })
+        .await
+}
+
+/// Repeated "Enter to send now" used to cancel the just-promoted previous
+/// prompt before it made a model call, invisibly destroying its message.
+#[tokio::test(flavor = "current_thread")]
+async fn queue_send_now_never_cancels_uncommitted_front() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (mut m1, _m1_rx) = user_item_with_rx("m1", "client");
+            m1.send_now = true;
+            let m2 = user_item("m2", "client");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(m1);
+                state.pending_inputs.push_back(m2);
+                state.running_task = Some(running_task_stub("m1"));
+                state.front_message_committed = false;
+            }
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("m1".into());
+
+            let cancel = actor
+                .handle_interject_queued_prompt("m2", 0, Some("client"), None)
+                .await;
+            assert!(!cancel, "an uncommitted front must not be cancelled");
+            let state = actor.state.lock().await;
+            let order: Vec<&str> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.as_str())
+                .collect();
+            assert_eq!(order, vec!["m1", "m2"], "m2 promotes right behind m1");
+        })
+        .await;
+}
+
+/// An explicit send-now against an uncommitted front queues behind it instead
+/// of cancelling it; a committed front still cancels.
+#[tokio::test(flavor = "current_thread")]
+async fn queue_input_send_now_spares_uncommitted_front() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (m1, _m1_rx) = user_item_with_rx("m1", "client");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(m1);
+                state.running_task = Some(running_task_stub("m1"));
+                state.front_message_committed = false;
+            }
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("m1".into());
+
+            assert!(
+                !queue_text_send_now(&actor, "sn-2").await,
+                "an explicit send-now must not cancel an uncommitted front"
+            );
+            {
+                let state = actor.state.lock().await;
+                let order: Vec<&str> = state
+                    .pending_inputs
+                    .iter()
+                    .map(|i| i.prompt_id.as_str())
+                    .collect();
+                assert_eq!(order, vec!["m1", "sn-2"], "FIFO behind the front");
+            }
+
+            actor.state.lock().await.front_message_committed = true;
+            assert!(
+                queue_text_send_now(&actor, "sn-3").await,
+                "a committed front still cancels"
+            );
+        })
+        .await;
+}
+
+/// A buffered interjection survives a send-now cancel as a front-queued
+/// prompt turn instead of being cleared.
+#[tokio::test(flavor = "current_thread")]
+async fn send_now_cancel_flushes_buffered_interjections_as_prompts() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (wait_turn, mut wait_rx) = user_item_with_rx("wait-turn", "client");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(wait_turn);
+                state.running_task = Some(running_task_stub("wait-turn"));
+                state.front_message_committed = true;
+                let mut item = user_item("sn-1", "client");
+                item.send_now = true;
+                state.pending_inputs.insert(1, item);
+            }
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("wait-turn".into());
+            actor.pending_interjections.push(PendingInterjection {
+                text: "buffered steer".to_string(),
+                attachments: vec![],
+            });
+
+            let mut replay_buffer = ReplayBuffer::new(None);
+            actor.cancel_turn_for_send_now(&mut replay_buffer).await;
+
+            assert!(
+                matches!(
+                    wait_rx.try_recv(),
+                    Ok(Ok(crate::session::commands::PromptTurnOk {
+                        stop_reason: acp::StopReason::Cancelled,
+                        ..
+                    }))
+                ),
+                "the running turn itself is cancelled (send-now semantics)"
+            );
+            assert!(actor.pending_interjections.is_empty());
+            let state = actor.state.lock().await;
+            let texts: Vec<String> = state
+                .pending_inputs
+                .iter()
+                .map(|i| match i.prompt_blocks.first() {
+                    Some(acp::ContentBlock::Text(t)) => t.text.clone(),
+                    other => panic!("expected text block, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(
+                texts,
+                vec!["buffered steer".to_string(), "text for sn-1".to_string()],
+                "the interjection runs next, ahead of the send-now prompt"
+            );
+            assert!(
+                is_interject_fallback(&state.pending_inputs[0].prompt_id),
+                "converted interjections use the persist-only fallback prefix"
+            );
+        })
+        .await;
+}
+
+/// Welds `state.rewindable` to its real arm (promoter) and disarm (first
+/// update) sites so moving either fails the suite.
+#[tokio::test(flavor = "current_thread")]
+async fn promoter_arms_rewind_window_and_first_update_disarms_it() {
+    fn agent_msg_update(text: &str) -> acp::SessionUpdate {
+        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+            acp::TextContent::new(text.to_string()),
+        )))
+    }
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("m1", "client"));
+            }
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.clone().maybe_start_running_task(completion_tx).await;
+
+            // Race-free: the promoter spawned the task last and nothing has awaited since.
+            {
+                let state = actor.state.try_lock().expect("no await since promote");
+                assert_eq!(state.running_prompt_id(), Some("m1"));
+                assert!(
+                    state.rewindable,
+                    "the promoter must arm the first-output window"
+                );
+            }
+
+            actor
+                .send_update(agent_msg_update("first delta"), Some(1))
+                .await;
+            assert!(
+                !actor.state.try_lock().expect("uncontended").rewindable,
+                "the first outbound update must disarm the first-output window"
+            );
+        })
+        .await;
+}
+
+/// Welds the flag to the real promoter and commit sites so moving either
+/// fails the suite.
+#[tokio::test(flavor = "current_thread")]
+async fn promoter_clears_committed_flag_and_handle_prompt_sets_it() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = actor_with_persistence_drain().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.front_message_committed = true;
+                state.pending_inputs.push_back(user_item("m1", "client"));
+            }
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.clone().maybe_start_running_task(completion_tx).await;
+
+            // Abort the turn unpolled: polling `handle_prompt` here overflows
+            // the default 2 MB test-thread stack in debug builds.
+            {
+                let state = actor.state.try_lock().expect("no await since promote");
+                assert_eq!(state.running_prompt_id(), Some("m1"));
+                assert!(
+                    !state.front_message_committed,
+                    "the promoter must clear the committed flag"
+                );
+                if let Some(task) = state.running_task.as_ref() {
+                    task.handle.abort();
+                }
+            }
+
+            // The persist ack resolves after the history commit, so the flag is set once it fires.
+            let actor_for_prompt = actor.clone();
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            let prompt_task = tokio::task::spawn_local(async move {
+                actor_for_prompt
+                    .handle_prompt(
+                        "m2",
+                        vec![acp::ContentBlock::Text(acp::TextContent::new("hello"))],
+                        PromptMode::Agent,
+                        /* trace_gcs_config */ None,
+                        /* artifact_tracker */ None,
+                        /* client_identifier */ None,
+                        /* screen_mode */ None,
+                        /* verbatim */ true,
+                        /* json_schema */ None,
+                        Some(ack_tx),
+                        /* parsed_prompt_tx */ None,
+                    )
+                    .await
+            });
+            assert!(ack_rx.await.is_ok(), "persist ack should resolve");
+            assert!(
+                actor.state.lock().await.front_message_committed,
+                "handle_prompt must set the committed flag at the history commit"
+            );
+            prompt_task.abort();
+        })
+        .await;
+}
+
+/// A terminal whose commands never finish, holding a bash turn mid-run.
+struct NeverFinishesTerminal;
+
+#[async_trait::async_trait]
+impl crate::terminal::AsyncTerminalRunner for NeverFinishesTerminal {
+    async fn run(
+        &self,
+        _request: crate::terminal::runner::TerminalRunRequest,
+    ) -> Result<crate::terminal::runner::TerminalRunResult, crate::terminal::runner::TerminalError>
+    {
+        std::future::pending().await
+    }
+}
+
+/// The bash path must set the committed flag before running the command, or a
+/// send-now during a long command would queue behind it forever.
+#[tokio::test(flavor = "current_thread")]
+async fn bash_turn_sets_committed_flag_before_running_the_command() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (actor, _ev) = create_test_actor_with_terminal(
+                0,
+                256_000,
+                85,
+                gateway_tx,
+                persistence_tx,
+                std::sync::Arc::new(NeverFinishesTerminal),
+            )
+            .await;
+            let actor = std::sync::Arc::new(actor);
+            actor.state.lock().await.front_message_committed = false;
+
+            let bash_actor = actor.clone();
+            let bash_turn = tokio::task::spawn_local(async move {
+                bash_actor
+                    .handle_direct_bash_command(
+                        "bash-1",
+                        "sleep 30".to_string(),
+                        &[acp::ContentBlock::Text(acp::TextContent::new("!sleep 30"))],
+                    )
+                    .await
+            });
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !actor.state.lock().await.front_message_committed {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the bash path must mark the commit before the command finishes"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(
+                !bash_turn.is_finished(),
+                "the command never finishes, so the flag was set mid-run"
+            );
+            bash_turn.abort();
+        })
+        .await;
+}
+
+/// Builtin turns carry no user message; they commit at intake so a send-now
+/// can cancel a long-running builtin like `/compact`.
+#[tokio::test(flavor = "current_thread")]
+async fn builtin_turn_commits_immediately() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            actor.state.lock().await.front_message_committed = false;
+
+            let _ = actor
+                .execute_builtin_slash_command(BuiltinAction::ContextInfo)
+                .await;
+
+            assert!(
+                actor.state.lock().await.front_message_committed,
+                "a builtin turn must commit at intake"
+            );
+        })
+        .await;
+}
+
+/// `rewindIfPristine` must not pop a promoted interjection-fallback front —
+/// it is not the prompt the client rewound; it takes the normal cancel.
+#[tokio::test(flavor = "current_thread")]
+async fn rewind_if_pristine_never_pops_an_interjection_fallback_front() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (item, mut rx) =
+                input_with_origin_rx("interject-fallback-1", crate::session::PromptOrigin::User);
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(item);
+                state.running_task = Some(running_task_stub("interject-fallback-1"));
+                state.rewindable = true;
+            }
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("interject-fallback-1".into());
+
+            let _ = actor
+                .cancel_running_task(crate::session::CancelOptions {
+                    rewind_if_no_output: true,
+                    trigger: Some(crate::session::CancelTrigger::Esc),
+                    user_initiated: true,
+                    ..Default::default()
+                })
+                .await;
+
+            assert!(
+                matches!(
+                    rx.try_recv(),
+                    Ok(Ok(crate::session::commands::PromptTurnOk {
+                        completion_kind: PromptCompletionKind::Cancelled { .. },
+                        ..
+                    }))
+                ),
+                "a fallback front resolves through the normal cancel, never the rewind pop"
             );
         })
         .await;

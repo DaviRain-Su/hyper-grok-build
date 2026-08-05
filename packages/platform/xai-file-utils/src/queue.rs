@@ -2025,8 +2025,8 @@ const AUTH_PARK_WAIT_INTERVAL: Duration = Duration::from_secs(5);
 /// compressible owned temps, streams through a zstd encoder. Snapshots are
 /// immutable and already verified at enqueue, so the worker just uploads them.
 ///
-/// On 400/403/404, aborts immediately (terminal — malformed path, ZDR / opt-out
-/// rejection, or not-owned session). On 401, re-resolves credentials and
+/// On a terminal status (400/403/404, origin-TLS 525/526), aborts immediately.
+/// On 401, re-resolves credentials and
 /// retries once; if the retry also 401s, the item parks until auth recovers
 /// (releasing its concurrency permit while parked) rather than dropping.
 async fn upload_with_retries(
@@ -2068,7 +2068,7 @@ async fn upload_with_retries(
                     tracing::warn!(
                         attempt = item.attempts,
                         error = ?e,
-                        "Storage upload failed with a terminal client error (400/403/404); dropping artifact"
+                        "Storage upload failed with a terminal status; dropping artifact"
                     );
                     return Err(e);
                 }
@@ -4060,7 +4060,7 @@ mod tests {
     }
     #[test]
     fn upload_disposition_structured_terminal() {
-        for code in [400u16, 403, 404] {
+        for code in [400u16, 403, 404, 525, 526] {
             assert_eq!(upload_disposition(&http_err(code)), Disposition::Terminal);
             let wrapped = http_err(code).context("Streaming upload failed for s/turn_0/x");
             assert_eq!(upload_disposition(&wrapped), Disposition::Terminal);
@@ -4069,7 +4069,7 @@ mod tests {
     #[test]
     fn upload_disposition_structured_auth_and_retryable() {
         assert_eq!(upload_disposition(&http_err(401)), Disposition::AuthRefresh);
-        for code in [429u16, 500, 503] {
+        for code in [429u16, 500, 503, 522] {
             assert_eq!(upload_disposition(&http_err(code)), Disposition::Retryable);
         }
     }
@@ -4738,8 +4738,8 @@ mod tests {
         assert!(result.is_err(), "max_age bound enforced while parked");
         assert_eq!(stats.auth_parked.load(Ordering::Relaxed), 1);
     }
-    /// A terminal client status (400/403/404) must abort on the FIRST attempt: one
-    /// HTTP request, one credential resolve, no backoff.
+    /// A terminal status (400/403/404, 525/526) must abort on the FIRST attempt:
+    /// one HTTP request, one credential resolve, no backoff.
     async fn assert_terminal_status_aborts_immediately(status: axum::http::StatusCode) {
         use axum::{Router, body::Body, extract::State, response::IntoResponse, routing::post};
         #[derive(Clone)]

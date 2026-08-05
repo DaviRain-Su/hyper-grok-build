@@ -136,16 +136,26 @@ pub(super) fn finish_wake_turn(
         }
         "error" | "rate_limit" => {
             agent.failed_wake_marker_for = Some(prompt_id.to_string());
-            Some(SessionEvent::TurnFailed {
-                error: agent_result.map(str::to_string).unwrap_or_else(|| {
-                    if stop_reason == "error" {
-                        "unknown error".to_string()
-                    } else {
-                        "rate limited".to_string()
-                    }
-                }),
-                elapsed,
-            })
+            // A dedicated banner (re-auth, overflow, disk-full, formatted
+            // request failure) from the retry-state rail already covers this
+            // failure — same dedupe as `turn_failed_event` on the local rails.
+            if crate::app::dispatch::scrollback_has_recent_error_banner(&agent.scrollback) {
+                None
+            } else {
+                let error = if stop_reason == "error" {
+                    crate::app::error_display::format_request_failure(
+                        None,
+                        None,
+                        agent_result.unwrap_or("unknown error"),
+                    )
+                    .message()
+                } else {
+                    agent_result
+                        .map(str::to_string)
+                        .unwrap_or_else(|| "rate limited".to_string())
+                };
+                Some(SessionEvent::TurnFailed { error, elapsed })
+            }
         }
         "cancelled" if !had_output => None,
         // Send-now cancel: no marker (the sender's new prompt is the next turn).

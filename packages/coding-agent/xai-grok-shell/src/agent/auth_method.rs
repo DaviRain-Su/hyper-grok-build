@@ -60,14 +60,33 @@ pub fn has_xai_api_key_env() -> bool {
 /// `GROK_DISABLE_API_KEY_AUTH`) is the admin kill switch: when true the
 /// method is never advertised, regardless of available credentials, so
 /// `XAI_API_KEY` can't bypass a deployment's forced IdP login.
+///
+/// Presence-only for the first-party env key (treats it as usable). Login
+/// paths that have run the validity probe should call
+/// [`should_advertise_xai_api_key_with_env_ok`] with the probe result instead.
 pub(crate) fn should_advertise_xai_api_key<'a, I>(disable_api_key_auth: bool, models: I) -> bool
+where
+    I: IntoIterator<Item = &'a ModelEntry>,
+{
+    should_advertise_xai_api_key_with_env_ok(disable_api_key_auth, models, true)
+}
+
+/// Single advertise policy for `xai.api_key`: kill switch, BYOK, and first-party
+/// env gated by `first_party_env_ok` (probe result, or `true` for presence-only).
+/// BYOK still advertises without a probe.
+pub(crate) fn should_advertise_xai_api_key_with_env_ok<'a, I>(
+    disable_api_key_auth: bool,
+    models: I,
+    first_party_env_ok: bool,
+) -> bool
 where
     I: IntoIterator<Item = &'a ModelEntry>,
 {
     if disable_api_key_auth {
         return false;
     }
-    has_xai_api_key_env() || models.into_iter().any(ModelEntry::has_own_credentials)
+    let has_byok = models.into_iter().any(ModelEntry::has_own_credentials);
+    has_byok || (has_xai_api_key_env() && first_party_env_ok)
 }
 
 /// Inputs to [`build_auth_methods`].
@@ -77,7 +96,9 @@ where
 /// (`AuthManager`). The list-construction logic itself is pure so it can be
 /// unit-tested without any of that machinery.
 pub struct AuthMethodsBuildInputs<'a> {
-    /// True if `xai.api_key` should be advertised AT ALL. Caller computes via
+    /// True if `xai.api_key` should be advertised AT ALL. Login/initialize
+    /// callers compute via [`should_advertise_xai_api_key_with_env_ok`] after
+    /// the validity probe; presence-only paths may use
     /// [`should_advertise_xai_api_key`]. When `preferred_method` is `Oidc`,
     /// this is ignored (API key is never advertised under that pin).
     pub has_external_api_key: bool,
@@ -1025,6 +1046,68 @@ mod tests {
              must lead so the pager requires interactive login",
         );
         assert!(built.default_auth_method_id.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn env_key_probe_unusable_suppresses_advertise_without_byok() {
+        let _set = EnvGuard::set(XAI_API_KEY_ENV_VAR, "xai-dead-key");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let cfg = Config::default();
+        let models = resolve_model_list(&cfg, None);
+        assert!(
+            should_advertise_xai_api_key(false, models.values()),
+            "presence-only helper still sees the env key"
+        );
+        assert!(
+            !should_advertise_xai_api_key_with_env_ok(false, models.values(), false),
+            "probe-unusable env key alone must not advertise"
+        );
+        let built = build_auth_methods(AuthMethodsBuildInputs {
+            has_external_api_key: false,
+            ..default_inputs()
+        });
+        assert_eq!(first_kind(&built.methods), Some(AuthMethodKind::GrokCom));
+    }
+
+    #[test]
+    #[serial]
+    fn env_key_probe_ok_still_advertises() {
+        let _set = EnvGuard::set(XAI_API_KEY_ENV_VAR, "xai-live-key");
+        let cfg = Config::default();
+        let models = resolve_model_list(&cfg, None);
+        assert!(should_advertise_xai_api_key_with_env_ok(
+            false,
+            models.values(),
+            true
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn byok_advertises_even_when_env_probe_unusable() {
+        const TEST_ENV_VAR: &str = "TEST_BYOK_PROBE_INDEPENDENT_TOKEN";
+        let _unset = EnvGuard::unset(XAI_API_KEY_ENV_VAR);
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let _byok = EnvGuard::set(TEST_ENV_VAR, "enterprise-secret-token");
+
+        let dm = crate::models::default_model();
+        let toml: toml::Value = toml::from_str(&format!(
+            r#"
+            [model."{dm}"]
+            model = "{dm}"
+            base_url = "https://inference.example.com/v1"
+            context_window = 200000
+            env_key = "{TEST_ENV_VAR}"
+            "#,
+        ))
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&toml).expect("config should parse");
+        let models = resolve_model_list(&cfg, None);
+        assert!(
+            should_advertise_xai_api_key_with_env_ok(false, models.values(), false),
+            "BYOK must not depend on the first-party env probe"
+        );
     }
 
     /// Legacy `GROK_CODE_XAI_API_KEY` env var is accepted as a fallback

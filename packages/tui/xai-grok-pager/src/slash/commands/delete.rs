@@ -1,4 +1,4 @@
-//! `/delete` — delete this session's history and return home.
+//! `/delete` — delete this session's history (welcome, or dashboard when attached).
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -11,7 +11,7 @@ impl SlashCommand for DeleteCommand {
     }
 
     fn description(&self) -> &str {
-        "Delete this session and return home"
+        "Delete this session"
     }
 
     fn session_scoped(&self) -> bool {

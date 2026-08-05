@@ -56,7 +56,7 @@ pub enum Action {
     ExitSession,
     /// Exit session without double-press confirmation (e.g., from command palette).
     ExitSessionConfirmed,
-    /// `/delete`: confirm, then delete history and return home.
+    /// `/delete`: confirm, then delete history; return to welcome, or dashboard when attached.
     DeleteCurrentSession,
     DeleteCurrentSessionAnswered {
         confirmed: bool,
@@ -1451,9 +1451,9 @@ pub struct DoctorFixTarget {
 pub enum AfterSessionDelete {
     /// Picker delete — stay put.
     Stay,
-    /// `/delete` — return to welcome.
+    /// `/delete` from a standalone agent — return to welcome.
     Welcome,
-    /// Stay on the dashboard.
+    /// `/delete` from a dashboard-attached agent, or dashboard row delete.
     Dashboard,
 }
 #[derive(Debug)]
@@ -2158,12 +2158,16 @@ pub enum Effect {
         /// with `--fork-session`).
         new_session_id: Option<String>,
     },
-    /// Read the display title (and its `/rename` manual-ness) from local
-    /// `summary.json` (post-resume UI label + prompt-border title).
-    HydrateSessionTitleFromDisk {
+    /// Read session display fields from local `summary.json` after load/resume:
+    /// title (and `/rename` manual-ness) plus last-turn summary for the
+    /// dashboard secondary line.
+    HydrateSessionMetaFromDisk {
         agent_id: AgentId,
         session_id: acp::SessionId,
         cwd: std::path::PathBuf,
+        /// [`crate::app::agent_view::AgentView::last_turn_summary_gen`] at enqueue;
+        /// the disk result applies only when this still matches on completion.
+        last_turn_summary_gen: u64,
     },
     FetchRewindPoints {
         agent_id: AgentId,
@@ -2348,6 +2352,9 @@ pub enum TaskResult {
         code_restored: bool,
         restore_summary: Option<String>,
         restore_degree: Option<xai_grok_workspace::session::git::RestoreDegree>,
+        /// Resume/parent id this worktree was created from (`load_session_id`).
+        /// Used to retarget one-shot restore-code suppress onto the child.
+        resume_session_id: Option<String>,
     },
     /// Worktree session creation failed.
     WorktreeSessionFailed {
@@ -2379,13 +2386,18 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         error: String,
     },
-    /// Local `summary.json` title read for [`Effect::HydrateSessionTitleFromDisk`].
-    SessionTitleFromDisk {
+    /// Local `summary.json` display fields for [`Effect::HydrateSessionMetaFromDisk`].
+    SessionMetaFromDisk {
         agent_id: AgentId,
         /// The display title paired with whether it came from a manual
         /// `/rename` (`summary.title_is_manual`, restores the prompt-border
         /// title) — manual-ness cannot exist without a title.
         title: Option<(String, bool)>,
+        /// Persisted per-turn dashboard summary, so a resumed session's row
+        /// shows it without waiting for the next turn.
+        last_turn_summary: Option<String>,
+        /// Generation captured when the hydrate effect was enqueued.
+        last_turn_summary_gen: u64,
     },
     /// Session list fetched for the welcome screen picker.
     SessionListLoaded {
@@ -2922,6 +2934,9 @@ pub enum TaskResult {
         agent_id: AgentId,
         new_session_id: acp::SessionId,
         cwd: std::path::PathBuf,
+        /// Parent session id the fork was taken from (for one-shot
+        /// restore-code suppress retarget).
+        parent_session_id: acp::SessionId,
     },
     /// `x.ai/session/fork` failed. The placeholder agent stays in
     /// `app.agents` with no `session_id` so the user can switch away.

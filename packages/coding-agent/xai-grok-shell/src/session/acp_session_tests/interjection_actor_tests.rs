@@ -14,6 +14,7 @@ async fn queue_send_now_keeps_prompt_block_images_on_promoted_row() {
                 let mut state = actor.state.lock().await;
                 state.pending_inputs.push_back(user_item("running", "A"));
                 state.running_task = Some(running_task_stub("running"));
+                state.front_message_committed = true;
                 let mut item = user_item("p1", "A");
                 item.prompt_blocks
                     .push(acp::ContentBlock::Image(test_image_content()));
@@ -330,7 +331,7 @@ async fn flush_stranded_interjections_converts_to_front_prompts_in_order() {
                 attachments: vec![],
             });
 
-            assert!(actor.flush_stranded_interjections().await);
+            assert_eq!(actor.flush_stranded_interjections().await, 2);
             assert!(
                 actor.pending_interjections.is_empty(),
                 "flush must drain the buffer"
@@ -365,7 +366,7 @@ async fn flush_stranded_interjections_noop_when_empty() {
     local
         .run_until(async {
             let (actor, _rx) = build_actor().await;
-            assert!(!actor.flush_stranded_interjections().await);
+            assert_eq!(actor.flush_stranded_interjections().await, 0);
             assert!(actor.state.lock().await.pending_inputs.is_empty());
         })
         .await;

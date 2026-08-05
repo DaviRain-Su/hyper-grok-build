@@ -69,6 +69,10 @@ pub struct RosterEntry {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub yolo: bool,
     pub activity: RosterActivity,
+    /// Ultra-short summary of the session's most recent turn, for the row's
+    /// secondary line. From `summary.json`; absent until the first turn ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_summary: Option<String>,
     /// `true` while a resident actor hosts the session (vs. read from disk).
     pub resident: bool,
     /// Best-effort last-change timestamp (unix millis). Used for sort order.
@@ -120,6 +124,10 @@ pub(crate) fn merge_roster(
         if let Some(title) = summary.display_title_opt() {
             entry.title = Some(title);
         }
+        // Copied through even when `None`: disk is authoritative, so a
+        // rewind-cleared summary.json also clears a resident row whose
+        // cache still holds the old value.
+        entry.last_turn_summary = summary.last_turn_summary.clone();
         if entry.activity != RosterActivity::Working {
             entry.last_change_unix_ms = summary.last_change_unix_ms();
         }
@@ -136,6 +144,7 @@ pub(crate) fn merge_roster(
         reasoning_effort: summary.reasoning_effort,
         yolo: false,
         activity: RosterActivity::Dormant,
+        last_turn_summary: summary.last_turn_summary.clone(),
         resident: false,
         last_change_unix_ms: summary.last_change_unix_ms(),
         origin: RosterOrigin::Local,
@@ -177,6 +186,7 @@ mod merge_roster_tests {
             reasoning_effort: None,
             yolo: false,
             activity,
+            last_turn_summary: None,
             resident: true,
             last_change_unix_ms,
             origin: RosterOrigin::Local,
@@ -287,6 +297,41 @@ mod merge_roster_tests {
         let out = merge_roster(vec![live], vec![s]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].reasoning_effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn last_turn_summary_adopted_from_summary_for_resident_and_dormant() {
+        let mut with = summary("a", None, 1);
+        with.last_turn_summary = Some("Fixed the roster merge".into());
+        let mut dormant = summary("b", None, 2);
+        dormant.last_turn_summary = Some("Explained the roster".into());
+
+        let out = merge_roster(
+            vec![resident("a", RosterActivity::Idle, 9_000)],
+            vec![with, dormant, summary("c", None, 3)],
+        );
+
+        let by_id = |id: &str| out.iter().find(|e| e.session_id == id).unwrap();
+        assert_eq!(
+            by_id("a").last_turn_summary.as_deref(),
+            Some("Fixed the roster merge")
+        );
+        assert_eq!(
+            by_id("b").last_turn_summary.as_deref(),
+            Some("Explained the roster")
+        );
+        assert_eq!(by_id("c").last_turn_summary, None);
+    }
+
+    /// Disk is authoritative: a rewind-cleared `summary.json` clears a
+    /// resident row whose delta cache still carries the old value
+    /// (self-healing poll).
+    #[test]
+    fn last_turn_summary_cleared_disk_clears_resident_row() {
+        let mut entry = resident("a", RosterActivity::Idle, 9_000);
+        entry.last_turn_summary = Some("Stale cached".into());
+        let out = merge_roster(vec![entry], vec![summary("a", None, 1)]);
+        assert_eq!(out[0].last_turn_summary, None);
     }
 
     #[test]

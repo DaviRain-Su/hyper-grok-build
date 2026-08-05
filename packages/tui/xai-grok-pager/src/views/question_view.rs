@@ -24,6 +24,7 @@ pub use xai_grok_tools::implementations::grok_build::ask_user_question::{
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::input::key::RowWalk;
 use crate::render::line_utils::{byte_offset_at_width, truncate_line, truncate_str};
 use crate::render::wrapping::word_wrap_lines_with_joiners;
 use crate::syntax::get_syntect;
@@ -349,23 +350,10 @@ impl QuestionViewState {
         self.set_cursor(target.min(last));
     }
 
-    pub fn is_on_first_row(&self) -> bool {
-        self.cursor() == 0
-    }
-
-    pub fn is_on_last_row(&self) -> bool {
-        self.cursor() + 1 >= self.total_items(self.active_tab)
-    }
-
-    /// Whether the question at `q_idx` has any answer marked.
-    pub fn has_selection(&self, q_idx: usize) -> bool {
-        let option_selected = !self.selected_labels(q_idx).is_empty();
-        let freeform_selected = self
-            .per_question_freeform_selected
-            .get(q_idx)
-            .copied()
-            .unwrap_or(false);
-        option_selected || freeform_selected
+    /// Walk one answer row of the active question, wrapping at both ends.
+    pub fn walk_cursor(&mut self, walk: RowWalk) {
+        let target = walk.step(self.cursor(), self.total_items(self.active_tab));
+        self.set_cursor(target);
     }
 
     pub fn clear_selection(&mut self, q_idx: usize) {
@@ -856,11 +844,16 @@ impl QuestionViewState {
     }
 
     /// True when the active tab has any option selected, or its free-form
-    /// answer marked selected. Drives the graduated `Esc` back-out: when
-    /// nothing is selected, `Esc` (which only clears the selection) has
-    /// nothing to do, so it can fall through to the dashboard back-out.
+    /// answer marked selected.
     pub fn active_tab_has_selection(&self) -> bool {
-        self.has_selection(self.active_tab)
+        let q_idx = self.active_tab;
+        let option_selected = !self.selected_labels(q_idx).is_empty();
+        let freeform_selected = self
+            .per_question_freeform_selected
+            .get(q_idx)
+            .copied()
+            .unwrap_or(false);
+        option_selected || freeform_selected
     }
 }
 
@@ -991,24 +984,6 @@ impl QuestionViewState {
     /// Go to the previous question (clamped, no wrap).
     pub fn prev_question(&mut self) {
         self.active_tab = self.active_tab.saturating_sub(1);
-    }
-
-    /// Advance to the next question (wraps past the last, back to the first).
-    pub fn wrapping_next_question(&mut self) {
-        let last = self.questions.len().saturating_sub(1);
-        self.active_tab = if self.active_tab < last {
-            self.active_tab + 1
-        } else {
-            0
-        };
-    }
-
-    /// Go to the previous question (wraps before the first, round to the last).
-    pub fn wrapping_prev_question(&mut self) {
-        self.active_tab = match self.active_tab.checked_sub(1) {
-            Some(prev) => prev,
-            None => self.questions.len().saturating_sub(1),
-        };
     }
 }
 
@@ -2418,39 +2393,6 @@ mod tests {
         assert_eq!(state.active_tab, 0);
         state.prev_question();
         assert_eq!(state.active_tab, 0); // clamped at start
-    }
-
-    #[test]
-    fn wrapping_question_cycling_loops_at_boundaries() {
-        let qs = vec![
-            make_question("Q1?", &["A"], false),
-            make_question("Q2?", &["B"], false),
-        ];
-        let mut state = QuestionViewState::new("tc".into(), qs, StashedPrompt::default());
-
-        state.wrapping_next_question();
-        assert_eq!(state.active_tab, 1);
-        state.wrapping_next_question();
-        assert_eq!(
-            state.active_tab, 0,
-            "past the last question, back to the first"
-        );
-
-        state.wrapping_prev_question();
-        assert_eq!(
-            state.active_tab, 1,
-            "before the first question, round to the last"
-        );
-
-        let mut single = QuestionViewState::new(
-            "tc".into(),
-            vec![make_question("Only?", &["A"], false)],
-            StashedPrompt::default(),
-        );
-        single.wrapping_next_question();
-        assert_eq!(single.active_tab, 0);
-        single.wrapping_prev_question();
-        assert_eq!(single.active_tab, 0);
     }
 
     // ── compute_max_label_w ────────────────────────────────────────────

@@ -29,7 +29,7 @@ impl AgentView {
             && (matches!(key.code, KeyCode::Tab | KeyCode::Char(' '))
                 || (allow_i_alt && matches!(key.code, KeyCode::Char('i'))))
         {
-            if self.question_view.is_some() {
+            if self.parked_card().is_some() {
                 self.set_active_pane(AgentPane::Prompt, false);
                 return InputOutcome::Changed;
             }

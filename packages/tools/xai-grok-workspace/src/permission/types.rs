@@ -52,7 +52,7 @@ pub struct PermissionEvent {
     /// a request reached a prompt even when `user_prompted=true`. Values:
     /// yolo, policy_allow, policy_deny, policy_ask, bash_command_gate_ask,
     /// shell_file_gate_ask, auto_fast_path,
-    /// auto_classifier_allow, auto_classifier_block, auto_classifier_deny,
+    /// auto_classifier_allow, auto_classifier_deny,
     /// auto_classifier_timeout, auto_classifier_unavailable, auto_denial_limit,
     /// sandbox_auto, persisted_grant, session_grant, static_allowlist, safe_command,
     /// session_deny, prompt_deny, needs_user, bash_request_floor, opaque_shell,

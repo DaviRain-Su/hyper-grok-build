@@ -49,6 +49,10 @@ mod mid_turn_slash_dropdown_esc_dismisses_not_cancel;
 mod minimal_ctrl_o_send_now_queued_apple_terminal;
 #[path = "pty_e2e/queue_and_interjection_lifecycle.rs"]
 mod queue_and_interjection_lifecycle;
+#[path = "pty_e2e/queue_reorder_local_row_above_server_row.rs"]
+mod queue_reorder_local_row_above_server_row;
+#[path = "pty_e2e/queue_reorder_moves_row_up.rs"]
+mod queue_reorder_moves_row_up;
 #[path = "pty_e2e/queued_bash_promotion_renders_output_pty.rs"]
 mod queued_bash_promotion_renders_output_pty;
 #[path = "pty_e2e/queued_message_renders_once_not_twice.rs"]

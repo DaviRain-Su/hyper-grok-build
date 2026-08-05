@@ -183,6 +183,7 @@ pub(super) fn last_session_event(sb: &ScrollbackState) -> Option<SessionEvent> {
 pub(super) fn make_app_with_agent(session_id: &str) -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
+    app.leader_mode = true;
     let id = AgentId(0);
     let agent = make_agent(Some(session_id));
     app.agents.insert(id, agent);

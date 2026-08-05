@@ -2407,7 +2407,10 @@
         let agent = app.agents.get(&AgentId(0)).unwrap();
         match last_session_event(&agent.scrollback) {
             Some(SessionEvent::TurnFailed { error, .. }) => {
-                assert_eq!(error, "boom", "agentResult must propagate into the marker")
+                assert_eq!(
+                    error, "Request failed \u{2014} boom. Try sending again.",
+                    "agentResult must propagate into the formatted marker"
+                )
             }
             other => panic!("expected TurnFailed marker, got {other:?}"),
         }

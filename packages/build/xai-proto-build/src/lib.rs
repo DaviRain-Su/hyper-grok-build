@@ -1,3 +1,4 @@
+mod debug_redact;
 pub mod find_protoc;
 
 use anyhow::Context;
@@ -36,6 +37,7 @@ pub struct XaiProtoBuilder {
     gen_pbjson: bool,
     pbjson_ignore_unknown_fields: bool,
     pbjson_preserve_proto_field_names: bool,
+    honor_debug_redact: bool,
 }
 
 impl XaiProtoBuilder {
@@ -87,6 +89,13 @@ impl XaiProtoBuilder {
 
     pub fn generate_default_stubs(self, enable: bool) -> Self {
         self.map_builder(|b| b.generate_default_stubs(enable))
+    }
+
+    /// Honor the protobuf `debug_redact` field option: annotated fields
+    /// print as `***` in `Debug`. The crate must also depend on `veil`.
+    pub fn honor_debug_redact(mut self) -> Self {
+        self.honor_debug_redact = true;
+        self
     }
 
     pub fn type_attribute(self, path: impl AsRef<str>, attr: impl AsRef<str>) -> Self {
@@ -237,6 +246,7 @@ impl XaiProtoBuilder {
             file_descriptor_set_path,
             pbjson_ignore_unknown_fields,
             pbjson_preserve_proto_field_names,
+            honor_debug_redact,
         } = self;
         let mut config = prost_build::Config::new();
         config.enable_type_names();
@@ -285,6 +295,29 @@ impl XaiProtoBuilder {
 
         let protos: Vec<&Path> = protos.iter().map(|p| p.as_ref()).collect();
 
+        {
+            let plain_includes: Vec<&Path> = includes.iter().map(|i| i.as_ref()).collect();
+            if honor_debug_redact {
+                debug_redact::apply(
+                    &mut config,
+                    protoc.as_deref(),
+                    protoc_include_dir.as_deref(),
+                    &plain_includes,
+                    &protos,
+                )?;
+            } else if let Some(field) = debug_redact::first_marked_field(
+                protoc.as_deref(),
+                protoc_include_dir.as_deref(),
+                &plain_includes,
+                &protos,
+            )? {
+                anyhow::bail!(
+                    "{field} sets `debug_redact = true` but redaction is not active: \
+                     call `.honor_debug_redact()` on the builder"
+                );
+            }
+        }
+
         builder
             .compile_with_config(config, &protos, &all_includes)
             .context("tonic_build failed")?;
@@ -329,5 +362,6 @@ pub fn configure() -> XaiProtoBuilder {
         pbjson_ignore_unknown_fields: false,
         pbjson_preserve_proto_field_names: false,
         file_descriptor_set_path: None,
+        honor_debug_redact: false,
     }
 }

@@ -772,6 +772,65 @@ fn reconcile_applies_stashed_running_adoption() {
     assert!(!app.pending_running_adoptions.contains_key(&id));
 }
 
+/// The reconcile rail's `stop_reason == "error"` arm: formats the raw
+/// agent_result and skips the marker when a dedicated banner already
+/// explains the failure.
+#[test]
+fn reconcile_error_formats_marker_and_defers_to_banner() {
+    fn run(with_banner: bool) -> Option<String> {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("pid-stuck".into());
+            if with_banner {
+                agent.scrollback.push_block(RenderBlock::session_event(
+                    SessionEvent::RequestFailed {
+                        status: Some(500),
+                        headline: "Server error (500)".into(),
+                        detail: String::new(),
+                    },
+                ));
+            }
+            agent.pending_turn_end_reconcile = Some(crate::app::agent_view::PendingTurnEnd {
+                prompt_id: "pid-stuck".into(),
+                stop_reason: Some("error".into()),
+                agent_result: Some("boom".into()),
+                cancel_trigger: None,
+                received_at: std::time::Instant::now()
+                    - (TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1)),
+            });
+        }
+        let fired = reconcile_overdue_turn_ends(&mut app);
+        assert!(
+            fired.is_some(),
+            "the overdue reconcile must finish the turn"
+        );
+        let agent = &app.agents[&id];
+        (0..agent.scrollback.len()).find_map(|i| {
+            match agent.scrollback.entry(i).map(|e| &e.block) {
+                Some(RenderBlock::SessionEvent(ev)) => match &ev.event {
+                    SessionEvent::TurnFailed { error, .. } => Some(error.clone()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        })
+    }
+
+    assert_eq!(
+        run(false).as_deref(),
+        Some("Request failed \u{2014} boom. Try sending again."),
+        "the raw agent_result must render as a formatted marker"
+    );
+    assert_eq!(
+        run(true),
+        None,
+        "a dedicated banner must suppress the reconcile's TurnFailed marker"
+    );
+}
+
 #[test]
 fn always_stop_preference_skips_panel() {
     let mut app = test_app_with_agent();

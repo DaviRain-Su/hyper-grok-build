@@ -171,18 +171,172 @@
 
     #[test]
     fn late_auto_recap_dropped_when_agent_not_idle() {
-        assert!(should_drop_late_auto_recap(true, false, false));
+        let idle = make_agent(Some("s1"));
+        let mut busy = make_agent(Some("s1"));
+        busy.session.state = crate::app::agent::AgentState::TurnRunning;
+
+        assert!(should_drop_late_auto_recap(true, false, &busy));
         assert!(
-            !should_drop_late_auto_recap(true, false, true),
+            !should_drop_late_auto_recap(true, false, &idle),
             "idle agent: show auto recap"
         );
         assert!(
-            !should_drop_late_auto_recap(false, false, false),
+            !should_drop_late_auto_recap(false, false, &busy),
             "manual /recap always shown"
         );
         assert!(
-            !should_drop_late_auto_recap(true, true, false),
+            !should_drop_late_auto_recap(true, true, &busy),
             "history replay rebuilds scrollback even mid-turn"
+        );
+    }
+
+    fn running_bg_task(is_monitor: bool) -> crate::app::agent::BgTaskState {
+        crate::app::agent::BgTaskState {
+            task_id: "t1".into(),
+            tool_call_id: "c1".into(),
+            command: "sleep 5".into(),
+            description: None,
+            cwd: "/tmp".into(),
+            output_file: "/tmp/out".into(),
+            status: crate::app::agent::BgTaskStatus::Running,
+            start_time: std::time::SystemTime::now(),
+            end_time: None,
+            exit_code: None,
+            signal: None,
+            stdout: String::new(),
+            stdout_line_count: 0,
+            truncated: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            is_monitor,
+            restored_from_replay: false,
+        }
+    }
+
+    #[test]
+    fn recap_idle_allows_monitors_but_not_subagents_or_turn_wait() {
+        let mut agent = make_agent(Some("s1"));
+        agent.scrollback.push_block(
+            crate::scrollback::block::RenderBlock::agent_message("done"),
+        );
+        assert!(
+            !should_drop_late_auto_recap(true, false, &agent),
+            "agent message + idle"
+        );
+
+        agent.session.bg_tasks.insert("mon".into(), running_bg_task(true));
+        assert!(
+            !should_drop_late_auto_recap(true, false, &agent),
+            "running monitors must not block recap"
+        );
+
+        agent
+            .session
+            .bg_tasks
+            .insert("bash".into(), running_bg_task(false));
+        assert!(
+            should_drop_late_auto_recap(true, false, &agent),
+            "non-monitor bg task is not idle"
+        );
+        agent.session.bg_tasks.remove("bash");
+
+        agent
+            .subagent_sessions
+            .insert("child".into(), make_subagent_info("child"));
+        assert!(
+            should_drop_late_auto_recap(true, false, &agent),
+            "running subagent is not idle"
+        );
+        agent.subagent_sessions.get_mut("child").unwrap().finished = true;
+        assert!(
+            !should_drop_late_auto_recap(true, false, &agent),
+            "finished subagent is idle again"
+        );
+
+        agent.session.enqueue_prompt("queued follow-up".into());
+        assert!(
+            should_drop_late_auto_recap(true, false, &agent),
+            "queued prompt is a turn wait"
+        );
+        agent.session.pending_prompts.clear();
+
+        agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+            id: "sq-1".into(),
+            version: 0,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: "server follow-up".into(),
+            position: 0,
+            combined_texts: None,
+        }];
+        assert!(
+            should_drop_late_auto_recap(true, false, &agent),
+            "shared_queue follow-up is a turn wait"
+        );
+        agent.shared_queue.clear();
+
+        agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
+            text: "hi".into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::entry::EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        assert!(
+            should_drop_late_auto_recap(true, false, &agent),
+            "in-flight prompt is a turn wait"
+        );
+        agent.session.in_flight_prompt = None;
+
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::user_prompt(
+                "so wait, what was the issue",
+            ));
+        assert!(
+            should_drop_late_auto_recap(true, false, &agent),
+            "trailing user prompt is waiting on a turn"
+        );
+        agent.scrollback.push_block(
+            crate::scrollback::block::RenderBlock::bg_task("monitor logs", "mon-1"),
+        );
+        assert!(
+            should_drop_late_auto_recap(true, false, &agent),
+            "bg-task trailer after a waiting user prompt is still a turn wait"
+        );
+        agent.scrollback.push_block(crate::scrollback::block::RenderBlock::session_event(
+            crate::scrollback::blocks::SessionEvent::TurnCancelled {
+                elapsed: std::time::Duration::from_secs(1),
+            },
+        ));
+        assert!(
+            !should_drop_late_auto_recap(true, false, &agent),
+            "turn terminal after a user prompt is idle"
+        );
+
+        let mut failed = make_agent(Some("s1"));
+        failed.scrollback.push_block(
+            crate::scrollback::block::RenderBlock::user_prompt("try again"),
+        );
+        failed.scrollback.push_block(
+            crate::scrollback::block::RenderBlock::session_event(
+                crate::scrollback::blocks::SessionEvent::ReAuthRequired,
+            ),
+        );
+        assert!(
+            !should_drop_late_auto_recap(true, false, &failed),
+            "ReAuthRequired settles the turn without TurnFailed"
+        );
+        failed.scrollback.push_block(
+            crate::scrollback::block::RenderBlock::session_event(
+                crate::scrollback::blocks::SessionEvent::ContextTooLarge,
+            ),
+        );
+        assert!(
+            !should_drop_late_auto_recap(true, false, &failed),
+            "ContextTooLarge settles the turn without TurnFailed"
         );
     }
 

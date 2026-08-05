@@ -21,8 +21,12 @@ use agent_client_protocol as acp;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_sampling_types::ReasoningEffort;
 
+use crate::extensions::notification::{
+    DISK_FULL_ERROR_TYPE, DISK_FULL_USER_MESSAGE, RetryState,
+    SessionNotification as XaiSessionNotification, SessionUpdate as XaiSessionUpdate,
+};
 use crate::session::info::Info;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 /// Current chat history format version.
 /// - Version 0: Legacy ChatRequestMessage format (default for old sessions)
@@ -380,6 +384,10 @@ pub enum PersistenceMsg {
     /// Routed back through the persistence channel so the storage write
     /// stays sequential with other summary.json mutations.
     GeneratedTitle(String),
+    /// Per-turn dashboard summary as `(text, prompt_id)`; replaces (`Some`)
+    /// or clears (`None`, on conversation rewind) the previous one in
+    /// `summary.json`.
+    LastTurnSummary(Option<(String, String)>),
     /// Enable remote writeback for a session created `Local` before remote
     /// settings resolved (non-blocking startup); backfills its local history.
     UpgradeToWriteback {
@@ -390,7 +398,10 @@ pub enum PersistenceMsg {
     /// Unlike `Flush` (fire-and-forget), this is a **sync barrier**: the caller's
     /// oneshot only resolves after `flush_pending()` finishes writing to disk.
     FlushAndAck {
-        respond_to: tokio::sync::oneshot::Sender<()>,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
+    ProbeWritable {
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
     },
     /// Flush all pending writes, then copy the current session directory contents and return
     /// the in-memory snapshot to the caller (who can tar.gz + upload to GCS, etc.).
@@ -951,6 +962,15 @@ pub struct Summary {
     pub sandbox_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Ultra-short summary of the most recent successful turn, shown as the
+    /// dashboard row's secondary line (via the roster for non-attached
+    /// clients). Displayed until replaced by the next successful turn (or
+    /// cleared by a conversation rewind).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_summary: Option<String>,
+    /// Prompt id of the turn `last_turn_summary` describes (provenance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_summary_prompt_id: Option<String>,
 }
 
 /// Current `grok_home` as a UTF-8 string, or `None` if the path isn't valid UTF-8.
@@ -1007,6 +1027,8 @@ impl Summary {
             agent_name: None,
             sandbox_profile: None,
             reasoning_effort: None,
+            last_turn_summary: None,
+            last_turn_summary_prompt_id: None,
         })
     }
 
@@ -1509,17 +1531,24 @@ mod generated_title_tests {
 pub struct PersistenceHandle {
     pub tx: mpsc::UnboundedSender<PersistenceMsg>,
     noop: bool,
+    disk_full_rx: watch::Receiver<bool>,
 }
 
 fn actor_channel() -> (
     PersistenceHandle,
     mpsc::UnboundedReceiver<PersistenceMsg>,
     mpsc::WeakUnboundedSender<PersistenceMsg>,
+    watch::Sender<bool>,
 ) {
     let (tx, rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    let (disk_full_tx, disk_full_rx) = watch::channel(false);
     let weak = tx.downgrade();
-    let handle = PersistenceHandle { tx, noop: false };
-    (handle, rx, weak)
+    let handle = PersistenceHandle {
+        tx,
+        noop: false,
+        disk_full_rx,
+    };
+    (handle, rx, weak, disk_full_tx)
 }
 
 #[derive(Debug)]
@@ -1554,16 +1583,41 @@ impl From<crate::session::storage::AppendUpdateError> for DurableAppendError {
 impl PersistenceHandle {
     #[cfg(test)]
     pub(crate) fn from_sender_for_test(tx: mpsc::UnboundedSender<PersistenceMsg>) -> Self {
-        Self { tx, noop: false }
+        Self::from_parts_for_test(tx, watch::channel(false).1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_parts_for_test(
+        tx: mpsc::UnboundedSender<PersistenceMsg>,
+        disk_full_rx: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            tx,
+            noop: false,
+            disk_full_rx,
+        }
     }
 
     pub fn noop() -> Self {
         let (tx, _rx) = mpsc::unbounded_channel();
-        Self { tx, noop: true }
+        Self {
+            tx,
+            noop: true,
+            disk_full_rx: watch::channel(false).1,
+        }
     }
 
     pub fn is_noop(&self) -> bool {
         self.noop
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_disk_full(&self) -> bool {
+        *self.disk_full_rx.borrow()
+    }
+
+    pub(crate) fn subscribe_disk_full(&self) -> watch::Receiver<bool> {
+        self.disk_full_rx.clone()
     }
 
     /// Append after older buffered updates and wait for the durable barrier.
@@ -1630,6 +1684,8 @@ struct SessionPersistence {
     /// manual `/rename` never reaches the client. `None` for the subagent
     /// variant, whose lifecycle notifications are handled by the coordinator.
     gateway: Option<GatewaySender>,
+    disk_full_tx: watch::Sender<bool>,
+    disk_full_notified: bool,
 }
 
 impl SessionPersistence {
@@ -1720,12 +1776,97 @@ impl SessionPersistence {
     }
 
     async fn write_update(
-        &self,
+        &mut self,
         update: &SessionUpdate,
     ) -> Result<(), crate::session::storage::AppendUpdateError> {
-        self.storage
+        let result = self
+            .storage
             .append_update_commit_aware(&self.info, update)
-            .await
+            .await;
+        self.observe_append_update(&result);
+        result
+    }
+
+    fn observe_io<T>(&mut self, result: &io::Result<T>) {
+        match result {
+            Ok(_) => self.clear_disk_full(),
+            Err(error) if is_disk_full_io_error(error) => self.mark_disk_full(),
+            Err(_) => {}
+        }
+    }
+
+    fn observe_append_update(
+        &mut self,
+        result: &Result<(), crate::session::storage::AppendUpdateError>,
+    ) {
+        match result {
+            Ok(()) => self.clear_disk_full(),
+            Err(
+                crate::session::storage::AppendUpdateError::NotCommitted(error)
+                | crate::session::storage::AppendUpdateError::Committed(error),
+            ) if is_disk_full_io_error(error) => self.mark_disk_full(),
+            Err(_) => {}
+        }
+    }
+
+    fn mark_disk_full(&mut self) {
+        if !*self.disk_full_tx.borrow() {
+            let _ = self.disk_full_tx.send(true);
+        }
+        if self.disk_full_notified {
+            return;
+        }
+        self.disk_full_notified = true;
+        self.emit_disk_full_notification();
+    }
+
+    fn clear_disk_full(&mut self) {
+        if *self.disk_full_tx.borrow() {
+            let _ = self.disk_full_tx.send(false);
+        }
+        self.disk_full_notified = false;
+    }
+
+    fn emit_disk_full_notification(&self) {
+        let Some(gateway) = &self.gateway else {
+            return;
+        };
+        let notification = XaiSessionNotification {
+            session_id: self.info.id.clone(),
+            update: XaiSessionUpdate::RetryState(RetryState::Failed {
+                error_type: DISK_FULL_ERROR_TYPE.to_string(),
+                message: DISK_FULL_USER_MESSAGE.to_string(),
+            }),
+            meta: None,
+        };
+        if let Ok(params) = serde_json::value::to_raw_value(&notification) {
+            gateway.forward_fire_and_forget(acp::ExtNotification::new(
+                "x.ai/session_notification",
+                params.into(),
+            ));
+        }
+    }
+
+    async fn probe_writable(&self) -> io::Result<()> {
+        let dir = self
+            .storage
+            .updates_file_path(&self.info)
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "session directory is unknown; cannot probe disk space",
+                )
+            })?;
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&dir)?;
+            let probe = dir.join(".disk_ok");
+            std::fs::write(&probe, b"ok")?;
+            let _ = std::fs::remove_file(&probe);
+            io::Result::Ok(())
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     fn queue_acp_sync(&self, notification: acp::SessionNotification) {
@@ -1745,7 +1886,7 @@ impl SessionPersistence {
             return;
         }
         // Flush the merge-pending notification so the backfill re-reads it.
-        self.flush_pending().await;
+        let _ = self.flush_pending().await;
         let persisted = match self.storage.load_session(&self.info).await {
             Ok(persisted) => persisted,
             Err(error) => {
@@ -1833,6 +1974,7 @@ impl SessionPersistence {
             .storage
             .append_update_durable_commit_aware(&self.info, &update)
             .await;
+        self.observe_append_update(&result);
         match (&update, &result) {
             (SessionUpdate::Acp(notification), Ok(()))
             | (
@@ -1845,8 +1987,13 @@ impl SessionPersistence {
     }
 
     /// Flush any pending merged ACP notification to disk and remote sync.
-    async fn flush_pending(&mut self) {
-        if let Err(error) = self.drain_pending().await {
+    /// A no-op drain must not clear the disk-full latch.
+    async fn flush_pending(&mut self) -> io::Result<()> {
+        let result = self
+            .drain_pending()
+            .await
+            .map_err(crate::session::storage::AppendUpdateError::into_io_error);
+        if let Err(error) = &result {
             tracing::warn!(%error, "failed to write pending update");
         }
         if let Some(sync) = &self.remote_sync {
@@ -1855,13 +2002,13 @@ impl SessionPersistence {
         if let Some(relay) = &self.relay_sync {
             relay.flush();
         }
+        result
     }
 
     /// Flush pending writes and sync all session files to disk.
     /// Called before CopyFile to ensure all data is persisted.
     async fn flush_and_sync(&mut self) {
-        self.flush_pending().await;
-        // Sync all session files to disk to ensure they're actually written
+        let _ = self.flush_pending().await;
         if let Err(e) = self.storage.sync_session_files(&self.info).await {
             tracing::warn!(?e, "Failed to sync session files to disk");
         }
@@ -1884,11 +2031,16 @@ impl SessionPersistence {
                     self.upgrade_to_writeback(auth_manager).await;
                 }
                 PersistenceMsg::Flush => {
-                    self.flush_pending().await;
+                    let _ = self.flush_pending().await;
                 }
                 PersistenceMsg::FlushAndAck { respond_to } => {
-                    self.flush_pending().await;
-                    let _ = respond_to.send(());
+                    let result = self.flush_pending().await;
+                    let _ = respond_to.send(result);
+                }
+                PersistenceMsg::ProbeWritable { respond_to } => {
+                    let result = self.probe_writable().await;
+                    self.observe_io(&result);
+                    let _ = respond_to.send(result);
                 }
                 PersistenceMsg::Update(update) => {
                     match update {
@@ -1922,11 +2074,12 @@ impl SessionPersistence {
                     let _ = respond_to.send(result);
                 }
                 PersistenceMsg::Chat(chat_msg) => {
-                    if let Err(e) = self
+                    let result = self
                         .storage
                         .append_chat_message(&self.info, &chat_msg)
-                        .await
-                    {
+                        .await;
+                    self.observe_io(&result);
+                    if let Err(e) = result {
                         tracing::warn!(?e, "failed to write chat message");
                     }
                 }
@@ -1954,11 +2107,12 @@ impl SessionPersistence {
                         num_messages = messages.len(),
                         "Replacing chat history (compaction)"
                     );
-                    if let Err(e) = self
+                    let result = self
                         .storage
                         .replace_chat_history(&self.info, &messages)
-                        .await
-                    {
+                        .await;
+                    self.observe_io(&result);
+                    if let Err(e) = result {
                         tracing::warn!(?e, "failed to replace chat history");
                     }
                 }
@@ -2113,8 +2267,19 @@ impl SessionPersistence {
                         }
                     }
                 }
+                PersistenceMsg::LastTurnSummary(summary) => {
+                    if let Err(e) = self
+                        .storage
+                        .set_last_turn_summary(&self.info, summary)
+                        .await
+                    {
+                        tracing::warn!(?e, "failed to persist last turn summary");
+                    }
+                }
                 PersistenceMsg::RewindPoint(point) => {
-                    if let Err(e) = self.storage.append_rewind_point(&self.info, &point).await {
+                    let result = self.storage.append_rewind_point(&self.info, &point).await;
+                    self.observe_io(&result);
+                    if let Err(e) = result {
                         tracing::warn!(?e, "failed to write rewind point");
                     }
                 }
@@ -2233,7 +2398,7 @@ impl SessionPersistence {
         }
 
         // Drain the merge buffer on channel close.
-        self.flush_pending().await;
+        let _ = self.flush_pending().await;
     }
 
     async fn copy_session_dir_to_memory(&self) -> anyhow::Result<SessionStateCopy> {
@@ -2405,23 +2570,34 @@ async fn try_pull_from_remote(info: &Info, client: &crate::remote::BackendClient
     }
 }
 
+pub(crate) fn is_disk_full_io_error(e: &io::Error) -> bool {
+    if e.kind() == io::ErrorKind::StorageFull {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        matches!(
+            e.raw_os_error(),
+            Some(raw) if raw == libc::ENOSPC || raw == libc::EDQUOT
+        )
+    }
+    #[cfg(windows)]
+    {
+        const ERROR_DISK_FULL: i32 = 112;
+        const ERROR_HANDLE_DISK_FULL: i32 = 39;
+        matches!(
+            e.raw_os_error(),
+            Some(ERROR_DISK_FULL | ERROR_HANDLE_DISK_FULL)
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
+    false
+}
+
 /// Map a persistence `io::Error` into an `acp::Error` with a human-friendly
 /// `message` and a stable `data.code` for log aggregation.
 pub(crate) fn io_error_to_acp(e: &io::Error) -> acp::Error {
-    // Unix: ENOSPC / EDQUOT. Windows: ERROR_DISK_FULL (112). Also accept
-    // `ErrorKind::StorageFull` when no raw OS code is present.
-    #[cfg(unix)]
-    let is_disk_full_os = matches!(
-        e.raw_os_error(),
-        Some(raw) if raw == libc::ENOSPC || raw == libc::EDQUOT
-    );
-    #[cfg(windows)]
-    const ERROR_DISK_FULL: i32 = 112;
-    #[cfg(windows)]
-    let is_disk_full_os = matches!(e.raw_os_error(), Some(ERROR_DISK_FULL));
-    let is_disk_full = is_disk_full_os || e.kind() == io::ErrorKind::StorageFull;
-
-    let (message, code) = if is_disk_full {
+    let (message, code) = if is_disk_full_io_error(e) {
         ("No space left on device", "FS_DISK_QUOTA_EXCEEDED")
     } else {
         match e.kind() {
@@ -2448,7 +2624,9 @@ mod io_error_to_acp_tests {
 
     #[test]
     fn storage_full_maps_to_no_space_left() {
-        let acp_err = io_error_to_acp(&io::Error::from(io::ErrorKind::StorageFull));
+        let io = io::Error::from(io::ErrorKind::StorageFull);
+        assert!(super::is_disk_full_io_error(&io));
+        let acp_err = io_error_to_acp(&io);
         assert_eq!(acp_err.message, "No space left on device");
         assert_eq!(acp_err.data.unwrap()["code"], "FS_DISK_QUOTA_EXCEEDED");
     }
@@ -2515,7 +2693,7 @@ pub(crate) async fn new(
         summary.current_model_id = model_id;
     }
 
-    let (handle, rx, summary_tx) = actor_channel();
+    let (handle, rx, summary_tx, disk_full_tx) = actor_channel();
 
     let info_clone = info.clone();
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
@@ -2538,6 +2716,8 @@ pub(crate) async fn new(
             ),
             registry_title_sync,
             gateway,
+            disk_full_tx,
+            disk_full_notified: false,
         };
         persistence.run().await;
     });
@@ -2582,7 +2762,7 @@ pub(crate) async fn new_with_explicit_dir(
         summary.current_model_id = model_id;
     }
 
-    let (handle, rx, summary_tx) = actor_channel();
+    let (handle, rx, summary_tx, disk_full_tx) = actor_channel();
 
     let info_clone = info.clone();
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
@@ -2604,6 +2784,8 @@ pub(crate) async fn new_with_explicit_dir(
             ),
             registry_title_sync: None,
             gateway: None,
+            disk_full_tx,
+            disk_full_notified: false,
         };
         persistence.run().await;
     });
@@ -2695,7 +2877,7 @@ pub(crate) async fn load(
         workflow_runs: persisted.workflow_runs,
     };
 
-    let (handle, rx, summary_tx) = actor_channel();
+    let (handle, rx, summary_tx, disk_full_tx) = actor_channel();
 
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
     let remote_sync = init_remote_sync(&persisted_info.summary, storage_mode, auth_manager)?;
@@ -2723,6 +2905,8 @@ pub(crate) async fn load(
             summary: summary_gen,
             registry_title_sync,
             gateway,
+            disk_full_tx,
+            disk_full_notified: false,
         };
         persistence.run().await;
     });
@@ -2778,7 +2962,7 @@ pub(crate) async fn load_light(
         workflow_runs: persisted.workflow_runs,
     };
 
-    let (handle, rx, summary_tx) = actor_channel();
+    let (handle, rx, summary_tx, disk_full_tx) = actor_channel();
 
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
     let remote_sync = init_remote_sync(&persisted_info.summary, storage_mode, auth_manager)?;
@@ -2806,6 +2990,8 @@ pub(crate) async fn load_light(
             summary: summary_gen,
             registry_title_sync,
             gateway,
+            disk_full_tx,
+            disk_full_notified: false,
         };
         persistence.run().await;
     });
@@ -4154,6 +4340,39 @@ mod session_exists_for_cwd_tests {
             "must anchor to the real session's cwd, not the stub's"
         );
     }
+
+    #[test]
+    fn find_summary_by_session_id_reads_cross_cwd_uuid() {
+        use super::find_summary_by_session_id_in_root;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("sessions");
+        let session_id = "019f870d-6976-7d73-a12a-52e9d4aebcd4";
+        let cwd = "/project/elsewhere";
+        let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
+        let dir = root.join(&encoded).join(session_id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("summary.json"),
+            serde_json::json!({
+                "info": { "id": session_id, "cwd": cwd },
+                "session_summary": "cross-cwd hit",
+                "created_at": "2026-03-01T00:00:00Z",
+                "updated_at": "2026-03-01T00:00:00Z",
+                "num_messages": 2,
+                "num_chat_messages": 1,
+                "current_model_id": "test",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let summary = find_summary_by_session_id_in_root(session_id, &root)
+            .expect("CLI --resume finds this summary by id across cwds");
+        assert_eq!(summary.info.id.0.as_ref(), session_id);
+        assert_eq!(summary.info.cwd, cwd);
+        assert_eq!(summary.session_summary, "cross-cwd hit");
+    }
 }
 
 #[cfg(test)]
@@ -4620,7 +4839,7 @@ mod actor_lifetime_tests {
 
     #[tokio::test]
     async fn dropping_the_session_handle_closes_the_actor_channel() {
-        let (handle, mut rx, summary_tx) = actor_channel();
+        let (handle, mut rx, summary_tx, _disk_full_tx) = actor_channel();
 
         drop(handle);
 

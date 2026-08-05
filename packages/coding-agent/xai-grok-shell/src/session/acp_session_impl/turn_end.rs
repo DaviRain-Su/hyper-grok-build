@@ -177,7 +177,15 @@ impl SessionActor {
         ));
     }
 
-    pub(super) async fn handle_completion(&self, prompt_id: String, result: PromptTurnResult) {
+    /// Returns whether this handler OWNED the completion (it matched and
+    /// dequeued the front prompt). `false` means a stale completion for a
+    /// turn another path (e.g. Cancel) already finalized — callers must not
+    /// treat it as a turn ending now.
+    pub(super) async fn handle_completion(
+        &self,
+        prompt_id: String,
+        result: PromptTurnResult,
+    ) -> bool {
         let tool_overrides = self.effective_tool_overrides().await;
         let result = result.map(|mut ok| {
             ok.tool_overrides = tool_overrides;
@@ -221,7 +229,7 @@ impl SessionActor {
             .is_some_and(|input| input.prompt_id == prompt_id)
         {
             let Some(input) = state.pending_inputs.pop_front() else {
-                return;
+                return false;
             };
             owned_completion = true;
             let _ = input.respond_to.send(result.clone()).ok();
@@ -316,6 +324,7 @@ impl SessionActor {
             self.emit_turn_completed(prompt_id, &mapped, usage, cancel_trigger)
                 .await;
         }
+        owned_completion
     }
 
     /// Emit the durable, replayable `TurnCompleted` terminal — the single

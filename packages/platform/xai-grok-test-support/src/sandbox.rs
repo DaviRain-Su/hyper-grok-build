@@ -343,6 +343,9 @@ fn baseline_env_from_parent(
         ("DISABLE_FEEDBACK_COMMAND", "1"),
         ("GROK_DISABLE_AUTOUPDATER", "1"),
         ("GROK_PROMPT_SUGGESTIONS", "false"),
+        // Post-turn summary side-calls would add unscripted requests to the
+        // mock server and break exact wire-traffic assertions.
+        ("GROK_TURN_SUMMARY", "0"),
         ("NO_PROXY", "127.0.0.1,localhost,::1"),
         ("no_proxy", "127.0.0.1,localhost,::1"),
         ("GIT_CONFIG_NOSYSTEM", "1"),

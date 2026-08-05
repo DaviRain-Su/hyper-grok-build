@@ -16,6 +16,7 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+xai-circuit-breaker = { workspace = true }
 xai-grok-compaction = { path = "../../agent/xai-grok-compaction" }
 xai-grok-models = { workspace = true }
 xai-grok-tools = { path = "../../tools/xai-grok-tools" }

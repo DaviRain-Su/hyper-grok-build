@@ -206,6 +206,9 @@ impl SessionActor {
             .send(PersistenceMsg::ContentChunk(PersistenceContentChunk::new(
                 prompt_blocks.to_vec(),
             )));
+        // Bash turns bypass `handle_prompt`'s commit point; the command is now
+        // in the ordered persistence stream, so a send-now may cancel this turn.
+        self.mark_front_message_committed().await;
 
         // Run the bash command with streaming enabled
         let tool_call_id = acp::ToolCallId::from(format!("bash-mode-{}", uuid::Uuid::new_v4()));
@@ -356,7 +359,8 @@ impl SessionActor {
 
         self.chat_state_handle.flush();
 
-        self.flush_to_disk().await;
+        let flush_error = self.flush_to_disk().await.err();
+        self.disk_full_acp_error(flush_error.as_ref())?;
 
         let total_tokens = self.chat_state_handle.get_total_tokens().await;
         ok_end_turn(total_tokens, None)

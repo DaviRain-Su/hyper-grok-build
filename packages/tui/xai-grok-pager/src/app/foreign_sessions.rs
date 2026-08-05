@@ -456,6 +456,7 @@ pub(crate) fn map_summary(summary: ForeignSessionSummary) -> SessionPickerEntry 
         branch: summary.branch,
         repo_name: crate::views::session_picker::repo_name_from_cwd(&cwd),
         worktree_label: None,
+        last_turn_summary: None,
         card_detail: None,
     }
 }
@@ -566,6 +567,7 @@ mod tests {
             branch: None,
             repo_name: "repo".into(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }
     }

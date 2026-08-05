@@ -17,8 +17,23 @@ use anyhow::Result;
 use std::io::Write;
 use std::sync::Arc;
 
+use crate::theme::system_appearance::SystemAppearance;
 use crate::wrap_filter::Osc52Filter;
 use crate::wrap_restore::ModeTracker;
+
+/// OSC 52 sink markers plus optional local appearance (`LC_*` survives SSH).
+fn apply_wrap_child_env(
+    cmd: &mut portable_pty::CommandBuilder,
+    appearance: Option<SystemAppearance>,
+) {
+    cmd.env("GROK_OSC52_SINK", "1");
+    cmd.env("LC_GROK_OSC52_SINK", "1");
+    if let Some(appearance) = appearance {
+        let value = appearance.as_env_value();
+        cmd.env("GROK_APPEARANCE", value);
+        cmd.env("LC_GROK_APPEARANCE", value);
+    }
+}
 
 /// Run an arbitrary command inside a local PTY with OSC 52 output filtering.
 ///
@@ -50,21 +65,7 @@ pub(crate) fn run_wrapped_command(program: &str, args: &[String]) -> Result<i32>
     let mut cmd = CommandBuilder::new(program);
     args.iter().for_each(|arg| cmd.arg(arg));
 
-    // Advertise to the wrapped program — and anything it spawns, e.g. a remote
-    // `grok` reached over SSH — that its OSC 52 clipboard writes are being
-    // intercepted here and copied to the real local clipboard. The inner grok
-    // reads this (see `xai_grok_pager_render::clipboard::osc52_sink_active`) to
-    // *trust* OSC 52 even when it can't detect an OSC-52-capable terminal,
-    // which is the usual SSH case (only `TERM` propagates, so the inner grok
-    // cannot otherwise verify that the local clipboard received the write).
-    //
-    // `CommandBuilder::new` inherits the full parent environment; `env` overlays
-    // these two without clearing it. The canonical `GROK_OSC52_SINK` is
-    // inherited by local children; the `LC_`-prefixed alias rides the default
-    // OpenSSH env forwarding (`SendEnv LANG LC_*` on the client,
-    // `AcceptEnv LANG LC_*` on the server) so the signal survives the SSH hop.
-    cmd.env("GROK_OSC52_SINK", "1");
-    cmd.env("LC_GROK_OSC52_SINK", "1");
+    apply_wrap_child_env(&mut cmd, crate::theme::system_appearance::detect_desktop());
 
     // Not session-scoped: this is the wrapped process itself.
     #[allow(clippy::disallowed_methods)]
@@ -423,5 +424,46 @@ mod tests {
             &tracker,
             std::time::Duration::from_millis(5)
         ));
+    }
+
+    fn env_str(cmd: &portable_pty::CommandBuilder, key: &str) -> Option<String> {
+        cmd.get_env(key)
+            .and_then(|value| value.to_str().map(str::to_owned))
+    }
+
+    #[test]
+    fn apply_wrap_child_env_dark_overrides_parent_light_on_both_names() {
+        let mut cmd = portable_pty::CommandBuilder::new("true");
+        cmd.env("GROK_APPEARANCE", "light");
+        cmd.env("LC_GROK_APPEARANCE", "light");
+        apply_wrap_child_env(&mut cmd, Some(SystemAppearance::Dark));
+        assert_eq!(env_str(&cmd, "GROK_APPEARANCE").as_deref(), Some("dark"));
+        assert_eq!(env_str(&cmd, "LC_GROK_APPEARANCE").as_deref(), Some("dark"));
+        assert_eq!(env_str(&cmd, "GROK_OSC52_SINK").as_deref(), Some("1"));
+        assert_eq!(env_str(&cmd, "LC_GROK_OSC52_SINK").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn apply_wrap_child_env_light_overrides_parent_dark_on_both_names() {
+        let mut cmd = portable_pty::CommandBuilder::new("true");
+        cmd.env("GROK_APPEARANCE", "dark");
+        cmd.env("LC_GROK_APPEARANCE", "dark");
+        apply_wrap_child_env(&mut cmd, Some(SystemAppearance::Light));
+        assert_eq!(env_str(&cmd, "GROK_APPEARANCE").as_deref(), Some("light"));
+        assert_eq!(
+            env_str(&cmd, "LC_GROK_APPEARANCE").as_deref(),
+            Some("light")
+        );
+    }
+
+    #[test]
+    fn apply_wrap_child_env_none_does_not_stamp_from_parent_snapshot() {
+        let mut cmd = portable_pty::CommandBuilder::new("true");
+        cmd.env("GROK_APPEARANCE", "dark");
+        cmd.env_remove("LC_GROK_APPEARANCE");
+        apply_wrap_child_env(&mut cmd, None);
+        assert_eq!(env_str(&cmd, "GROK_APPEARANCE").as_deref(), Some("dark"));
+        assert_eq!(env_str(&cmd, "LC_GROK_APPEARANCE"), None);
+        assert_eq!(env_str(&cmd, "GROK_OSC52_SINK").as_deref(), Some("1"));
     }
 }

@@ -19,6 +19,7 @@ pub mod fs;
 pub mod git;
 pub mod hooks;
 pub mod hunks;
+pub mod repos;
 pub mod search;
 pub mod session;
 pub mod skills;

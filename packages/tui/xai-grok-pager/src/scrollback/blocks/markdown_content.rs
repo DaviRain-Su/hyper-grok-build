@@ -538,6 +538,41 @@ mod tests {
         }
     }
 
+    /// In-cell reflow regression: a six-column table of unbreakable tokens at
+    /// width 30 must keep its right border on every line — a table that
+    /// overflows the budget gets hard-clipped by the wrap layer, which eats
+    /// the right `│`.
+    #[test]
+    fn test_six_col_table_output_30_keeps_right_border() {
+        use unicode_width::UnicodeWidthStr;
+
+        let md = "| Alpha | Bravo | Ident | DeptName | RoleName | Amount |\n\
+                  |---|---|---|---|---|---|\n\
+                  | LongalphaToken | TokenTwo | ID-AA1001 | EngineeringOps | ManagerRole | $145,000 |\n";
+        let width = 30;
+        let out = MarkdownContent::new(md).output(width);
+
+        assert!(out.lines.len() >= 5, "table should produce borders + rows");
+        for (i, line) in out.lines.iter().enumerate() {
+            let text: String = line
+                .content
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            assert_eq!(
+                text.width(),
+                width,
+                "table line {i} must fill the content width, got {text:?}"
+            );
+            let right_edge = text.trim_end().chars().last();
+            assert!(
+                matches!(right_edge, Some('│' | '┐' | '┘' | '┤')),
+                "table line {i} lost its right border: {text:?}"
+            );
+        }
+    }
+
     #[test]
     fn empty_content_returns_placeholder() {
         let md = MarkdownContent::streaming();

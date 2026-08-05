@@ -93,31 +93,83 @@ Switch between the prompt input and scrollback pane.
 |-----|---------|---------|--------|
 | `Tab` | `Space` (and `i` in vim mode) | Scrollback focused | Focus the prompt input |
 | `Tab` | | Prompt focused | Focus the scrollback (both simple and vim scrollback modes) |
-| `Tab` | `Shift+Tab` (backwards) | Question card focused | Walk the card's answers, wrapping round at the ends. Focus stays in the card |
+| `Tab` | `Shift+Tab` (backwards) | A blocking card is focused (question, permission prompt, cancel-turn panel) | Walk that card's rows, wrapping round at the ends. Focus stays in the card |
+| `Tab` | `Space` (and `i` in vim mode) | Scrollback focused with a card parked | Hand the keyboard back to the card (the bar's focus hint names it) |
 | `Enter` | | Prompt focused | Send the current prompt |
 
 **Esc is not a focus key.** It follows the cancel / clear / rewind semantics below. The mid-turn cancel is the only branch gated on `[ui].vim_mode` (scrollback nav); nothing depends on `[ui].simple_mode` (prompt editor). Overlays, modals, slash/file dropdowns, voice, search, and selection still steal Esc first.
 
-## Question card (`ask_user_question`)
+## Blocking cards
 
-While the agent is waiting on an answer, the card owns the keyboard.
+Three surfaces block the agent on your answer and take over the keyboard while
+they are open: the **question card** (`ask_user_question`), the **permission
+prompt**, and the **cancel-turn panel**. When more than one is open the
+permission prompt has the keyboard first, then the cancel-turn panel, then the
+question card — and the shortcuts bar always shows the keys of whichever one is
+receiving them.
+
+They share one contract:
+
+- `Tab` / `Shift+Tab` walk that card's rows and wrap at both ends. They never
+  move focus out of the card, so the cursor is always somewhere you can see.
+- `Esc` steps back out, one rung at a time: it clears whatever the card has
+  pending first, and only once there is nothing left to clear does it leave.
+  Where it leaves to is the one thing that differs per card — the question card
+  and the permission prompt park the keyboard in the scrollback so you can
+  scroll up and read the context behind them (the card stays on screen), while
+  the cancel-turn panel's "keep everything running" resolves it outright.
+- With the keyboard parked, the shortcuts bar shows the scrollback's own keys,
+  and its focus hint names the card rather than the prompt: `Tab/Space:
+  question`. That hint is pinned, so a narrow bar can never trim away the only
+  route back.
+- Inside the dashboard's session overlay there is one more rung: once the
+  keyboard is parked, the next `Esc` returns to the dashboard, leaving the card
+  pending. (`Ctrl+\` still leaves from any state.)
+
+### Question card (`ask_user_question`)
 
 | Key | Action |
 |-----|--------|
 | `↑` / `↓`, `j` / `k` | Move between answers (clamped at the ends) |
-| `Tab` / `Shift+Tab` | Walk the answers in a loop: every answer of this question, then the next question's, and off the last answer back to the first |
+| `Tab` / `Shift+Tab` | Walk this question's answers in a loop — off the last answer back to the first. It never carries you into another question |
 | `←` / `→`, `h` / `l`, `[` / `]` | Previous / next question |
 | `1`–`9`, `a`–`f` | Pick that answer directly |
 | `z` | Jump to the free-text row and start typing |
 | `Space` | Toggle the focused answer (multi-select), or start typing on the free-text row |
 | `Enter` | Select and advance, submit on the last question, or edit the free-text row |
-| `Esc` | Unselect this question's answer. It does not move focus |
+| `Esc` | Unselect this question's answer; with nothing selected, park focus in the scrollback (`Tab` returns). On the *first* question inside the dashboard's session overlay it returns to the dashboard instead — from a later question `←` is still the way back, so the park comes first and the next `Esc` leaves. The shortcuts bar names whichever rung is live |
 | `y` | Copy the focused answer |
 | `Shift+X` | Dismiss the question (the agent continues without an answer) |
 | `Ctrl+F` | Fullscreen the card |
 
 While typing a free-text answer, `Enter` submits and `Esc` returns to the
 answer rows; every other key goes to the text field.
+
+### Permission prompt
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓`, `j` / `k` | Move between options (clamped at the ends) |
+| `Tab` / `Shift+Tab` | Walk the options in a loop |
+| `1`–`9` | Choose that option directly |
+| `Enter` | Choose the focused option |
+| `←` / `→` | Widen / narrow the scope an "always" answer would remember |
+| `e` | Edit the always-allow pattern by hand (bash prompts) |
+| `Ctrl+F` | Expand / collapse the full arguments |
+| `Ctrl+O` | Turn on always-approve mode |
+| `Esc` | Park focus in the scrollback (`Tab` returns). It never answers or dismisses the request |
+| `Ctrl+C` | Cancel the request |
+
+Typing on the "No" row starts a message back to the agent instead; `Enter`
+sends it and `Esc` returns to the options.
+
+### Cancel-turn panel
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓`, `j` / `k`, `Tab` / `Shift+Tab` | Move between the choices |
+| `1`–`4`, `Enter` | Confirm that choice |
+| `Esc` | Keep everything running. This resolves the panel, so it is never a dead end and never needs to park |
 
 ## Escape
 

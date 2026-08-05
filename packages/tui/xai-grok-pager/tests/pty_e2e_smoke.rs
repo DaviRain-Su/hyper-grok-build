@@ -45,6 +45,8 @@ mod waiting_for_model_label;
 mod welcome_screen;
 #[path = "pty_e2e/welcome_screen_braille_logo_renders_correctly.rs"]
 mod welcome_screen_braille_logo_renders_correctly;
+#[path = "pty_e2e/wrap_appearance_env_advertised_through_shell.rs"]
+mod wrap_appearance_env_advertised_through_shell;
 #[path = "pty_e2e/wrap_child_killed_with_latched_modes_restores_terminal.rs"]
 mod wrap_child_killed_with_latched_modes_restores_terminal;
 #[path = "pty_e2e/wrap_clean_exit_stays_byte_transparent.rs"]

@@ -114,6 +114,7 @@ fn pending_notification_cap_keeps_newest_entries() {
         pending_notifications: Vec::new(),
         notifications_suppressed: true,
         rewindable: false,
+        front_message_committed: false,
         nudges_used_this_session: 0,
     };
     for index in 0..(MAX_PENDING_NOTIFICATIONS + 3) {
@@ -395,24 +396,12 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                 .expect("normal task wake should be admitted");
             assert_eq!(response_rx.await, Ok(true));
             let (respond_to, _rx) = oneshot::channel();
-            actor
-                .queue_input(
-                    vec![],
-                    "task-completed-bg-normal".to_string(),
-                    PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    true,
-                    None,
-                    false,
-                    Some(fallback),
-                    None,
-                    respond_to,
-                    None,
-                    None,
-                )
+            let _ = actor
+                .queue_input(QueueInputRequest {
+                    verbatim: true,
+                    task_wake_fallback: Some(fallback),
+                    ..queue_input_request(vec![], "task-completed-bg-normal", respond_to)
+                })
                 .await;
             let state = actor.state.lock().await;
             assert_eq!(state.pending_inputs.len(), 1);
@@ -480,6 +469,64 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                     .task_completion_reservations
                     .as_ref()
                     .is_none_or(|ids| !ids.contains("bg-normal"))
+            );
+        })
+        .await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn disk_full_refusal_still_clears_task_completion_reservation() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, mut persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            tokio::task::spawn_local(async move {
+                while let Some(msg) = persistence_rx.recv().await {
+                    if let PersistenceMsg::ProbeWritable { respond_to } = msg {
+                        let _ = respond_to
+                            .send(Err(std::io::Error::from(std::io::ErrorKind::StorageFull)));
+                    }
+                }
+            });
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.notifications.disk_full = tokio::sync::watch::channel(true).1;
+            actor
+                .tool_context
+                .task_completion_reservations
+                .as_ref()
+                .expect("completion reservations")
+                .reserve("bg-disk".to_string());
+            let actor = std::sync::Arc::new(actor);
+            let error = actor
+                .handle_prompt(
+                    "task-completed-bg-disk",
+                    vec![acp::ContentBlock::Text(acp::TextContent::new("done"))],
+                    PromptMode::Agent,
+                    None,
+                    None,
+                    None,
+                    None,
+                    true,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect_err("latched disk-full must refuse the wake");
+            assert_eq!(error.message, "No space left on device");
+            assert!(
+                already_reported(&actor, "bg-disk").await,
+                "disk-full refusal must mark the completion reported"
+            );
+            assert!(
+                actor
+                    .tool_context
+                    .task_completion_reservations
+                    .as_ref()
+                    .is_none_or(|ids| !ids.contains("bg-disk")),
+                "disk-full refusal must release the completion reservation"
             );
         })
         .await;
@@ -849,24 +896,8 @@ async fn user_prompt_preempt_keeps_running_synthetic_slot() {
                     .push_back(task_completed_input("bg-other"));
             }
             let (respond_to, _rx) = oneshot::channel();
-            actor
-                .queue_input(
-                    vec![],
-                    "user-clarify".to_string(),
-                    PromptMode::Agent,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    false,
-                    None,
-                    None,
-                    respond_to,
-                    None,
-                    None,
-                )
+            let _ = actor
+                .queue_input(queue_input_request(vec![], "user-clarify", respond_to))
                 .await;
             let state = actor.state.lock().await;
             let remaining_ids: Vec<&str> = state

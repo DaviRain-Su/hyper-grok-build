@@ -49,6 +49,10 @@ pub struct RosterEntry {
     #[serde(default)]
     pub yolo: bool,
     pub activity: RosterActivity,
+    /// Ultra-short summary of the session's most recent turn, shown as the
+    /// row's secondary line.
+    #[serde(default)]
+    pub last_turn_summary: Option<String>,
     #[serde(default)]
     pub resident: bool,
     #[serde(default)]
@@ -114,6 +118,7 @@ mod tests {
             reasoning_effort: None,
             yolo: true,
             activity: agent::RosterActivity::Working,
+            last_turn_summary: Some("Fixed the roster merge".to_string()),
             resident: true,
             last_change_unix_ms: 1_725_000_000_123,
             origin: agent::RosterOrigin::Local,
@@ -175,6 +180,10 @@ mod tests {
         assert_eq!(e.model_id.as_deref(), Some("grok-4"));
         assert!(e.yolo);
         assert_eq!(e.activity, RosterActivity::Working);
+        assert_eq!(
+            e.last_turn_summary.as_deref(),
+            Some("Fixed the roster merge")
+        );
         assert!(e.resident);
         assert_eq!(e.last_change_unix_ms, 1_725_000_000_123);
         assert_eq!(e.origin.kind, "local");

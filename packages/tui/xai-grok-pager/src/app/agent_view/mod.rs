@@ -160,6 +160,8 @@ mod input;
 pub(crate) use input::ExternalPromptEditorAccess;
 mod interactions;
 mod jump;
+mod key_owner;
+pub(crate) use key_owner::{BlockingCard, EscStep, KeyOwner};
 mod links;
 mod media;
 mod modals;
@@ -1310,6 +1312,12 @@ pub struct AgentView {
     /// shortcuts cheatsheet so the overlay-scoped shortcuts
     /// (`When::DashboardOverlay`) are lit in the overlay and dimmed elsewhere.
     pub(crate) in_dashboard_overlay: bool,
+    /// Whether that overlay's cycle order holds more than one agent, i.e.
+    /// whether the header shows its `[‹]`/`[›]` chips. Updated every frame by
+    /// `draw` beside [`Self::in_dashboard_overlay`], and read from the same
+    /// place: the shortcuts bar builds the pane's hints once for both the bar
+    /// and the cheatsheet, neither of which can see `draw`'s arguments.
+    pub(crate) overlay_can_cycle: bool,
     /// MCP server init progress. Set when the shell starts connecting
     /// MCP servers, cleared when `x.ai/mcp_initialized` arrives.
     /// Shown in the turn status line while the agent is idle.
@@ -1471,7 +1479,7 @@ pub struct AgentView {
     /// rename flow), as distinct from the auto-generated
     /// `generated_session_title` below. Set optimistically at dispatch,
     /// persisted by the shell as `Summary.title_is_manual`, and restored
-    /// from disk on resume (`TaskResult::SessionTitleFromDisk`). Drives the
+    /// from disk on resume (`TaskResult::SessionMetaFromDisk`). Drives the
     /// prompt-border inline title and wins precedence for the dashboard
     /// modal label and the OSC terminal title. The on-disk write is
     /// best-effort (failure surfaces a toast through the existing
@@ -1480,6 +1488,17 @@ pub struct AgentView {
     /// Short title from shell `SessionSummaryGenerated` or `summary.json` on load/resume.
     /// Precedence in the dashboard title is below `display_name`, above first-prompt text.
     pub generated_session_title: Option<String>,
+    /// Ultra-short summary of the most recent successful turn (shell
+    /// `LastTurnSummary`), preferred over the last-message preview for the
+    /// idle dashboard row's secondary line. Shown until replaced by the next
+    /// successful turn's summary; cleared only by a conversation rewind
+    /// (which removes the work it describes).
+    pub last_turn_summary: Option<String>,
+    /// Bumped on every live mutation of [`Self::last_turn_summary`] (notification
+    /// apply or rewind clear). Disk hydration captures this at enqueue and
+    /// applies only when it still matches, so a rewind that cleared the field
+    /// while the read was in flight is not undone by a stale disk value.
+    pub last_turn_summary_gen: u64,
     /// Effects queued by input handlers that cannot return `InputOutcome::Action`.
     /// Drained by `AppView.handle_input` after each event.
     pub(crate) pending_effects: Vec<super::actions::Effect>,
@@ -1502,12 +1521,11 @@ pub struct AgentView {
     /// (a lost response would otherwise leave the TUI on "Cancelling…" with
     /// Esc and the input dead until a restart).
     pub(crate) pending_turn_end_reconcile: Option<PendingTurnEnd>,
-    /// Send-now cancel expectation: the client-minted id of a cancel-and-send
-    /// prompt this client dispatched into a running turn (send-now chord /
-    /// queue-row "Send now" / a plain prompt sent into a held blocking wait,
-    /// which the shell auto-routes onto send-now). The running turn's imminent
-    /// cancel is the silent half of cancel-and-send, so the turn-end rails
-    /// suppress the "Turn cancelled by user …" marker.
+    /// Send-now cancel expectation: the client-minted id of an explicit
+    /// cancel-and-send this client dispatched into a running turn (send-now
+    /// chord / `SendPromptNow`, or queue-row "Send now"). The running turn's
+    /// imminent cancel is the silent half of cancel-and-send, so the turn-end
+    /// rails suppress the "Turn cancelled by user …" marker.
     ///
     /// Compat fallback only: a wire `_meta.cancelTrigger` on the turn end is
     /// trusted over this flag (`"send_now"` suppresses, anything else
@@ -1518,6 +1536,8 @@ pub struct AgentView {
     /// replay-window entry, so a stale expectation can never eat a later real
     /// Ctrl+C marker.
     pub(crate) expect_send_now_cancel: Option<String>,
+    /// Cleared at turn start; set on the first live non-echo update. Defaults true.
+    pub(crate) front_message_committed: bool,
     /// Send-now promote: skip `scroll_to_entry_top` on next matching adoption.
     /// Survives cancel-rail `take()` of [`Self::expect_send_now_cancel`].
     pub(crate) follow_without_jump_prompt_id: Option<String>,
@@ -2173,6 +2193,61 @@ pub(crate) mod test_fixtures {
     use crate::scrollback::state::ScrollbackState;
     use agent_client_protocol as acp;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    pub(crate) fn make_followup_permission_state()
+    -> crate::views::permission_view::PermissionViewState {
+        let (response_tx, _rx) = tokio::sync::oneshot::channel();
+        let request = agent_client_protocol::RequestPermissionRequest::new(
+            agent_client_protocol::SessionId::new(std::sync::Arc::from("test")),
+            agent_client_protocol::ToolCallUpdate::new(
+                agent_client_protocol::ToolCallId::new(std::sync::Arc::from("call-1")),
+                agent_client_protocol::ToolCallUpdateFields::default(),
+            ),
+            vec![],
+        );
+        let perm = xai_acp_lib::AcpArgs {
+            request,
+            response_tx,
+        };
+        crate::views::permission_view::PermissionViewState {
+            request: perm,
+            id: 0,
+            focus: crate::views::permission_view::PermissionFocus::FollowupInput,
+            options: vec![],
+            active_idx: 0,
+            bash_highlights: None,
+            bash_selection_count: 0,
+            bash_command_raw: None,
+            mcp_scope: None,
+            title: String::new(),
+            description: vec![],
+            args_expanded: false,
+            desc_scroll: 0,
+            subagent_label: None,
+            options_area_height: 0,
+            options_scroll_offset: 0,
+        }
+    }
+    pub(crate) fn make_plan_approval_view_state()
+    -> crate::views::plan_approval_view::PlanApprovalViewState {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-1".into(),
+            plan_content: Some("# Plan\n\n## Step 1\nDo something".into()),
+        };
+        crate::views::plan_approval_view::PlanApprovalViewState::new(
+            request,
+            crate::views::prompt_widget::StashedPrompt {
+                text: String::new(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        )
+    }
     /// Drive the agent's tracker into a task-output wait via the real update
     /// path. `timeout_ms > 0` advertises a blocking (sendable/parked) wait;
     /// `0` is an instant poll that must NOT advertise one.
@@ -2189,6 +2264,7 @@ pub(crate) mod test_fixtures {
         use crate::acp::meta::NotificationMeta;
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         use std::sync::Arc;
+        agent.front_message_committed = true;
         let meta = NotificationMeta::default();
         agent.session.handle_update(
             acp::SessionUpdate::ToolCall(
@@ -2263,6 +2339,7 @@ pub(crate) mod test_fixtures {
         use crate::acp::meta::NotificationMeta;
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         use std::sync::Arc;
+        agent.front_message_committed = true;
         let meta = NotificationMeta::default();
         agent.session.handle_update(
             acp::SessionUpdate::ToolCall(
@@ -2296,6 +2373,7 @@ pub(crate) mod test_fixtures {
         use crate::acp::meta::NotificationMeta;
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         use std::sync::Arc;
+        agent.front_message_committed = true;
         let meta = NotificationMeta::default();
         agent.session.handle_update(
             acp::SessionUpdate::ToolCall(

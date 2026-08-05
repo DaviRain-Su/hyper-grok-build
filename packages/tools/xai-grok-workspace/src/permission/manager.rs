@@ -7,7 +7,10 @@ use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 
-use crate::permission::auto_mode::{EnvRisk, KUBECTL_UNSAFE_FLAGS, script_env_risk};
+use crate::permission::auto_mode::{
+    BashSecurityAssessment, ClassifierSecurityFinding, EnvRisk, KUBECTL_UNSAFE_FLAGS,
+    script_env_risk,
+};
 use crate::permission::bash_command_splitting::{
     is_setup_command, try_parse_shell, try_parse_word_only_commands_sequence, unwrap_wrappers,
 };
@@ -45,7 +48,6 @@ pub(crate) mod reasons {
     pub const SHELL_FILE_GATE_ASK: &str = "shell_file_gate_ask";
     pub const AUTO_FAST_PATH: &str = "auto_fast_path";
     pub const AUTO_CLASSIFIER_ALLOW: &str = "auto_classifier_allow";
-    pub const AUTO_CLASSIFIER_BLOCK: &str = "auto_classifier_block";
     pub const AUTO_CLASSIFIER_DENY: &str = "auto_classifier_deny";
     pub const AUTO_CLASSIFIER_TIMEOUT: &str = "auto_classifier_timeout";
     pub const AUTO_CLASSIFIER_UNAVAILABLE: &str = "auto_classifier_unavailable";
@@ -554,7 +556,6 @@ pub(crate) enum SegmentEvaluation {
     NeedsPrompts {
         #[allow(dead_code)]
         segments: Vec<String>,
-        any_dangerous: bool,
     },
     /// Tree-sitter could not decompose the script (heredoc, `$(…)`,
     /// backtick, single `&` background, …). Caller should fall back to a
@@ -566,12 +567,12 @@ pub(crate) enum SegmentEvaluation {
 #[derive(Debug)]
 struct BashEvaluation {
     segments: SegmentEvaluation,
-    writes_real_file: bool,
-    env_risk: EnvRisk,
     exact_grant: bool,
     all_segments_granted: bool,
-    has_opaque_shell: bool,
-    exec_risk: bool,
+    /// Canonical, ordered, deduplicated security findings for this request — the
+    /// single source for grant/sandbox floor disposition and classifier
+    /// evidence. `ExecOrAmbientGit` may be added later by the ambient git scan.
+    assessment: BashSecurityAssessment,
     /// Raw segment word lists for ambient cwd tracking (git present, flags clean).
     ambient_segments: Option<Vec<Vec<String>>>,
 }
@@ -582,49 +583,70 @@ fn unparseable_exec_risk(cmd: &str) -> bool {
     script_may_invoke_git(cmd)
 }
 
+/// Map an unsafe-environment risk tier to its finding (safe → none).
+fn env_risk_finding(env_risk: EnvRisk) -> Option<ClassifierSecurityFinding> {
+    match env_risk {
+        EnvRisk::Injection => Some(ClassifierSecurityFinding::EnvInjection),
+        EnvRisk::Unvetted => Some(ClassifierSecurityFinding::UnvettedEnv),
+        EnvRisk::Safe => None,
+    }
+}
+
 /// Parse and classify one Bash request once, keeping ordinary segment outcome
 /// separate from the script-level real-file-write and unsafe-environment floors.
 fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> BashEvaluation {
+    use ClassifierSecurityFinding as Finding;
     let exact_grant = state.allowed_bash_commands.contains(cmd);
+    let mut assessment = BashSecurityAssessment::default();
     let Some(tree) = try_parse_shell(cmd) else {
+        // Undecomposable at the top level: unparseable structure, plus fail
+        // closed on ambient git exec risk (word-only decomposition never ran).
+        assessment.insert(Finding::UnparseableShell);
+        if unparseable_exec_risk(cmd) {
+            assessment.insert(Finding::ExecOrAmbientGit);
+        }
         return BashEvaluation {
             segments: SegmentEvaluation::Unparseable,
-            writes_real_file: false,
-            env_risk: EnvRisk::Safe,
             exact_grant,
             all_segments_granted: false,
-            has_opaque_shell: false,
-            exec_risk: unparseable_exec_risk(cmd),
+            assessment,
             ambient_segments: None,
         };
     };
-    let writes_real_file = command_write_paths_in_tree(tree.root_node(), cmd)
+    if command_write_paths_in_tree(tree.root_node(), cmd)
         .into_iter()
-        .any(|path| !is_safe_write_sink(&path));
+        .any(|path| !is_safe_write_sink(&path))
+    {
+        assessment.insert(Finding::FileWrite);
+    }
     let segments = try_parse_word_only_commands_sequence(&tree, cmd);
-    let env_risk = script_env_risk(
+    if let Some(finding) = env_risk_finding(script_env_risk(
         tree.root_node(),
         cmd,
         segments.as_deref().unwrap_or_default(),
-    );
+    )) {
+        assessment.insert(finding);
+    }
     let Some(segments) = segments else {
         // WHY: undecomposable dynamic `bash -c "$X"`/`eval` is still opaque shell.
+        assessment.insert(Finding::UnparseableShell);
+        if tree_has_opaque_shell(tree.root_node(), cmd) {
+            assessment.insert(Finding::OpaqueShell);
+        }
+        if unparseable_exec_risk(cmd) {
+            assessment.insert(Finding::ExecOrAmbientGit);
+        }
         return BashEvaluation {
             segments: SegmentEvaluation::Unparseable,
-            writes_real_file,
-            env_risk,
             exact_grant,
             all_segments_granted: false,
-            has_opaque_shell: tree_has_opaque_shell(tree.root_node(), cmd),
-            exec_risk: unparseable_exec_risk(cmd),
+            assessment,
             ambient_segments: None,
         };
     };
     let mut needs_prompt: Vec<String> = Vec::new();
-    let mut any_dangerous = false;
     let mut via_session_grant = false;
     let mut all_segments_granted = true;
-    let mut has_opaque_shell = false;
     let mut exec_risk = false;
     let mut has_git_command = false;
     let mut ambient_raw: Vec<Vec<String>> = Vec::new();
@@ -638,12 +660,13 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         let words = unwrap_wrappers(raw_words);
         let shell_words: Vec<ShellWord<'_>> = words.iter().map(ShellWord::from).collect();
         if words_are_opaque_shell(&shell_words) {
-            has_opaque_shell = true;
+            assessment.insert(Finding::OpaqueShell);
         }
         // Raw words: interleaved normalize lives in segment_exec_facts.
         let facts = segment_exec_facts(raw_words);
         if facts.exec_risk {
             exec_risk = true;
+            assessment.insert(Finding::ExecOrAmbientGit);
         }
         if facts.has_git {
             has_git_command = true;
@@ -663,12 +686,9 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
                 segments: SegmentEvaluation::Reject(format!(
                     "User previously rejected `{d}` for this session"
                 )),
-                writes_real_file,
-                env_risk,
                 exact_grant,
                 all_segments_granted,
-                has_opaque_shell,
-                exec_risk,
+                assessment: std::mem::take(&mut assessment),
                 ambient_segments: None,
             };
         }
@@ -687,7 +707,7 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         //    would otherwise match. This preserves the historical invariant
         //    that `is_dangerous_command` took precedence over auto-allow.
         if is_dangerous_command_words(words) {
-            any_dangerous = true;
+            assessment.insert(Finding::DangerousCommand);
             needs_prompt.push(s);
             continue;
         }
@@ -695,11 +715,11 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         // kubectl config/auth flags, `rg --pre`, env-dumping `ps` (BSD
         // `e`/`E`), and git driver/write options (`--textconv`, `--filters`,
         // `--output`, `--ext-diff`, `grep -O`) must prompt even under a
-        // whitelist *prefix* grant. Always-allow persists only the verb prefix
-        // (e.g. "kubectl get", "git cat-file", or a bare "ps" from approving
-        // `ps aux`), so it cannot be trusted to auto-allow these
+        // whitelist *prefix* / blanket grant. Always-allow persists only the
+        // verb prefix (e.g. "kubectl get", "git cat-file", or a bare "ps" from
+        // approving `ps aux`), so it cannot be trusted to auto-allow these
         // secret-exposing / exec-capable variants (H1 #3877754). An exact
-        // segment grant still auto-allows below. Do NOT set any_dangerous —
+        // segment grant still auto-allows below. Do NOT insert DangerousCommand —
         // that would also block exact grants.
         if (kubectl_has_unsafe_flag(words)
             || rg_has_pre_flag(words)
@@ -707,6 +727,7 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             || git_words_have_unsafe_query_option(words))
             && !state.allowed_bash_commands.contains(&s)
         {
+            assessment.insert(Finding::SpecialExecSurface);
             needs_prompt.push(s);
             continue;
         }
@@ -730,7 +751,6 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
     } else {
         SegmentEvaluation::NeedsPrompts {
             segments: needs_prompt,
-            any_dangerous,
         }
     };
     let ambient_segments = if has_git_command && !exec_risk {
@@ -740,12 +760,9 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
     };
     BashEvaluation {
         segments,
-        writes_real_file,
-        env_risk,
         exact_grant,
         all_segments_granted,
-        has_opaque_shell,
-        exec_risk,
+        assessment,
         ambient_segments,
     }
 }
@@ -1031,55 +1048,35 @@ fn persisted_bash_auto_allows(
     (state.allow_bash_execute && yolo_pin.is_none()) || state.allowed_bash_commands.contains(cmd)
 }
 
-fn bash_write_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
-    evaluation.is_some_and(|evaluation| evaluation.writes_real_file && !evaluation.exact_grant)
-}
-
-fn bash_unsafe_env_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
-    evaluation
-        .is_some_and(|evaluation| evaluation.env_risk != EnvRisk::Safe && !evaluation.exact_grant)
-}
-
-fn bash_opaque_shell_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
-    evaluation.is_some_and(|evaluation| evaluation.has_opaque_shell && !evaluation.exact_grant)
-}
-
-fn bash_exec_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
-    evaluation.is_some_and(|evaluation| evaluation.exec_risk && !evaluation.exact_grant)
-}
-
+/// A broad grant (session `allow_bash_execute` blanket, prefix/glob grant,
+/// sandbox auto-allow, or a broad configured policy Allow deferred to the
+/// confirmation floor) must prompt rather than auto-allow when the request's
+/// assessment carries a grant-floor finding. An exact whole-command grant is
+/// explicit user authority and bypasses this. Delegates to the single canonical
+/// [`BashSecurityAssessment`] — no re-derivation of per-effect fields.
 fn bash_request_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
-    bash_write_floor_requires_prompt(evaluation)
-        || bash_unsafe_env_floor_requires_prompt(evaluation)
-        || bash_opaque_shell_floor_requires_prompt(evaluation)
-        || bash_exec_floor_requires_prompt(evaluation)
+    evaluation.is_some_and(|e| !e.exact_grant && e.assessment.constrains_broad_grant())
 }
 
-/// Floors that consult the auto-mode classifier before prompting instead of
-/// hard-prompting: unvetted env assignments and real-file writes (auto mode
-/// already accepts the same mutations via the Edit tool, so a redirect like
-/// `printf … >> notes.md` gets the classifier's judgment rather than an
-/// unconditional prompt). Injection env, opaque shells, exec-risk flags, and
-/// dangerous segments (`rm`/`chmod`/`kill`/`git push`/… — whose operands also
-/// count as real-file writes, e.g. `rm -rf /`) never defer, and a deferred
-/// Block still prompts — never a silent deny.
-fn bash_request_floor_defers_to_classifier(evaluation: Option<&BashEvaluation>) -> bool {
-    evaluation.is_some_and(|evaluation| {
-        !evaluation.has_opaque_shell
-            && !evaluation.exec_risk
-            && !matches!(
-                evaluation.segments,
-                SegmentEvaluation::NeedsPrompts {
-                    any_dangerous: true,
-                    ..
-                }
-            )
-            && match evaluation.env_risk {
-                EnvRisk::Safe => evaluation.writes_real_file,
-                EnvRisk::Unvetted => true,
-                EnvRisk::Injection => false,
-            }
-    })
+/// A request has no static-analysis findings at all — the only case where a
+/// broad configured policy Allow may bypass the classifier. Non-Bash access has
+/// no Bash findings and is always clear here.
+fn bash_assessment_is_clear(evaluation: Option<&BashEvaluation>) -> bool {
+    evaluation.is_none_or(|e| e.assessment.is_empty())
+}
+
+/// The trusted classifier assessment for one request: the request's canonical
+/// findings plus the managed-policy fail-closed finding when a gate could not
+/// decompose the command to match a rule. Non-Bash access carries no findings.
+fn classifier_assessment(
+    evaluation: Option<&BashEvaluation>,
+    fail_closed_policy: bool,
+) -> BashSecurityAssessment {
+    let mut assessment = evaluation.map(|e| e.assessment.clone()).unwrap_or_default();
+    if fail_closed_policy {
+        assessment.insert(ClassifierSecurityFinding::FailClosedPolicy);
+    }
+    assessment
 }
 
 fn sandbox_may_auto_allow_bash(evaluation: Option<&BashEvaluation>, sandbox_active: bool) -> bool {
@@ -1144,8 +1141,13 @@ fn bash_grant_pre_decision(
                 })
             }
         }
-        SegmentEvaluation::NeedsPrompts { any_dangerous, .. } => {
-            if !opts.allow_blanket || (*any_dangerous && opts.conservative_blanket) {
+        SegmentEvaluation::NeedsPrompts { .. } => {
+            if !opts.allow_blanket
+                || (opts.conservative_blanket
+                    && evaluation
+                        .assessment
+                        .contains(ClassifierSecurityFinding::DangerousCommand))
+            {
                 None
             } else {
                 persisted_bash_auto_allows(state, cmd, yolo_pin)
@@ -1615,7 +1617,9 @@ fn spawn_permission_manager_with_pin(
                                     continue;
                                 }
                                 if ambient_risk {
-                                    evaluation.exec_risk = true;
+                                    evaluation
+                                        .assessment
+                                        .insert(ClassifierSecurityFinding::ExecOrAmbientGit);
                                 }
                             }
                             Some(evaluation)
@@ -1708,11 +1712,15 @@ fn spawn_permission_manager_with_pin(
                         continue;
                     }
 
+                    // A broad configured policy Allow (e.g. `Bash(*)`) may only
+                    // skip the classifier when the request has NO findings; a
+                    // dangerous/special/other finding sends it to the classifier
+                    // so a broad allow cannot bypass HackerOne detections.
                     if auto_mode
                         && !policy_forced_prompt
                         && !shell_forced_prompt
                         && protected_edit.is_none()
-                        && !bash_request_floor_requires_prompt(bash_evaluation.as_ref())
+                        && bash_assessment_is_clear(bash_evaluation.as_ref())
                         && matches!(policy_decision, Some(Decision::Allow))
                     {
                         tracing::info!(
@@ -1728,16 +1736,11 @@ fn spawn_permission_manager_with_pin(
 
                     // Auto mode: classifier + fast-paths (not silent always-approve).
                     // Policy deny already handled; forced Ask falls through unless
-                    // fast-path/classifier allows. Policy Ask still prompts below
-                    // unless auto fast-path/classifier decides first for non-forced
-                    // paths; policy Asks and Bash request floors skip auto entirely
-                    // unless they defer (fail-closed gate Ask / unvetted-env /
-                    // real-file write floors).
-                    if auto_mode
-                        && preflight.admits_auto_classifier()
-                        && (!bash_request_floor_requires_prompt(bash_evaluation.as_ref())
-                            || bash_request_floor_defers_to_classifier(bash_evaluation.as_ref()))
-                    {
+                    // fast-path/classifier allows. Every built-in Bash floor now
+                    // routes through the classifier with typed findings as
+                    // evidence; only an actual rule-match Ask (never a fail-closed
+                    // one) keeps the classifier out via `admits_auto_classifier`.
+                    if auto_mode && preflight.admits_auto_classifier() {
                         use crate::permission::auto_mode::{
                             AutoFastPath, ClassifierVerdict, access_requires_user_interaction,
                             auto_mode_fast_path,
@@ -1778,6 +1781,10 @@ fn spawn_permission_manager_with_pin(
                                     use crate::permission::auto_mode::ClassifierContext;
                                     let mut turns = classifier_turns.clone();
                                     turns.extend(recorded_permission_decisions.iter().cloned());
+                                    let security_findings = classifier_assessment(
+                                        bash_evaluation.as_ref(),
+                                        preflight.defers_gate_ask(),
+                                    );
                                     let classify = clf.classify(
                                         &tool_name,
                                         &access,
@@ -1785,6 +1792,7 @@ fn spawn_permission_manager_with_pin(
                                         ClassifierContext {
                                             turns,
                                             project_instructions: project_instructions.clone(),
+                                            security_findings,
                                         },
                                     );
                                     tokio::select! {
@@ -1843,22 +1851,10 @@ fn spawn_permission_manager_with_pin(
                                         let _ = respond_to.send(decision);
                                         continue;
                                     }
-                                    // Deferred gate Asks and floor deferrals stay
-                                    // prompt-binding on a Block: never a silent deny,
-                                    // no denial-budget consumption.
-                                    ClassifierVerdict::Block
-                                        if preflight.defers_gate_ask()
-                                            || bash_request_floor_requires_prompt(
-                                                bash_evaluation.as_ref(),
-                                            ) =>
-                                    {
-                                        tracing::info!(
-                                            tool = %tool_name,
-                                            "auto mode: classifier declined deferred command — prompting user"
-                                        );
-                                        auto_forced_prompt = true;
-                                        auto_prompt_reason = Some(reasons::AUTO_CLASSIFIER_BLOCK);
-                                    }
+                                    // A classifier Block on any built-in Bash
+                                    // finding (or fail-closed gate Ask) follows the
+                                    // ordinary Auto denial semantics: deny within
+                                    // the budget, then escalate to a prompt.
                                     ClassifierVerdict::Block
                                         if auto_consecutive_denials
                                             < AUTO_DENY_CONSECUTIVE_LIMIT
@@ -1963,8 +1959,12 @@ fn spawn_permission_manager_with_pin(
                         }
                         Some(Decision::Allow)
                             if protected_edit.is_some()
+                                || auto_forced_prompt
                                 || bash_request_floor_requires_prompt(bash_evaluation.as_ref()) =>
                         {
+                            // Auto forced a prompt (classifier timeout/unavailable/
+                            // denial-limit on a findings-bearing command): a broad
+                            // policy Allow must not silently override it.
                             tracing::info!(
                                 tool = ?tool_name,
                                 source = "policy",
@@ -2149,15 +2149,21 @@ fn spawn_permission_manager_with_pin(
                     // The preflight owns the policy/gate labels (a deferred Ask that
                     // reached the classifier reports the classifier outcome); the
                     // bash floors are the fallback triggers.
-                    let prompt_trigger = preflight.prompt_trigger(auto_prompt_reason).unwrap_or(
-                        if bash_opaque_shell_floor_requires_prompt(bash_evaluation.as_ref()) {
-                            reasons::OPAQUE_SHELL
-                        } else if bash_request_floor_requires_prompt(bash_evaluation.as_ref()) {
-                            reasons::BASH_REQUEST_FLOOR
-                        } else {
-                            reasons::NEEDS_USER
-                        },
-                    );
+                    let opaque_floor = bash_evaluation.as_ref().is_some_and(|e| {
+                        !e.exact_grant
+                            && e.assessment
+                                .contains(ClassifierSecurityFinding::OpaqueShell)
+                    });
+                    let prompt_trigger =
+                        preflight
+                            .prompt_trigger(auto_prompt_reason)
+                            .unwrap_or(if opaque_floor {
+                                reasons::OPAQUE_SHELL
+                            } else if bash_request_floor_requires_prompt(bash_evaluation.as_ref()) {
+                                reasons::BASH_REQUEST_FLOOR
+                            } else {
+                                reasons::NEEDS_USER
+                            });
                     if respond_to.is_closed() {
                         tracing::info!(tool = %tool_name, "permission requester gone; prompt suppressed");
                         emit_event(
@@ -4371,8 +4377,12 @@ mod tests {
                 .await;
         }
 
+        /// A fail-closed gate Ask reaches the classifier with a
+        /// `fail_closed_policy` finding; a Block follows the ordinary Auto
+        /// denial semantics (deny within budget, no prompt yet).
         #[tokio::test]
-        async fn deferred_classifier_block_prompts_without_budget() {
+        async fn fail_closed_gate_ask_classifier_block_denies_within_budget() {
+            use crate::permission::auto_mode::ClassifierSecurityFinding;
             let local = tokio::task::LocalSet::new();
             local
                 .run_until(async {
@@ -4392,22 +4402,23 @@ mod tests {
 
                     let d = request(&mgr, AccessKind::Bash("echo \"build $(date)\"".into())).await;
                     assert!(
-                        matches!(d, Decision::Reject(_)),
-                        "deferred Block must prompt (answered reject-once), got {d:?}"
+                        matches!(d, Decision::PolicyDeny(_)),
+                        "Block within budget must deny-and-continue, got {d:?}"
                     );
-                    assert_eq!(prompts.borrow().len(), 1);
+                    assert_eq!(prompts.borrow().len(), 0);
                     assert_eq!(seen.lock().unwrap().len(), 1);
+                    assert!(
+                        seen.lock().unwrap()[0]
+                            .security_findings
+                            .contains(ClassifierSecurityFinding::FailClosedPolicy),
+                        "the classifier must see the fail_closed_policy finding"
+                    );
                     let ev = events.try_recv().expect("event must be emitted");
                     assert_eq!(
                         ev.decision_reason.as_deref(),
-                        Some(reasons::AUTO_CLASSIFIER_BLOCK)
+                        Some(reasons::AUTO_CLASSIFIER_DENY)
                     );
-                    assert!(ev.user_prompted);
-                    assert_eq!(
-                        ev.auto_denials_total,
-                        Some(0),
-                        "deferred Block must not consume denial budget"
-                    );
+                    assert_eq!(ev.auto_denials_total, Some(1));
                 })
                 .await;
         }
@@ -4457,11 +4468,12 @@ mod tests {
                 .await;
         }
 
-        /// A deferrable fail-closed gate Ask on an opaque `bash -c "$X"` must
-        /// still hard-prompt (`opaque_shell`) with zero classifier calls: the
-        /// floor outranks gate-ask deferral.
+        /// An opaque `bash -c "$X"` now routes through the classifier with an
+        /// `opaque_shell` finding (plus `unparseable_shell` for the
+        /// undecomposable form); a classifier Allow runs it.
         #[tokio::test]
-        async fn opaque_shell_floor_outranks_gate_ask_deferral() {
+        async fn opaque_shell_reaches_classifier_with_finding() {
+            use crate::permission::auto_mode::ClassifierSecurityFinding;
             let local = tokio::task::LocalSet::new();
             local
                 .run_until(async {
@@ -4479,21 +4491,22 @@ mod tests {
                     let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                     mgr.set_classifier(Some(clf));
 
-                    // `"$X"` is undecomposable, so the gate is a deferrable Ask.
                     let d = request(&mgr, AccessKind::Bash("bash -c \"$X\"".into())).await;
                     assert!(
-                        matches!(d, Decision::Reject(_)),
-                        "opaque bash -c must hard prompt, got {d:?}"
+                        matches!(d, Decision::Allow),
+                        "classifier Allow must run, got {d:?}"
                     );
-                    assert_eq!(prompts.borrow().len(), 1);
-                    assert_eq!(
-                        seen.lock().unwrap().len(),
-                        0,
-                        "opaque shell must never reach the classifier"
-                    );
+                    assert_eq!(prompts.borrow().len(), 0);
+                    assert_eq!(seen.lock().unwrap().len(), 1);
+                    let findings = seen.lock().unwrap()[0].security_findings.clone();
+                    assert!(findings.contains(ClassifierSecurityFinding::OpaqueShell));
+                    assert!(findings.contains(ClassifierSecurityFinding::UnparseableShell));
                     let ev = events.try_recv().expect("event must be emitted");
-                    assert_eq!(ev.decision_reason.as_deref(), Some(reasons::OPAQUE_SHELL));
-                    assert!(ev.user_prompted);
+                    assert_eq!(
+                        ev.decision_reason.as_deref(),
+                        Some(reasons::AUTO_CLASSIFIER_ALLOW)
+                    );
+                    assert!(ev.auto_approved && !ev.user_prompted);
                 })
                 .await;
         }
@@ -4526,6 +4539,142 @@ mod tests {
                     assert_eq!(ev.decision_reason.as_deref(), Some(reasons::POLICY_DENY));
                     assert_eq!(prompts.borrow().len(), 0);
                     assert_eq!(seen.lock().unwrap().len(), 0);
+                })
+                .await;
+        }
+
+        /// A blanket `allow_bash_execute` grant must not cross a special
+        /// exec/disclosure surface: each HackerOne shape reaches the classifier
+        /// once with `SpecialExecSurface` rather than auto-allowing.
+        #[tokio::test]
+        async fn blanket_grant_cannot_cross_special_exec_surface() {
+            use crate::permission::auto_mode::ClassifierSecurityFinding::SpecialExecSurface;
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    for cmd in [
+                        "kubectl get pods --kubeconfig=/tmp/evil.yaml",
+                        "rg --pre ./pre.sh TODO .",
+                        "ps auxe",
+                        "git cat-file --textconv HEAD:x",
+                    ] {
+                        let tmp = tempfile::tempdir().unwrap();
+                        let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                        let seeded = PermissionState {
+                            allow_bash_execute: true,
+                            ..Default::default()
+                        };
+                        persist_state(&cwd, &seeded, None).await;
+                        let client = RecordingClient::default();
+                        let prompts = client.prompts.clone();
+                        let (mgr, _events) = manager_with_recording_client(
+                            &cwd,
+                            None,
+                            client,
+                            ClientType::GrokPager,
+                        );
+                        mgr.set_auto_mode(true);
+                        let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
+                        mgr.set_classifier(Some(clf));
+
+                        let d = request(&mgr, AccessKind::Bash(cmd.into())).await;
+                        assert!(matches!(d, Decision::Allow), "{cmd}: {d:?}");
+                        assert_eq!(seen.lock().unwrap().len(), 1, "{cmd}: one classifier call");
+                        assert!(
+                            seen.lock().unwrap()[0]
+                                .security_findings
+                                .contains(SpecialExecSurface),
+                            "{cmd}: blanket grant must not skip the special-surface finding"
+                        );
+                        assert_eq!(prompts.borrow().len(), 0, "{cmd}");
+                    }
+                })
+                .await;
+        }
+
+        /// A broad configured `Bash(*)` Allow must not bypass the classifier for
+        /// findings-bearing commands: dangerous/special segments reach the
+        /// classifier once carrying their finding.
+        #[tokio::test]
+        async fn broad_policy_allow_cannot_bypass_findings() {
+            use crate::permission::auto_mode::ClassifierSecurityFinding::{
+                DangerousCommand, SpecialExecSurface,
+            };
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    for (cmd, finding) in [
+                        ("chmod -R 777 /etc", DangerousCommand),
+                        ("kill -9 1", DangerousCommand),
+                        ("git push --force origin main", DangerousCommand),
+                        (
+                            "kubectl get pods --kubeconfig=/tmp/evil.yaml",
+                            SpecialExecSurface,
+                        ),
+                    ] {
+                        let tmp = tempfile::tempdir().unwrap();
+                        let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                        let config = PermissionConfig::new(vec![rule(
+                            RuleAction::Allow,
+                            ToolFilter::Bash,
+                            "*",
+                        )]);
+                        let client = RecordingClient::default();
+                        let prompts = client.prompts.clone();
+                        let (mgr, _events) = manager_with_recording_client(
+                            &cwd,
+                            Some(config),
+                            client,
+                            ClientType::Generic,
+                        );
+                        mgr.set_auto_mode(true);
+                        let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
+                        mgr.set_classifier(Some(clf));
+
+                        let d = request(&mgr, AccessKind::Bash(cmd.into())).await;
+                        assert!(matches!(d, Decision::Allow), "{cmd}: {d:?}");
+                        assert_eq!(seen.lock().unwrap().len(), 1, "{cmd}: one classifier call");
+                        assert!(
+                            seen.lock().unwrap()[0].security_findings.contains(finding),
+                            "{cmd}: broad Allow must not skip the {finding:?} finding"
+                        );
+                        assert_eq!(prompts.borrow().len(), 0, "{cmd}");
+                    }
+                })
+                .await;
+        }
+
+        /// A findings-bearing command whose classifier returns malformed/empty
+        /// output must fail closed to a prompt (`auto_classifier_unavailable`) —
+        /// never fall back to the heuristic and silently execute or deny.
+        #[tokio::test]
+        async fn findings_bearing_malformed_classifier_output_prompts() {
+            use crate::permission::auto_mode::LlmPermissionClassifier;
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let client = RecordingClient::default();
+                    let prompts = client.prompts.clone();
+                    let (mgr, mut events) =
+                        manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                    mgr.set_auto_mode(true);
+                    mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
+                        "not valid json",
+                    )));
+
+                    let d = request(&mgr, AccessKind::Bash("cat payload >> notes.md".into())).await;
+                    assert!(
+                        matches!(d, Decision::Reject(_)),
+                        "malformed output on a flagged command must prompt, got {d:?}"
+                    );
+                    assert_eq!(prompts.borrow().len(), 1);
+                    let ev = events.try_recv().expect("event must be emitted");
+                    assert_eq!(
+                        ev.decision_reason.as_deref(),
+                        Some(reasons::AUTO_CLASSIFIER_UNAVAILABLE)
+                    );
                 })
                 .await;
         }
@@ -5088,9 +5237,12 @@ mod tests {
             .await;
     }
 
+    /// Injection-env commands now route through the classifier with an
+    /// `env_injection` finding; a classifier Allow runs them (the broader
+    /// classifier-authoritative trust boundary).
     #[tokio::test]
-    async fn auto_mode_injection_env_prompts_despite_classifier_allow() {
-        use crate::permission::auto_mode::LlmPermissionClassifier;
+    async fn auto_mode_injection_env_reaches_classifier_allow() {
+        use crate::permission::auto_mode::{ClassifierSecurityFinding, ClassifierVerdict};
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -5101,33 +5253,41 @@ mod tests {
                 let (mgr, mut events) =
                     manager_with_recording_client(&cwd, None, client, ClientType::Generic);
                 mgr.set_auto_mode(true);
-                mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
-                    r#"{"thinking":"looks fine","shouldBlock":false,"reason":"ok"}"#,
-                )));
+                let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
+                mgr.set_classifier(Some(clf));
                 for cmd in [
                     UNSAFE_GIT_STATUS,
                     "LD_PRELOAD=/tmp/e.so ls",
                     "env -i git status",
                 ] {
+                    let before = seen.lock().unwrap().len();
                     let d = mgr
                         .request(AccessKind::Bash(cmd.into()), tool_call(), None, None, None)
                         .await;
-                    assert!(matches!(d, Decision::Reject(_)), "{cmd}: {d:?}");
+                    assert!(matches!(d, Decision::Allow), "{cmd}: {d:?}");
+                    assert!(
+                        seen.lock().unwrap()[before]
+                            .security_findings
+                            .contains(ClassifierSecurityFinding::EnvInjection),
+                        "{cmd}: env_injection finding must reach the classifier"
+                    );
                     let ev = events.try_recv().expect("event must be emitted");
                     assert_eq!(
                         ev.decision_reason.as_deref(),
-                        Some("bash_request_floor"),
+                        Some(reasons::AUTO_CLASSIFIER_ALLOW),
                         "{cmd}"
                     );
                 }
-                assert_eq!(prompts.borrow().len(), 3);
+                assert_eq!(prompts.borrow().len(), 0);
             })
             .await;
     }
 
+    /// Opaque-shell commands now route through the classifier with an
+    /// `opaque_shell` finding; a classifier Allow runs them.
     #[tokio::test]
-    async fn auto_mode_opaque_shell_prompts_despite_classifier_allow() {
-        use crate::permission::auto_mode::LlmPermissionClassifier;
+    async fn auto_mode_opaque_shell_reaches_classifier_allow() {
+        use crate::permission::auto_mode::{ClassifierSecurityFinding, ClassifierVerdict};
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -5138,9 +5298,8 @@ mod tests {
                 let (mgr, mut events) =
                     manager_with_recording_client(&cwd, None, client, ClientType::Generic);
                 mgr.set_auto_mode(true);
-                mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
-                    r#"{"thinking":"looks fine","shouldBlock":false,"reason":"ok"}"#,
-                )));
+                let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
+                mgr.set_classifier(Some(clf));
                 for cmd in [
                     "bash -c 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat git status'",
                     "sh -c 'LD_PRELOAD=/x ls'",
@@ -5148,14 +5307,25 @@ mod tests {
                     "eval 'echo hi'",
                     "env bash -c 'echo hi'",
                 ] {
+                    let before = seen.lock().unwrap().len();
                     let d = mgr
                         .request(AccessKind::Bash(cmd.into()), tool_call(), None, None, None)
                         .await;
-                    assert!(matches!(d, Decision::Reject(_)), "{cmd}: {d:?}");
+                    assert!(matches!(d, Decision::Allow), "{cmd}: {d:?}");
+                    assert!(
+                        seen.lock().unwrap()[before]
+                            .security_findings
+                            .contains(ClassifierSecurityFinding::OpaqueShell),
+                        "{cmd}: opaque_shell finding must reach the classifier"
+                    );
                     let ev = events.try_recv().expect("event must be emitted");
-                    assert_eq!(ev.decision_reason.as_deref(), Some("opaque_shell"), "{cmd}");
+                    assert_eq!(
+                        ev.decision_reason.as_deref(),
+                        Some(reasons::AUTO_CLASSIFIER_ALLOW),
+                        "{cmd}"
+                    );
                 }
-                assert_eq!(prompts.borrow().len(), 5);
+                assert_eq!(prompts.borrow().len(), 0);
             })
             .await;
     }
@@ -5189,43 +5359,10 @@ mod tests {
             .await;
     }
 
+    /// A classifier Block on a write-floor command follows the ordinary Auto
+    /// denial semantics: deny within budget (no prompt yet).
     #[tokio::test]
-    async fn auto_mode_write_floor_defers_to_classifier_allow() {
-        use crate::permission::auto_mode::LlmPermissionClassifier;
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let tmp = tempfile::tempdir().unwrap();
-                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let client = RecordingClient::default();
-                let prompts = client.prompts.clone();
-                let (mgr, mut events) =
-                    manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                mgr.set_auto_mode(true);
-                mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
-                    r#"{"thinking":"looks fine","shouldBlock":false,"reason":"ok"}"#,
-                )));
-                for cmd in ["V=1 cat payload > out", "printf 'done\\n' >> progress.md"] {
-                    let d = mgr
-                        .request(AccessKind::Bash(cmd.into()), tool_call(), None, None, None)
-                        .await;
-                    assert!(matches!(d, Decision::Allow), "{cmd}: {d:?}");
-                    let ev = events.try_recv().expect("event must be emitted");
-                    assert_eq!(
-                        ev.decision_reason.as_deref(),
-                        Some("auto_classifier_allow"),
-                        "{cmd}"
-                    );
-                }
-                assert_eq!(prompts.borrow().len(), 0);
-            })
-            .await;
-    }
-
-    /// A classifier Block on a deferred write floor stays prompt-binding:
-    /// the user is asked, never a silent deny.
-    #[tokio::test]
-    async fn auto_mode_write_floor_classifier_block_prompts() {
+    async fn auto_mode_write_floor_classifier_block_denies_within_budget() {
         use crate::permission::auto_mode::LlmPermissionClassifier;
         let local = tokio::task::LocalSet::new();
         local
@@ -5249,43 +5386,11 @@ mod tests {
                         None,
                     )
                     .await;
-                assert!(matches!(d, Decision::Reject(_)), "{d:?}");
+                assert!(matches!(d, Decision::PolicyDeny(_)), "{d:?}");
                 let ev = events.try_recv().expect("event must be emitted");
-                assert_eq!(ev.decision_reason.as_deref(), Some("auto_classifier_block"));
-                assert_eq!(prompts.borrow().len(), 1);
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn auto_mode_unvetted_env_classifier_block_prompts() {
-        use crate::permission::auto_mode::LlmPermissionClassifier;
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let tmp = tempfile::tempdir().unwrap();
-                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let client = RecordingClient::default();
-                let prompts = client.prompts.clone();
-                let (mgr, mut events) =
-                    manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                mgr.set_auto_mode(true);
-                mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
-                    r#"{"thinking":"suspicious","shouldBlock":true,"reason":"no"}"#,
-                )));
-                let d = mgr
-                    .request(
-                        AccessKind::Bash("CUSTOM_TOKEN=x curl-ish --post".into()),
-                        tool_call(),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                assert!(matches!(d, Decision::Reject(_)));
-                assert_eq!(prompts.borrow().len(), 1);
-                let ev = events.try_recv().expect("event must be emitted");
-                assert_eq!(ev.decision_reason.as_deref(), Some("auto_classifier_block"));
+                assert_eq!(ev.decision_reason.as_deref(), Some("auto_classifier_deny"));
+                assert_eq!(ev.auto_denials_total, Some(1));
+                assert_eq!(prompts.borrow().len(), 0);
             })
             .await;
     }
@@ -6599,16 +6704,19 @@ mod tests {
         // auto-allowed the entire chain. Per-segment evaluation must
         // surface `rm -rf` for an explicit prompt.
         let state = PermissionState::default();
-        match evaluate_bash_segments("ls && rm -rf /tmp/foo", &state) {
-            SegmentEvaluation::NeedsPrompts {
-                segments: p,
-                any_dangerous,
-            } => {
-                assert_eq!(p, vec!["rm -rf /tmp/foo".to_string()]);
-                assert!(any_dangerous, "rm -rf must set any_dangerous");
+        let evaluation = evaluate_bash("ls && rm -rf /tmp/foo", &state, true);
+        match &evaluation.segments {
+            SegmentEvaluation::NeedsPrompts { segments: p } => {
+                assert_eq!(p, &["rm -rf /tmp/foo".to_string()]);
             }
             other => panic!("expected NeedsPrompts, got {other:?}"),
         }
+        assert!(
+            evaluation
+                .assessment
+                .contains(ClassifierSecurityFinding::DangerousCommand),
+            "rm -rf must set DangerousCommand"
+        );
     }
 
     #[test]
@@ -6666,16 +6774,19 @@ mod tests {
         // the dangerous-segment prompt.
         let mut state = PermissionState::default();
         state.allowed_bash_commands.insert("cargo test".to_string());
-        match evaluate_bash_segments("cargo test && git push --force", &state) {
-            SegmentEvaluation::NeedsPrompts {
-                segments: p,
-                any_dangerous,
-            } => {
-                assert_eq!(p, vec!["git push --force".to_string()]);
-                assert!(any_dangerous, "git push must set any_dangerous");
+        let evaluation = evaluate_bash("cargo test && git push --force", &state, true);
+        match &evaluation.segments {
+            SegmentEvaluation::NeedsPrompts { segments: p } => {
+                assert_eq!(p, &["git push --force".to_string()]);
             }
             other => panic!("expected NeedsPrompts, got {other:?}"),
         }
+        assert!(
+            evaluation
+                .assessment
+                .contains(ClassifierSecurityFinding::DangerousCommand),
+            "git push must set DangerousCommand"
+        );
     }
 
     #[test]
@@ -6782,7 +6893,9 @@ mod tests {
             "> out",
         ] {
             assert!(
-                evaluate_bash(cmd, &state, true).writes_real_file,
+                evaluate_bash(cmd, &state, true)
+                    .assessment
+                    .contains(ClassifierSecurityFinding::FileWrite),
                 "real-file write must set the floor: {cmd}"
             );
         }
@@ -6791,6 +6904,7 @@ mod tests {
     #[test]
     fn exec_risk_flags_and_grants() {
         use crate::permission::exec_risk::segment_has_exec_risk_flag;
+        use ClassifierSecurityFinding::ExecOrAmbientGit;
         let state = PermissionState::default();
         for cmd in [
             "sort --compress-program=/tmp/pwn in",
@@ -6810,7 +6924,10 @@ mod tests {
             "echo git $(true)",
         ] {
             let evaluation = evaluate_bash(cmd, &state, true);
-            assert!(evaluation.exec_risk, "exec floor: {cmd}");
+            assert!(
+                evaluation.assessment.contains(ExecOrAmbientGit),
+                "exec floor: {cmd}"
+            );
             assert!(
                 bash_request_floor_requires_prompt(Some(&evaluation)),
                 "{cmd}"
@@ -6827,7 +6944,7 @@ mod tests {
             "timeout 1 command env git status",
         ] {
             let e = evaluate_bash(cmd, &state, true);
-            assert!(!e.exec_risk, "{cmd}");
+            assert!(!e.assessment.contains(ExecOrAmbientGit), "{cmd}");
             assert!(e.ambient_segments.is_some(), "{cmd}");
         }
 
@@ -6841,7 +6958,9 @@ mod tests {
             "git -C/tmp status",
         ] {
             assert!(
-                !evaluate_bash(cmd, &state, true).exec_risk,
+                !evaluate_bash(cmd, &state, true)
+                    .assessment
+                    .contains(ExecOrAmbientGit),
                 "must not flag: {cmd}"
             );
         }
@@ -6959,9 +7078,12 @@ mod tests {
             .await;
     }
 
+    /// Exec-risk commands hard-prompt outside Auto mode, but in Auto mode they
+    /// route through the classifier with an `exec_or_ambient_git` finding; a
+    /// classifier Allow runs them (broader classifier-authoritative boundary).
     #[tokio::test]
-    async fn production_exec_risk_prompts_default_and_auto() {
-        use crate::permission::auto_mode::LlmPermissionClassifier;
+    async fn production_exec_risk_prompts_default_but_classifies_in_auto() {
+        use crate::permission::auto_mode::{ClassifierSecurityFinding, ClassifierVerdict};
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -6981,36 +7103,63 @@ mod tests {
                     "exec git status",
                     "git status $(true)",
                 ];
-                for (auto, label) in [(false, "default"), (true, "auto")] {
-                    let client = RecordingClient::default();
-                    let prompts = client.prompts.clone();
-                    let (mgr, mut events) =
-                        manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                    if auto {
-                        mgr.set_auto_mode(true);
-                        mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
-                            r#"{"thinking":"ok","shouldBlock":false,"reason":"ok"}"#,
-                        )));
-                    }
-                    for cmd in CMDS {
-                        let d = mgr
-                            .request(
-                                AccessKind::Bash((*cmd).into()),
-                                tool_call(),
-                                None,
-                                None,
-                                None,
-                            )
-                            .await;
-                        assert!(
-                            matches!(d, Decision::Reject(_)),
-                            "{label}/{cmd}: expected prompt-reject, got {d:?}"
-                        );
-                        let ev = events.try_recv().expect("event");
-                        assert!(ev.user_prompted && !ev.auto_approved, "{label}/{cmd}");
-                    }
-                    assert_eq!(prompts.borrow().len(), CMDS.len(), "{label}");
+                // Default (non-Auto): every exec-risk command hard-prompts.
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, mut events) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                for cmd in CMDS {
+                    let d = mgr
+                        .request(
+                            AccessKind::Bash((*cmd).into()),
+                            tool_call(),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                    assert!(
+                        matches!(d, Decision::Reject(_)),
+                        "default/{cmd}: expected prompt-reject, got {d:?}"
+                    );
+                    let ev = events.try_recv().expect("event");
+                    assert!(ev.user_prompted && !ev.auto_approved, "default/{cmd}");
                 }
+                assert_eq!(prompts.borrow().len(), CMDS.len());
+
+                // Auto: each exec-risk command reaches the classifier and a
+                // classifier Allow runs it.
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, mut events) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                mgr.set_auto_mode(true);
+                let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
+                mgr.set_classifier(Some(clf));
+                for (i, cmd) in CMDS.iter().enumerate() {
+                    let d = mgr
+                        .request(
+                            AccessKind::Bash((*cmd).into()),
+                            tool_call(),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                    assert!(matches!(d, Decision::Allow), "auto/{cmd}: {d:?}");
+                    assert_eq!(seen.lock().unwrap().len(), i + 1, "auto/{cmd}");
+                    // Every exec-risk command carries an exec_or_ambient_git (or
+                    // unparseable, for `$(true)`) finding as classifier evidence.
+                    let findings = seen.lock().unwrap()[i].security_findings.clone();
+                    assert!(
+                        findings.contains(ClassifierSecurityFinding::ExecOrAmbientGit)
+                            || findings.contains(ClassifierSecurityFinding::UnparseableShell),
+                        "auto/{cmd}: expected exec/ambient-git evidence, got {findings:?}"
+                    );
+                    let ev = events.try_recv().expect("event");
+                    assert!(ev.auto_approved && !ev.user_prompted, "auto/{cmd}");
+                }
+                assert_eq!(prompts.borrow().len(), 0);
             })
             .await;
     }
@@ -7143,6 +7292,7 @@ mod tests {
 
     #[test]
     fn unsafe_environment_detection_covers_script_forms() {
+        use ClassifierSecurityFinding::{EnvInjection, UnvettedEnv};
         let state = PermissionState::default();
         for (cmd, env_risk) in [
             (UNSAFE_GIT_STATUS, EnvRisk::Injection),
@@ -7170,15 +7320,15 @@ mod tests {
             ("out=$(gh pr view 3135); echo \"$out\"", EnvRisk::Unvetted),
             ("RUST_LOG=debug git status", EnvRisk::Safe),
         ] {
-            let evaluation = evaluate_bash(cmd, &state, true);
-            assert_eq!(evaluation.env_risk, env_risk, "{cmd}");
+            // Each unsafe-env shape surfaces its typed finding; safe stays clear.
+            let a = &evaluate_bash(cmd, &state, true).assessment;
             assert_eq!(
-                bash_unsafe_env_floor_requires_prompt(Some(&evaluation)),
-                env_risk != EnvRisk::Safe,
+                a.contains(EnvInjection),
+                env_risk == EnvRisk::Injection,
                 "{cmd}"
             );
             assert_eq!(
-                bash_request_floor_defers_to_classifier(Some(&evaluation)),
+                a.contains(UnvettedEnv),
                 env_risk == EnvRisk::Unvetted,
                 "{cmd}"
             );
@@ -7187,71 +7337,74 @@ mod tests {
 
     #[test]
     fn injection_env_floor_respects_exact_grant() {
+        use ClassifierSecurityFinding::EnvInjection;
         let cmd = UNSAFE_GIT_STATUS;
         let ungranted = evaluate_bash(cmd, &PermissionState::default(), true);
-        assert_eq!(ungranted.env_risk, EnvRisk::Injection);
-        assert!(bash_unsafe_env_floor_requires_prompt(Some(&ungranted)));
-        assert!(!bash_request_floor_defers_to_classifier(Some(&ungranted)));
+        assert!(ungranted.assessment.contains(EnvInjection));
+        assert!(bash_request_floor_requires_prompt(Some(&ungranted)));
 
+        // Exact whole-command grant is user authority: the floor does not fire,
+        // so the command auto-allows rather than routing to the classifier.
         let granted_state = PermissionState {
             allowed_bash_commands: HashSet::from([cmd.to_owned()]),
             ..Default::default()
         };
         let granted = evaluate_bash(cmd, &granted_state, true);
-        assert!(!bash_unsafe_env_floor_requires_prompt(Some(&granted)));
+        assert!(granted.exact_grant);
+        assert!(!bash_request_floor_requires_prompt(Some(&granted)));
     }
 
-    /// Real-file writes defer to the auto-mode classifier on their own, but
-    /// never when combined with an injection env, opaque shell, exec risk, or
-    /// a dangerous segment.
+    /// Every built-in Bash floor surfaces a typed finding, and combined floors
+    /// surface each finding (deterministic, deduplicated).
     #[test]
-    fn write_floor_defers_to_classifier_unless_other_floors() {
+    fn floors_surface_typed_classifier_findings() {
+        use ClassifierSecurityFinding::*;
         let state = PermissionState::default();
         let write = evaluate_bash("printf 'done\\n' >> progress.md", &state, true);
-        assert!(write.writes_real_file);
+        assert_eq!(write.assessment.render_tokens(), "[file_write]");
         assert!(bash_request_floor_requires_prompt(Some(&write)));
-        assert!(bash_request_floor_defers_to_classifier(Some(&write)));
 
-        // `rm` operands are real-file writes, but a dangerous command keeps
-        // the hard prompt floor (never rides the classifier).
-        let dangerous = evaluate_bash("rm -rf /", &state, true);
-        assert!(dangerous.writes_real_file);
-        assert!(bash_request_floor_requires_prompt(Some(&dangerous)));
-        assert!(!bash_request_floor_defers_to_classifier(Some(&dangerous)));
+        // `rm` operands are real-file writes AND a dangerous command.
+        let dangerous = evaluate_bash("rm -rf /", &state, true).assessment;
+        assert!(dangerous.contains(FileWrite) && dangerous.contains(DangerousCommand));
 
-        let injection = evaluate_bash("LD_PRELOAD=/tmp/e.so cat payload > out", &state, true);
-        assert_eq!(injection.env_risk, EnvRisk::Injection);
-        assert!(!bash_request_floor_defers_to_classifier(Some(&injection)));
+        let injection =
+            evaluate_bash("LD_PRELOAD=/tmp/e.so cat payload > out", &state, true).assessment;
+        assert!(injection.contains(EnvInjection) && injection.contains(FileWrite));
 
-        let opaque = evaluate_bash("bash -c 'echo hi' > out", &state, true);
-        assert!(opaque.has_opaque_shell);
-        assert!(!bash_request_floor_defers_to_classifier(Some(&opaque)));
+        let opaque = evaluate_bash("bash -c 'echo hi' > out", &state, true).assessment;
+        assert!(opaque.contains(OpaqueShell));
 
-        let exec = evaluate_bash("git -c core.fsmonitor=/x status > out", &state, true);
-        assert!(exec.exec_risk);
-        assert!(!bash_request_floor_defers_to_classifier(Some(&exec)));
+        let exec = evaluate_bash("git -c core.fsmonitor=/x status > out", &state, true).assessment;
+        assert!(exec.contains(ExecOrAmbientGit));
+
+        // Special exec/disclosure surface (kubectl config override).
+        let special =
+            evaluate_bash("kubectl get pods --kubeconfig=/tmp/evil.yaml", &state, true).assessment;
+        assert!(special.contains(SpecialExecSurface));
     }
 
     #[test]
     fn opaque_shell_floor_and_exact_grant() {
+        use ClassifierSecurityFinding::OpaqueShell;
         let cmd = "bash -c 'GIT_CONFIG_COUNT=1 git status'";
         let ungranted = evaluate_bash(cmd, &PermissionState::default(), true);
-        assert!(ungranted.has_opaque_shell);
-        assert_eq!(ungranted.env_risk, EnvRisk::Safe);
-        assert!(bash_opaque_shell_floor_requires_prompt(Some(&ungranted)));
+        assert!(ungranted.assessment.contains(OpaqueShell));
         assert!(bash_request_floor_requires_prompt(Some(&ungranted)));
-        assert!(!bash_request_floor_defers_to_classifier(Some(&ungranted)));
 
         let granted_state = PermissionState {
             allowed_bash_commands: HashSet::from([cmd.to_owned()]),
             ..Default::default()
         };
         let granted = evaluate_bash(cmd, &granted_state, true);
-        assert!(!bash_opaque_shell_floor_requires_prompt(Some(&granted)));
+        // Finding still present, but exact grant makes the floor stand down.
+        assert!(granted.assessment.contains(OpaqueShell));
+        assert!(!bash_request_floor_requires_prompt(Some(&granted)));
     }
 
     #[test]
     fn opaque_shell_floor_only_for_inline_c_and_eval() {
+        use ClassifierSecurityFinding::OpaqueShell;
         let state = PermissionState::default();
         // Positive: supported -c shapes (plain, option-edge, wrapped) and eval.
         for cmd in [
@@ -7268,13 +7421,13 @@ mod tests {
         ] {
             let evaluation = evaluate_bash(cmd, &state, true);
             assert!(
-                evaluation.has_opaque_shell,
-                "expected opaque-shell floor for {cmd}"
+                evaluation.assessment.contains(OpaqueShell),
+                "expected opaque-shell finding for {cmd}"
             );
-            assert!(bash_opaque_shell_floor_requires_prompt(Some(&evaluation)));
+            assert!(bash_request_floor_requires_prompt(Some(&evaluation)));
         }
-        // Negative: display/script long options without -c must not hard-prompt
-        // as opaque shells (classifier may still run in auto mode).
+        // Negative: display/script long options without -c must not acquire the
+        // opaque-shell finding (classifier may still run in auto mode).
         for cmd in [
             "bash --version",
             "bash --help",
@@ -7283,17 +7436,18 @@ mod tests {
         ] {
             let evaluation = evaluate_bash(cmd, &state, true);
             assert!(
-                !evaluation.has_opaque_shell,
-                "non-inline shell form must not acquire opaque floor: {cmd}"
+                !evaluation.assessment.contains(OpaqueShell),
+                "non-inline shell form must not acquire opaque finding: {cmd}"
             );
-            assert!(!bash_opaque_shell_floor_requires_prompt(Some(&evaluation)));
         }
     }
 
     /// Opaque shell is detected on the undecomposable path (dynamic `-c`/`eval`)
-    /// and never defers; non-opaque undecomposable commands stay deferrable.
+    /// and surfaces both the `opaque_shell` and `unparseable_shell` findings;
+    /// non-opaque undecomposable commands surface only `unparseable_shell`.
     #[test]
     fn opaque_shell_floor_covers_undecomposable_inline_c_and_eval() {
+        use ClassifierSecurityFinding::{OpaqueShell, UnparseableShell};
         let state = PermissionState::default();
         for cmd in [
             "bash -c \"$X\"",
@@ -7308,15 +7462,11 @@ mod tests {
                 "expected undecomposable path for {cmd}"
             );
             assert!(
-                evaluation.has_opaque_shell,
-                "undecomposable opaque shell must trip the floor: {cmd}"
+                evaluation.assessment.contains(OpaqueShell)
+                    && evaluation.assessment.contains(UnparseableShell),
+                "opaque undecomposable shell must surface both findings: {cmd}"
             );
-            assert!(bash_opaque_shell_floor_requires_prompt(Some(&evaluation)));
             assert!(bash_request_floor_requires_prompt(Some(&evaluation)));
-            assert!(
-                !bash_request_floor_defers_to_classifier(Some(&evaluation)),
-                "opaque shell must never defer to the classifier: {cmd}"
-            );
         }
         for cmd in ["echo \"build $(date)\"", "cat \"$FILE\""] {
             let evaluation = evaluate_bash(cmd, &state, true);
@@ -7325,10 +7475,10 @@ mod tests {
                 "expected undecomposable path for {cmd}"
             );
             assert!(
-                !evaluation.has_opaque_shell,
-                "non-opaque undecomposable command must stay deferrable: {cmd}"
+                evaluation.assessment.contains(UnparseableShell)
+                    && !evaluation.assessment.contains(OpaqueShell),
+                "non-opaque undecomposable command surfaces only unparseable_shell: {cmd}"
             );
-            assert!(!bash_opaque_shell_floor_requires_prompt(Some(&evaluation)));
         }
     }
 
@@ -7346,7 +7496,11 @@ mod tests {
                 ..Default::default()
             };
             let evaluation = evaluate_bash(cmd, &state, true);
-            assert_ne!(evaluation.env_risk, EnvRisk::Safe);
+            assert!(
+                evaluation
+                    .assessment
+                    .contains(ClassifierSecurityFinding::EnvInjection)
+            );
             assert_eq!(
                 bash_grant_pre_decision(
                     cmd,
@@ -7365,7 +7519,11 @@ mod tests {
     fn write_floor_preserves_sinks_fd_dups_and_exact_decisions() {
         let state = PermissionState::default();
         for cmd in ["grep text file 2>/dev/null", "cargo check 2>&1"] {
-            assert!(!evaluate_bash(cmd, &state, true).writes_real_file);
+            assert!(
+                !evaluate_bash(cmd, &state, true)
+                    .assessment
+                    .contains(ClassifierSecurityFinding::FileWrite)
+            );
         }
 
         let cmd = "cat payload > another-file";
@@ -8058,17 +8216,18 @@ mod tests {
                     .await;
                 assert!(
                     matches!(d, Decision::Reject(_)),
-                    "dangerous rm -rf / must still prompt (floor), got {d:?}"
+                    "dangerous rm -rf / must still prompt, got {d:?}"
                 );
                 let event = events.try_recv().expect("event must be emitted");
-                // Exec-risk floors skip auto classify entirely (do not defer to
-                // the classifier); prompt_trigger is the bash request floor.
+                // The floor now routes to the classifier with findings; with no
+                // side query configured it is Unavailable and fails closed to a
+                // prompt (never a silent allow).
                 assert_eq!(
                     event.decision_reason.as_deref(),
-                    Some(reasons::BASH_REQUEST_FLOOR)
+                    Some(reasons::AUTO_CLASSIFIER_UNAVAILABLE)
                 );
-                assert!(event.classifier_source.is_none());
-                assert!(event.classifier_latency_ms.is_none());
+                assert_eq!(event.classifier_source.as_deref(), Some("heuristic"));
+                assert!(event.classifier_latency_ms.is_some());
                 assert_eq!(event.auto_denials_consecutive, Some(0));
                 assert_eq!(event.auto_denials_total, Some(0));
             })
@@ -8969,10 +9128,12 @@ mod tests {
             .await;
     }
 
-    /// Approve-all + dangerous + classifier Block must still prompt (not Allow).
+    /// Approve-all must not let a dangerous command skip the classifier: the
+    /// `dangerous_command` finding forces the model path, and a classifier Block
+    /// denies within budget (never a silent Allow via approve-all).
     #[tokio::test]
-    async fn auto_approve_all_bash_dangerous_still_prompts_on_classifier_block() {
-        use crate::permission::auto_mode::LlmPermissionClassifier;
+    async fn auto_approve_all_bash_dangerous_still_classifier_denies_on_block() {
+        use crate::permission::auto_mode::ClassifierVerdict;
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -8989,9 +9150,8 @@ mod tests {
                 let (mgr, _e) =
                     manager_with_recording_client(&cwd, None, client, ClientType::GrokPager);
                 mgr.set_auto_mode(true);
-                mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
-                    r#"{"thinking":"t","shouldBlock":true,"reason":"x"}"#,
-                )));
+                let (clf, seen) = capturing_classifier(ClassifierVerdict::Block);
+                mgr.set_classifier(Some(clf));
 
                 let d = tokio::time::timeout(
                     std::time::Duration::from_secs(5),
@@ -9006,13 +9166,20 @@ mod tests {
                 .await
                 .expect("must resolve, not hang");
                 assert!(
-                    matches!(d, Decision::Reject(_)),
-                    "dangerous + approve-all under classifier Block must prompt, got {d:?}"
+                    matches!(d, Decision::PolicyDeny(_)),
+                    "dangerous + approve-all under classifier Block must deny, got {d:?}"
+                );
+                assert_eq!(seen.lock().unwrap().len(), 1, "must reach the classifier");
+                assert!(
+                    seen.lock().unwrap()[0].security_findings.contains(
+                        crate::permission::auto_mode::ClassifierSecurityFinding::DangerousCommand
+                    ),
+                    "dangerous_command finding must reach the classifier"
                 );
                 assert_eq!(
                     prompts.borrow().len(),
-                    1,
-                    "dangerous cmd must prompt once, not silently Allow via approve-all"
+                    0,
+                    "dangerous cmd under Block denies within budget, no prompt"
                 );
             })
             .await;

@@ -295,12 +295,15 @@ impl MvpAgent {
                 h.yolo_mode,
             )
         };
+        let (title, last_turn_summary) = self
+            .resident_roster_titles
+            .borrow()
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default();
         Some(crate::agent::roster::RosterEntry {
-            title: self
-                .resident_roster_titles
-                .borrow()
-                .get(&session_id)
-                .cloned(),
+            title,
+            last_turn_summary,
             session_id,
             cwd,
             is_worktree,
@@ -336,7 +339,12 @@ impl MvpAgent {
         *self.resident_roster_titles.borrow_mut() = entries
             .iter()
             .filter(|e| e.resident)
-            .filter_map(|e| Some((e.session_id.clone(), e.title.clone()?)))
+            .map(|e| {
+                (
+                    e.session_id.clone(),
+                    (e.title.clone(), e.last_turn_summary.clone()),
+                )
+            })
             .collect();
     }
     /// Emit the final roster delta, then drop the session from all maps.

@@ -557,17 +557,6 @@ fn managed_gateway_connector_id(entry_name: &str) -> Option<&str> {
     entry_name.strip_prefix(MANAGED_GATEWAY_ENTRY_PREFIX)
 }
 
-fn should_append_disabled_mcp_placeholder(
-    name: &str,
-    catalog_names: &std::collections::HashSet<String>,
-    gateway_tools_enabled: bool,
-) -> bool {
-    if catalog_names.contains(name) {
-        return false;
-    }
-    !gateway_tools_enabled
-}
-
 fn disabled_server_placeholder_entry(name: &str) -> McpServerEntry {
     let is_managed_gateway = name.starts_with(MANAGED_GATEWAY_ENTRY_PREFIX);
     let source = if is_managed_gateway || name.starts_with(MANAGED_MCP_PREFIX) {
@@ -1053,14 +1042,22 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         });
     }
 
-    // Include disabled servers from config so they appear in the list
-    // with enabled=false and can be re-enabled by the user.
-    let catalog_names: std::collections::HashSet<String> =
-        servers.iter().map(|s| s.name.clone()).collect();
-    for name in &disabled_names {
-        if should_append_disabled_mcp_placeholder(name, &catalog_names, gateway_tools_enabled) {
-            servers.push(disabled_server_placeholder_entry(name));
-        }
+    // Disabled stubs: only names Space enable can still resolve (see
+    // `crate::util::config::mcp_reenable`). Orphans with no definition stay hidden.
+    let catalog_names: HashSet<String> = servers.iter().map(|s| s.name.clone()).collect();
+    let discovery = crate::session::managed_mcp::McpDiscoveryInputs {
+        cwd: &cwd,
+        managed_configs: &managed_configs,
+        plugin_registry: plugin_registry_snapshot.as_deref(),
+        compat: &compat,
+    };
+    let stubs = crate::util::config::reenableable_disabled_stubs(
+        &disabled_names,
+        &catalog_names,
+        &discovery,
+    );
+    for name in stubs {
+        servers.push(disabled_server_placeholder_entry(&name));
     }
 
     if let Some(snapshot) = session_snapshot {
@@ -1653,7 +1650,7 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .await
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
-    let rollback = || async {
+    let rollback_prefs = || async {
         let _ = crate::util::config::restore_mcp_preference_server(
             &req.server_name,
             previous_entry.clone(),
@@ -1661,34 +1658,103 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .await;
     };
 
+    // Presence check with personal disable ignored (no config write yet).
     let managed_configs = agent.get_managed_mcp_configs().await;
-    let all_servers_with_policy =
-        crate::session::managed_mcp::merge_managed_mcp_servers_with_policy(
-            vec![],
-            &cwd,
-            &managed_configs,
-            agent.plugin_registry_snapshot().as_deref(),
-            &agent.cfg.borrow().compat_resolved,
-        );
-    let found = match all_servers_with_policy
-        .into_iter()
-        .find(|s| crate::session::mcp_servers::mcp_server_name(&s.server) == req.server_name)
-    {
-        Some(found) => found,
+    let plugin_reg = agent.plugin_registry_snapshot();
+    let compat = agent.cfg.borrow().compat_resolved;
+    let discovery = crate::session::managed_mcp::McpDiscoveryInputs {
+        cwd: &cwd,
+        managed_configs: &managed_configs,
+        plugin_registry: plugin_reg.as_deref(),
+        compat: &compat,
+    };
+    let discovered =
+        crate::session::managed_mcp::discover_mcp_definitions_ignoring_disable(&discovery);
+    let Some(probe) = discovered.get(&req.server_name) else {
+        rollback_prefs().await;
+        return Err(acp::Error::internal_error().data("server did not resolve after setup"));
+    };
+    let allowlist = &xai_grok_workspace::permission::resolution::managed_settings().mcp_allowlist;
+    if !allowlist.is_server_allowed(probe) {
+        rollback_prefs().await;
+        let reason =
+            crate::session::managed_mcp::McpDisabledReason::for_blocked_server(allowlist, probe);
+        return Err(acp::Error::invalid_params().data(reason.to_string()));
+    }
+
+    // Clear disable only after resolve succeeds, then merge for a spawnable
+    // transport (includes managed header inject).
+    let was_disabled =
+        crate::util::config::disabled_mcp_server_names(&cwd).contains(&req.server_name);
+    let enable_paths = if was_disabled {
+        match crate::util::config::save_mcp_server_enabled_in(&req.server_name, true, &cwd).await {
+            Ok(paths) => paths,
+            Err(e) => {
+                rollback_prefs().await;
+                return Err(acp::Error::internal_error().data(format!(
+                    "failed to clear disabled MCP server entry after setup resolve: {e}"
+                )));
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let restore_disable = || async {
+        if !was_disabled {
+            return;
+        }
+        if let Err(re) = crate::util::config::restore_mcp_server_enabled_after_enable(
+            &req.server_name,
+            &enable_paths,
+        )
+        .await
+        {
+            tracing::warn!(
+                server = req.server_name.as_str(),
+                error = %re,
+                "Failed to restore MCP enable state after setup failure"
+            );
+        }
+    };
+
+    // Prefs + enable-tier restore for failures after enable wrote config.
+    let rollback_after_enable = || async {
+        rollback_prefs().await;
+        restore_disable().await;
+    };
+
+    let found = crate::session::managed_mcp::merge_managed_mcp_servers_with_policy(
+        vec![],
+        &cwd,
+        &managed_configs,
+        plugin_reg.as_deref(),
+        &compat,
+    )
+    .into_iter()
+    .find(|s| crate::session::mcp_servers::mcp_server_name(&s.server) == req.server_name);
+
+    let server = match found {
+        Some(s) if s.disabled_reason.is_none() => s.server,
+        Some(s) => {
+            rollback_after_enable().await;
+            return Err(acp::Error::invalid_params().data(
+                s.disabled_reason
+                    .map(|r| r.to_string())
+                    .unwrap_or_else(|| "blocked by organization policy".into()),
+            ));
+        }
         None => {
-            rollback().await;
+            rollback_after_enable().await;
             return Err(acp::Error::internal_error().data("server did not resolve after setup"));
         }
     };
-    if let Some(reason) = found.disabled_reason {
-        rollback().await;
-        return Err(acp::Error::invalid_params().data(reason.to_string()));
-    }
+
     if let Err(e) = handle
-        .toggle_mcp_server(req.server_name.clone(), true, Some(found.server))
+        .toggle_mcp_server(req.server_name.clone(), true, Some(server))
         .await
     {
-        rollback().await;
+        rollback_after_enable().await;
         return Err(acp::Error::internal_error().data(e.to_string()));
     }
 
@@ -2304,76 +2370,6 @@ mod tests {
         let entry = disabled_server_placeholder_entry("grok_com_slack");
         assert_eq!(entry.source, McpServerSource::Managed);
         assert!(matches!(entry.config, McpServerConfig::Stdio { .. }));
-    }
-
-    /// Mirrors `handle_list` set construction: catalog names from
-    /// `build_mcp_catalog_with_gateway_tools` (same inputs as production),
-    /// then disabled placeholders via `should_append_disabled_mcp_placeholder`.
-    fn append_disabled_like_handle_list(
-        servers: &mut Vec<McpServerEntry>,
-        disabled_names: &[&str],
-        gateway_tools_enabled: bool,
-    ) {
-        let catalog_names: std::collections::HashSet<String> =
-            servers.iter().map(|s| s.name.clone()).collect();
-        for name in disabled_names {
-            if should_append_disabled_mcp_placeholder(name, &catalog_names, gateway_tools_enabled) {
-                servers.push(disabled_server_placeholder_entry(name));
-            }
-        }
-    }
-
-    #[test]
-    fn disabled_placeholders_match_handle_list_catalog_relationships() {
-        // Empty loads (gateway on, nothing in catalog) + orphan legacy disables
-        // only in disabled_mcp_servers — production ghost-stub regression.
-        let mut servers = build_mcp_catalog_with_gateway_tools(&[], &[], None, &Default::default());
-        append_disabled_like_handle_list(
-            &mut servers,
-            &["grok_com_slack", "grok_mcp_linear"],
-            true,
-        );
-        assert!(
-            servers.is_empty(),
-            "gateway on + no catalog rows → no stubs for orphan disables"
-        );
-
-        // Same orphans with gateway off → still placeholders (legacy UX).
-        let mut servers = build_mcp_catalog_with_gateway_tools(&[], &[], None, &Default::default());
-        append_disabled_like_handle_list(&mut servers, &["grok_com_slack"], false);
-        assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].name, "grok_com_slack");
-        assert!(!servers[0].session.as_ref().unwrap().enabled);
-
-        // Name already in catalog (gateway row) → never double-append.
-        let gateway = crate::session::managed_mcp::GatewayToolCatalog {
-            tools: vec![gateway_tool(
-                "linear",
-                "Linear",
-                "list_issues",
-                "List issues",
-                "linear.list_issues",
-                "List Linear issues",
-            )],
-            total_tools: 1,
-            connectors_needing_reauth: vec![],
-        };
-        let mut servers =
-            build_mcp_catalog_with_gateway_tools(&[], &[], Some(&gateway), &Default::default());
-        let gateway_entry = managed_gateway_entry_name("linear");
-        assert!(servers.iter().any(|s| s.name == gateway_entry));
-        let before = servers.len();
-        append_disabled_like_handle_list(&mut servers, &[gateway_entry.as_str()], true);
-        append_disabled_like_handle_list(&mut servers, &[gateway_entry.as_str()], false);
-        assert_eq!(
-            servers.len(),
-            before,
-            "disabled name already in catalog must not add a second row"
-        );
-        assert_eq!(
-            servers.iter().filter(|s| s.name == gateway_entry).count(),
-            1
-        );
     }
 
     #[test]

@@ -447,12 +447,37 @@ fn assemble_diff_line_outputs(
         }];
     }
 
-    // Wrap: fall back to solid FG for wrapped segments (same as hunk-only path).
+    // Wrap: project the precomputed styles onto the wrap segments; fall back
+    // to a solid FG per segment when the projection cannot be aligned.
     let mut outputs = Vec::new();
     let gutter_padding = " ".repeat(layout.total);
     let wrapped_lines = wrap_text(&raw_content, content_width);
     let bg_start = compute_bg_start(config, layout.total, indent_width);
-    for (i, wrapped) in wrapped_lines.iter().enumerate() {
+    let styled_rows = match project_styles_onto_wrap_segments(&content_spans, &wrapped_lines) {
+        Some(rows) if rows.len() == wrapped_lines.len() => rows,
+        _ => {
+            let style = match line.tag {
+                ChangeTag::Equal => Style::default().fg(theme.diff_equal_fg),
+                ChangeTag::Delete | ChangeTag::Insert => {
+                    if theme.diff_uses_line_fg() {
+                        let fg = if line.tag == ChangeTag::Delete {
+                            theme.diff_delete_fg
+                        } else {
+                            theme.diff_insert_fg
+                        };
+                        Style::default().fg(fg)
+                    } else {
+                        Style::default().fg(theme.text_primary)
+                    }
+                }
+            };
+            wrapped_lines
+                .iter()
+                .map(|wrapped| vec![Span::styled(wrapped.clone(), style)])
+                .collect()
+        }
+    };
+    for (i, (wrapped, row)) in wrapped_lines.iter().zip(styled_rows).enumerate() {
         let mut spans = Vec::new();
         let gutter_count = if i == 0 {
             render_gutter(&mut spans, line, layout, theme, config);
@@ -461,22 +486,7 @@ fn assemble_diff_line_outputs(
             spans.push(Span::raw(gutter_padding.clone()));
             1
         };
-        let style = match line.tag {
-            ChangeTag::Equal => Style::default().fg(theme.diff_equal_fg),
-            ChangeTag::Delete | ChangeTag::Insert => {
-                if theme.diff_uses_line_fg() {
-                    let fg = if line.tag == ChangeTag::Delete {
-                        theme.diff_delete_fg
-                    } else {
-                        theme.diff_insert_fg
-                    };
-                    Style::default().fg(fg)
-                } else {
-                    Style::default().fg(theme.text_primary)
-                }
-            }
-        };
-        spans.push(Span::styled(wrapped.clone(), style));
+        spans.extend(row);
         outputs.push(DiffLineOutput {
             line: Line::from(spans),
             background: bg,
@@ -539,6 +549,48 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     }
 
     lines
+}
+
+/// Project precomputed content-span styles onto [`wrap_text`] segments.
+///
+/// Walks the source spans with a monotonic cursor, splitting only at existing
+/// span edges or wrap edges and copying each whole [`Style`] onto owned
+/// substrings, so the concat of every returned row's text equals its wrap
+/// segment. Returns `None` when the span text and the segments do not
+/// partition the same bytes (the caller keeps its solid-FG wrap path).
+fn project_styles_onto_wrap_segments(
+    content_spans: &[Span<'static>],
+    wrapped_segments: &[String],
+) -> Option<Vec<Vec<Span<'static>>>> {
+    let spans_text: String = content_spans.iter().map(|s| s.content.as_ref()).collect();
+    if spans_text != wrapped_segments.concat() {
+        return None;
+    }
+
+    let mut rows = Vec::with_capacity(wrapped_segments.len());
+    let mut span_idx = 0;
+    let mut span_byte = 0;
+    for segment in wrapped_segments {
+        let mut row = Vec::new();
+        let mut remaining = segment.len();
+        while remaining > 0 {
+            let span = content_spans.get(span_idx)?;
+            let available = span.content.len().checked_sub(span_byte)?;
+            if available == 0 {
+                span_idx += 1;
+                span_byte = 0;
+                continue;
+            }
+            let take = available.min(remaining);
+            // `get` fails closed if either edge is not a char boundary.
+            let piece = span.content.get(span_byte..span_byte + take)?;
+            row.push(Span::styled(piece.to_owned(), span.style));
+            span_byte += take;
+            remaining -= take;
+        }
+        rows.push(row);
+    }
+    Some(rows)
 }
 
 /// Gutter layout computed from a hunk and config.
@@ -2069,6 +2121,206 @@ mod tests {
         for output in &outputs {
             assert_eq!(output.background, Some(theme.diff_insert_bg));
         }
+    }
+
+    /// Wrapped diff rows must keep the precomputed syntect / FileScoped styles
+    /// instead of flattening to a solid foreground on banded themes.
+    #[test]
+    fn test_diff_reflow_preserves_banded_syntect_styles_across_wrap() {
+        let _guard = pin_groknight_syntect();
+        let theme = Theme::groknight();
+        let config = DiffRenderConfig::default();
+        let path = Path::new("probe.rs");
+        let source = "let naïve = compute(input); // café comment stretching over wraps";
+
+        fn style_stream(outputs: &[DiffLineOutput]) -> Vec<(char, Style)> {
+            outputs
+                .iter()
+                .flat_map(|o| {
+                    o.line.spans.iter().skip(o.gutter_span_count).flat_map(|s| {
+                        let style = s.style;
+                        s.content.chars().map(move |c| (c, style))
+                    })
+                })
+                .collect()
+        }
+
+        for (tag, expected_bg, label) in [
+            (ChangeTag::Insert, Some(theme.diff_insert_bg), "insert"),
+            (ChangeTag::Equal, None, "equal"),
+            (ChangeTag::Delete, Some(theme.diff_delete_bg), "delete"),
+        ] {
+            let hunk = vec![DiffLine {
+                text: format!("{source}\n"),
+                lo: if tag == ChangeTag::Insert { 0 } else { 1 },
+                ln: if tag == ChangeTag::Delete { 0 } else { 1 },
+                tag,
+            }];
+            let wide = render_diff_hunk_highlighted(&hunk, path, &theme, 120, &config);
+            assert_eq!(wide.len(), 1, "{label}: wide render must not wrap");
+            let narrow = render_diff_hunk_highlighted(&hunk, path, &theme, 30, &config);
+            assert!(narrow.len() > 1, "{label}: narrow render must wrap");
+
+            // Per-character styles survive the wrap, row 0 included.
+            let narrow_stream = style_stream(&narrow);
+            assert_eq!(
+                narrow_stream,
+                style_stream(&wide),
+                "{label}: wrapped rows must keep the unwrapped styles"
+            );
+
+            // Non-vacuous fixture: the comment is italic, the code is not.
+            assert!(
+                narrow_stream
+                    .iter()
+                    .any(|(_, st)| st.add_modifier.contains(Modifier::ITALIC)),
+                "{label}: comment chars must be italic"
+            );
+            assert!(
+                narrow_stream
+                    .iter()
+                    .any(|(_, st)| !st.add_modifier.contains(Modifier::ITALIC)),
+                "{label}: code chars must not be italic"
+            );
+
+            // Geometry is unchanged: joiners, content_text partition, painted
+            // content after the gutter, background band on every row.
+            assert_eq!(narrow[0].joiner, None, "{label}: row 0 joiner");
+            assert!(
+                narrow[1..].iter().all(|o| o.joiner == Some(String::new())),
+                "{label}: continuation joiners"
+            );
+            let joined: String = narrow.iter().map(|o| o.content_text.as_str()).collect();
+            assert_eq!(joined, source, "{label}: content_text partition");
+            for (i, output) in narrow.iter().enumerate() {
+                let painted: String = output.line.spans[output.gutter_span_count..]
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect();
+                assert_eq!(
+                    painted, output.content_text,
+                    "{label}: row {i} painted text"
+                );
+                assert_eq!(
+                    output.background, expected_bg,
+                    "{label}: row {i} background"
+                );
+            }
+        }
+
+        // FileScoped styles flow through the same projection: a style edge
+        // mid-word must survive wrapping at a different column.
+        let fs_source = "abcdef ghijkl mnopqr stuvwx yzabcd efghij";
+        let split = 17;
+        let style_a = Style::default()
+            .fg(Color::Rgb(10, 20, 30))
+            .add_modifier(Modifier::BOLD);
+        let style_b = Style::default()
+            .fg(Color::Rgb(200, 100, 50))
+            .add_modifier(Modifier::ITALIC);
+        let mut map = HashMap::new();
+        map.insert(
+            1usize,
+            vec![
+                (style_a, fs_source[..split].to_string()),
+                (style_b, fs_source[split..].to_string()),
+            ],
+        );
+        let hunk = vec![DiffLine {
+            text: format!("{fs_source}\n"),
+            lo: 0,
+            ln: 1,
+            tag: ChangeTag::Insert,
+        }];
+        let outputs = render_diff_hunks_with_styles(&[hunk], path, &map, &theme, 30, &config);
+        assert!(outputs.len() > 1, "file-scoped render must wrap");
+        let expected: Vec<(char, Style)> = fs_source
+            .chars()
+            .enumerate()
+            .map(|(i, c)| (c, if i < split { style_a } else { style_b }))
+            .collect();
+        assert_eq!(
+            style_stream(&outputs),
+            expected,
+            "file-scoped styles must survive the wrap"
+        );
+    }
+
+    /// A token wider than the content width still wraps into a single row and
+    /// must keep its styles rather than flatten to `text_primary`.
+    #[test]
+    fn test_diff_reflow_keeps_overlong_token_styles() {
+        let _guard = pin_groknight_syntect();
+        let theme = Theme::groknight();
+        let config = DiffRenderConfig::default();
+        let path = Path::new("probe.rs");
+        let source = format!("//{}", "x".repeat(40));
+        let hunk = vec![DiffLine {
+            text: format!("{source}\n"),
+            lo: 0,
+            ln: 1,
+            tag: ChangeTag::Insert,
+        }];
+
+        let outputs = render_diff_hunk_highlighted(&hunk, path, &theme, 30, &config);
+        assert_eq!(outputs.len(), 1, "overlong token must stay one row");
+        assert_eq!(outputs[0].joiner, None);
+        assert_eq!(outputs[0].content_text, source);
+        let content = &outputs[0].line.spans[outputs[0].gutter_span_count..];
+        let painted: String = content.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(painted, source);
+        assert!(
+            content
+                .iter()
+                .all(|s| s.style.add_modifier.contains(Modifier::ITALIC)),
+            "comment styles must survive the wrap branch"
+        );
+    }
+
+    /// The projection helper fails closed when the segments do not partition
+    /// the span text exactly.
+    #[test]
+    fn test_diff_style_projection_rejects_mismatched_partition() {
+        let spans = vec![Span::styled(
+            "hello world".to_string(),
+            Style::default().fg(Color::Red),
+        )];
+        // Extra byte.
+        assert!(
+            project_styles_onto_wrap_segments(
+                &spans,
+                &["hello ".to_string(), "world!".to_string()]
+            )
+            .is_none()
+        );
+        // Same length, different bytes.
+        assert!(
+            project_styles_onto_wrap_segments(&spans, &["hello ".to_string(), "wOrld".to_string()])
+                .is_none()
+        );
+        // Exact partition succeeds.
+        let rows =
+            project_styles_onto_wrap_segments(&spans, &["hello ".to_string(), "world".to_string()])
+                .expect("exact partition must project");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].content.as_ref(), "hello ");
+        assert_eq!(rows[1][0].content.as_ref(), "world");
+
+        // Empty mid-spans must be skipped without underflow/panic.
+        let with_empty = vec![
+            Span::styled("ab".to_string(), Style::default().fg(Color::Red)),
+            Span::raw(""),
+            Span::styled("cd".to_string(), Style::default().fg(Color::Blue)),
+        ];
+        let rows =
+            project_styles_onto_wrap_segments(&with_empty, &["a".to_string(), "bcd".to_string()])
+                .expect("empty mid-span must project");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect::<Vec<_>>(),
+            ["a", "bcd"]
+        );
     }
 
     #[test]
