@@ -4,6 +4,30 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.120-r1] — 2026-08-05
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `ed6d543`
+  (monorepo `SOURCE_REV` `d6937fe…`), basing this community revision on
+  upstream **0.2.120**. Notable upstream: ACP `session/resume` and
+  `session/close`, streaming session fork/copy (bounded memory), MCP image
+  extract before truncation, sandbox deny-glob large-workspace start, bearer
+  **suffix** attribution (`xai-grok-auth`), model switch during plan
+  approval, Ctrl+L shortcut telemetry, errno-safe signal handlers, workflow
+  subagent cap (16).
+
+### Fixed
+- **OpenCode Go 401 with bare wire models** — Reconstruct now resolves the
+  platform key from the request base URL (`platform/opencode` / OpenCode env)
+  before live-catalog own credentials, filters catalog hits by base URL so
+  bare slugs like `deepseek-v4-flash` cannot send `OLLAMA_API_KEY`, and drops
+  JWT-shaped chat-state keys for third-party routes.
+- **OpenCode Go JWT leak** — Third-party open-platform routes never install the
+  xAI session bearer or forward a stale OIDC JWT as an API key.
+- **WASM extensions (Pi parity path)** — `post_tool_use` observe path,
+  `register_command` for slash commands, guest rebuild / reload UX, e2e for
+  hello_wasm.
+
 ## [0.2.119-r1] — 2026-08-04
 
 ### Changed
