@@ -712,7 +712,7 @@ impl SubagentTokenRecord {
     /// report below the anchor yields 0 instead of underflowing. Shared by
     /// the single-line total ([`SessionActor::goal_tokens`]) and the
     /// per-model breakdown ([`fold_tokens_by_model`]) so they can't drift.
-    pub fn marginal(&self) -> u64 {
+    pub(crate) fn marginal(&self) -> u64 {
         self.last_cumulative_reported
             .saturating_sub(self.resume_anchor_cumulative)
     }

@@ -79,7 +79,7 @@ impl CompactCancelGate {
     /// including a token already cancelled by stop, so overlapping prefire +
     /// compact both observe the same abort. A later independent enter after
     /// holders drain installs a fresh token.
-    pub fn enter(&self) -> (tokio_util::sync::CancellationToken, CompactCancelScope<'_>) {
+    pub(crate) fn enter(&self) -> (tokio_util::sync::CancellationToken, CompactCancelScope<'_>) {
         let prev = self.holders.fetch_add(1, Ordering::AcqRel);
         let token = if prev == 0 {
             let token = tokio_util::sync::CancellationToken::new();
@@ -101,7 +101,7 @@ impl CompactCancelGate {
         }
     }
 
-    pub fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.holders.load(Ordering::Acquire) > 0 && self.token.borrow().is_cancelled()
     }
 }
@@ -137,7 +137,7 @@ impl PrefireState {
     }
 
     /// Release the in-flight slot (call exactly once after a `try_begin` win).
-    pub fn finish(&self) {
+    pub(crate) fn finish(&self) {
         self.in_flight.store(false, Ordering::Release);
     }
 
@@ -157,22 +157,22 @@ impl PrefireState {
         self.handle.borrow_mut().take()
     }
 
-    pub fn store(&self, cache: AsyncCompactionCache) {
+    pub(crate) fn store(&self, cache: AsyncCompactionCache) {
         self.cache.replace(Some(cache));
     }
 
     /// Take the cache, leaving `None`.
-    pub fn take(&self) -> Option<AsyncCompactionCache> {
+    pub(crate) fn take(&self) -> Option<AsyncCompactionCache> {
         self.cache.borrow_mut().take()
     }
 
     /// Drop any cached async pass-1 result (invalidation: model switch, rewind,
     /// apply, edits).
-    pub fn clear(&self) {
+    pub(crate) fn clear(&self) {
         self.cache.replace(None);
     }
 
-    pub fn has_cache(&self) -> bool {
+    pub(crate) fn has_cache(&self) -> bool {
         self.cache.borrow().is_some()
     }
 }

@@ -7,8 +7,9 @@ use reqwest::{Request, Response, StatusCode, header::HeaderValue};
 use reqwest_middleware::{Error, Middleware, Next};
 
 use crate::AuthCredentialProvider;
+use crate::bearer_fragment::bearer_suffix;
 
-/// Tail fragment (last [`STAMPED_BEARER_SUFFIX_LEN`] chars) of the bearer
+/// Tail fragment of the bearer
 /// this middleware stamped, recorded into the request's `http::Extensions`
 /// at stamp time. 401-attribution sites read it back via
 /// [`execute_with_stamp`] instead of re-resolving at record time, which
@@ -18,23 +19,6 @@ use crate::AuthCredentialProvider;
 /// heads are a shared constant, and the tail is safe for sinks to log.
 #[derive(Clone, Debug)]
 pub struct StampedBearerSuffix(pub String);
-
-/// Length of [`StampedBearerSuffix`]. Matches `token_suffix` in
-/// xai-grok-shell (the comparison site for 401 attribution).
-const STAMPED_BEARER_SUFFIX_LEN: usize = 12;
-
-/// Last [`STAMPED_BEARER_SUFFIX_LEN`] chars, counting chars from the end
-/// so a non-ASCII credential cannot cause a byte-boundary panic.
-fn bearer_suffix(token: &str) -> &str {
-    match token
-        .char_indices()
-        .rev()
-        .nth(STAMPED_BEARER_SUFFIX_LEN - 1)
-    {
-        Some((i, _)) => &token[i..],
-        None => token,
-    }
-}
 
 /// Execute `req` on a middleware-wrapped client and return the response
 /// together with the [`StampedBearerSuffix`] the auth middleware recorded
@@ -346,18 +330,6 @@ mod tests {
         assert_eq!(resp.status(), 401);
         assert!(stamp.is_none(), "no credential must mean no stamp");
         m.assert_async().await;
-    }
-
-    #[test]
-    fn bearer_suffix_takes_char_safe_tail() {
-        assert_eq!(
-            bearer_suffix("eyJ0eXAiOiJh.head.tail-distinct"),
-            "ail-distinct"
-        );
-        assert_eq!(bearer_suffix("short"), "short");
-        assert_eq!(bearer_suffix(""), "");
-        // 13 multi-byte chars: a byte-index cut would land mid-char.
-        assert_eq!(bearer_suffix("ééééééééééééé"), "éééééééééééé");
     }
 
     #[tokio::test]

@@ -19,7 +19,7 @@ const MAX_RESULTS: usize = 10;
 pub(crate) struct HistoryProvider;
 
 impl HistoryProvider {
-    pub async fn suggest(&self, ctx: &SuggestContext) -> Vec<RankedSuggestion> {
+    pub(crate) async fn suggest(&self, ctx: &SuggestContext) -> Vec<RankedSuggestion> {
         let prefix = ctx.prefix();
         if prefix.is_empty() {
             return Vec::new();

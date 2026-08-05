@@ -25,6 +25,7 @@ use xai_grok_shell::session::info::Info;
 use tempfile::TempDir;
 
 const BYTES_PER_MB: f64 = 1024.0 * 1024.0;
+#[cfg(feature = "dhat-heap")]
 const BYTES_PER_MB_U64: u64 = 1024 * 1024;
 
 fn file_len(path: &std::path::Path) -> u64 {
@@ -400,132 +401,10 @@ mod rss {
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
 
     use agent_client_protocol::{self as acp};
 
-    use xai_grok_test_support::resources::ResourceSnapshot;
-
-    const SAMPLE_INTERVAL_MS: u64 = 3;
-
-    /// Poll RSS from a thread; the load path is synchronous, so this is how its
-    /// peak gets captured.
-    fn spawn_rss_sampler(stop: Arc<AtomicBool>) -> std::thread::JoinHandle<usize> {
-        std::thread::spawn(move || {
-            let mut peak = ResourceSnapshot::capture_rss().unwrap_or(0);
-            while !stop.load(Ordering::Relaxed) {
-                if let Some(r) = ResourceSnapshot::capture_rss() {
-                    peak = peak.max(r);
-                }
-                std::thread::sleep(Duration::from_millis(SAMPLE_INTERVAL_MS));
-            }
-            if let Some(r) = ResourceSnapshot::capture_rss() {
-                peak = peak.max(r);
-            }
-            peak
-        })
-    }
-
-    /// Owns the RSS baseline and the background sampler for one measured load.
-    struct RssSampler {
-        baseline: Option<usize>,
-        stop: Arc<AtomicBool>,
-        handle: std::thread::JoinHandle<usize>,
-    }
-
-    impl RssSampler {
-        /// Capture the RSS baseline and start a background sampler.
-        fn start() -> Self {
-            let baseline = ResourceSnapshot::capture_rss();
-            let stop = Arc::new(AtomicBool::new(false));
-            let handle = spawn_rss_sampler(stop.clone());
-            Self {
-                baseline,
-                stop,
-                handle,
-            }
-        }
-
-        /// Stop sampling and build the outcome. Takes a final synchronous read
-        /// first as a best-effort backstop: when the caller still holds the
-        /// loaded state it pins a load that peaked and freed between the
-        /// sampler's ticks; otherwise the background sampler is the sole source.
-        fn finish(self, budget_mb: u64) -> RssOutcome {
-            let final_rss = ResourceSnapshot::capture_rss().unwrap_or(0);
-            self.stop.store(true, Ordering::Relaxed);
-            let peak_rss = self.handle.join().expect("sampler thread").max(final_rss);
-            RssOutcome {
-                baseline: self.baseline,
-                peak_rss,
-                budget_mb,
-            }
-        }
-    }
-
-    struct RssOutcome {
-        baseline: Option<usize>,
-        peak_rss: usize,
-        budget_mb: u64,
-    }
-
-    impl RssOutcome {
-        fn baseline_bytes(&self) -> usize {
-            self.baseline.unwrap_or(0)
-        }
-
-        fn measurable(&self) -> bool {
-            self.baseline.is_some() && self.peak_rss > 0
-        }
-
-        fn peak_growth_bytes(&self) -> usize {
-            self.peak_rss.saturating_sub(self.baseline_bytes())
-        }
-
-        fn budget_bytes(&self) -> u64 {
-            self.budget_mb * BYTES_PER_MB_U64
-        }
-
-        fn within_budget(&self) -> bool {
-            (self.peak_growth_bytes() as u64) < self.budget_bytes()
-        }
-
-        fn pass(&self) -> bool {
-            self.measurable() && self.within_budget()
-        }
-    }
-
-    #[test]
-    fn rss_outcome_verdict_arithmetic() {
-        let mb = BYTES_PER_MB_U64 as usize;
-
-        let over = RssOutcome {
-            baseline: Some(mb),
-            peak_rss: mb + 3 * mb,
-            budget_mb: 2,
-        };
-        assert_eq!(over.peak_growth_bytes(), 3 * mb);
-        assert!(!over.within_budget());
-        assert!(!over.pass());
-
-        let under = RssOutcome {
-            baseline: Some(mb),
-            peak_rss: mb + mb,
-            budget_mb: 2,
-        };
-        assert!(under.within_budget());
-        assert!(under.pass());
-
-        // Unmeasurable RSS fails the gate rather than passing vacuously.
-        let unmeasurable = RssOutcome {
-            baseline: None,
-            peak_rss: 0,
-            budget_mb: 1,
-        };
-        assert!(!unmeasurable.measurable());
-        assert!(!unmeasurable.pass());
-    }
+    use xai_grok_test_support::resources::{RssOutcome, RssSampler};
 
     fn report_summary(mode: &str, counts: serde_json::Value, on_disk_bytes: u64, o: &RssOutcome) {
         let mut summary = serde_json::json!({
@@ -591,7 +470,7 @@ mod rss {
         let prepared = prepare_replay_lines(&transcript, None);
         let replayed = prepared.lines.len();
 
-        let outcome = sampler.finish(budget_mb);
+        let outcome = sampler.finish().against_budget(budget_mb);
         drop(prepared);
         drop(transcript);
         drop(light);
@@ -696,7 +575,7 @@ mod rss {
 
         // The agent load already dropped the loaded state, so the peak here comes
         // from the background sampler; the final read is only a backstop.
-        let outcome = sampler.finish(budget_mb);
+        let outcome = sampler.finish().against_budget(budget_mb);
         report_summary(
             "rss-e2e",
             serde_json::json!({ "replayed_notifications": replay_count }),

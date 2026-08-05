@@ -29,7 +29,7 @@ fn backfill_session_summary(summary: &mut Summary) {
 }
 
 /// Router for x.ai/session/* and x.ai/session_summaries/* methods.
-pub async fn handle(
+pub(crate) async fn handle(
     agent: &MvpAgent,
     args: &acp::ExtRequest,
 ) -> Result<acp::ExtResponse, acp::Error> {
@@ -79,9 +79,8 @@ async fn handle_session_info(
 
     let session_id = req.session_id.or_else(|| {
         agent
-            .sessions
-            .borrow()
-            .keys()
+            .resident_ids()
+            .into_iter()
             .next()
             .map(|id| id.0.to_string())
     });
@@ -93,7 +92,7 @@ async fn handle_session_info(
     };
 
     let sid = acp::SessionId::new(session_id.clone());
-    let Some(session) = agent.sessions.borrow().get(&sid).cloned() else {
+    let Some(session) = agent.resident_handle(&sid) else {
         return ExtMethodResult::success(serde_json::json!({}))
             .to_ext_response()
             .map_err(|e| acp::Error::internal_error().data(e.to_string()));
@@ -157,23 +156,22 @@ async fn handle_session_close(
     let req: CloseRequest = serde_json::from_str(args.params.get())
         .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
 
-    let sid = acp::SessionId::new(req.session_id.clone());
-    let existed = agent.sessions.borrow().contains_key(&sid);
-    if existed {
-        // Explicit terminal close: shut the actor down and finalize the cloud
-        // replica (genuine session end). Distinct from a mere client disconnect,
-        // which detaches but keeps the session resumable and never finalizes
-        // (see `MvpAgent::handle_evict_sessions` / `close_session_explicit`).
-        agent.request_session_shutdown(&sid);
-        agent.close_session_explicit(&sid);
-        tracing::info!(session_id = %req.session_id, "session closed via x.ai/session/close");
-    } else {
-        tracing::debug!(session_id = %req.session_id, "session/close: session not found (already closed)");
-    }
+    let sid = acp::SessionId::new(req.session_id);
+    let outcome = agent.close_active_session(&sid).await;
+    tracing::info!(
+        session_id = %sid.0,
+        ?outcome,
+        "x.ai/session/close"
+    );
 
-    ExtMethodResult::success(serde_json::json!({ "success": true }))
-        .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+    // `success` stays for existing callers; `outcome` says what the close
+    // actually did (`closed` / `notResident` / `superseded`).
+    ExtMethodResult::success(serde_json::json!({
+        "success": true,
+        "outcome": outcome.wire_str(),
+    }))
+    .to_ext_response()
+    .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 
 async fn handle_session_summaries(

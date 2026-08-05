@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::session::pending_interaction::PendingInteractions;
-use crate::session::{SessionCommand, SessionHandle};
+use crate::session::{SessionCommand, SessionHandle, ShutdownKind};
 
 /// How often [`AgentActivity::flush_all_sessions`] re-polls actors that have
 /// not yet exited.
@@ -164,7 +164,7 @@ impl AgentActivity {
             for (id, tx) in snapshot {
                 if !signaled.iter().any(|(_, s)| s.same_channel(&tx)) {
                     tracing::info!(session_id = %id, "shutdown: flushing session");
-                    let _ = tx.send(SessionCommand::Shutdown);
+                    let _ = tx.send(SessionCommand::Shutdown(ShutdownKind::Graceful));
                     signaled.push((id, tx));
                 }
             }
@@ -252,7 +252,7 @@ mod tests {
     ) -> tokio::task::JoinHandle<bool> {
         tokio::spawn(async move {
             while let Some(cmd) = rx.recv().await {
-                if matches!(cmd, SessionCommand::Shutdown) {
+                if matches!(cmd, SessionCommand::Shutdown(_)) {
                     tokio::time::sleep(delay).await;
                     return true;
                 }
@@ -388,7 +388,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let (mut rx2, _p2, _i2) = activity_late.register_for_test("s2");
             while let Some(cmd) = rx2.recv().await {
-                if matches!(cmd, SessionCommand::Shutdown) {
+                if matches!(cmd, SessionCommand::Shutdown(_)) {
                     return true;
                 }
             }

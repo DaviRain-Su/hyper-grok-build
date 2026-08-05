@@ -36,7 +36,7 @@ impl PathRewriter {
     ///
     /// Returns `None` if the paths are the same (no rewriting needed) or if
     /// `display_cwd` is not set.
-    pub fn new(real_cwd: &str, display_cwd: Option<&str>) -> Option<Self> {
+    pub(crate) fn new(real_cwd: &str, display_cwd: Option<&str>) -> Option<Self> {
         let display_cwd = display_cwd?;
         if real_cwd == display_cwd {
             return None;
@@ -52,7 +52,7 @@ impl PathRewriter {
     /// Handles both plain paths (e.g., `/root/.grok/worktrees/project/fork-...`)
     /// and URL-encoded paths (e.g., `%2Froot%2F.grok%2Fworktrees%2F...`) that
     /// appear in session directory structures and `output_file` references.
-    pub fn rewrite(&self, text: &str) -> String {
+    pub(crate) fn rewrite(&self, text: &str) -> String {
         let plain = text.replace(&self.real_cwd, &self.display_cwd);
         // Also replace URL-encoded form — session directory paths use
         // urlencoding::encode(&cwd) as a path component, so background task

@@ -405,7 +405,7 @@ pub(crate) async fn run_auth_flow_with_stderr_bridge(
 
 /// Full auth chain: cache → refresh → external provider → interactive (OIDC/OAuth2/legacy).
 /// When `url_tx` and `code_rx` are `None`, falls back to stderr/stdin (CLI mode).
-pub async fn run_auth_flow(
+pub(crate) async fn run_auth_flow(
     auth_manager: &Arc<AuthManager>,
     grok_com_config: &GrokComConfig,
     reauth: bool,

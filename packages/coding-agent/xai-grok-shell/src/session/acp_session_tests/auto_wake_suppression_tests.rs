@@ -1294,7 +1294,7 @@ async fn handle_bridge_tool_success_runs_consumed_completion_sweep() {
                     "tc-1",
                     "get_task_output",
                     "get_task_output",
-                    result,
+                    DrainedToolSuccess::new(result),
                     0,
                     "test-model",
                     &parsed_args,

@@ -1500,6 +1500,31 @@ pub struct DashboardOpened {
     pub leader_mode: bool,
 }
 
+/// User pressed an allowlisted registry shortcut.
+///
+/// **Product contract (authoritative):** intent-only telemetry for the
+/// bindings that can own **Ctrl+L**. Emits when the chord resolves to the
+/// action, whether the effect succeeds, defers, or soft-no-ops. Soft no-ops
+/// still count as intent.
+///
+/// Allowlist: `interject_prompt` (VS Code family often Ctrl+L; elsewhere the
+/// interject/send-now chord) and `open_extensions` (Ctrl+L on other
+/// terminals). Absence of other actions is not “unused.” Expand the allowlist
+/// deliberately; this is not full-registry coverage.
+///
+/// Fields are content-free. `key` is a platform-stable encoding (`Ctrl+L`,
+/// not locale-specific `Cmd`/`Opt` or mixed case). `context` is a surface
+/// label (`prompt_focused`, `agent_screen`, `queue`, …).
+#[derive(Serialize)]
+pub struct ShortcutUsed {
+    /// Stable chord encoding (`Ctrl+L`, `Ctrl+Enter`, …).
+    pub key: String,
+    /// Allowlisted action id (`interject_prompt`, `open_extensions`).
+    pub action: String,
+    /// Surface label (`prompt_focused`, `agent_screen`, `queue`, …).
+    pub context: String,
+}
+
 #[derive(Serialize)]
 pub struct DashboardClosed {
     pub agents: usize,
@@ -1896,6 +1921,7 @@ telemetry_event!(DashboardOpened, "dashboard_opened");
 telemetry_event!(DashboardClosed, "dashboard_closed");
 telemetry_event!(DashboardAgentAttached, "dashboard_agent_attached");
 telemetry_event!(DashboardAgentLaunched, "dashboard_agent_launched");
+telemetry_event!(ShortcutUsed, "shortcut_used");
 telemetry_event!(
     RateLimitHit,
     "rate_limit_hit",
@@ -2089,6 +2115,25 @@ mod tests {
     fn announcement_cta_event_names() {
         assert_eq!(AnnouncementCtaShown::NAME, "announcement_cta_shown");
         assert_eq!(AnnouncementCtaClicked::NAME, "announcement_cta_clicked");
+    }
+
+    #[test]
+    fn shortcut_used_name_and_shape() {
+        assert_eq!(ShortcutUsed::NAME, "shortcut_used");
+        let value = serde_json::to_value(ShortcutUsed {
+            key: "Ctrl+L".into(),
+            action: "interject_prompt".into(),
+            context: "prompt_focused".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "key": "Ctrl+L",
+                "action": "interject_prompt",
+                "context": "prompt_focused",
+            })
+        );
     }
 
     #[test]

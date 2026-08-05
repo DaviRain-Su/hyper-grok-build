@@ -376,7 +376,7 @@ pub(crate) enum ModelByok {
 }
 
 impl ModelByok {
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Byok => "byok",
             Self::NotByok => "not_byok",

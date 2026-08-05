@@ -75,7 +75,7 @@ impl MvpAgent {
                 footprint_bytes: usage.footprint_bytes,
                 threads: usage.threads,
                 open_files: usage.open_files,
-                resident_sessions: self.sessions.borrow().len(),
+                resident_sessions: self.session_registry.resident_count(),
                 session_threads: self.session_registry.counts().session_threads,
             },
         );

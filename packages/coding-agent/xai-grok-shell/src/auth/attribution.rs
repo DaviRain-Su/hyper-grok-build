@@ -53,7 +53,8 @@ use serde_json::Value as JsonValue;
 use xai_grok_sampler::{Auth401AttributionCallback, SamplingConsumer};
 use xai_grok_tools::{Auth401AttributionCallback as ToolAuth401AttributionCallback, ToolConsumer};
 
-use crate::auth::{AuthManager, TOKEN_TTL, token_suffix};
+use crate::auth::{AuthManager, TOKEN_TTL};
+use xai_grok_auth::bearer_suffix;
 
 /// `cfg(test)`-only process-global counter that bumps on every
 /// successful `record_auth_401` invocation.
@@ -115,7 +116,7 @@ impl ShellAttribution {
     /// keeping the boundary in one place avoids `as Arc<dyn _>`
     /// coercions at every call site.)
     #[allow(clippy::new_ret_no_self)]
-    pub fn new(
+    pub(crate) fn new(
         auth_manager: Arc<AuthManager>,
         session_id: Option<String>,
     ) -> Arc<dyn Auth401AttributionCallback> {
@@ -144,24 +145,15 @@ impl ShellAttribution {
 }
 
 impl Auth401AttributionCallback for ShellAttribution {
-    fn record_401(&self, consumer: SamplingConsumer, sent_bearer_prefix: Option<&str>) {
-        // The sampler crate has already truncated `sent_bearer_prefix`
-        // to `xai_grok_sampler::SENT_BEARER_PREFIX_LEN` characters
-        // before this trait method fires (see
-        // `SamplingClient::extract_sent_bearer`); the truncation
-        // inside `compute_attribution_payload` (via `token_suffix`)
-        // is therefore idempotent for this code path. The doubled
-        // truncation is intentional belt-and-suspenders -- the
-        // sampler-side scrub keeps the full bearer from ever leaving
-        // that crate, and the shell-side scrub keeps the local-log
-        // and OTel-span sinks aligned with the existing 12-char
-        // convention used by every other auth log line.
+    fn record_401(&self, consumer: SamplingConsumer, sent_bearer_suffix: Option<&str>) {
+        // Already truncated by the sampler; the re-truncate downstream is a
+        // deliberate no-op so the full bearer never leaves that crate.
         record_consumer_401(
             self.auth_manager.as_ref(),
             self.session_id.as_deref(),
             ConsumerKind::OaiCompatClient,
             consumer.as_endpoint(),
-            sent_bearer_prefix,
+            sent_bearer_suffix,
         );
     }
 }
@@ -175,7 +167,7 @@ impl Auth401AttributionCallback for ShellAttribution {
 /// same [`ConsumerKind::VideoGen`] with different op strings so the
 /// gate query can break down video-gen 401s by phase.
 impl ToolAuth401AttributionCallback for ShellAttribution {
-    fn record_401(&self, consumer: ToolConsumer, sent_bearer_prefix: Option<&str>) {
+    fn record_401(&self, consumer: ToolConsumer, sent_bearer_suffix: Option<&str>) {
         let (kind, op) = match consumer {
             ToolConsumer::ImageGen => (ConsumerKind::ImageGen, ""),
             ToolConsumer::VideoGenStart => (ConsumerKind::VideoGen, "start"),
@@ -187,7 +179,7 @@ impl ToolAuth401AttributionCallback for ShellAttribution {
             self.session_id.as_deref(),
             kind,
             op,
-            sent_bearer_prefix,
+            sent_bearer_suffix,
         );
     }
 }
@@ -394,23 +386,23 @@ fn compute_attribution_payload(
     let now = chrono::Utc::now();
 
     // Last-12-char suffix of the bearer the wire actually carried
-    // (see [`token_suffix`]: JWT headers share a common base64 prefix).
+    // (see [`bearer_suffix`]: JWT headers share a common base64 prefix).
     // `""` when the request had no bearer at all (distinct case from
     // "had a bearer that turned out to be stale" -- the gate-criteria
     // query can break down on this).
-    let sent_prefix = sent_bearer.map(token_suffix).unwrap_or("");
+    let sent_suffix = sent_bearer.map(bearer_suffix).unwrap_or("");
 
     // One read; `current_or_expired` keeps the hard-expired token visible
     // (see the fn doc).
     let current_auth = auth_manager.current_or_expired();
-    let current_prefix_owned: Option<String> = current_auth
+    let current_suffix_owned: Option<String> = current_auth
         .as_ref()
-        .map(|a| token_suffix(&a.key).to_string());
+        .map(|a| bearer_suffix(&a.key).to_string());
 
     // True-positive staleness only: a bearer was sent AND differs from
     // the held token. "Sent nothing" is the fail-closed path (in sync,
     // credential dead); "held nothing" is no evidence -- neither is stale.
-    let is_stale_snapshot = match (sent_prefix, current_prefix_owned.as_deref()) {
+    let is_stale_snapshot = match (sent_suffix, current_suffix_owned.as_deref()) {
         ("", _) => false,
         (_, None) => false,
         (sent, Some(held)) => sent != held,
@@ -438,8 +430,8 @@ fn compute_attribution_payload(
     };
 
     serde_json::json!({
-        "sent_key_prefix": sent_prefix,
-        "current_key_prefix": current_prefix_owned,
+        "sent_key_prefix": sent_suffix,
+        "current_key_prefix": current_suffix_owned,
         "mint_age_seconds": mint_age_seconds,
         "expires_at_seconds_from_now": expires_at_seconds_from_now,
         "consumer": consumer,
@@ -809,7 +801,7 @@ mod tests {
         }
 
         impl SpanCollector {
-            pub fn new() -> (Self, std::sync::Arc<Mutex<Vec<CapturedSpan>>>) {
+            pub(crate) fn new() -> (Self, std::sync::Arc<Mutex<Vec<CapturedSpan>>>) {
                 let buf = std::sync::Arc::new(Mutex::new(Vec::new()));
                 (Self { spans: buf.clone() }, buf)
             }

@@ -261,7 +261,12 @@ async fn cancellation_persists_turn_completed_cancelled() {
             }
 
             actor
-                .cancel_running_task(true, false, false, Some("ctrl_c".to_string()))
+                .cancel_running_task(crate::session::CancelOptions {
+                    cancel_subagents: true,
+                    trigger: Some(crate::session::CancelTrigger::CtrlC),
+                    user_initiated: true,
+                    ..Default::default()
+                })
                 .await;
 
             let msgs = drain_persistence(&mut persistence_rx);
@@ -456,11 +461,11 @@ async fn pristine_rewind_cancel_emits_no_turn_completed() {
                 state.pending_inputs.push_back(item);
             }
 
-            // rewind_if_pristine = true on a rewindable turn takes the rewind
+            // rewind_if_no_output = true on a rewindable turn takes the rewind
             // path: the turn is treated as UNSENT, so — in lock-step with the
             // legacy emit_turn_ended — NO durable terminal is emitted (else
             // replay would finalize a turn that was rewound, not completed).
-            actor.cancel_running_task(false, false, true, None).await;
+            actor.cancel_running_task(crate::session::CancelOptions { rewind_if_no_output: true, user_initiated: true, ..Default::default() }).await;
 
             let msgs = drain_persistence(&mut persistence_rx);
             assert!(

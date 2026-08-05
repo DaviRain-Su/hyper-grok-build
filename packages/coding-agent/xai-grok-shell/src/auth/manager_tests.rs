@@ -588,7 +588,7 @@ fn manager_collection_predicates_fail_directions() {
     );
 }
 
-// -- token_suffix ----------------------------------------------------------------
+// -- bearer_suffix ----------------------------------------------------------------
 
 #[test]
 fn token_suffix_matrix() {
@@ -599,7 +599,7 @@ fn token_suffix_matrix() {
         ("123456789012", "123456789012"),     // exact 12
     ];
     for (input, expected) in cases {
-        assert_eq!(token_suffix(input), *expected, "input={input:?}");
+        assert_eq!(bearer_suffix(input), *expected, "input={input:?}");
     }
 }
 

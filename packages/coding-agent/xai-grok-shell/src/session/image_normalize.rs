@@ -99,7 +99,7 @@ impl ImageCompressionInfo {
     /// outcome, not the limit violation, so it doesn't read as an error;
     /// the why lives in the model-facing [`render_compression_notice`],
     /// which keeps [`Self::reason_label`].
-    pub fn display(&self) -> String {
+    pub(crate) fn display(&self) -> String {
         let verb = if self.compressed_width == self.original_width
             && self.compressed_height == self.original_height
         {

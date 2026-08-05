@@ -2479,6 +2479,7 @@ fn dashboard_attach_subagent_switches_to_parent_with_subagent_focused() {
         crate::app::agent_view::BannerSlotParams::none(),
         &crate::app::bundle::BundleState::default(),
         false,
+        false,
         &mut Vec::new(),
         crate::app::agent_view::AppRenderParams::default(),
     );

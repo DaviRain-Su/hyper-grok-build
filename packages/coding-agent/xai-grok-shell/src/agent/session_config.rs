@@ -35,7 +35,7 @@ pub(crate) struct GrokSessionDetail {
 }
 
 impl GrokSessionDetail {
-    pub fn build(
+    pub(crate) fn build(
         session_id: String,
         cwd: String,
         current_model_id: String,

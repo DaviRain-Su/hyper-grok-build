@@ -13,11 +13,11 @@ use crate::upload::gcs::WithAuth as _;
 pub const HARD_DUMP_SIZE_CAP_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Wall budget for `prof.dump` in `spawn_blocking` (K6).
-pub const DUMP_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const DUMP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Wall budget for GCS heap+meta upload so a stalled proxy cannot pin
 /// `upload_in_flight` for the process lifetime (blocks later threshold dumps).
-pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub(super) const UPLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Scoped kill-switch poll cadence while profiling is enabled (K12).
 pub const SCOPED_KILL_SWITCH_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -371,7 +371,7 @@ pub(crate) struct PendingDump {
 impl PendingDump {
     /// Dump + upload off the monitor borrow. On timeout, awaits the dump join
     /// before returning so in-flight stays set until the private dir is safe.
-    pub async fn execute(self) -> DumpAttemptOutcome {
+    pub(crate) async fn execute(self) -> DumpAttemptOutcome {
         let threshold = self.threshold;
         let stats = self.stats;
         let session_id = self.session_id.as_ref();

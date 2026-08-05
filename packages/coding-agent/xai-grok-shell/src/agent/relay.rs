@@ -209,7 +209,7 @@ async fn attempt_auth_recovery(
                 None,
                 Some(serde_json::json!({
                     "context": context,
-                    "key_prefix": crate::auth::token_suffix(&new_auth.key),
+                    "key_prefix": xai_grok_auth::bearer_suffix(&new_auth.key),
                 })),
             );
             false
@@ -221,7 +221,7 @@ async fn attempt_auth_recovery(
                 None,
                 Some(serde_json::json!({
                     "context": context,
-                    "new_key_prefix": crate::auth::token_suffix(&new_auth.key),
+                    "new_key_prefix": xai_grok_auth::bearer_suffix(&new_auth.key),
                 })),
             );
             config.auth = new_auth;

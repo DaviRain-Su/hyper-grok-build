@@ -743,7 +743,7 @@ pub(crate) struct PtyLoadResult {
 /// Reconnect to a PTY, replaying the ring buffer so the client can reset its
 /// VTE emulator and feed all bytes from scratch. An exited PTY still loads, so
 /// its final output stays readable.
-pub async fn load(
+pub(crate) async fn load(
     pty_id: &str,
     gateway: &GatewaySender,
     target_client_id: TargetClientId,

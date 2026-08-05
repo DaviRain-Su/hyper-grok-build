@@ -26,6 +26,7 @@ use xai_tool_runtime::ToolCallContext;
 
 use crate::types::output::{MCPOutputDetails, ToolOutput};
 use crate::types::tool::ToolKind;
+use crate::util::base64_images::{ExtractionResult, extract_base64_images};
 use crate::util::query_tools::{QueryTools, examples_clause};
 use crate::util::truncate::format_bytes;
 
@@ -251,17 +252,26 @@ async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
 }
 
 /// Bound the `MCP`/`Text` variants to the inline size limit, keeping a preview
-/// and dumping the full payload to disk. Other variants are returned untouched.
+/// and dumping the text that remains after any MCP image extract. Other
+/// variants pass through. MCP data-URI images go into `extracted_images`
+/// before the bound.
 pub async fn truncate_tool_output(
     mut output: ToolOutput,
     trunc_ctx: &McpTruncateContext,
 ) -> ToolOutput {
     match &mut output {
         ToolOutput::MCP(mcp) => {
-            let text = match mcp.output_mut() {
-                MCPOutputDetails::OkayOutput(t) | MCPOutputDetails::Error(t) => t,
+            let raw = match mcp.output_mut() {
+                MCPOutputDetails::OkayOutput(t) | MCPOutputDetails::Error(t) => std::mem::take(t),
             };
-            truncate_mcp_text(text, trunc_ctx).await;
+            let ExtractionResult { mut text, images } = extract_base64_images(raw);
+            mcp.extracted_images = images;
+            truncate_mcp_text(&mut text, trunc_ctx).await;
+            match mcp.output_mut() {
+                MCPOutputDetails::OkayOutput(t) | MCPOutputDetails::Error(t) => {
+                    *t = text;
+                }
+            }
         }
         ToolOutput::Text(text_out) => {
             truncate_mcp_text(&mut text_out.text, trunc_ctx).await;
@@ -274,6 +284,7 @@ pub async fn truncate_tool_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::base64_images::IMAGE_CONTENT_PLACEHOLDER;
 
     fn cfg_with_folder(folder: PathBuf, max: usize) -> McpTruncateContext {
         McpTruncateContext {
@@ -465,5 +476,207 @@ mod tests {
             panic!("expected SearchTool");
         };
         assert_eq!(s.content, "anything", "passthrough leaves content intact");
+    }
+
+    #[tokio::test]
+    async fn mcp_data_uri_image_survives_truncate_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let max = 20_000;
+        let cfg = cfg_with_folder(dir.path().to_path_buf(), max);
+
+        let payload = "A".repeat(100_000);
+        let prose = "x".repeat(30_000);
+        let full = format!("before data:image/png;base64,{payload} after\n{prose}");
+        assert!(
+            full.len() > max,
+            "fixture must exceed inline cap (got {})",
+            full.len()
+        );
+
+        let out = truncate_tool_output(
+            ToolOutput::MCP(crate::types::output::MCPOutput::okay_output(
+                "browser_screenshot".into(),
+                "browser-use".into(),
+                full,
+            )),
+            &cfg,
+        )
+        .await;
+
+        let ToolOutput::MCP(mcp) = out else {
+            panic!("expected MCP");
+        };
+        assert_eq!(mcp.extracted_images.len(), 1);
+        assert_eq!(mcp.extracted_images[0].mime_type, "image/png");
+        assert_eq!(mcp.extracted_images[0].data, payload);
+        assert_eq!(mcp.extracted_images[0].data.len(), 100_000);
+
+        let MCPOutputDetails::OkayOutput(text) = mcp.output() else {
+            panic!("expected OkayOutput");
+        };
+        assert!(
+            text.contains(IMAGE_CONTENT_PLACEHOLDER),
+            "data URI replaced with placeholder"
+        );
+        assert!(
+            !text.contains("data:image"),
+            "no data URI left for session mid-chop extraction"
+        );
+        assert!(
+            !text.contains(&payload),
+            "full payload must not remain inline"
+        );
+        // Truncation footer is appended after the bound, so allow overhead.
+        let body_end = text
+            .find("\n\n[MCP output truncated:")
+            .unwrap_or(text.len());
+        assert!(
+            body_end <= max,
+            "inline body must stay within cap: body={body_end} max={max}"
+        );
+        assert!(
+            text.contains("[MCP output truncated:"),
+            "large leftover prose still triggers truncate"
+        );
+
+        // Dump is post-extraction (full leftover text), not the raw data URI.
+        let dump = dir.path().join("mcp").join("call-test.txt");
+        let dump_text = tokio::fs::read_to_string(&dump).await.unwrap();
+        assert!(
+            dump_text.contains(IMAGE_CONTENT_PLACEHOLDER),
+            "dump should keep the placeholder"
+        );
+        assert!(
+            !dump_text.contains("data:image"),
+            "dump must not re-embed the data URI"
+        );
+        assert!(
+            !dump_text.contains(&payload),
+            "dump must not contain the raw base64 payload"
+        );
+        assert!(
+            dump_text.contains(&prose),
+            "dump keeps full post-extraction prose (not the truncated preview)"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_image_only_under_cap_still_extracts() {
+        let cfg = McpTruncateContext {
+            max_output_bytes: 20_000,
+            session_folder: None,
+            shell_tool: "bash".to_string(),
+            call_id: "call-img".to_string(),
+        };
+        let payload = "B".repeat(50_000);
+        let full = format!("data:image/jpeg;base64,{payload}");
+
+        let out = truncate_tool_output(
+            ToolOutput::MCP(crate::types::output::MCPOutput::okay_output(
+                "shot".into(),
+                "srv".into(),
+                full,
+            )),
+            &cfg,
+        )
+        .await;
+
+        let ToolOutput::MCP(mcp) = out else {
+            panic!("expected MCP");
+        };
+        assert_eq!(mcp.extracted_images.len(), 1);
+        assert_eq!(mcp.extracted_images[0].mime_type, "image/jpeg");
+        assert_eq!(mcp.extracted_images[0].data, payload);
+
+        let MCPOutputDetails::OkayOutput(text) = mcp.output() else {
+            panic!("expected OkayOutput");
+        };
+        assert_eq!(text, IMAGE_CONTENT_PLACEHOLDER);
+        assert!(!text.contains("[MCP output truncated:"));
+    }
+
+    #[tokio::test]
+    async fn mcp_multi_image_extract_then_truncate() {
+        let dir = tempfile::tempdir().unwrap();
+        let max = 20_000;
+        let cfg = cfg_with_folder(dir.path().to_path_buf(), max);
+
+        let p1 = "A".repeat(40_000);
+        let p2 = "B".repeat(50_000);
+        let prose = "z".repeat(25_000);
+        let full =
+            format!("one data:image/png;base64,{p1} two data:image/jpeg;base64,{p2} end\n{prose}");
+
+        let out = truncate_tool_output(
+            ToolOutput::MCP(crate::types::output::MCPOutput::okay_output(
+                "multi".into(),
+                "srv".into(),
+                full,
+            )),
+            &cfg,
+        )
+        .await;
+
+        let ToolOutput::MCP(mcp) = out else {
+            panic!("expected MCP");
+        };
+        assert_eq!(mcp.extracted_images.len(), 2);
+        assert_eq!(mcp.extracted_images[0].mime_type, "image/png");
+        assert_eq!(mcp.extracted_images[0].data, p1);
+        assert_eq!(mcp.extracted_images[1].mime_type, "image/jpeg");
+        assert_eq!(mcp.extracted_images[1].data, p2);
+
+        let MCPOutputDetails::OkayOutput(text) = mcp.output() else {
+            panic!("expected OkayOutput");
+        };
+        assert_eq!(text.matches(IMAGE_CONTENT_PLACEHOLDER).count(), 2);
+        assert!(!text.contains("data:image"));
+        assert!(!text.contains(&p1));
+        assert!(!text.contains(&p2));
+        assert!(text.contains("[MCP output truncated:"));
+
+        let dump = tokio::fs::read_to_string(dir.path().join("mcp").join("call-test.txt"))
+            .await
+            .unwrap();
+        assert_eq!(dump.matches(IMAGE_CONTENT_PLACEHOLDER).count(), 2);
+        assert!(!dump.contains("data:image"));
+    }
+
+    #[tokio::test]
+    async fn mcp_error_path_extracts_before_truncate() {
+        let dir = tempfile::tempdir().unwrap();
+        let max = 20_000;
+        let cfg = cfg_with_folder(dir.path().to_path_buf(), max);
+
+        let payload = "C".repeat(80_000);
+        let prose = "e".repeat(30_000);
+        // Space terminator so LF-wrapped prose is not absorbed into the payload.
+        let full = format!("err data:image/png;base64,{payload} done\n{prose}");
+
+        let out = truncate_tool_output(
+            ToolOutput::MCP(crate::types::output::MCPOutput::errored(
+                "failing_tool".into(),
+                "srv".into(),
+                full,
+            )),
+            &cfg,
+        )
+        .await;
+
+        let ToolOutput::MCP(mcp) = out else {
+            panic!("expected MCP");
+        };
+        assert!(mcp.is_error);
+        assert_eq!(mcp.extracted_images.len(), 1);
+        assert_eq!(mcp.extracted_images[0].mime_type, "image/png");
+        assert_eq!(mcp.extracted_images[0].data, payload);
+
+        let MCPOutputDetails::Error(text) = mcp.output() else {
+            panic!("expected Error");
+        };
+        assert!(text.contains(IMAGE_CONTENT_PLACEHOLDER));
+        assert!(!text.contains("data:image"));
+        assert!(!text.contains(&payload));
+        assert!(text.contains("[MCP output truncated:"));
     }
 }

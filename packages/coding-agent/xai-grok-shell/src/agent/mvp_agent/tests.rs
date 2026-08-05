@@ -484,7 +484,7 @@ async fn upload_harness_trace_turns_numbers_siblings_and_persists_counter() {
         agent.auth_manager.clone(),
     );
     let _ = handle.upload_queue.set(queue);
-    agent.sessions.borrow_mut().insert(sid.clone(), handle);
+    agent.insert_resident(&sid, handle);
     for _ in 0..3 {
         agent.allocate_turn_number(&sid);
     }
@@ -605,7 +605,7 @@ async fn upload_harness_trace_turns_build_per_turn_manifest() {
         agent.auth_manager.clone(),
     );
     let _ = handle.upload_queue.set(queue);
-    agent.sessions.borrow_mut().insert(sid.clone(), handle);
+    agent.insert_resident(&sid, handle);
     let built = agent
         .build_harness_trace_uploads(
             &sid,
@@ -1211,39 +1211,29 @@ fn make_test_handle(
         scheduler_handle: None,
     }
 }
-/// lookup_session_model returns the per-session model for each session.
+/// lookup_session_model returns the per-session model when one is known.
 #[tokio::test]
 async fn lookup_session_model_returns_per_session_model() {
-    let sid_a = acp::SessionId::new("sess-a");
-    let sid_b = acp::SessionId::new("sess-b");
     let default_model = acp::ModelId::new("default-model");
-    let sessions: HashMap<acp::SessionId, crate::session::SessionHandle> = [
-        (sid_a.clone(), make_test_handle("grok-3-fast", false, None)),
-        (sid_b.clone(), make_test_handle("codex-mini", false, None)),
-    ]
-    .into();
     assert_eq!(
-        lookup_session_model(&sessions, Some(&sid_a), &default_model)
+        lookup_session_model(Some(acp::ModelId::new("grok-3-fast")), &default_model)
             .0
             .as_ref(),
         "grok-3-fast"
     );
     assert_eq!(
-        lookup_session_model(&sessions, Some(&sid_b), &default_model)
+        lookup_session_model(Some(acp::ModelId::new("codex-mini")), &default_model)
             .0
             .as_ref(),
         "codex-mini"
     );
 }
-/// lookup_session_model falls back to the default when session_id is None.
+/// lookup_session_model falls back to the default when no session model is known.
 #[tokio::test]
 async fn lookup_session_model_fallback_no_session() {
     let default_model = acp::ModelId::new("grok-3");
-    let sessions: HashMap<acp::SessionId, crate::session::SessionHandle> = HashMap::new();
     assert_eq!(
-        lookup_session_model(&sessions, None, &default_model)
-            .0
-            .as_ref(),
+        lookup_session_model(None, &default_model).0.as_ref(),
         "grok-3"
     );
 }
@@ -1260,15 +1250,21 @@ async fn set_session_model_does_not_cross_contaminate() {
     .into();
     sessions.get_mut(&sid_a).unwrap().model_id = acp::ModelId::new("codex-mini");
     assert_eq!(
-        lookup_session_model(&sessions, Some(&sid_a), &default_model)
-            .0
-            .as_ref(),
+        lookup_session_model(
+            sessions.get(&sid_a).map(|h| h.model_id.clone()),
+            &default_model
+        )
+        .0
+        .as_ref(),
         "codex-mini"
     );
     assert_eq!(
-        lookup_session_model(&sessions, Some(&sid_b), &default_model)
-            .0
-            .as_ref(),
+        lookup_session_model(
+            sessions.get(&sid_b).map(|h| h.model_id.clone()),
+            &default_model
+        )
+        .0
+        .as_ref(),
         "grok-3",
         "Session B's model must not be affected by session A's model change"
     );
@@ -1299,17 +1295,14 @@ async fn model_state_prefers_session_reasoning_effort_over_global() {
     let pinned = acp::SessionId::new("sess-pinned");
     let mut handle = make_test_handle("effort-model", false, None);
     handle.reasoning_effort = Some(ReasoningEffort::Xhigh);
-    agent.sessions.borrow_mut().insert(pinned.clone(), handle);
+    agent.insert_resident(&pinned, handle);
     assert_eq!(
         read_effort(&agent.model_state(Some(&pinned))).as_deref(),
         Some("xhigh"),
         "model_state must report the session's own restored effort",
     );
     let unset = acp::SessionId::new("sess-unset");
-    agent
-        .sessions
-        .borrow_mut()
-        .insert(unset.clone(), make_test_handle("effort-model", false, None));
+    agent.insert_resident(&unset, make_test_handle("effort-model", false, None));
     assert_eq!(
         read_effort(&agent.model_state(Some(&unset))).as_deref(),
         Some("low"),
@@ -1333,10 +1326,7 @@ async fn session_config_options_resolves_routing_slug_to_catalog_model() {
         .models_manager
         .insert_test_entry("catalog-key-model", entry);
     let sid = acp::SessionId::new("sess-slug");
-    agent
-        .sessions
-        .borrow_mut()
-        .insert(sid.clone(), make_test_handle("routing-slug", false, None));
+    agent.insert_resident(&sid, make_test_handle("routing-slug", false, None));
     let state = agent.model_state(Some(&sid));
     assert_eq!(state.current_model_id.0.as_ref(), "routing-slug");
     let opts = agent.session_config_options(Some(&sid), &state);
@@ -1371,7 +1361,8 @@ async fn yolo_toggle_scoped_by_client_identifier() {
         ),
     ]
     .into();
-    let updated = apply_yolo_mode_to_matching_sessions(&mut sessions, Some("grok-tui"), true);
+    let updated =
+        apply_yolo_mode_to_matching_sessions(sessions.values_mut(), Some("grok-tui"), true);
     assert_eq!(updated, 1, "exactly one matching session should be updated");
     assert!(
         sessions[&sid_tui].yolo_mode,
@@ -1399,7 +1390,8 @@ async fn yolo_toggle_can_disable_session_started_with_yolo_enabled() {
         ),
     ]
     .into();
-    let updated = apply_yolo_mode_to_matching_sessions(&mut sessions, Some("grok-tui"), false);
+    let updated =
+        apply_yolo_mode_to_matching_sessions(sessions.values_mut(), Some("grok-tui"), false);
     assert_eq!(updated, 1, "only the sender's session should be updated");
     assert!(
         !sessions[&sid_tui].yolo_mode,
@@ -1607,7 +1599,7 @@ async fn ext_method_routes_auth_cleared_and_refreshes_resident_sessions() {
             agent.managed_mcp_cache.lock().await.enable_gateway_tools();
             let sid = acp::SessionId::new("sess-auth-cleared");
             let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
-            agent.sessions.borrow_mut().insert(sid, handle);
+            agent.insert_resident(&sid, handle);
             let params = serde_json::json!({});
             agent
                 .ext_method(acp::ExtRequest::new(
@@ -1640,7 +1632,7 @@ async fn sync_fresh_managed_mcp_pushes_update() {
             });
             let sid = acp::SessionId::new("sess-managed-sync");
             let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
-            agent.sessions.borrow_mut().insert(sid, handle);
+            agent.insert_resident(&sid, handle);
             let managed = vec![crate::session::managed_mcp::ManagedMcpConfig {
                 name: "Linear".into(),
                 endpoint: "https://mcp.example.com/linear".into(),
@@ -1688,7 +1680,7 @@ async fn refresh_mcp_search_index_broadcasts_to_sessions() {
     let agent = build_minimal_agent_for_tests();
     let sid = acp::SessionId::new("sess-search-index");
     let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
-    agent.sessions.borrow_mut().insert(sid, handle);
+    agent.insert_resident(&sid, handle);
     agent.refresh_mcp_search_index_in_sessions();
     let cmd = tokio::time::timeout(std::time::Duration::from_secs(1), cmd_rx.recv())
         .await
@@ -1733,7 +1725,7 @@ async fn session_usage_dead_chat_state_actor_fails_closed() {
     let sid = acp::SessionId::new("usage-dead-actor-sess");
     let mut handle = make_test_handle("test-model", false, None);
     handle.info.id = sid.clone();
-    agent.sessions.borrow_mut().insert(sid, handle);
+    agent.insert_resident(&sid, handle);
     let err =
         crate::extensions::usage::handle(&agent, &session_usage_request("usage-dead-actor-sess"))
             .await
@@ -1749,7 +1741,7 @@ async fn session_meta_publishes_the_sessions_pinned_scheduler_background_loops()
     let mut handle = make_test_handle("test-model", false, None);
     handle.info.id = sid.clone();
     handle.scheduler_background_loops = false;
-    agent.sessions.borrow_mut().insert(sid.clone(), handle);
+    agent.insert_resident(&sid, handle);
     let model_state = agent.model_state(Some(&sid));
     let mut meta = serde_json::Map::new();
     agent.insert_session_config_meta(&mut meta, &sid, "/tmp".to_string(), None, &model_state);
@@ -1829,6 +1821,7 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
 }
 #[cfg(unix)]
 mod process_scope_reclaim;
+mod session_resume_close_tests;
 mod subagent_spawn_context_tests;
 /// No load in flight and no session → the wait returns immediately
 /// (the caller then surfaces "unknown session id" exactly as before).
@@ -1862,12 +1855,12 @@ async fn wait_for_in_flight_load_blocks_until_load_completes() {
                 waiter_agent
                     .wait_for_in_flight_session_load(&waiter_sid)
                     .await;
-                waiter_agent.sessions.borrow().contains_key(&waiter_sid)
+                waiter_agent.is_resident(&waiter_sid)
             });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             assert!(!waiter.is_finished(), "waiter must block while loading");
             let handle = make_test_handle("test-model", false, None);
-            agent.sessions.borrow_mut().insert(sid.clone(), handle);
+            agent.insert_resident(&sid, handle);
             drop(guard);
             let found_session = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
                 .await
@@ -1897,7 +1890,7 @@ async fn wait_for_in_flight_load_wakes_on_failed_load() {
                 waiter_agent
                     .wait_for_in_flight_session_load(&waiter_sid)
                     .await;
-                waiter_agent.sessions.borrow().contains_key(&waiter_sid)
+                waiter_agent.is_resident(&waiter_sid)
             });
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             drop(guard);
@@ -1920,12 +1913,12 @@ async fn concurrent_load_guards_do_not_clobber_each_other() {
     let guard_two = agent.begin_session_load(&sid);
     drop(guard_one);
     assert!(
-        agent.loading_sessions.borrow().contains_key(&sid),
+        agent.session_registry.is_attaching(&sid),
         "second load's marker must survive the first guard's drop"
     );
     drop(guard_two);
     assert!(
-        agent.loading_sessions.borrow().is_empty(),
+        agent.session_registry.attaching_count() == 0,
         "all markers removed once every load finished"
     );
 }
@@ -1941,7 +1934,7 @@ async fn resident_activity_reports_needs_input_when_pending() {
     let handle = make_test_handle("grok-3", false, None);
     let pending = handle.pending_interactions.clone();
     let prompt_id = handle.current_prompt_id.clone();
-    agent.sessions.borrow_mut().insert(sid.clone(), handle);
+    agent.insert_resident(&sid, handle);
     assert_eq!(agent.resident_activity(&sid), RosterActivity::Idle);
     *prompt_id.lock().unwrap() = Some("turn-1".to_string());
     assert_eq!(agent.resident_activity(&sid), RosterActivity::Working);
@@ -1997,10 +1990,7 @@ async fn push_roster_activity_delta_broadcasts_overridden_activity() {
     let cfg = AgentConfig::default();
     let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
     let sid = acp::SessionId::new("sess-activity");
-    agent
-        .sessions
-        .borrow_mut()
-        .insert(sid.clone(), make_test_handle("grok-3", false, None));
+    agent.insert_resident(&sid, make_test_handle("grok-3", false, None));
     agent.push_roster_activity_delta(&sid, RosterActivity::Working);
     let changed = drain_roster_changed(&mut rx).expect("turn-start delta emitted");
     assert_eq!(changed.upserted.len(), 1);
@@ -3062,12 +3052,6 @@ fn reject_chat_kind_without_feature_errors_without_chat_feature() {
         )
         .is_ok()
     );
-    assert!(!is_chat_session_kind(
-        json!({"x.ai/session": {"kind": "chat"}}).as_object()
-    ));
-    assert!(!is_chat_session_kind(
-        json!({ "x.ai/session" : { "kind" : "build" } }).as_object()
-    ));
 }
 #[test]
 fn chat_initial_model_matrix() {
@@ -3491,7 +3475,6 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
     agent
         .session_registry
         .set_permission_receiver(&sid, permission_rx);
-    agent.session_registry.mark_require_gateway(&sid);
     agent.remove_session(&sid);
     assert!(
         toolset_weak.upgrade().is_none(),
@@ -3533,14 +3516,14 @@ fn cancel_does_not_forward_to_bridge_in_local_mode() {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-cancel-local");
         let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         agent
             .cancel(acp::CancelNotification::new(sid.clone()))
             .await
             .expect("cancel must succeed");
         let mut saw_local_cancel = false;
         while let Ok(cmd) = cmd_rx.try_recv() {
-            if let SessionCommand::Cancel { .. } = cmd {
+            if let SessionCommand::Cancel(..) = cmd {
                 saw_local_cancel = true;
             }
         }
@@ -3561,7 +3544,7 @@ fn cancel_never_overtakes_in_flight_prompt_intake() {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-cancel-intake-race");
         let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         let order: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>> =
             std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let (intake_parked_tx, intake_parked_rx) = tokio::sync::oneshot::channel::<()>();
@@ -3577,7 +3560,7 @@ fn cancel_never_overtakes_in_flight_prompt_intake() {
                         }
                     }
                     SessionCommand::Prompt { .. } => driver_order.borrow_mut().push("prompt"),
-                    SessionCommand::Cancel { .. } => driver_order.borrow_mut().push("cancel"),
+                    SessionCommand::Cancel(..) => driver_order.borrow_mut().push("cancel"),
                     _ => {}
                 }
             }
@@ -3698,12 +3681,12 @@ fn disconnect_keeps_live_session_resident_without_finalize() {
         let sid = acp::SessionId::new("sess-live");
         let (_cmd_tx, mut cmd_rx) = {
             let (handle, tx, rx) = make_live_session_handle(&sid, Some("turn-1"));
-            agent.sessions.borrow_mut().insert(sid.clone(), handle);
+            agent.insert_resident(&sid, handle);
             (tx, rx)
         };
         drive_disconnect(&agent, &sid).await;
         assert!(
-            agent.sessions.borrow().contains_key(&sid),
+            agent.is_resident(&sid),
             "live session must stay resident across client disconnect"
         );
         assert!(
@@ -3714,10 +3697,7 @@ fn disconnect_keeps_live_session_resident_without_finalize() {
             "no command may be sent to a session kept resident with live work"
         );
         let resident = agent
-            .sessions
-            .borrow()
-            .get(&sid)
-            .cloned()
+            .resident_handle(&sid)
             .expect("session must still be resident");
         resident
             .cmd_tx
@@ -3751,7 +3731,7 @@ fn disconnect_keeps_resident_on_poisoned_lock() {
         let sid = acp::SessionId::new("sess-poison");
         let (handle, _tx, _rx) = make_live_session_handle(&sid, None);
         let poison_target = handle.current_prompt_id.clone();
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         let _ = std::thread::spawn(move || {
             let _g = poison_target.lock().unwrap();
             panic!("poison current_prompt_id");
@@ -3759,9 +3739,7 @@ fn disconnect_keeps_resident_on_poisoned_lock() {
         .join();
         assert!(
             agent
-                .sessions
-                .borrow()
-                .get(&sid)
+                .resident_handle(&sid)
                 .unwrap()
                 .current_prompt_id
                 .lock()
@@ -3770,7 +3748,7 @@ fn disconnect_keeps_resident_on_poisoned_lock() {
         );
         drive_disconnect(&agent, &sid).await;
         assert!(
-            agent.sessions.borrow().contains_key(&sid),
+            agent.is_resident(&sid),
             "a session with an unknown (poisoned) state must be kept resident"
         );
         assert_eq!(
@@ -3830,7 +3808,7 @@ fn disconnect_unloads_idle_session_without_finalize() {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-idle");
         let (handle, _cmd_tx, cmd_rx) = make_live_session_handle(&sid, None);
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         let mut observed = spawn_fake_actor(cmd_rx, false);
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         agent.session_registry.set_thread(
@@ -3842,7 +3820,7 @@ fn disconnect_unloads_idle_session_without_finalize() {
         agent.ensure_session_supervisor();
         drive_disconnect(&agent, &sid).await;
         assert!(
-            !agent.sessions.borrow().contains_key(&sid),
+            !agent.is_resident(&sid),
             "idle session must be unloaded from the resident map on disconnect"
         );
         assert!(
@@ -3854,7 +3832,7 @@ fn disconnect_unloads_idle_session_without_finalize() {
             .expect("idle-unload must send a command within 1s")
             .expect("fake actor channel must stay open");
         assert!(
-            matches!(shutdown, TestSessionCommand::Shutdown),
+            matches!(shutdown, TestSessionCommand::Shutdown(_)),
             "idle-unload must send SessionCommand::Shutdown"
         );
         assert!(
@@ -3904,11 +3882,11 @@ fn disconnect_keeps_resident_when_actor_reports_busy() {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-busy");
         let (handle, _cmd_tx, cmd_rx) = make_live_session_handle(&sid, None);
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         let mut observed = spawn_fake_actor(cmd_rx, true);
         drive_disconnect(&agent, &sid).await;
         assert!(
-            agent.sessions.borrow().contains_key(&sid),
+            agent.is_resident(&sid),
             "a between-turns session with queued work (IsBusy=true) must stay resident"
         );
         assert_eq!(
@@ -3941,11 +3919,11 @@ fn disconnect_keeps_resident_when_plan_approval_parked() {
             "exit-plan-mode-resume".to_string(),
             crate::session::pending_interaction::PendingKind::PlanApproval,
         );
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         let mut observed = spawn_fake_actor(cmd_rx, false);
         drive_disconnect(&agent, &sid).await;
         assert!(
-            agent.sessions.borrow().contains_key(&sid),
+            agent.is_resident(&sid),
             "a session with a parked plan-approval must stay resident"
         );
         assert_eq!(
@@ -3978,19 +3956,13 @@ fn disconnect_mixed_batch_keeps_busy_unloads_idle() {
         let sid_idle = acp::SessionId::new("sess-batch-idle");
         let (busy_handle, _busy_tx, busy_rx) = make_live_session_handle(&sid_busy, None);
         let (idle_handle, _idle_tx, idle_rx) = make_live_session_handle(&sid_idle, None);
-        agent
-            .sessions
-            .borrow_mut()
-            .insert(sid_busy.clone(), busy_handle);
-        agent
-            .sessions
-            .borrow_mut()
-            .insert(sid_idle.clone(), idle_handle);
+        agent.insert_resident(&sid_busy, busy_handle);
+        agent.insert_resident(&sid_idle, idle_handle);
         let mut busy_observed = spawn_fake_actor(busy_rx, true);
         let mut idle_observed = spawn_fake_actor(idle_rx, false);
         drive_disconnect_many(&agent, &[&sid_busy, &sid_idle]).await;
         assert!(
-            agent.sessions.borrow().contains_key(&sid_busy),
+            agent.is_resident(&sid_busy),
             "the busy session in the batch must stay resident"
         );
         assert_eq!(
@@ -3999,7 +3971,7 @@ fn disconnect_mixed_batch_keeps_busy_unloads_idle() {
             "the busy session must be Working"
         );
         assert!(
-            !agent.sessions.borrow().contains_key(&sid_idle),
+            !agent.is_resident(&sid_idle),
             "the idle session in the batch must be unloaded"
         );
         assert_eq!(
@@ -4013,7 +3985,7 @@ fn disconnect_mixed_batch_keeps_busy_unloads_idle() {
                 .expect("idle session must receive a command within 1s")
                 .expect("fake actor channel must stay open");
         assert!(
-            matches!(idle_shutdown, TestSessionCommand::Shutdown),
+            matches!(idle_shutdown, TestSessionCommand::Shutdown(_)),
             "the idle session must be sent Shutdown"
         );
         tokio::task::yield_now().await;
@@ -4040,9 +4012,13 @@ fn session_live_state_map_is_bounded_across_cycles() {
         for i in 0..50 {
             let sid = acp::SessionId::new(format!("sess-cycle-{i}"));
             let (handle, _tx, _rx) = make_live_session_handle(&sid, Some("turn"));
-            agent.sessions.borrow_mut().insert(sid.clone(), handle);
+            agent.insert_resident(&sid, handle);
             agent.set_session_live_state(&sid, SessionLiveState::IdleResident);
-            agent.close_session_explicit(&sid);
+            assert_eq!(
+                agent.close_active_session(&sid).await,
+                crate::agent::mvp_agent::session_lifecycle::CloseOutcome::Closed,
+                "cycle {i} must actually close, or the bound below proves nothing"
+            );
         }
         assert_eq!(
             agent.session_registry.counts().session_live_state,
@@ -4051,18 +4027,15 @@ fn session_live_state_map_is_bounded_across_cycles() {
         );
     });
 }
-/// Finalize fires on a genuine terminal close — driven through the **real**
-/// `x.ai/session/close` dispatch (`ext_method` → `handle_session_close`),
-/// not the internal helper. Proves finalize was *moved* (not removed) and
-/// guards the handler's `existed` gate. (Finalize assertion is
-/// invocation-level; see note in `finalize_session_replica`.)
+/// Finalize fires on a genuine terminal close, driven through the real
+/// `x.ai/session/close` dispatch rather than the internal helper.
 #[test]
 fn explicit_close_finalizes_the_replica() {
     run_local_for_bridge_test(|| async {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-close");
         let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, Some("turn-1"));
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         drive_close(&agent, "no-such-session")
             .await
             .expect("close of a missing session must succeed as a no-op");
@@ -4073,9 +4046,29 @@ fn explicit_close_finalizes_the_replica() {
         drive_close(&agent, sid.0.as_ref())
             .await
             .expect("session close must be handled");
+        let Ok(TestSessionCommand::Cancel(options)) = cmd_rx.try_recv() else {
+            panic!("close must send Cancel before anything else");
+        };
+        assert_eq!(
+            (
+                options.cancel_subagents,
+                options.kill_background_tasks,
+                options.rewind_if_no_output,
+                options.trigger.as_ref().map(|t| t.as_str()),
+                options.user_initiated
+            ),
+            (true, true, false, Some("session_close"), false),
+        );
         assert!(
-            matches!(cmd_rx.try_recv(), Ok(TestSessionCommand::Shutdown)),
-            "handle_session_close must send Shutdown to the actor"
+            matches!(
+                cmd_rx.try_recv(),
+                Ok(TestSessionCommand::Shutdown(
+                    crate::session::ShutdownKind::CancelRunningTurn
+                ))
+            ),
+            "close frees the session, so its Shutdown must cancel the running \
+             turn; a graceful one would let the turn answer EndTurn as the \
+             actor tears down"
         );
         assert_eq!(
             agent.finalize_spy.borrow().as_slice(),
@@ -4083,7 +4076,7 @@ fn explicit_close_finalizes_the_replica() {
             "explicit close must finalize the cloud replica exactly once"
         );
         assert!(
-            !agent.sessions.borrow().contains_key(&sid),
+            !agent.is_resident(&sid),
             "explicit close removes the session"
         );
         assert_eq!(
@@ -4115,7 +4108,7 @@ fn supervisor_reaps_panicked_resident_actor() {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-panic");
         let (handle, _tx, _rx) = make_live_session_handle(&sid, Some("turn-1"));
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         let panic_thread = std::thread::spawn(|| panic!("injected actor panic"));
         agent.session_registry.set_thread(
             &sid,
@@ -4135,7 +4128,7 @@ fn supervisor_reaps_panicked_resident_actor() {
             "supervisor must reap the dead thread"
         );
         assert!(
-            !agent.sessions.borrow().contains_key(&sid),
+            !agent.is_resident(&sid),
             "reaped session must be removed from the resident map"
         );
         assert_eq!(
@@ -4601,15 +4594,19 @@ fn reload_after_terminal_removal_starts_clean() {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-reload");
         let (handle, _tx, _rx) = make_live_session_handle(&sid, Some("turn-1"));
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
-        agent.close_session_explicit(&sid);
+        agent.insert_resident(&sid, handle);
+        assert_eq!(
+            agent.close_active_session(&sid).await,
+            crate::agent::mvp_agent::session_lifecycle::CloseOutcome::Closed,
+            "the reload below is only meaningful after a close that happened"
+        );
         assert_eq!(
             agent.session_live_state_for(&sid),
             None,
             "terminal removal must leave no stale state"
         );
         let (handle2, _tx2, _rx2) = make_live_session_handle(&sid, None);
-        agent.sessions.borrow_mut().insert(sid.clone(), handle2);
+        agent.insert_resident(&sid, handle2);
         agent.set_session_live_state(&sid, SessionLiveState::IdleResident);
         assert_eq!(
             agent.session_live_state_for(&sid),
@@ -4678,7 +4675,7 @@ fn subagent_spawn_context_reloads_project_definitions_after_trust_changes() {
         let sid = acp::SessionId::new("roles-personas-trust-transition");
         let (mut handle, _tx, _cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo.path().display().to_string();
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         {
             let mut cfg = agent.cfg.borrow_mut();
             cfg.subagent_roles.insert(
@@ -4747,7 +4744,7 @@ fn project_roles_personas_gated_via_resolve_and_record_chain() {
         let sid = acp::SessionId::new("roles-personas-resolve-chain");
         let (mut handle, _tx, _cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo.path().display().to_string();
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         let allowed = crate::agent::folder_trust::resolve_and_record(
             repo.path(),
             Some(&folder_trust_on()),
@@ -4835,7 +4832,7 @@ fn interactive_trust_prompt_grant_reloads_project_mcp() {
         let sid = acp::SessionId::new("sess-trust");
         let (mut handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
         let params = answer_folder_trust_request(&mut gw_rx, "trust").await;
         assert!(
@@ -4910,7 +4907,7 @@ fn interactive_trust_prompt_reject_keeps_gated() {
         let sid = acp::SessionId::new("sess-reject");
         let (mut handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
         let _ = answer_folder_trust_request(&mut gw_rx, "reject").await;
         assert!(
@@ -4949,7 +4946,7 @@ fn interactive_trust_prompt_dormant_when_feature_off() {
         let sid = acp::SessionId::new("sess-dormant");
         let (mut handle, _tx, _cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(300), gw_rx.recv())
@@ -4976,7 +4973,7 @@ fn interactive_trust_prompt_no_request_without_capability() {
         let sid = acp::SessionId::new("sess-nocap");
         let (mut handle, _tx, _cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(300), gw_rx.recv())
@@ -5005,7 +5002,7 @@ fn interactive_trust_prompt_client_error_fails_closed() {
         let sid = acp::SessionId::new("sess-err");
         let (mut handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
         let msg = tokio::time::timeout(std::time::Duration::from_secs(2), gw_rx.recv())
             .await
@@ -5046,7 +5043,7 @@ fn interactive_trust_prompt_dedups_same_workspace() {
         let sid = acp::SessionId::new("sess-dedup");
         let (mut handle, _tx, _cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
         let first = tokio::time::timeout(std::time::Duration::from_secs(2), gw_rx.recv()).await;
         assert!(
@@ -5130,18 +5127,15 @@ fn interactive_trust_prompt_reloads_all_same_workspace_sessions() {
         let sid_root = acp::SessionId::new("sess-root");
         let (mut h_root, _t1, mut rx_root) = make_live_session_handle(&sid_root, None);
         h_root.info.cwd = root.to_string_lossy().to_string();
-        agent.sessions.borrow_mut().insert(sid_root.clone(), h_root);
+        agent.insert_resident(&sid_root, h_root);
         let sid_sub = acp::SessionId::new("sess-sub");
         let (mut h_sub, _t2, mut rx_sub) = make_live_session_handle(&sid_sub, None);
         h_sub.info.cwd = subdir.to_string_lossy().to_string();
-        agent.sessions.borrow_mut().insert(sid_sub.clone(), h_sub);
+        agent.insert_resident(&sid_sub, h_sub);
         let sid_other = acp::SessionId::new("sess-other");
         let (mut h_other, _t3, mut rx_other) = make_live_session_handle(&sid_other, None);
         h_other.info.cwd = other_path.to_string_lossy().to_string();
-        agent
-            .sessions
-            .borrow_mut()
-            .insert(sid_other.clone(), h_other);
+        agent.insert_resident(&sid_other, h_other);
         agent.maybe_spawn_interactive_trust_prompt(&sid_root, &root, Some(&remote));
         let _ = answer_folder_trust_request(&mut gw_rx, "trust").await;
         let root_cmds = drain_reload_commands(&mut rx_root).await;
@@ -5186,7 +5180,7 @@ fn interactive_trust_prompt_reprompts_after_untrust() {
         let sid = acp::SessionId::new("sess-reprompt");
         let (mut handle, _tx, _cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.insert_resident(&sid, handle);
         agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
         assert!(
             matches!(

@@ -1013,12 +1013,22 @@ pub fn render_picker_row(
     } else {
         row.badge.width() as u16 + 1
     }; // +1 space before badge
-    let right_width = row.right_label.width() as u16;
-    let gap = if right_width > 0 { 2u16 } else { 0 };
-    let max_label_width = width
-        .saturating_sub(right_width + gap + trailing_pad + badge_width + prefix_width)
-        as usize;
+    // Cap right column at half width so long descriptions don't crush labels.
+    let fixed = prefix_width + trailing_pad + badge_width;
+    let content_width = width.saturating_sub(fixed);
+    let (max_label_width, truncated_right) = if row.right_label.is_empty() {
+        (content_width as usize, String::new())
+    } else {
+        let gap = 2u16;
+        let usable = content_width.saturating_sub(gap);
+        let max_right = (usable / 2) as usize;
+        let right = truncate_str(row.right_label, max_right);
+        let right_cols = right.width() as u16;
+        let max_label = usable.saturating_sub(right_cols) as usize;
+        (max_label, right)
+    };
     let truncated_label = truncate_str(row.label, max_label_width);
+    let right_width = truncated_right.width() as u16;
 
     // Render as separate spans: indent, fold indicator (shared), label.
     let mut cur_x = x;
@@ -1089,14 +1099,13 @@ pub fn render_picker_row(
         );
     }
 
-    // Right side (with trailing padding).
     if right_width > 0 {
         let right_style = Style::default().fg(meta_fg).bg(row_bg);
         let right_x = x + width.saturating_sub(right_width + trailing_pad);
         buf.set_span(
             right_x,
             y,
-            &Span::styled(row.right_label, right_style),
+            &Span::styled(&truncated_right, right_style),
             right_width,
         );
     }

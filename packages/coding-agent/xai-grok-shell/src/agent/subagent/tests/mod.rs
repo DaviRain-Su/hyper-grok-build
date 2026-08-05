@@ -2277,7 +2277,7 @@ async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
         .await;
     assert!(matches!(
             child_cmd_rx.try_recv(),
-            Ok(SessionCommand::Shutdown)
+            Ok(SessionCommand::Shutdown(_))
         ));
     assert!(result.cancelled);
     assert!(!result.success);
@@ -2345,7 +2345,7 @@ async fn run_promote_cancel_with_worktree(
         .await;
     assert!(matches!(
             child_cmd_rx.try_recv(),
-            Ok(SessionCommand::Shutdown)
+            Ok(SessionCommand::Shutdown(_))
         ));
     assert!(result.cancelled);
 }

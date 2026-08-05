@@ -94,7 +94,7 @@ pub(crate) struct PendingInteractionGuard {
 
 impl PendingInteractionGuard {
     /// Register a pending interaction and broadcast `pending_interaction`.
-    pub fn new(
+    pub(crate) fn new(
         pending: PendingInteractions,
         gateway: GatewaySender,
         session_id: acp::SessionId,

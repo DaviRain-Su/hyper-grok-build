@@ -34,5 +34,5 @@ pub mod util;
 pub mod versions;
 
 pub use attribution::{
-    Auth401AttributionCallback, SENT_BEARER_PREFIX_LEN, SharedAttributionCallback, ToolConsumer,
+    Auth401AttributionCallback, BEARER_SUFFIX_LEN, SharedAttributionCallback, ToolConsumer,
 };

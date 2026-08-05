@@ -320,11 +320,14 @@ fn find_session(
     agent: &MvpAgent,
     session_id: Option<&str>,
 ) -> Option<crate::session::handle::SessionHandle> {
-    let sessions = agent.sessions.borrow();
     if let Some(id) = session_id {
-        sessions.get(&acp::SessionId::new(id)).cloned()
+        agent.resident_handle(&acp::SessionId::new(id))
     } else {
-        sessions.values().next().cloned()
+        agent
+            .resident_ids()
+            .into_iter()
+            .next()
+            .and_then(|id| agent.resident_handle(&id))
     }
 }
 

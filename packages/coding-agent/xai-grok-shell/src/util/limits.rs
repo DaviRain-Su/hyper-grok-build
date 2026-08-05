@@ -10,7 +10,7 @@ pub(crate) struct ProcessLimits {
 }
 
 impl ProcessLimits {
-    pub fn read() -> Self {
+    pub(crate) fn read() -> Self {
         Self {
             nofile: rlimit(RlimitKind::Nofile),
             nproc: rlimit(RlimitKind::Nproc),
@@ -21,7 +21,7 @@ impl ProcessLimits {
         }
     }
 
-    pub fn log(&self) {
+    pub(crate) fn log(&self) {
         xai_grok_telemetry::unified_log::info(
             "process resource limits",
             None,

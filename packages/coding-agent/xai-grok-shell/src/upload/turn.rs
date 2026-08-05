@@ -342,22 +342,13 @@ pub(crate) fn parse_ask_user_question_from_meta(
 }
 /// Look up a session's model, falling back to the agent default.
 pub(crate) fn lookup_session_model(
-    sessions: &std::collections::HashMap<
-        agent_client_protocol::SessionId,
-        crate::session::SessionHandle,
-    >,
-    session_id: Option<&agent_client_protocol::SessionId>,
+    session_model: Option<agent_client_protocol::ModelId>,
     default_model_id: &agent_client_protocol::ModelId,
 ) -> agent_client_protocol::ModelId {
-    session_id
-        .and_then(|sid| sessions.get(sid).map(|h| h.model_id.clone()))
-        .unwrap_or_else(|| default_model_id.clone())
+    session_model.unwrap_or_else(|| default_model_id.clone())
 }
-pub(crate) fn apply_yolo_mode_to_matching_sessions(
-    sessions: &mut std::collections::HashMap<
-        agent_client_protocol::SessionId,
-        crate::session::SessionHandle,
-    >,
+pub(crate) fn apply_yolo_mode_to_matching_sessions<'a>(
+    sessions: impl IntoIterator<Item = &'a mut crate::session::SessionHandle>,
     sender_id: Option<&str>,
     yolo_mode: bool,
 ) -> usize {
@@ -365,7 +356,7 @@ pub(crate) fn apply_yolo_mode_to_matching_sessions(
         sender_id.is_none() || h.origin_client.as_ref().map(|c| c.product.as_str()) == sender_id
     };
     let mut updated = 0;
-    for handle in sessions.values_mut() {
+    for handle in sessions {
         if matches_sender(handle) {
             handle.yolo_mode = yolo_mode;
             let _ = handle

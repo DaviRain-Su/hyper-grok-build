@@ -14,9 +14,7 @@ use std::path::{Path, PathBuf};
 #[cfg(all(feature = "enforce", unix))]
 mod glob;
 #[cfg(all(feature = "enforce", target_os = "linux"))]
-pub(crate) use glob::{
-    DENY_GLOB_MAX_DEPTH, DENY_GLOB_MAX_ENTRIES, DENY_GLOB_MAX_MATCHES, expand_deny_globs,
-};
+pub(crate) use glob::{DENY_GLOB_CAPS, expand_deny_globs};
 #[cfg(all(feature = "enforce", unix))]
 pub(crate) use glob::{apply_deny_globs_to_capability_set, partition_deny_entries};
 

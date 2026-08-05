@@ -36,6 +36,7 @@ use xai_grok_sampling_types::{
 
 use crate::adapter::BackendAdapter;
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
+use xai_grok_auth::bearer_suffix;
 use crate::events::SamplingErrorInfo;
 use crate::types::ResponsesStreamItem;
 
@@ -1988,8 +1989,8 @@ impl SamplingClient {
         is_first_party_grok_endpoint(&self.base_url)
     }
 
-    fn bearer_tail_fragment(bearer: &str) -> String {
-        crate::attribution::bearer_tail_fragment(bearer).to_string()
+    fn bearer_suffix(bearer: &str) -> String {
+        xai_grok_auth::bearer_suffix(bearer).to_string()
     }
 
     /// Bearer tail fragment for 401 attribution. When a resolver is wired it is
@@ -1999,13 +2000,13 @@ impl SamplingClient {
     /// Prefer the tail fragment returned by [`Self::post`] for request-path
     /// attribution so the live credential is resolved only once.
     #[cfg_attr(not(test), allow(dead_code))]
-    fn current_sent_bearer_prefix(&self) -> Option<String> {
+    fn current_sent_bearer_suffix(&self) -> Option<String> {
         if self.bearer_resolver.is_some() {
             return self
                 .bearer_resolver
                 .as_ref()
                 .and_then(|r| r.current_bearer())
-                .map(|s| Self::bearer_tail_fragment(&s));
+                .map(|s| Self::bearer_suffix(&s));
         }
         self.extract_sent_bearer()
     }
@@ -2036,17 +2037,17 @@ impl SamplingClient {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.strip_prefix("Bearer ")),
         };
-        raw.map(Self::bearer_tail_fragment)
+        raw.map(Self::bearer_suffix)
     }
 
     /// Attribute a 401 to the exact bearer already resolved for this request.
     fn record_401_attribution(
         &self,
         consumer: crate::attribution::SamplingConsumer,
-        sent_bearer_prefix: Option<&str>,
+        sent_bearer_suffix: Option<&str>,
     ) {
         if let Some(cb) = self.attribution_callback.as_ref() {
-            cb.record_401(consumer, sent_bearer_prefix);
+            cb.record_401(consumer, sent_bearer_suffix);
         }
     }
 
@@ -5603,7 +5604,7 @@ mod tests {
     }
 
     /// `post()` strips the `"Bearer "` scheme prefix off `Authorization`
-    /// and captures the tail fragment (see `SENT_BEARER_PREFIX_LEN`).
+    /// and captures the tail fragment (see `BEARER_SUFFIX_LEN`).
     #[test]
     fn post_captures_bearer_tail_for_openai_compat() {
         let cfg = SamplerConfig {
@@ -5619,7 +5620,7 @@ mod tests {
         assert_eq!(bearer.as_deref(), Some("r-1234567890"));
         assert_eq!(
             bearer.as_deref().map(str::len),
-            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
+            Some(crate::attribution::BEARER_SUFFIX_LEN),
         );
     }
 
@@ -5641,7 +5642,7 @@ mod tests {
         assert_eq!(bearer.as_deref(), Some("c-key-abc123"));
         assert_eq!(
             bearer.as_deref().map(str::len),
-            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
+            Some(crate::attribution::BEARER_SUFFIX_LEN),
         );
     }
 
@@ -5701,7 +5702,7 @@ mod tests {
         // A record-time re-read (the pre-fix behavior) would report the
         // rotated token instead:
         assert_eq!(
-            client.current_sent_bearer_prefix().as_deref(),
+            client.current_sent_bearer_suffix().as_deref(),
             Some("en-newtail99"),
             "sanity: the build-time capture and a live re-read now differ"
         );
@@ -5921,7 +5922,7 @@ mod tests {
         assert_eq!(calls[0].1.as_deref(), Some("0-extra-tail"));
         assert_eq!(
             calls[0].1.as_deref().map(str::len),
-            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
+            Some(crate::attribution::BEARER_SUFFIX_LEN),
         );
     }
 
@@ -5945,7 +5946,7 @@ mod tests {
         };
         let client = SamplingClient::new(cfg).expect("client should build");
         assert_eq!(
-            client.current_sent_bearer_prefix(),
+            client.current_sent_bearer_suffix(),
             None,
             "resolver None must not attribute a stripped default seed"
         );

@@ -7,8 +7,8 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-/// One base64 image lifted out of tool result or file content. The session
-/// layer converts these into multimodal `ContentPart::Image` follow-ups.
+/// Image payload captured before text truncation for session harvest
+/// (multimodal vision follow-ups).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExtractedImage {
     pub data: String,
@@ -19,6 +19,10 @@ pub struct ExtractionResult {
     pub text: String,
     pub images: Vec<ExtractedImage>,
 }
+
+/// In-text stand-in for a captured data-URI image. Keep in lockstep with
+/// extract and tool-layer writers.
+pub const IMAGE_CONTENT_PLACEHOLDER: &str = "[image content will be provided separately]";
 
 /// Skip tiny decorative icons (favicons, spacer GIFs).
 const MIN_PAYLOAD_LEN: usize = 1024;
@@ -237,7 +241,7 @@ fn scan_and_extract(s: &str) -> Option<(String, Vec<ExtractedImage>)> {
                 data,
                 mime_type: mime,
             });
-            result.push_str("[image content will be provided separately]");
+            result.push_str(IMAGE_CONTENT_PLACEHOLDER);
         }
 
         last_end = payload_end;

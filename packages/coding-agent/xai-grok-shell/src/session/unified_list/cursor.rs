@@ -25,7 +25,7 @@ pub(super) struct BoundaryKey {
 }
 
 impl CompositeCursor {
-    pub fn decode(raw: Option<&str>) -> Self {
+    pub(super) fn decode(raw: Option<&str>) -> Self {
         raw.filter(|s| !s.is_empty())
             .and_then(|s| {
                 base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -36,7 +36,7 @@ impl CompositeCursor {
             .unwrap_or_default()
     }
 
-    pub fn encode(&self) -> String {
+    pub(super) fn encode(&self) -> String {
         let json = serde_json::to_vec(self).unwrap_or_default();
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
     }

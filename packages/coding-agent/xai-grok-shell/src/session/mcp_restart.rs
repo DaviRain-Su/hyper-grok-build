@@ -107,7 +107,7 @@ use crate::session::mcp_dispatcher::{
 ///
 /// Wall-clock targets: `t=1s, t=5s, t=21s` (cumulative). Total worst-case
 /// window before the task gives up and parks the server is 21 s.
-pub const BACKOFF: [Duration; 3] = [
+pub(crate) const BACKOFF: [Duration; 3] = [
     Duration::from_secs(1),
     Duration::from_secs(4),
     Duration::from_secs(16),
@@ -118,7 +118,7 @@ pub const BACKOFF: [Duration; 3] = [
 /// `http-mcp-server`) usually drops on a rolling redeploy that takes minutes to bring
 /// a healthy replica back; retrying across ~2.5 min lets it self-heal
 /// instead of parking until the next tool call. 8 attempts total.
-pub const HTTP_RECOVERY_BACKOFF: [Duration; 7] = [
+pub(crate) const HTTP_RECOVERY_BACKOFF: [Duration; 7] = [
     Duration::from_secs(1),
     Duration::from_secs(4),
     Duration::from_secs(16),

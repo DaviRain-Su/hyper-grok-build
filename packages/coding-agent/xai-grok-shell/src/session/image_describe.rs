@@ -29,22 +29,22 @@ use xai_grok_sampling_types::conversation::{ContentPart, ConversationItem, UserI
 use xai_grok_tools::util::truncate::truncate_middle;
 /// Per-entry character cap for the conversation outline sent to the
 /// vision model. Mirrors the compat-harness behavior.
-pub const OUTLINE_PER_ENTRY_CAP: usize = 1_500;
+pub(crate) const OUTLINE_PER_ENTRY_CAP: usize = 1_500;
 /// Total character cap for the assembled outline block.
-pub const OUTLINE_TOTAL_CAP: usize = 4_000;
+pub(crate) const OUTLINE_TOTAL_CAP: usize = 4_000;
 /// Maximum number of prior user requests to surface in the outline.
-pub const OUTLINE_MAX_ENTRIES: usize = 5;
+pub(crate) const OUTLINE_MAX_ENTRIES: usize = 5;
 /// Character cap on the current `<user_query>` text injected into the
 /// describe prompt. Prevents pathological prompts from blowing up the
 /// vision request.
-pub const CURRENT_QUERY_CAP: usize = 12_000;
+pub(crate) const CURRENT_QUERY_CAP: usize = 12_000;
 /// Maximum number of images that will be captioned per turn. Only the
 /// **last** N images are described; older ones receive
 /// [`SKIPPED_IMAGE_MARKER`]. Default 16.
-pub const IMAGE_DESCRIPTION_PROCESSING_LIMIT: usize = 16;
+pub(crate) const IMAGE_DESCRIPTION_PROCESSING_LIMIT: usize = 16;
 /// Placeholder stamped on images that fall outside
 /// [`IMAGE_DESCRIPTION_PROCESSING_LIMIT`].
-pub const SKIPPED_IMAGE_MARKER: &str = "[skipped-due-to-limit]";
+pub(crate) const SKIPPED_IMAGE_MARKER: &str = "[skipped-due-to-limit]";
 /// Empty twin: no optional template is compiled in, nothing extra to strip.
 const OPTIONAL_CONTEXT_TAGS: &[&str] = &[];
 /// Strip template-specific context tags from text before it reaches the
@@ -284,7 +284,7 @@ pub(crate) struct ImageDescribeCache {
     inner: Mutex<HashMap<(ImageDescribeSource, String, String, String), String>>,
 }
 impl ImageDescribeCache {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
         }

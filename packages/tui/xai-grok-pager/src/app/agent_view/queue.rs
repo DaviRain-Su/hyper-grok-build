@@ -4,7 +4,7 @@
 #[cfg(test)]
 use super::test_fixtures;
 use super::{AgentPane, AgentView, PromptMode, overlay_action_to_outcome};
-use crate::actions::ActionRegistry;
+use crate::actions::{ActionId, ActionRegistry};
 use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 use crossterm::event::KeyEvent;
@@ -539,6 +539,9 @@ impl AgentView {
                     self.session.swap_prompt_down(id);
                 }
                 QueueEvent::ForceInterject { id } => {
+                    // Same InterjectPrompt chord as the prompt; surface is the
+                    // queue pane (not When::PromptFocused).
+                    crate::actions::log_shortcut_used(key, ActionId::InterjectPrompt, "queue");
                     return self.force_interject_queue_row(id);
                 }
             }

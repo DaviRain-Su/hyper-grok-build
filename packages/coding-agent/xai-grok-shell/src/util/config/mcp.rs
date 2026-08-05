@@ -374,7 +374,7 @@ pub(crate) enum McpPreferencesLoad {
 }
 
 impl McpPreferencesLoad {
-    pub fn file(&self) -> McpPreferencesFile {
+    pub(crate) fn file(&self) -> McpPreferencesFile {
         match self {
             Self::Ok(f) => f.clone(),
             Self::Missing | Self::Corrupt => McpPreferencesFile::default(),

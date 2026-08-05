@@ -105,7 +105,7 @@ pub(crate) struct ConfigReloader {
 }
 
 impl ConfigReloader {
-    pub fn new(
+    pub(crate) fn new(
         grok_home: PathBuf,
         initial_auth_key_hash: u64,
         initial_config: toml::Value,
@@ -129,7 +129,7 @@ impl ConfigReloader {
     }
 
     /// Main loop. Batches all events from each debounce tick before processing.
-    pub async fn run(
+    pub(crate) async fn run(
         mut self,
         mut events: mpsc::UnboundedReceiver<ConfigChangeEvent>,
         cancel: CancellationToken,

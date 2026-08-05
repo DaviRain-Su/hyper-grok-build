@@ -141,17 +141,16 @@ impl MvpAgent {
             None => return Err(CodeNavEligibility::SessionRequired),
         };
 
-        let sessions = self.sessions.borrow();
-        let (client_type, code_nav_enabled) = if let Some(handle) = sessions.get(session_id) {
+        let (client_type, code_nav_enabled) = if let Some(handle) = self.resident_handle(session_id)
+        {
             let ct = crate::http::client_type_from_origin(handle.origin_client.as_ref());
             (ct, handle.code_nav_enabled)
         } else {
             // Session not found (evicted/unknown): reject rather than silently
-            // falling back to shared global state — that would reintroduce the
+            // falling back to shared global state: that would reintroduce the
             // last-client-wins bug for stale session IDs in leader mode.
             return Err(CodeNavEligibility::SessionRequired);
         };
-        drop(sessions);
         self.code_nav_eligibility_inner(cwd, client_type, code_nav_enabled)
     }
 

@@ -69,5 +69,5 @@ pub use process::{
     TestOutput, TestOutputSnapshot, TestProcess, TestProcessConfig, TestProcessState,
     TestProcessStderr, TestProcessStdout, TestProcessTermination, TestProcessTree, TestStdin,
 };
-pub use resources::{ResourceGrowth, ResourceSnapshot};
+pub use resources::{ResourceGrowth, ResourceSnapshot, RssMeasurement, RssOutcome, RssSampler};
 pub use sandbox::{TestSandbox, TestSandboxBuilder};

@@ -59,12 +59,12 @@ pub(crate) struct SessionMemory {
 
 impl SessionMemory {
     /// Whether memory is enabled for this session.
-    pub fn is_enabled(&self) -> bool {
+    pub(crate) fn is_enabled(&self) -> bool {
         self.storage.borrow().is_some()
     }
 
     /// Clone the storage out of the `RefCell`, dropping the borrow immediately.
-    pub fn storage(&self) -> Option<crate::session::memory::MemoryStorage> {
+    pub(crate) fn storage(&self) -> Option<crate::session::memory::MemoryStorage> {
         self.storage.borrow().clone()
     }
 
@@ -202,7 +202,7 @@ impl SessionMemory {
     }
 
     /// Collect telemetry counters for session-end summary.
-    pub fn telemetry_snapshot(&self) -> MemoryTelemetry {
+    pub(crate) fn telemetry_snapshot(&self) -> MemoryTelemetry {
         use std::sync::atomic::Ordering::Relaxed;
         MemoryTelemetry {
             flush_count: self.flush_count.load(Relaxed),

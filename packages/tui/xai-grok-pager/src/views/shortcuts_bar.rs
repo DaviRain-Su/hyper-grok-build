@@ -28,7 +28,9 @@ pub struct HintItem {
     pub keys: Vec<KeyShortcut>,
     /// Short label for the bottom bar (e.g., "send", "nav", "cancel").
     pub label: Cow<'static, str>,
-    /// Optional custom display string for keys (overrides keys.display()).
+    /// Optional custom key text for single-key bar paint (and cheatsheet).
+    /// Multi-key bar paint (`keys.len() > 1`) ignores this and builds from
+    /// structured keys (shared-mod compact or full-form join).
     pub custom_display: Option<&'static str>,
     /// Longer description for the all-shortcuts cheatsheet (e.g.,
     /// "Send prompt to agent"). When `None`, falls back to `label`.
@@ -69,18 +71,77 @@ impl HintItem {
         self
     }
 
-    /// Render the keys portion as a display string (e.g., "j/k", "Enter", "Ctrl+c").
-    fn key_display(&self) -> String {
-        if let Some(display) = self.custom_display {
-            display.to_string()
+    fn bar_key_display(&self) -> String {
+        bar_key_segments(self)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect()
+    }
+}
+
+struct BarKeySeg {
+    text: String,
+    is_join: bool,
+}
+
+fn bar_key_segments(hint: &HintItem) -> Vec<BarKeySeg> {
+    if hint.keys.len() <= 1 {
+        let text = if let Some(d) = hint.custom_display {
+            d.to_string()
+        } else if let Some(k) = hint.keys.first() {
+            k.display()
         } else {
-            self.keys
-                .iter()
-                .map(|k| k.display())
-                .collect::<Vec<_>>()
-                .join("/")
+            String::new()
+        };
+        if text.is_empty() {
+            return Vec::new();
+        }
+        return vec![BarKeySeg {
+            text,
+            is_join: false,
+        }];
+    }
+
+    let shared = hint
+        .keys
+        .iter()
+        .all(|k| k.modifiers == hint.keys[0].modifiers);
+    let mut segs = Vec::new();
+    if shared {
+        let prefix = hint.keys[0].modifiers_prefix();
+        if !prefix.is_empty() {
+            segs.push(BarKeySeg {
+                text: prefix,
+                is_join: false,
+            });
+        }
+        for (i, k) in hint.keys.iter().enumerate() {
+            if i > 0 {
+                segs.push(BarKeySeg {
+                    text: "/".into(),
+                    is_join: true,
+                });
+            }
+            segs.push(BarKeySeg {
+                text: k.code_display(),
+                is_join: false,
+            });
+        }
+    } else {
+        for (i, k) in hint.keys.iter().enumerate() {
+            if i > 0 {
+                segs.push(BarKeySeg {
+                    text: "/".into(),
+                    is_join: true,
+                });
+            }
+            segs.push(BarKeySeg {
+                text: k.display(),
+                is_join: false,
+            });
         }
     }
+    segs
 }
 
 /// Shortcuts bar widget. Renders a list of `HintItem`s.
@@ -223,14 +284,11 @@ impl Widget for ShortcutsBar<'_> {
                 x += sep_width;
             }
 
-            let key_text = hint.key_display();
-            let key_span = Span::styled(&key_text, key_style);
-            let key_width = key_text.width() as u16;
+            let key_width = hint.bar_key_display().width() as u16;
             if x + key_width > area.x + area.width {
                 break;
             }
-            buf.set_span(x, area.y, &key_span, key_width);
-            x += key_width;
+            x = paint_hint_keys(buf, x, area.y, hint, key_style, action_style);
 
             let colon = Span::styled(":", action_style);
             if x + 1 > area.x + area.width {
@@ -262,6 +320,31 @@ impl Widget for ShortcutsBar<'_> {
             }
         }
     }
+}
+
+fn paint_key_run(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style) -> u16 {
+    if text.is_empty() {
+        return x;
+    }
+    let w = text.width() as u16;
+    let span = Span::styled(text, style);
+    buf.set_span(x, y, &span, w);
+    x + w
+}
+
+fn paint_hint_keys(
+    buf: &mut Buffer,
+    mut x: u16,
+    y: u16,
+    hint: &HintItem,
+    key_style: Style,
+    sep_style: Style,
+) -> u16 {
+    for seg in bar_key_segments(hint) {
+        let style = if seg.is_join { sep_style } else { key_style };
+        x = paint_key_run(buf, x, y, &seg.text, style);
+    }
+    x
 }
 
 /// Compute the hint list the bar will actually render.
@@ -424,5 +507,207 @@ mod tests {
         let labels: Vec<&str> = out.iter().map(|h| h.label.as_ref()).collect();
         // All 3 pinned, 0 budget for unpinned.
         assert_eq!(labels, vec!["a", "b", "c"]);
+    }
+
+    fn render_hints(hints: &[HintItem]) -> Buffer {
+        use ratatui::layout::Rect;
+        use ratatui::widgets::Widget;
+
+        let area = Rect::new(0, 0, 48, 1);
+        let mut buf = Buffer::empty(area);
+        ShortcutsBar::new(hints).render(area, &mut buf);
+        buf
+    }
+
+    fn leading_text(buf: &Buffer, n: usize) -> String {
+        let mut text = String::new();
+        for col in 0..n {
+            text.push_str(buf.cell((col as u16, 0)).expect("cell").symbol());
+        }
+        text
+    }
+
+    #[test]
+    fn multi_key_shared_mod_compact_join_slash_uses_label_style() {
+        use ratatui::style::Modifier;
+
+        let theme = Theme::current();
+        let key_fg = theme.text_secondary;
+        let action_fg = theme.gray;
+
+        let hints = [HintItem::paired(
+            key!('[', CONTROL),
+            key!(']', CONTROL),
+            "prev/next agent",
+        )];
+        let buf = render_hints(&hints);
+
+        assert!(
+            leading_text(&buf, 9).starts_with("Ctrl+[/]:"),
+            "expected compact Ctrl+[/]:, got {:?}",
+            leading_text(&buf, 12)
+        );
+
+        // "Ctrl+[/]:prev/next agent" — join slash at col 6
+        let slash = buf.cell((6, 0)).expect("slash cell");
+        assert_eq!(slash.symbol(), "/");
+        assert_eq!(
+            slash.style().fg,
+            Some(action_fg),
+            "join slash must match label gray, got {:?}",
+            slash.style().fg
+        );
+        assert!(
+            !slash.style().add_modifier.contains(Modifier::BOLD),
+            "join slash must not be bold key style"
+        );
+
+        let open = buf.cell((5, 0)).expect("open bracket");
+        assert_eq!(open.symbol(), "[");
+        assert_eq!(open.style().fg, Some(key_fg));
+        assert!(open.style().add_modifier.contains(Modifier::BOLD));
+
+        let close = buf.cell((7, 0)).expect("close bracket");
+        assert_eq!(close.symbol(), "]");
+        assert_eq!(close.style().fg, Some(key_fg));
+        assert!(close.style().add_modifier.contains(Modifier::BOLD));
+
+        // "Ctrl+[/]:" = 9 cols, then "prev" = 4, "/" at col 13.
+        let label_slash = buf.cell((13, 0)).expect("label slash cell");
+        assert_eq!(label_slash.symbol(), "/");
+        assert_eq!(label_slash.style().fg, Some(action_fg));
+    }
+
+    #[test]
+    fn multi_key_ignores_custom_display() {
+        use ratatui::style::Modifier;
+
+        let theme = Theme::current();
+        let action_fg = theme.gray;
+
+        let mut item = HintItem::paired(key!('[', CONTROL), key!(']', CONTROL), "cycle");
+        item.custom_display = Some("WRONG");
+        let buf = render_hints(&[item]);
+
+        let text = leading_text(&buf, 12);
+        assert!(
+            text.starts_with("Ctrl+[/]:"),
+            "multi-key must ignore custom_display, got {text:?}"
+        );
+        assert!(
+            !text.contains("WRONG"),
+            "custom_display must not appear for multi-key, got {text:?}"
+        );
+
+        let join = buf.cell((6, 0)).expect("join");
+        assert_eq!(join.symbol(), "/");
+        assert_eq!(join.style().fg, Some(action_fg));
+        assert!(!join.style().add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn custom_display_with_slash_is_fully_key_styled() {
+        use ratatui::style::Modifier;
+
+        let theme = Theme::current();
+        let key_fg = theme.text_secondary;
+
+        let mut item = HintItem::new(key!(Null), "nav");
+        item.custom_display = Some("\u{2191}/\u{2193}");
+        let buf = render_hints(&[item]);
+
+        // "↑/↓:nav" — all three key cells must be key-styled, including `/`.
+        for col in 0..3 {
+            let cell = buf.cell((col, 0)).expect("key cell");
+            assert_eq!(
+                cell.style().fg,
+                Some(key_fg),
+                "col {col} ({}) must be key-styled",
+                cell.symbol()
+            );
+            assert!(cell.style().add_modifier.contains(Modifier::BOLD));
+        }
+        assert_eq!(buf.cell((0, 0)).expect("up").symbol(), "\u{2191}");
+        assert_eq!(buf.cell((1, 0)).expect("slash").symbol(), "/");
+        assert_eq!(buf.cell((2, 0)).expect("down").symbol(), "\u{2193}");
+        assert_eq!(buf.cell((3, 0)).expect("colon").symbol(), ":");
+    }
+
+    #[test]
+    fn bare_slash_key_is_fully_key_styled() {
+        use ratatui::style::Modifier;
+
+        let theme = Theme::current();
+        let key_fg = theme.text_secondary;
+
+        let hints = [HintItem::new(key!('/'), "search")];
+        let buf = render_hints(&hints);
+
+        let slash = buf.cell((0, 0)).expect("slash cell");
+        assert_eq!(slash.symbol(), "/");
+        assert_eq!(slash.style().fg, Some(key_fg));
+        assert!(
+            slash.style().add_modifier.contains(Modifier::BOLD),
+            "bare / must be key-styled, not a join separator"
+        );
+    }
+
+    #[test]
+    fn ctrl_slash_key_is_fully_key_styled() {
+        use ratatui::style::Modifier;
+
+        let theme = Theme::current();
+        let key_fg = theme.text_secondary;
+
+        let hints = [HintItem::new(key!('/', CONTROL), "search")];
+        let buf = render_hints(&hints);
+
+        // "Ctrl+/" — every cell key-styled; the trailing / is not a join.
+        for col in 0..6 {
+            let cell = buf.cell((col, 0)).expect("key cell");
+            assert_eq!(
+                cell.style().fg,
+                Some(key_fg),
+                "col {col} ({}) must be key-styled",
+                cell.symbol()
+            );
+            assert!(cell.style().add_modifier.contains(Modifier::BOLD));
+        }
+        assert_eq!(buf.cell((5, 0)).expect("slash").symbol(), "/");
+        assert_eq!(buf.cell((6, 0)).expect("colon").symbol(), ":");
+    }
+
+    #[test]
+    fn multi_key_different_mods_uses_full_forms() {
+        use ratatui::style::Modifier;
+
+        let theme = Theme::current();
+        let key_fg = theme.text_secondary;
+        let action_fg = theme.gray;
+
+        let hints = [HintItem::paired(key!(' ', CONTROL), key!(F(8)), "toggle")];
+        let buf = render_hints(&hints);
+
+        // "Ctrl+Space/F8:toggle"
+        //  0123456789...
+        // join / at col 10
+        let mut text = String::new();
+        for col in 0..20 {
+            text.push_str(buf.cell((col, 0)).expect("cell").symbol());
+        }
+        assert!(
+            text.starts_with("Ctrl+Space/F8:"),
+            "expected full forms, got {text:?}"
+        );
+
+        let join = buf.cell((10, 0)).expect("join slash");
+        assert_eq!(join.symbol(), "/");
+        assert_eq!(join.style().fg, Some(action_fg));
+        assert!(!join.style().add_modifier.contains(Modifier::BOLD));
+
+        let f = buf.cell((11, 0)).expect("F");
+        assert_eq!(f.symbol(), "F");
+        assert_eq!(f.style().fg, Some(key_fg));
+        assert!(f.style().add_modifier.contains(Modifier::BOLD));
     }
 }

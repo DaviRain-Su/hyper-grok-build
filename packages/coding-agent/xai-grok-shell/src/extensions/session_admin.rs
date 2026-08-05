@@ -38,7 +38,7 @@ use crate::session::{ExtMethodResult, SessionCommand};
 use xai_grok_telemetry::id::agent_id;
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
-pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+pub(crate) async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     if let Some(method) = InternalMethod::from_name(args.method.as_ref()) {
         return handle_internal(agent, args, method).await;
     }
@@ -237,7 +237,7 @@ async fn rename_chat_conversation(
 
     // If this conversation is open live, notify clients of the new title.
     let session_id = acp::SessionId::new(Arc::from(conversation_id));
-    if agent.sessions.borrow().contains_key(&session_id) {
+    if agent.is_resident(&session_id) {
         notify_session_title(agent, session_id, title).await;
     }
 
@@ -281,7 +281,7 @@ async fn handle_session_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
     // Tear down any live actor first (cancel turn/subagents/bg tasks,
     // process-scope kill, flush). Then wipe history so shutdown cannot
     // rewrite the session directory after delete.
-    if agent.sessions.borrow().contains_key(&session_id) {
+    if agent.is_resident(&session_id) {
         agent.teardown_live_session_before_delete(&session_id).await;
     }
 
@@ -325,7 +325,7 @@ async fn soft_delete_chat_conversation(agent: &MvpAgent, conversation_id: &str) 
         })?;
 
     let session_id = acp::SessionId::new(Arc::from(conversation_id));
-    if agent.sessions.borrow().contains_key(&session_id) {
+    if agent.is_resident(&session_id) {
         agent.request_session_shutdown(&session_id);
         agent.remove_session(&session_id);
     }
@@ -348,10 +348,8 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
     let params: Params = parse_params(args)?;
 
     let (handle, cwd) = {
-        let sessions = agent.sessions.borrow();
-        let h = sessions
-            .get(&params.session_id)
-            .cloned()
+        let h = agent
+            .resident_handle(&params.session_id)
             .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
         let cwd = std::path::PathBuf::from(&h.info.cwd);
         (h, cwd)
@@ -388,9 +386,9 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
     // Store the admitted (not raw) client set: hot-reloads re-merge from this
     // seed, and a raw list would re-spawn a previously rejected vendor server
     // once on-disk attribution vanishes.
-    if let Some(h) = agent.sessions.borrow_mut().get_mut(&params.session_id) {
+    agent.with_resident_mut(&params.session_id, |h| {
         h.initial_client_mcp_servers = admitted;
-    }
+    });
 
     ExtMethodResult::success(serde_json::json!({ "ok": true }))
         .to_ext_response()
@@ -411,9 +409,8 @@ async fn handle_add_local_workspace(agent: &MvpAgent, args: &acp::ExtRequest) ->
 
     let params: Params = parse_params(args)?;
     let cwd = {
-        let sessions = agent.sessions.borrow();
-        let h = sessions
-            .get(&params.session_id)
+        let h = agent
+            .resident_handle(&params.session_id)
             .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
         std::path::PathBuf::from(&h.info.cwd)
     };
@@ -456,7 +453,7 @@ fn handle_reload_workflows(agent: &MvpAgent) -> ExtResult {
 /// Reload MCP servers for ALL active sessions. Called by the config
 /// hot-reload watcher when `[mcp_servers]` changes in config.toml.
 async fn handle_reload_all_mcp_servers(agent: &MvpAgent) -> ExtResult {
-    let session_ids: Vec<acp::SessionId> = agent.sessions.borrow().keys().cloned().collect();
+    let session_ids = agent.resident_ids();
 
     if session_ids.is_empty() {
         return ExtMethodResult::success(serde_json::json!({ "updated": 0 }))
@@ -467,7 +464,7 @@ async fn handle_reload_all_mcp_servers(agent: &MvpAgent) -> ExtResult {
     let managed = agent.get_managed_mcp_configs().await;
     let mut updated = 0u32;
     for session_id in &session_ids {
-        let Some(handle) = agent.sessions.borrow().get(session_id).cloned() else {
+        let Some(handle) = agent.resident_handle(session_id) else {
             continue;
         };
         let cwd = std::path::PathBuf::from(&handle.info.cwd);
@@ -525,13 +522,11 @@ async fn handle_reload_project_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequ
 
     // Collect (session_id, cwd) pairs once so we don't hold the
     // `sessions` RefCell borrow across `.await` points.
-    let session_ids: Vec<(acp::SessionId, std::path::PathBuf)> = agent
-        .sessions
-        .borrow()
-        .iter()
-        .map(|(sid, h)| (sid.clone(), std::path::PathBuf::from(&h.info.cwd)))
-        .filter(|(_, cwd)| cwd_matches(cwd, &target_cwd))
-        .collect();
+    let mut session_ids = Vec::new();
+    agent.for_each_resident(|sid, h| {
+        session_ids.push((sid.clone(), std::path::PathBuf::from(&h.info.cwd)));
+    });
+    session_ids.retain(|(_, cwd)| cwd_matches(cwd, &target_cwd));
 
     if session_ids.is_empty() {
         return ExtMethodResult::success(serde_json::json!({ "updated": 0 }))
@@ -542,7 +537,7 @@ async fn handle_reload_project_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequ
     let managed = agent.get_managed_mcp_configs().await;
     let mut updated = 0u32;
     for (session_id, cwd) in &session_ids {
-        let Some(handle) = agent.sessions.borrow().get(session_id).cloned() else {
+        let Some(handle) = agent.resident_handle(session_id) else {
             continue;
         };
         // See `handle_reload_all_mcp_servers`: seed with the session's
@@ -831,12 +826,11 @@ fn handle_auth_cleared(agent: &MvpAgent) -> ExtResult {
 
 async fn handle_plugins_reload(agent: &MvpAgent) -> ExtResult {
     // Rebuild the shared registry so future/new sessions clone the latest.
-    let session_cwd = agent
-        .sessions
-        .borrow()
-        .values()
-        .next()
-        .map(|h| std::path::PathBuf::from(&h.info.cwd));
+    let session_cwd = agent.resident_ids().into_iter().next().and_then(|id| {
+        agent
+            .resident_handle(&id)
+            .map(|h| std::path::PathBuf::from(&h.info.cwd))
+    });
     let mut plugins = agent.cfg.borrow().plugins.clone();
     plugins.merge_claude_enabled_plugins(session_cwd.as_deref());
     let disk_cfg = plugins.to_discovery_config();

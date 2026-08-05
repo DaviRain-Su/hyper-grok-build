@@ -82,7 +82,7 @@ pub struct WorkflowHistoryEntry {
     pub at: String,
 }
 
-pub const WORKFLOW_HISTORY_MAX: usize = 64;
+pub(crate) const WORKFLOW_HISTORY_MAX: usize = 64;
 const WORKFLOW_PAUSE_MESSAGE_MAX_BYTES: usize = 4 * 1024;
 
 fn capped_pause_message(message: impl Into<String>) -> String {
@@ -134,7 +134,7 @@ pub struct WorkflowAgentRow {
     pub duration_ms: u64,
 }
 
-pub const WORKFLOW_AGENT_ROWS_MAX: usize = 256;
+pub(crate) const WORKFLOW_AGENT_ROWS_MAX: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRunState {
@@ -209,7 +209,7 @@ struct TrackedRun {
 }
 
 impl WorkflowTracker {
-    pub fn start_run(
+    pub(crate) fn start_run(
         &mut self,
         run_id: String,
         name: String,
@@ -300,7 +300,7 @@ impl WorkflowTracker {
         Some(state)
     }
 
-    pub fn set_phase(&mut self, run_id: &str, title: &str) -> Option<WorkflowRunState> {
+    pub(crate) fn set_phase(&mut self, run_id: &str, title: &str) -> Option<WorkflowRunState> {
         let run = self.run_mut(run_id)?;
         if run.state.current_phase.as_deref() != Some(title) {
             run.state.current_phase = Some(title.to_string());
@@ -452,7 +452,7 @@ impl WorkflowTracker {
         }
     }
 
-    pub fn log_message(&mut self, run_id: &str, message: &str) -> Option<WorkflowRunState> {
+    pub(crate) fn log_message(&mut self, run_id: &str, message: &str) -> Option<WorkflowRunState> {
         let run = self.run_mut(run_id)?;
         run.state.record_event("log", Some(message.to_string()));
         Some(run.state.clone())
@@ -475,7 +475,7 @@ impl WorkflowTracker {
         Some(run.state.clone())
     }
 
-    pub fn interrupt(
+    pub(crate) fn interrupt(
         &mut self,
         run_id: &str,
         message: impl Into<String>,
@@ -560,18 +560,18 @@ impl WorkflowTracker {
         Some(removed.state)
     }
 
-    pub fn get(&self, run_id: &str) -> Option<WorkflowRunState> {
+    pub(crate) fn get(&self, run_id: &str) -> Option<WorkflowRunState> {
         self.runs
             .iter()
             .find(|r| r.state.run_id == run_id)
             .map(|r| r.state.clone())
     }
 
-    pub fn list(&self) -> Vec<WorkflowRunState> {
+    pub(crate) fn list(&self) -> Vec<WorkflowRunState> {
         self.runs.iter().map(|r| r.state.clone()).collect()
     }
 
-    pub fn elapsed_ms(&self, run_id: &str) -> u64 {
+    pub(crate) fn elapsed_ms(&self, run_id: &str) -> u64 {
         self.runs
             .iter()
             .find(|r| r.state.run_id == run_id)
@@ -668,7 +668,7 @@ impl WorkflowTracker {
         (restored, fresh)
     }
 
-    pub fn snapshot(&self) -> Vec<WorkflowRunState> {
+    pub(crate) fn snapshot(&self) -> Vec<WorkflowRunState> {
         self.list()
     }
 

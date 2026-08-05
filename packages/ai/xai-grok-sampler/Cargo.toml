@@ -7,6 +7,7 @@ description = "Actor-based sampling/inference layer for xAI grok (HTTP streaming
 
 [dependencies]
 # Internal
+xai-grok-auth = { workspace = true }
 xai-grok-extra-ca = { workspace = true }
 xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
 xai-grok-version = { workspace = true }

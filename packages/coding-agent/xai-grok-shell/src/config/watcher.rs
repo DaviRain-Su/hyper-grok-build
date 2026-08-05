@@ -592,7 +592,7 @@ pub(crate) struct ProjectDiscoveryWatcher {
 }
 
 impl ProjectDiscoveryWatcher {
-    pub fn start(cwd: &Path) -> Option<(Self, mpsc::UnboundedReceiver<DiscoveryChange>)> {
+    pub(crate) fn start(cwd: &Path) -> Option<(Self, mpsc::UnboundedReceiver<DiscoveryChange>)> {
         let project_root = crate::session::workflow::registry::project_root(cwd);
         let project_grok = project_root.join(".grok");
         let (tx, rx) = mpsc::unbounded_channel();

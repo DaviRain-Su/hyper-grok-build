@@ -3,10 +3,10 @@ use std::path::Path;
 use xai_grok_workspace::session::git::VcsKind;
 
 // Re-export from xai-chat-state — canonical definition lives there.
-pub use xai_chat_state::compaction_utils::extract_user_query;
+pub(crate) use xai_chat_state::compaction_utils::extract_user_query;
 
 /// Wraps the user query properly
-pub fn user_query(user_message: String) -> String {
+pub(crate) fn user_query(user_message: String) -> String {
     format!(
         r#"<user_query>
 {user_message}

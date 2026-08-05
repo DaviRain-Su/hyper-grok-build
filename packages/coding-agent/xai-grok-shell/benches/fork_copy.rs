@@ -1,11 +1,6 @@
-//! Fork-path benchmark and profiling workbench.
-//!
-//! Synthesizes a session whose `updates.jsonl` matches a configurable target
-//! size (production byte/line shape: user and agent chunks plus one bulky
-//! trailing chunk), then measures `StorageAdapter::copy_session_data`, the
-//! path that materializes the whole file and produced multi-GB RSS spikes on
-//! large production sessions. Also the substrate for allocation/CPU profiling
-//! (`cargo flamegraph --bench fork_copy`, dhat) and future peak-RSS bounds.
+//! Throughput benchmark for `StorageAdapter::copy_session_data` over a
+//! synthesized production-shaped session; the peak-RSS bound lives in
+//! `tests/test_fork_copy_memory.rs`.
 //!
 //! Run: `cargo bench -p xai-grok-shell --bench fork_copy`
 //! Size override: `FORK_BENCH_MB=64 cargo bench ...` (default 16 MB).

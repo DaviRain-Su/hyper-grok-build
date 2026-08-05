@@ -81,7 +81,7 @@ impl AutoCompactThresholdTiers {
     /// Slice the parent's `Config` into the four tier inputs we'll resolve
     /// against later. Only fields relevant to the auto-compact threshold
     /// are captured; the parent's `Config` is not held by reference.
-    pub fn capture(cfg: &crate::agent::config::Config) -> Self {
+    pub(crate) fn capture(cfg: &crate::agent::config::Config) -> Self {
         let user_per_model = cfg
             .config_models
             .iter()
@@ -459,13 +459,17 @@ impl ChildControl for ShellChildRuntime {
         })
     }
     fn cancel(&self) {
-        let _ = self.child_handle.cmd_tx.send(SessionCommand::Cancel {
-            cancel_subagents: true,
-            kill_background_tasks: true,
-            rewind_if_pristine: false,
-            trigger: None,
-        });
-        let _ = self.child_handle.cmd_tx.send(SessionCommand::Shutdown);
+        let _ =
+            self.child_handle
+                .cmd_tx
+                .send(SessionCommand::Cancel(crate::session::CancelOptions {
+                    cancel_subagents: true,
+                    kill_background_tasks: true,
+                    ..Default::default()
+                }));
+        let _ = self.child_handle.cmd_tx.send(SessionCommand::Shutdown(
+            crate::session::ShutdownKind::Graceful,
+        ));
     }
 }
 #[derive(Default)]
@@ -1116,7 +1120,7 @@ fn resume_initial_context(
 fn forked_initial_context(
     mut items: Vec<xai_grok_sampling_types::conversation::ConversationItem>,
 ) -> InitialContext {
-    crate::session::storage::jsonl::fork_filter_chat(&mut items);
+    crate::sampling::fork_filter_chat(&mut items);
     if items.is_empty() {
         return InitialContext {
             source: InitialContextSource::New,
@@ -1207,7 +1211,7 @@ fn verbatim_or_normalize_fork(
         };
     }
     let mut filtered = items;
-    crate::session::storage::jsonl::fork_filter_chat(&mut filtered);
+    crate::sampling::fork_filter_chat(&mut filtered);
     if !filtered
         .iter()
         .any(|i| !matches!(i, ConversationItem::System(_)))
@@ -1317,11 +1321,11 @@ async fn bootstrap_initial_context(
             fork_filter: false,
             ..Default::default()
         };
-        return match storage.copy_session_data_sync(
-            &source_session_info,
-            child_session_info,
-            copy_options,
-        ) {
+        use crate::session::storage::StorageAdapter as _;
+        return match storage
+            .copy_session_data(&source_session_info, child_session_info, copy_options)
+            .await
+        {
             Ok(result) => {
                 let conversation = match storage.load_chat_history_from_dir(child_session_dir) {
                     Ok(items) if !items.is_empty() => items,
@@ -1428,7 +1432,11 @@ async fn bootstrap_initial_context(
             fork_filter: true,
             ..Default::default()
         };
-        return match storage.copy_session_data_sync(parent_info, child_session_info, copy_options) {
+        use crate::session::storage::StorageAdapter as _;
+        return match storage
+            .copy_session_data(parent_info, child_session_info, copy_options)
+            .await
+        {
             Ok(result) => {
                 tracing::info!(
                     subagent_id = %request.id,
@@ -2140,12 +2148,16 @@ fn spawn_subagent_budget_monitor(
             };
             if let Some(trigger) = hard {
                 state.store(trigger.code(), std::sync::atomic::Ordering::Release);
-                let _ = cmd_tx.send(SessionCommand::Cancel {
+                let _ = cmd_tx.send(SessionCommand::Cancel(crate::session::CancelOptions {
                     cancel_subagents: true,
                     kill_background_tasks: true,
-                    rewind_if_pristine: false,
-                    trigger: Some(format!("subagent_{}", trigger.termination_reason())),
-                });
+                    rewind_if_no_output: false,
+                    trigger: Some(crate::session::CancelTrigger::Client(format!(
+                        "subagent_{}",
+                        trigger.termination_reason()
+                    ))),
+                    user_initiated: false,
+                }));
                 cancel_token.cancel();
                 break;
             }
@@ -3219,7 +3231,9 @@ async fn cancel_pending_shell_child(
     duration_ms: u64,
     gcs_ctx: &GcsUploadContext,
 ) -> SubagentResult {
-    let _ = child_cmd_tx.send(SessionCommand::Shutdown);
+    let _ = child_cmd_tx.send(SessionCommand::Shutdown(
+        crate::session::ShutdownKind::Graceful,
+    ));
     if worktree_freshly_created
         && let Some(wt_path) = worktree_path
         && let Err(e) = crate::session::worktree::remove_subagent_worktree(wt_path).await
@@ -3532,7 +3546,7 @@ pub(crate) struct SubagentSessionMetadata {
 }
 impl SubagentSessionMetadata {
     /// Current schema version.
-    pub const SCHEMA_VERSION: u32 = 1;
+    pub(crate) const SCHEMA_VERSION: u32 = 1;
     /// Build from a `SubagentMeta` + additional runtime context.
     pub(crate) fn from_meta(
         meta: &SubagentMeta,

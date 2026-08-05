@@ -11476,10 +11476,11 @@ dependencies = [
 
 [[package]]
 name = "signal-hook-registry"
-version = "1.4.6"
+version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2a4719bff48cee6b39d12c020eeb490953ad2443b7055bd0b21fca26bd8c28b"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
+ "errno",
  "libc",
 ]
 
@@ -16273,7 +16274,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager"
-version = "0.2.119-r1"
+version = "0.2.120-r1"
 dependencies = [
  "agent-client-protocol",
  "ansi-to-tui",
@@ -16370,7 +16371,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager-bin"
-version = "0.2.119-r1"
+version = "0.2.120-r1"
 dependencies = [
  "anyhow",
  "clap",
@@ -16558,6 +16559,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "xai-grok-auth",
  "xai-grok-extra-ca",
  "xai-grok-sampling-types",
  "xai-grok-test-support",
@@ -16649,7 +16651,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-shell"
-version = "0.2.119-r1"
+version = "0.2.120-r1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -17014,6 +17016,7 @@ dependencies = [
  "xai-computer-hub-core",
  "xai-computer-hub-sdk",
  "xai-file-utils",
+ "xai-grok-auth",
  "xai-grok-config",
  "xai-grok-env",
  "xai-grok-extra-ca",
@@ -17076,7 +17079,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-version"
-version = "0.2.119-r1"
+version = "0.2.120-r1"
 dependencies = [
  "semver",
 ]

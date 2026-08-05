@@ -56,7 +56,7 @@ const FILE_CMD_BOOST: i32 = 2;
 pub(crate) struct FilePathProvider;
 
 impl FilePathProvider {
-    pub async fn suggest(&self, ctx: &SuggestContext) -> Vec<RankedSuggestion> {
+    pub(crate) async fn suggest(&self, ctx: &SuggestContext) -> Vec<RankedSuggestion> {
         // shell_token quoting is POSIX-only: cmd/pwsh would misparse the
         // escaped line, so Windows serves no deterministic completions.
         if cfg!(windows) {

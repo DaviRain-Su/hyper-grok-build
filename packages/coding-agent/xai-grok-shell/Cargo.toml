@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "xai-grok-shell"
-version = "0.2.119-r1"
+version = "0.2.120-r1"
 edition.workspace = true
 
 [features]
@@ -251,6 +251,10 @@ required-features = ["test-support"]
 
 [[test]]
 name = "test_session_load_memory"
+required-features = ["test-support"]
+
+[[test]]
+name = "test_fork_copy_memory"
 required-features = ["test-support"]
 
 [[test]]

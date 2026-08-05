@@ -26,16 +26,16 @@ pub(crate) use xai_file_utils::events::types::{
 
 /// Stalled — the model emitted prose narration claiming progress
 /// without any real tool calls.
-pub const LAZINESS_STALLED_NARRATION: &str = "stalled_narration";
+pub(crate) const LAZINESS_STALLED_NARRATION: &str = "stalled_narration";
 
 /// Stalled — the model asked the user for permission to continue a
 /// task that is already in flight.
-pub const LAZINESS_STALLED_PERMISSION_ASKING: &str = "stalled_permission_asking";
+pub(crate) const LAZINESS_STALLED_PERMISSION_ASKING: &str = "stalled_permission_asking";
 
 /// Stalled — the model has no todo list but a multi-step task is
 /// clearly in flight (no active plan tool calls despite a complex
 /// pending task).
-pub const LAZINESS_STALLED_NO_TODOS_BUT_TASK_IN_FLIGHT: &str =
+pub(crate) const LAZINESS_STALLED_NO_TODOS_BUT_TASK_IN_FLIGHT: &str =
     "stalled_no_todos_but_task_in_flight";
 
 /// Stalled — the agent declared completion/success but the transcript
@@ -43,32 +43,32 @@ pub const LAZINESS_STALLED_NO_TODOS_BUT_TASK_IN_FLIGHT: &str =
 /// running `make test` but no `make` tool_call appears; claims
 /// "overnight 8+ hour run" but elapsed time is minutes; claims N review
 /// rounds but only M happened).
-pub const LAZINESS_STALLED_FALSE_COMPLETION: &str = "stalled_false_completion";
+pub(crate) const LAZINESS_STALLED_FALSE_COMPLETION: &str = "stalled_false_completion";
 
 /// Not stalled — the model has genuinely completed its task.
-pub const LAZINESS_NOT_STALLED_COMPLETE: &str = "not_stalled_complete";
+pub(crate) const LAZINESS_NOT_STALLED_COMPLETE: &str = "not_stalled_complete";
 
 /// Not stalled — the model is correctly waiting on a backgrounded task
 /// it cannot drive forward.
-pub const LAZINESS_NOT_STALLED_WAITING_BG: &str = "not_stalled_waiting_on_background";
+pub(crate) const LAZINESS_NOT_STALLED_WAITING_BG: &str = "not_stalled_waiting_on_background";
 
 /// Not stalled — the model is correctly waiting on user input for a
 /// genuine ambiguity.
-pub const LAZINESS_NOT_STALLED_WAITING_USER: &str = "not_stalled_waiting_on_user";
+pub(crate) const LAZINESS_NOT_STALLED_WAITING_USER: &str = "not_stalled_waiting_on_user";
 
 /// Aborted because a fresh user prompt arrived before classification
 /// completed.
-pub const LAZINESS_ABORT_USER_INPUT: &str = "user_input";
+pub(crate) const LAZINESS_ABORT_USER_INPUT: &str = "user_input";
 
 /// Aborted because the user switched models mid-classification.
-pub const LAZINESS_ABORT_MODEL_SWITCH: &str = "model_switch";
+pub(crate) const LAZINESS_ABORT_MODEL_SWITCH: &str = "model_switch";
 
 /// Aborted because the classifier exceeded its wall-clock budget.
-pub const LAZINESS_ABORT_TIMEOUT: &str = "timeout";
+pub(crate) const LAZINESS_ABORT_TIMEOUT: &str = "timeout";
 
 /// Aborted because the classifier response failed to parse after the
 /// tolerant parser exhausted all three passes.
-pub const LAZINESS_ABORT_CLASSIFIER_ERROR: &str = "classifier_error";
+pub(crate) const LAZINESS_ABORT_CLASSIFIER_ERROR: &str = "classifier_error";
 
 // Compile-time guard against an accidentally-empty const breaking the
 // dashboards' group-by. `const _: () = assert!(…)` fires at build
@@ -184,7 +184,7 @@ impl LazinessCategory {
 
 /// The TodoGate fired because a content-only turn ended with one or more
 /// pending or unbacked in-progress todos.
-pub const TODO_GATE_IN_FLIGHT: &str = "in_flight";
+pub(crate) const TODO_GATE_IN_FLIGHT: &str = "in_flight";
 
 // Compile-time non-empty check — empty would silently break dashboards' group-by.
 #[allow(clippy::const_is_empty)]
@@ -222,33 +222,33 @@ pub(crate) fn prior_turn_interrupt_from_cancellation(
 // vocabulary the dashboards group by.
 
 /// Fail-open — legacy wire string; runner does not emit.
-pub const GOAL_CLASSIFIER_FAIL_OPEN_TIMEOUT: &str = "timeout";
+pub(crate) const GOAL_CLASSIFIER_FAIL_OPEN_TIMEOUT: &str = "timeout";
 
 /// Fail-open — the subagent spawn returned an error (channel closed,
 /// coordinator rejected, etc.). INFRA-class.
-pub const GOAL_CLASSIFIER_FAIL_OPEN_SAMPLER_ERROR: &str = "sampler_error";
+pub(crate) const GOAL_CLASSIFIER_FAIL_OPEN_SAMPLER_ERROR: &str = "sampler_error";
 
 /// Fail-open — the user aborted the run mid-classification.
-pub const GOAL_CLASSIFIER_FAIL_OPEN_ABORTED: &str = "aborted";
+pub(crate) const GOAL_CLASSIFIER_FAIL_OPEN_ABORTED: &str = "aborted";
 
 /// Fail-open — the harness could not pre-create the details-file parent
 /// directory or otherwise prepare the on-disk state.
-pub const GOAL_CLASSIFIER_FAIL_OPEN_FILE_WRITE_FAILED: &str = "file_write_failed";
+pub(crate) const GOAL_CLASSIFIER_FAIL_OPEN_FILE_WRITE_FAILED: &str = "file_write_failed";
 
 /// Fail-open — the goal was no longer Active when the runner resolved
 /// its inputs (status changed during the spawn).
-pub const GOAL_CLASSIFIER_FAIL_OPEN_GOAL_NOT_ACTIVE: &str = "goal_not_active_at_resolve";
+pub(crate) const GOAL_CLASSIFIER_FAIL_OPEN_GOAL_NOT_ACTIVE: &str = "goal_not_active_at_resolve";
 
 /// Fail-closed — a second `update_goal(completed: true)` arrived
 /// while a verification stage was already in flight for this goal.
 /// Caller must not double-spawn.
-pub const GOAL_CLASSIFIER_FAIL_CLOSED_CONCURRENT: &str = "concurrent_in_flight";
+pub(crate) const GOAL_CLASSIFIER_FAIL_CLOSED_CONCURRENT: &str = "concurrent_in_flight";
 
 /// Fail-closed — the deferred-completion queue overflowed and the
 /// oldest entry was dropped to make room for a newer one. PARSE-class
 /// analogue of `ConcurrentInFlight` for the runaway-`completed: true`
 /// path.
-pub const GOAL_CLASSIFIER_FAIL_CLOSED_PENDING_QUEUE_FULL: &str = "pending_queue_full";
+pub(crate) const GOAL_CLASSIFIER_FAIL_CLOSED_PENDING_QUEUE_FULL: &str = "pending_queue_full";
 
 // Compile-time non-empty guard (mirrors the laziness const block).
 #[allow(clippy::const_is_empty)]
@@ -334,19 +334,19 @@ impl GoalClassifierFailClosedReason {
 // fail-open analogue.
 
 /// Planner subagent coordinator channel was unreachable.
-pub const GOAL_PLANNER_FAIL_CLOSED_TRANSPORT: &str = "transport";
+pub(crate) const GOAL_PLANNER_FAIL_CLOSED_TRANSPORT: &str = "transport";
 
 /// Planner subagent reported a runtime failure.
-pub const GOAL_PLANNER_FAIL_CLOSED_RUNTIME: &str = "runtime";
+pub(crate) const GOAL_PLANNER_FAIL_CLOSED_RUNTIME: &str = "runtime";
 
 /// User aborted the planner mid-run.
-pub const GOAL_PLANNER_FAIL_CLOSED_ABORTED: &str = "aborted";
+pub(crate) const GOAL_PLANNER_FAIL_CLOSED_ABORTED: &str = "aborted";
 
 /// Planner did not write `plan.md` (file missing or empty).
-pub const GOAL_PLANNER_FAIL_CLOSED_MISSING_PLAN: &str = "missing_plan_file";
+pub(crate) const GOAL_PLANNER_FAIL_CLOSED_MISSING_PLAN: &str = "missing_plan_file";
 
 /// Harness could not pre-create the plan-file parent directory.
-pub const GOAL_PLANNER_FAIL_CLOSED_FILE_WRITE_FAILED: &str = "file_write_failed";
+pub(crate) const GOAL_PLANNER_FAIL_CLOSED_FILE_WRITE_FAILED: &str = "file_write_failed";
 
 #[allow(clippy::const_is_empty)]
 const _: () = assert!(
@@ -389,16 +389,16 @@ impl GoalPlannerFailClosedReason {
 // enhancement, never a gate.
 
 /// Strategist subagent coordinator channel was unreachable.
-pub const GOAL_STRATEGIST_FAILED_TRANSPORT: &str = "transport";
+pub(crate) const GOAL_STRATEGIST_FAILED_TRANSPORT: &str = "transport";
 
 /// Strategist subagent reported a runtime failure.
-pub const GOAL_STRATEGIST_FAILED_RUNTIME: &str = "runtime";
+pub(crate) const GOAL_STRATEGIST_FAILED_RUNTIME: &str = "runtime";
 
 /// User aborted the strategist mid-run.
-pub const GOAL_STRATEGIST_FAILED_ABORTED: &str = "aborted";
+pub(crate) const GOAL_STRATEGIST_FAILED_ABORTED: &str = "aborted";
 
 /// Strategist did not write the strategy note (file missing or empty).
-pub const GOAL_STRATEGIST_FAILED_MISSING_STRATEGY: &str = "missing_strategy_file";
+pub(crate) const GOAL_STRATEGIST_FAILED_MISSING_STRATEGY: &str = "missing_strategy_file";
 
 #[allow(clippy::const_is_empty)]
 const _: () = assert!(
@@ -432,14 +432,14 @@ impl GoalStrategistFailReason {
 
 /// The plan.md restore-guard could not put the contract back. A
 /// write to plan.md failed.
-pub const GOAL_STRATEGIST_RESTORE_WRITE_FAILED: &str = "write_failed";
+pub(crate) const GOAL_STRATEGIST_RESTORE_WRITE_FAILED: &str = "write_failed";
 
 /// Removing a strategist-created plan.md failed.
-pub const GOAL_STRATEGIST_RESTORE_REMOVE_FAILED: &str = "remove_failed";
+pub(crate) const GOAL_STRATEGIST_RESTORE_REMOVE_FAILED: &str = "remove_failed";
 
 /// plan.md is (or became) a symlink — refused to restore through it
 /// (treated as tampering).
-pub const GOAL_STRATEGIST_RESTORE_SYMLINK_TAMPER: &str = "symlink_tamper";
+pub(crate) const GOAL_STRATEGIST_RESTORE_SYMLINK_TAMPER: &str = "symlink_tamper";
 
 #[allow(clippy::const_is_empty)]
 const _: () = assert!(
@@ -475,17 +475,17 @@ impl GoalStrategistRestoreFailReason {
 // goal completion is never blocked, paused, or un-achieved.
 
 /// Summarizer subagent coordinator channel was unreachable.
-pub const GOAL_SUMMARIZER_FAIL_OPEN_TRANSPORT: &str = "transport";
+pub(crate) const GOAL_SUMMARIZER_FAIL_OPEN_TRANSPORT: &str = "transport";
 
 /// Summarizer subagent reported a runtime failure.
-pub const GOAL_SUMMARIZER_FAIL_OPEN_RUNTIME: &str = "runtime";
+pub(crate) const GOAL_SUMMARIZER_FAIL_OPEN_RUNTIME: &str = "runtime";
 
 /// User aborted the summarizer mid-run.
-pub const GOAL_SUMMARIZER_FAIL_OPEN_ABORTED: &str = "aborted";
+pub(crate) const GOAL_SUMMARIZER_FAIL_OPEN_ABORTED: &str = "aborted";
 
 /// Summarizer returned an empty (whitespace-only) summary — nothing to
 /// surface, so the closing message is skipped.
-pub const GOAL_SUMMARIZER_FAIL_OPEN_EMPTY_SUMMARY: &str = "empty_summary";
+pub(crate) const GOAL_SUMMARIZER_FAIL_OPEN_EMPTY_SUMMARY: &str = "empty_summary";
 
 #[allow(clippy::const_is_empty)]
 const _: () = assert!(
@@ -534,44 +534,45 @@ impl GoalSummarizerFailReason {
 
 /// Fail-open — the configured model id is not in the session's model
 /// catalog (`find_model_by_id` miss).
-pub const GOAL_ROLE_MODEL_FAIL_OPEN_MODEL_UNKNOWN: &str = "model_unknown";
+pub(crate) const GOAL_ROLE_MODEL_FAIL_OPEN_MODEL_UNKNOWN: &str = "model_unknown";
 
 /// Fail-open — the model is in the catalog but the session's
 /// `allowed_models` does not permit it (`ModelInfo.user_selectable == false`).
-pub const GOAL_ROLE_MODEL_FAIL_OPEN_MODEL_UNAUTHORIZED: &str = "model_unauthorized";
+pub(crate) const GOAL_ROLE_MODEL_FAIL_OPEN_MODEL_UNAUTHORIZED: &str = "model_unauthorized";
 
 /// Fail-open — the configured `agent_type` did not resolve
 /// (`describe_subagent_type` ⇒ `Unknown`): either a subagent type, or a `/goal`
 /// harness name, that does not exist.
-pub const GOAL_ROLE_MODEL_FAIL_OPEN_TOOLSET_UNKNOWN: &str = "toolset_unknown";
+pub(crate) const GOAL_ROLE_MODEL_FAIL_OPEN_TOOLSET_UNKNOWN: &str = "toolset_unknown";
 
 /// Fail-open — the `agent_type` exists but is not on the parent's
 /// allow-list (`describe_subagent_type` ⇒ `NotAllowed`).
-pub const GOAL_ROLE_MODEL_FAIL_OPEN_TOOLSET_NOT_ALLOWED: &str = "toolset_not_allowed";
+pub(crate) const GOAL_ROLE_MODEL_FAIL_OPEN_TOOLSET_NOT_ALLOWED: &str = "toolset_not_allowed";
 
 /// Fail-open — the `agent_type` is allow-listed but disabled
 /// (`describe_subagent_type` ⇒ `Disabled`).
-pub const GOAL_ROLE_MODEL_FAIL_OPEN_TOOLSET_DISABLED: &str = "toolset_disabled";
+pub(crate) const GOAL_ROLE_MODEL_FAIL_OPEN_TOOLSET_DISABLED: &str = "toolset_disabled";
 
 /// Fail-open — the coordinator could not describe the toolset (channel
 /// closed / responder dropped / timeout; `describe_subagent_type` ⇒
 /// `Unavailable`). Infra-flakiness, distinct from the config-bug cases.
-pub const GOAL_ROLE_MODEL_FAIL_OPEN_TOOLSET_UNAVAILABLE: &str = "toolset_unavailable";
+pub(crate) const GOAL_ROLE_MODEL_FAIL_OPEN_TOOLSET_UNAVAILABLE: &str = "toolset_unavailable";
 
 /// Fail-open — the toolset built but lacks the capabilities the role
 /// requires (e.g. a verifier whose toolset cannot read/grep code).
-pub const GOAL_ROLE_MODEL_FAIL_OPEN_TOOLSET_INCAPABLE: &str = "toolset_incapable";
+pub(crate) const GOAL_ROLE_MODEL_FAIL_OPEN_TOOLSET_INCAPABLE: &str = "toolset_incapable";
 
 /// Fail-open — spawning the role with the configured pair returned a
 /// `SpawnError`; the spawn-and-retry-once wrapper retried on the current
 /// model.
-pub const GOAL_ROLE_MODEL_FAIL_OPEN_SPAWN_FAILED: &str = "spawn_failed";
+pub(crate) const GOAL_ROLE_MODEL_FAIL_OPEN_SPAWN_FAILED: &str = "spawn_failed";
 
 /// Fail-open — the configured `agent_type` resolves as a STRICT harness whose
 /// subagent flavor `resolve_subagent_toolset` can't represent (e.g. `codex`):
 /// committing it would silently run grok-build flavor. Distinct from
 /// `toolset_unknown` (a name that doesn't resolve at all).
-pub const GOAL_ROLE_MODEL_FAIL_OPEN_HARNESS_FLAVOR_UNSUPPORTED: &str = "harness_flavor_unsupported";
+pub(crate) const GOAL_ROLE_MODEL_FAIL_OPEN_HARNESS_FLAVOR_UNSUPPORTED: &str =
+    "harness_flavor_unsupported";
 
 #[allow(clippy::const_is_empty)]
 const _: () = assert!(

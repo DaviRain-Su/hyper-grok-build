@@ -368,7 +368,7 @@ pub(crate) struct CommandAvailability {
 }
 impl CommandAvailability {
     /// `true` if commands gated on `gate` should be advertised this session.
-    pub fn allows(&self, gate: BuiltinGate) -> bool {
+    pub(crate) fn allows(&self, gate: BuiltinGate) -> bool {
         match gate {
             BuiltinGate::AlwaysOn => true,
             BuiltinGate::Feedback => self.feedback,

@@ -83,7 +83,7 @@ pub(crate) struct NormalizeCache {
 }
 
 impl NormalizeCache {
-    pub fn global() -> &'static Self {
+    pub(crate) fn global() -> &'static Self {
         static INSTANCE: LazyLock<NormalizeCache> =
             LazyLock::new(|| NormalizeCache::with_capacity(CACHE_MAX_BYTES));
         &INSTANCE
@@ -103,7 +103,7 @@ impl NormalizeCache {
     }
 
     /// Default false; toggled from remote settings at startup.
-    pub fn set_enabled(&self, enabled: bool) {
+    pub(crate) fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Relaxed);
     }
 

@@ -601,7 +601,7 @@ async fn refresh_tokens_once_with_timeout(
         tracing::warn!(
             http_status = status,
             oauth2_error = ?error_code,
-            rt_prefix = crate::auth::token_suffix(refresh_token),
+            rt_prefix = xai_grok_auth::bearer_suffix(refresh_token),
             client_id = %client_id,
             principal_type = ?principal_type,
             "OIDC: token refresh HTTP error"

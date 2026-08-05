@@ -839,9 +839,14 @@ pub async fn git_info(cwd: &Path) -> Result<GitInfoData> {
 /// Priority:
 /// 1. `refs/remotes/origin/HEAD` symbolic ref (set by `git clone` or
 ///    `git remote set-head origin --auto`).
-/// 2. `init.defaultBranch` git config value (user/system preference).
+/// 2. A unique remote-tracking `origin/main` or `origin/master`
+///    (hand-added remotes never get `origin/HEAD`).
+/// 3. `init.defaultBranch` git config value (user/system preference).
 fn detect_default_branch(repo: &Repository) -> Option<String> {
     if let Some(branch) = detect_remote_default_branch(repo) {
+        return Some(branch);
+    }
+    if let Some(branch) = guess_default_from_remote_tracking(repo) {
         return Some(branch);
     }
     if let Ok(config) = repo.config()
@@ -850,6 +855,19 @@ fn detect_default_branch(repo: &Repository) -> Option<String> {
         return Some(val);
     }
     None
+}
+/// `None` when both exist — a wrong guess would make clients treat the
+/// real default branch as a feature branch (and poll PR status on it).
+fn guess_default_from_remote_tracking(repo: &Repository) -> Option<String> {
+    let has = |name: &str| {
+        repo.find_branch(&format!("origin/{name}"), git2::BranchType::Remote)
+            .is_ok()
+    };
+    match (has("main"), has("master")) {
+        (true, false) => Some("main".to_string()),
+        (false, true) => Some("master".to_string()),
+        _ => None,
+    }
 }
 /// Resolve `refs/remotes/origin/HEAD` to the remote's default branch name.
 fn detect_remote_default_branch(repo: &Repository) -> Option<String> {
@@ -2780,6 +2798,28 @@ mod tests {
             strip_url_credentials(url_with_creds),
             "https://github.com/xai-org/example.git"
         );
+    }
+    #[test]
+    fn detect_default_branch_falls_back_to_unique_remote_tracking_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("init.defaultBranch", "trunk")
+            .unwrap();
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+        assert_eq!(detect_default_branch(&repo).as_deref(), Some("trunk"));
+        repo.reference("refs/remotes/origin/main", oid, false, "test")
+            .unwrap();
+        assert_eq!(detect_default_branch(&repo).as_deref(), Some("main"));
+        repo.reference("refs/remotes/origin/master", oid, false, "test")
+            .unwrap();
+        assert_eq!(detect_default_branch(&repo).as_deref(), Some("trunk"));
     }
     #[test]
     fn test_resolve_persisted_session_git_metadata_collects_sorted_unique_remotes() {

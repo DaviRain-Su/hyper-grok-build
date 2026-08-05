@@ -13,7 +13,7 @@ pub(crate) struct ExtMethodError {
 }
 
 impl ExtMethodError {
-    pub fn with_data<D: Serialize>(
+    pub(crate) fn with_data<D: Serialize>(
         code: impl Into<String>,
         message: impl Into<String>,
         data: D,

@@ -224,11 +224,9 @@ pub struct FileContent {
     /// offset-past-end vs genuinely-empty files.
     #[serde(default)]
     pub total_lines: usize,
-    /// Base64 images captured before per-line truncation. The session
-    /// layer turns these into multimodal `ContentPart::Image` follow-ups
-    /// (same pipeline as MCP image extraction); pre-truncation capture
-    /// prevents `truncate_line` from cutting a long single-line URI
-    /// mid-payload. Hidden from the model's JSON schema.
+    /// Pre-truncation image captures for session harvest. Must survive
+    /// ToolDyn hub `to_value`/`from_value`; session drains before PostToolUse
+    /// and ACP wire serialize.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(skip)]
     pub extracted_images: Vec<crate::util::base64_images::ExtractedImage>,
@@ -1198,6 +1196,11 @@ pub struct MCPOutput {
     pub is_timeout: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
+    /// Pre-truncation image captures for session harvest (same contract as
+    /// [`FileContent::extracted_images`]). Must survive ToolDyn hub
+    /// `to_value`/`from_value`; session drains before PostToolUse and ACP.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extracted_images: Vec<crate::util::base64_images::ExtractedImage>,
 }
 impl MCPOutput {
     pub fn okay_output(tool_name: String, server_name: String, output: String) -> Self {
@@ -1209,6 +1212,7 @@ impl MCPOutput {
             auth_retry_attempted: false,
             is_timeout: false,
             is_error: false,
+            extracted_images: Vec::new(),
         }
     }
     pub fn errored(tool_name: String, server_name: String, error: String) -> Self {
@@ -1220,6 +1224,7 @@ impl MCPOutput {
             auth_retry_attempted: false,
             is_timeout: false,
             is_error: true,
+            extracted_images: Vec::new(),
         }
     }
     pub fn output(&self) -> &MCPOutputDetails {
@@ -1302,6 +1307,103 @@ mod tests {
     /// Serialize a ToolOutput to JSON value
     fn to_json(output: ToolOutput) -> serde_json::Value {
         serde_json::to_value(&output).unwrap()
+    }
+    #[test]
+    fn mcp_extracted_images_survive_hub_json_roundtrip() {
+        let mut mcp = MCPOutput::okay_output(
+            "browser_screenshot".into(),
+            "browser-use".into(),
+            crate::util::base64_images::IMAGE_CONTENT_PLACEHOLDER.into(),
+        );
+        let payload = "A".repeat(50_000);
+        mcp.extracted_images = vec![crate::util::base64_images::ExtractedImage {
+            data: payload.clone(),
+            mime_type: "image/png".into(),
+        }];
+        let v = serde_json::to_value(&mcp).unwrap();
+        assert!(
+            v.get("extracted_images").is_some(),
+            "hub ToolDyn to_value must keep non-empty extracted_images"
+        );
+        let back: MCPOutput = serde_json::from_value(v).unwrap();
+        assert_eq!(back.extracted_images.len(), 1);
+        assert_eq!(back.extracted_images[0].data, payload);
+        assert_eq!(back.extracted_images[0].mime_type, "image/png");
+    }
+    #[test]
+    fn tool_output_mcp_extracted_images_survive_hub_roundtrip() {
+        let mut mcp = MCPOutput::okay_output(
+            "t".into(),
+            "s".into(),
+            crate::util::base64_images::IMAGE_CONTENT_PLACEHOLDER.into(),
+        );
+        let payload = "C".repeat(12_000);
+        mcp.extracted_images = vec![crate::util::base64_images::ExtractedImage {
+            data: payload.clone(),
+            mime_type: "image/webp".into(),
+        }];
+        let output = ToolOutput::MCP(mcp);
+        let v = serde_json::to_value(&output).unwrap();
+        let back: ToolOutput = serde_json::from_value(v).unwrap();
+        let ToolOutput::MCP(mcp) = back else {
+            panic!("expected MCP");
+        };
+        assert_eq!(mcp.extracted_images.len(), 1);
+        assert_eq!(mcp.extracted_images[0].data, payload);
+    }
+    #[test]
+    fn file_content_extracted_images_survive_hub_json_roundtrip() {
+        let payload = "B".repeat(40_000);
+        let fc = FileContent {
+            content: crate::util::base64_images::IMAGE_CONTENT_PLACEHOLDER.into(),
+            content_concise: None,
+            absolute_path: PathBuf::from("/tmp/x.png"),
+            offset: None,
+            limit: None,
+            raw_output: String::new(),
+            total_lines: 1,
+            extracted_images: vec![crate::util::base64_images::ExtractedImage {
+                data: payload.clone(),
+                mime_type: "image/jpeg".into(),
+            }],
+        };
+        let v = serde_json::to_value(&fc).unwrap();
+        assert!(v.get("extracted_images").is_some());
+        let back: FileContent = serde_json::from_value(v).unwrap();
+        assert_eq!(back.extracted_images.len(), 1);
+        assert_eq!(back.extracted_images[0].data, payload);
+    }
+    #[test]
+    fn empty_extracted_images_omitted_from_json() {
+        let mcp = MCPOutput::okay_output("t".into(), "s".into(), "plain".into());
+        let v = serde_json::to_value(&mcp).unwrap();
+        assert!(v.get("extracted_images").is_none());
+    }
+    #[test]
+    fn tool_output_read_file_extracted_images_survive_hub_roundtrip() {
+        let payload = "D".repeat(18_000);
+        let fc = FileContent {
+            content: crate::util::base64_images::IMAGE_CONTENT_PLACEHOLDER.into(),
+            content_concise: None,
+            absolute_path: PathBuf::from("/tmp/y.png"),
+            offset: None,
+            limit: None,
+            raw_output: String::new(),
+            total_lines: 1,
+            extracted_images: vec![crate::util::base64_images::ExtractedImage {
+                data: payload.clone(),
+                mime_type: "image/png".into(),
+            }],
+        };
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(fc));
+        let v = serde_json::to_value(&output).unwrap();
+        let back: ToolOutput = serde_json::from_value(v).unwrap();
+        let ToolOutput::ReadFile(ReadFileOutput::FileContent(fc)) = back else {
+            panic!("expected FileContent");
+        };
+        assert_eq!(fc.extracted_images.len(), 1);
+        assert_eq!(fc.extracted_images[0].data, payload);
+        assert_eq!(fc.extracted_images[0].mime_type, "image/png");
     }
     fn empty_file_content(offset: Option<usize>, total_lines: usize) -> FileContent {
         FileContent {

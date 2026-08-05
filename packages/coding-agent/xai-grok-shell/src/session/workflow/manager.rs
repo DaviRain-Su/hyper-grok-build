@@ -8,7 +8,8 @@ use tokio_util::sync::CancellationToken;
 use xai_workflow::{Journal, WorkflowOutcome, WorkflowRunParams};
 
 use super::host_service::{
-    HostDrainOutcome, TelemetryHook, WorkflowHostParams, spawn_workflow_host_service,
+    HostDrainOutcome, TelemetryHook, WORKFLOW_MAX_CONCURRENT_AGENTS, WorkflowHostParams,
+    spawn_workflow_host_service,
 };
 use super::notify::WorkflowNotifySender;
 use super::registry::{ResolvedWorkflow, WorkflowSource};
@@ -67,6 +68,7 @@ pub(crate) struct WorkflowManager {
     templates: HashMap<String, String>,
     active: HashMap<String, ActiveRun>,
     retiring: Vec<(String, oneshot::Receiver<()>)>,
+    max_concurrent_agents: usize,
 }
 
 impl WorkflowManager {
@@ -98,7 +100,13 @@ impl WorkflowManager {
             templates,
             active: HashMap::new(),
             retiring: Vec::new(),
+            max_concurrent_agents: WORKFLOW_MAX_CONCURRENT_AGENTS,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_max_concurrent_agents(&mut self, n: usize) {
+        self.max_concurrent_agents = n.max(1);
     }
 
     pub(crate) fn tracker(&self) -> Arc<parking_lot::Mutex<WorkflowTracker>> {
@@ -255,6 +263,7 @@ impl WorkflowManager {
                 templates: self.templates.clone(),
                 telemetry: self.telemetry.clone(),
                 cancel: cancel.clone(),
+                concurrency: Arc::new(tokio::sync::Semaphore::new(self.max_concurrent_agents)),
             },
             host_rx,
         );
@@ -736,6 +745,46 @@ mod tests {
             agent_budget: None,
             resume_run_id: None,
         }
+    }
+
+    fn parallel_n_script(n: usize) -> String {
+        format!(
+            "let meta = #{{ name: \"t\", description: \"d\" }};\n\
+             let jobs = [];\n\
+             let i = 0;\n\
+             while i < {n} {{\n\
+                 jobs.push(#{{ prompt: \"work \" + i.to_string() }});\n\
+                 i += 1;\n\
+             }}\n\
+             let results = parallel(jobs);\n\
+             complete(results.len());"
+        )
+    }
+
+    async fn recv_spawn(
+        rx: &mut SubagentEventRx,
+    ) -> xai_grok_tools::implementations::grok_build::task::types::SubagentSpawnRequest {
+        use xai_grok_tools::implementations::grok_build::task::types::SubagentEvent;
+        match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
+            Ok(Some(SubagentEvent::Spawn(req))) => req,
+            Ok(Some(_)) => panic!("expected spawn, got a non-spawn event"),
+            Ok(None) => panic!("expected spawn, channel closed"),
+            Err(_) => panic!("expected spawn, timed out"),
+        }
+    }
+
+    fn complete_spawn(
+        req: xai_grok_tools::implementations::grok_build::task::types::SubagentSpawnRequest,
+    ) {
+        use xai_grok_tools::implementations::grok_build::task::types::SubagentResult;
+        let id = req.id.clone();
+        let _ = req.result_tx.send(SubagentResult {
+            success: true,
+            output: std::sync::Arc::from("ok"),
+            subagent_id: id.clone(),
+            child_session_id: id,
+            ..Default::default()
+        });
     }
 
     #[tokio::test]
@@ -1502,5 +1551,67 @@ mod tests {
             state.status,
             crate::session::workflow::tracker::WorkflowRunStatus::Failed
         );
+    }
+
+    #[tokio::test]
+    async fn parallel_panel_respects_concurrency_cap() {
+        const CAP: usize = 2;
+        const N: usize = 6;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+        manager.test_set_max_concurrent_agents(CAP);
+        let (_run_id, outcome_rx) = manager
+            .launch(resolve_inline(parallel_n_script(N)).unwrap(), spec())
+            .unwrap();
+
+        let mut live = Vec::new();
+        for _ in 0..CAP {
+            live.push(recv_spawn(&mut subagent_rx).await);
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), subagent_rx.recv())
+                .await
+                .is_err(),
+            "more than {CAP} children were live"
+        );
+
+        let mut completed = 0usize;
+        while completed + live.len() < N {
+            complete_spawn(live.remove(0));
+            completed += 1;
+            live.push(recv_spawn(&mut subagent_rx).await);
+        }
+        for req in live {
+            complete_spawn(req);
+        }
+
+        match outcome_rx.await.unwrap() {
+            WorkflowOutcome::Completed { result } => assert_eq!(result, serde_json::json!(N)),
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_drops_queued_spawns_before_coordinator() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+        manager.test_set_max_concurrent_agents(1);
+        let (run_id, outcome_rx) = manager
+            .launch(resolve_inline(parallel_n_script(4)).unwrap(), spec())
+            .unwrap();
+
+        let first = recv_spawn(&mut subagent_rx).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), subagent_rx.recv())
+                .await
+                .is_err(),
+            "queued agents reached the coordinator before cancel"
+        );
+
+        assert!(manager.cancel(&run_id));
+        let _ = outcome_rx.await;
+        assert!(first.cancel_token.is_cancelled());
+        assert!(subagent_rx.try_recv().is_err());
     }
 }

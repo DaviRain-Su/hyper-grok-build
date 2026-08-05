@@ -82,6 +82,8 @@ Scroll the plan with the arrow keys or `j`/`k`. The action bar shows these short
 
 Press `Tab` to move focus between the plan preview and the prompt.
 
+While the plan approval view is open, `Ctrl+P` (command palette → model) still works for switching model before you press `a` to approve.
+
 ### Providing Feedback
 
 The approval view has three focus states:

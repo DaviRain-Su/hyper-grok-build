@@ -413,7 +413,7 @@ pub fn sync_campaign_fields(cfg: &mut crate::agent::config::Config) {
 /// Dismiss is recorded **before** the config write so a crash between the two
 /// can't leave the campaign active over the user's just-saved value (re-nudge).
 /// A dismiss-then-failed-write leaves the dismiss standing (fail-toward-no-nudge).
-pub async fn persist_user_choice(
+pub(super) async fn persist_user_choice(
     path: PatchPath,
     write: impl FnOnce(&mut super::mcp::Config),
 ) -> anyhow::Result<()> {

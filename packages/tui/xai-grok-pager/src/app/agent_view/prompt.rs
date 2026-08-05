@@ -623,6 +623,11 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 ActionId::InterjectPrompt => {
+                    crate::actions::log_shortcut_used(
+                        key,
+                        ActionId::InterjectPrompt,
+                        When::PromptFocused.telemetry_name(),
+                    );
                     // Editing-queued intercept lives in `queue_edit.rs`.
                     if let Some(outcome) = self.interject_editing_queued_intercept() {
                         return outcome;

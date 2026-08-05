@@ -146,7 +146,7 @@ pub(crate) struct Bm25ToolSearchIndex {
 }
 
 impl Bm25ToolSearchIndex {
-    pub fn new(snapshot: Arc<Mutex<ToolMetadataSnapshot>>) -> Self {
+    pub(crate) fn new(snapshot: Arc<Mutex<ToolMetadataSnapshot>>) -> Self {
         Self { snapshot }
     }
 }

@@ -13,7 +13,7 @@ const MAX_RESULTS: usize = 10;
 pub(crate) struct PathProvider;
 
 impl PathProvider {
-    pub async fn suggest(&self, ctx: &SuggestContext) -> Vec<RankedSuggestion> {
+    pub(crate) async fn suggest(&self, ctx: &SuggestContext) -> Vec<RankedSuggestion> {
         // shell_token quoting is POSIX-only: cmd/pwsh would misparse the
         // escaped line, so Windows serves no deterministic completions.
         if cfg!(windows) {

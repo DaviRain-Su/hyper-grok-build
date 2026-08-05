@@ -37,7 +37,7 @@ pub(crate) struct FileSizeExceededError {
 }
 
 impl FileSizeExceededError {
-    pub fn message(&self) -> String {
+    pub(crate) fn message(&self) -> String {
         let mut reasons = Vec::new();
         if let Some(limit) = self.limit_bytes {
             reasons.push(format!("{} bytes > {} byte limit", self.size_bytes, limit));

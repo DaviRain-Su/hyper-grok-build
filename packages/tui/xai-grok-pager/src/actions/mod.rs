@@ -197,6 +197,21 @@ pub enum When {
     DashboardOverlay,
 }
 
+impl When {
+    /// Stable product-event label for this context (`prompt_focused`, …).
+    pub fn telemetry_name(self) -> &'static str {
+        match self {
+            When::Always => "always",
+            When::PromptFocused => "prompt_focused",
+            When::ScrollbackFocused => "scrollback_focused",
+            When::AgentScreen => "agent_screen",
+            When::WelcomeScreen => "welcome_screen",
+            When::DashboardFocused => "dashboard_focused",
+            When::DashboardOverlay => "dashboard_overlay",
+        }
+    }
+}
+
 /// Action category (for grouping in command palette).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
@@ -320,6 +335,8 @@ impl ActionRegistry {
     ///
     /// Uses **exact** context matching — each layer in the input chain
     /// calls this with its own context level.
+    ///
+    /// Peek/probe only: does **not** emit telemetry.
     pub fn lookup(&self, event: &KeyEvent, context: When) -> Option<ActionId> {
         for def in &self.actions {
             if def.context != context {
@@ -539,6 +556,32 @@ impl ActionRegistry {
     }
 }
 
+/// Emit [`xai_grok_telemetry::events::ShortcutUsed`] for an allowlisted binding.
+///
+/// See that event's docs for the product contract (intent-only allowlist).
+/// `context` is a free-form surface label (`When::telemetry_name()` or e.g.
+/// `"queue"` when focus is not a registry `When`). Call only on the commit
+/// path that handles the allowlisted id, not peeks.
+pub fn log_shortcut_used(key: &KeyEvent, action_id: ActionId, context: &str) {
+    let Some(action) = shortcut_used_action_label(action_id) else {
+        return;
+    };
+    xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::ShortcutUsed {
+        key: KeyShortcut::from(*key).display_telemetry(),
+        action: action.to_string(),
+        context: context.to_string(),
+    });
+}
+
+/// Stable product-event labels for the allowlisted actions. `None` = do not emit.
+fn shortcut_used_action_label(id: ActionId) -> Option<&'static str> {
+    match id {
+        ActionId::InterjectPrompt => Some("interject_prompt"),
+        ActionId::OpenExtensions => Some("open_extensions"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,6 +634,32 @@ mod tests {
         assert_eq!(key!(Enter).display(), "Enter");
         assert_eq!(key!('c', CONTROL).display(), "Ctrl+c");
         assert_eq!(key!('l', CONTROL).display(), "Ctrl+l");
+    }
+
+    #[test]
+    fn shortcut_used_allowlist_is_ctrl_l_actions_only() {
+        assert_eq!(
+            shortcut_used_action_label(ActionId::InterjectPrompt),
+            Some("interject_prompt")
+        );
+        assert_eq!(
+            shortcut_used_action_label(ActionId::OpenExtensions),
+            Some("open_extensions")
+        );
+        assert_eq!(shortcut_used_action_label(ActionId::OpenDashboard), None);
+        assert_eq!(shortcut_used_action_label(ActionId::SendPrompt), None);
+        assert_eq!(When::PromptFocused.telemetry_name(), "prompt_focused");
+        assert_eq!(When::AgentScreen.telemetry_name(), "agent_screen");
+    }
+
+    #[test]
+    fn telemetry_chord_is_platform_stable() {
+        let ctrl_l = key!('l', CONTROL);
+        assert_eq!(ctrl_l.display_telemetry(), "Ctrl+L");
+        // UI pretty form lowercases the letter; telemetry must not.
+        assert_eq!(ctrl_l.display_pretty(), "Ctrl+l");
+        assert_eq!(key!('o', CONTROL).display_telemetry(), "Ctrl+O");
+        assert_eq!(key!(Enter, CONTROL).display_telemetry(), "Ctrl+Enter");
     }
 
     #[test]

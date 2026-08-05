@@ -62,10 +62,7 @@ struct RewindPointsRequest {
 /// `acp::Error`. Used by both arms below.
 fn lookup_session(agent: &MvpAgent, session_id: String) -> Result<SessionHandle, acp::Error> {
     agent
-        .sessions
-        .borrow()
-        .get(&acp::SessionId::new(session_id))
-        .cloned()
+        .resident_handle(&acp::SessionId::new(session_id))
         .ok_or_else(|| acp::Error::resource_not_found(Some("session not found".into())))
 }
 async fn handle_execute(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {

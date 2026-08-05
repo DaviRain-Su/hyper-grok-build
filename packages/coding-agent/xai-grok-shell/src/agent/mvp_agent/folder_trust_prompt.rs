@@ -130,19 +130,16 @@ impl MvpAgent {
         // over-exposed). Re-querying at grant time would need the `sessions` map
         // (a non-`Rc` `RefCell` field) shared into the detached task, which isn't
         // available here; the fail-safe stale-session window is accepted instead.
-        let targets: Vec<ReloadTarget> = self
-            .sessions
-            .borrow()
-            .values()
-            .filter(|h| {
-                xai_grok_workspace::trust::workspace_key(std::path::Path::new(&h.info.cwd)) == key
-            })
-            .map(|h| ReloadTarget {
-                cmd_tx: h.cmd_tx.clone(),
-                initial_client_mcp_servers: h.initial_client_mcp_servers.clone(),
-                cwd: PathBuf::from(&h.info.cwd),
-            })
-            .collect();
+        let mut targets = Vec::new();
+        self.session_registry.for_each_resident(|_, h| {
+            if xai_grok_workspace::trust::workspace_key(std::path::Path::new(&h.info.cwd)) == key {
+                targets.push(ReloadTarget {
+                    cmd_tx: h.cmd_tx.clone(),
+                    initial_client_mcp_servers: h.initial_client_mcp_servers.clone(),
+                    cwd: PathBuf::from(&h.info.cwd),
+                });
+            }
+        });
         if targets.is_empty() {
             prompted.borrow_mut().remove(&key);
             return;

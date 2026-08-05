@@ -7,9 +7,9 @@
 //!   into `\\.\pipe\grok-leader-<hash>` so callers keep their path-based API.
 //!
 #[cfg(unix)]
-pub use tokio::net::UnixListener as LeaderListener;
+pub(super) use tokio::net::UnixListener as LeaderListener;
 #[cfg(unix)]
-pub use tokio::net::UnixStream as LeaderStream;
+pub(super) use tokio::net::UnixStream as LeaderStream;
 
 /// Has a leader bound a listener at `path`?
 ///
@@ -28,7 +28,7 @@ pub fn listener_is_ready(path: &std::path::Path) -> bool {
 }
 
 #[cfg(windows)]
-pub use windows_impl::{LeaderListener, LeaderStream};
+pub(super) use windows_impl::{LeaderListener, LeaderStream};
 
 #[cfg(windows)]
 mod windows_impl {
@@ -43,7 +43,7 @@ mod windows_impl {
 
     /// Bidirectional IPC stream wrapping a connected named pipe (server-
     /// or client-side, depending on how it was created).
-    pub struct LeaderStream {
+    pub(crate) struct LeaderStream {
         inner: StreamInner,
     }
 
@@ -55,7 +55,7 @@ mod windows_impl {
     impl LeaderStream {
         /// Connect to a listener at `path`. The path is translated to a
         /// named-pipe name and `ClientOptions::open` is used.
-        pub async fn connect<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        pub(crate) async fn connect<P: AsRef<Path>>(path: P) -> io::Result<Self> {
             use tokio::net::windows::named_pipe::ClientOptions;
 
             // ClientOptions::open returns ERROR_PIPE_BUSY if all pipe
@@ -117,7 +117,7 @@ mod windows_impl {
     /// Listener for incoming leader IPC connections. Holds the pipe name
     /// plus the next pre-created server instance (Windows named pipes
     /// require pre-creating an instance per pending connection).
-    pub struct LeaderListener {
+    pub(crate) struct LeaderListener {
         pipe_name: std::ffi::OsString,
         /// Next pre-created server instance, ready for `connect().await`.
         /// We rotate: take this one, await its connect, immediately create
@@ -132,7 +132,7 @@ mod windows_impl {
 
     impl LeaderListener {
         /// Reserve a named-pipe name (no on-disk file is created).
-        pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        pub(crate) fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
             use tokio::net::windows::named_pipe::ServerOptions;
 
             let pipe_name = path_to_pipe_name(path.as_ref());
@@ -149,7 +149,7 @@ mod windows_impl {
         /// `UnixListener::accept`, returning a connected stream and a unit
         /// placeholder where Unix would return the peer address (named
         /// pipes don't carry one).
-        pub async fn accept(&self) -> io::Result<(LeaderStream, ())> {
+        pub(crate) async fn accept(&self) -> io::Result<(LeaderStream, ())> {
             use tokio::net::windows::named_pipe::ServerOptions;
 
             // Take the pending instance (or create one), await a client, then
@@ -201,7 +201,7 @@ mod windows_impl {
     /// which would open a real client the leader's `accept()` consumes as a
     /// phantom session. `ERROR_FILE_NOT_FOUND` means absent; `TRUE` or any other
     /// error (e.g. `ERROR_SEM_TIMEOUT`: exists but busy) means ready.
-    pub fn listener_is_ready(path: &Path) -> bool {
+    pub(super) fn listener_is_ready(path: &Path) -> bool {
         use std::os::windows::ffi::OsStrExt;
 
         use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, GetLastError};

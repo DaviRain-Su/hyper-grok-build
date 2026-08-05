@@ -43,7 +43,7 @@ async fn subagent_spawn_context_inherits_parent_permission_handle() {
 
             let mut handle = make_test_handle("test-model", false, None);
             handle.permission_handle = permission_handle;
-            agent.sessions.borrow_mut().insert(sid.clone(), handle);
+            agent.insert_resident(&sid, handle);
 
             let ctx = agent.build_subagent_spawn_context(sid.0.as_ref());
             let inherited = ctx
@@ -87,7 +87,7 @@ async fn subagent_spawn_context_shares_parent_goal_loop_gate() {
     let handle = make_test_handle("test-model", false, None);
     // Clone the parent's live gate before the handle moves into `sessions`.
     let parent_gate = handle.tool_context.goal_loop_active_gate.clone();
-    agent.sessions.borrow_mut().insert(sid.clone(), handle);
+    agent.insert_resident(&sid, handle);
 
     let ctx = agent.build_subagent_spawn_context(sid.0.as_ref());
 
@@ -110,10 +110,7 @@ async fn subagent_spawn_context_inherits_parent_ask_user_question_gate() {
     let sid_off = acp::SessionId::new("parent-no-ask");
     let mut handle_off = make_test_handle("test-model", false, None);
     handle_off.ask_user_question_enabled = false;
-    agent
-        .sessions
-        .borrow_mut()
-        .insert(sid_off.clone(), handle_off);
+    agent.insert_resident(&sid_off, handle_off);
     let ctx_off = agent.build_subagent_spawn_context(sid_off.0.as_ref());
     assert!(
         !ctx_off.ask_user_question_enabled,
@@ -123,10 +120,7 @@ async fn subagent_spawn_context_inherits_parent_ask_user_question_gate() {
     // Parent with the tool enabled (the default) → child on.
     let sid_on = acp::SessionId::new("parent-ask");
     let handle_on = make_test_handle("test-model", false, None);
-    agent
-        .sessions
-        .borrow_mut()
-        .insert(sid_on.clone(), handle_on);
+    agent.insert_resident(&sid_on, handle_on);
     let ctx_on = agent.build_subagent_spawn_context(sid_on.0.as_ref());
     assert!(
         ctx_on.ask_user_question_enabled,
@@ -153,7 +147,7 @@ async fn subagent_spawn_context_inherits_parent_configured_cutoff() {
     handle
         .resolved_tool_overrides
         .store(Some(std::sync::Arc::new(cutoff.clone())));
-    agent.sessions.borrow_mut().insert(sid.clone(), handle);
+    agent.insert_resident(&sid, handle);
     let ctx = agent.build_subagent_spawn_context(sid.0.as_ref());
     assert_eq!(
         ctx.inherited_tool_overrides,
@@ -163,10 +157,7 @@ async fn subagent_spawn_context_inherits_parent_configured_cutoff() {
 
     // A parent with no configured cutoff must not fabricate one for the child.
     let sid_none = acp::SessionId::new("parent-unbounded");
-    agent.sessions.borrow_mut().insert(
-        sid_none.clone(),
-        make_test_handle("test-model", false, None),
-    );
+    agent.insert_resident(&sid_none, make_test_handle("test-model", false, None));
     let ctx_none = agent.build_subagent_spawn_context(sid_none.0.as_ref());
     assert!(
         ctx_none.inherited_tool_overrides.is_none(),
@@ -183,7 +174,7 @@ async fn subagent_spawn_context_inherits_parent_process_scope() {
     let mut handle = make_test_handle("test-model", false, None);
     let parent_scope = xai_tty_utils::ProcessScope::new();
     handle.tool_context.process_scope = Some(parent_scope.clone());
-    agent.sessions.borrow_mut().insert(sid.clone(), handle);
+    agent.insert_resident(&sid, handle);
 
     // Hold an owner Arc in the parent scope so live_count == 1.
     let owner = std::sync::Arc::new(xai_tty_utils::ProcessGroup::new().expect("process group"));

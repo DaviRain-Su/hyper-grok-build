@@ -192,8 +192,8 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: GrokAuth) {
             None,
             Some(serde_json::json!({
                 "reason": "sibling_rotated",
-                "written_key_prefix": crate::auth::token_suffix(&auth.key),
-                "disk_key_prefix": crate::auth::token_suffix(&disk.key),
+                "written_key_prefix": xai_grok_auth::bearer_suffix(&auth.key),
+                "disk_key_prefix": xai_grok_auth::bearer_suffix(&disk.key),
             })),
         );
         return;

@@ -205,7 +205,7 @@ pub(crate) struct TerminalRunner {
 }
 
 impl TerminalRunner {
-    pub fn new(
+    pub(crate) fn new(
         notifier: Arc<dyn SessionNotificationSender>,
         session_id: agent_client_protocol::SessionId,
     ) -> Self {

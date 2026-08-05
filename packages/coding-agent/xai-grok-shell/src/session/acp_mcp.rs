@@ -63,7 +63,7 @@ pub(crate) struct GatewayAcpInvoker {
 }
 
 impl GatewayAcpInvoker {
-    pub fn new(gateway: AcpAgentGatewaySender) -> Self {
+    pub(crate) fn new(gateway: AcpAgentGatewaySender) -> Self {
         Self { gateway }
     }
 }

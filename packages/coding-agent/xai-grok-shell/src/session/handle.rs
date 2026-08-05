@@ -33,6 +33,8 @@ pub(crate) enum SessionLiveState {
     /// marker. Harmless to reap — the conversation persists and demotes to
     /// `Dormant` on the next disk scan.
     DeadFailed,
+    /// A load or resume is building the actor.
+    Attaching,
 }
 /// `_meta` key carrying [`SessionHandle::scheduler_background_loops`] on the
 /// `session/new` and `session/load` responses. Defined here so the shell that

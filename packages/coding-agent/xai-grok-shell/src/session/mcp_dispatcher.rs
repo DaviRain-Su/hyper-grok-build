@@ -53,7 +53,7 @@ use crate::extensions::mcp::McpServerSource;
 use crate::session::managed_mcp::MANAGED_MCP_PREFIX;
 
 /// Tumbling-window coalescing period. See module doc.
-pub const COALESCE_WINDOW: Duration = Duration::from_millis(50);
+pub(crate) const COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
 /// Method name for the ACP push.
 pub const SERVER_STATUS_METHOD: &str = "x.ai/mcp/server_status";
@@ -205,7 +205,7 @@ pub(crate) struct ShutdownState {
 }
 
 impl ShutdownState {
-    pub fn mark(&mut self, name: McpServerName) {
+    pub(crate) fn mark(&mut self, name: McpServerName) {
         self.shutting_down.insert(name);
     }
     /// Used by the auto-restart task: when `true`, skip respawn
@@ -214,7 +214,7 @@ impl ShutdownState {
     pub(crate) fn is_shutting_down(&self, name: &str) -> bool {
         self.shutting_down.contains(name)
     }
-    pub fn forget(&mut self, name: &str) {
+    pub(crate) fn forget(&mut self, name: &str) {
         self.shutting_down.remove(name);
     }
 

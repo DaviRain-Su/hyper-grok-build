@@ -825,7 +825,13 @@ async fn interject_after_cancel_does_nothing_and_keeps_prompt_queued() {
                 .lock()
                 .expect("current_prompt_id mutex poisoned") = Some("running".into());
 
-            actor.cancel_running_task(true, false, false, None).await;
+            actor
+                .cancel_running_task(crate::session::CancelOptions {
+                    cancel_subagents: true,
+                    user_initiated: true,
+                    ..Default::default()
+                })
+                .await;
 
             // p1 would start next; the interject lands in the gap where no turn runs yet.
             actor

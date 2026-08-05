@@ -59,7 +59,7 @@ pub use model::{
     platform_api_key_scope,
 };
 pub(crate) use model::{
-    TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired, token_suffix,
+    TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired,
 };
 pub(crate) use refresh::DiagnosticUploader;
 pub use storage::{

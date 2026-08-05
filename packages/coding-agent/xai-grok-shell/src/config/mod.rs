@@ -700,7 +700,7 @@ impl ModelOverrideConfig {
     /// `prompt_suggestion` resolves to a [`PromptSuggestModelPin`] instead of
     /// a model string (no CLI flag; the default and the catalog guard live at
     /// the consumer, `handle_suggest_prompt`).
-    pub fn resolve(
+    pub(crate) fn resolve(
         cli_web_search_model: Option<&str>,
         cli_session_summary_model: Option<&str>,
         config: &toml::Value,
@@ -1405,13 +1405,10 @@ pub fn apply_sandbox(
     let requires_bwrap = requires_read_deny || requires_hook_write_deny;
     #[cfg(target_os = "linux")]
     {
-        let refuse_unprotected = |detail: &str| {
+        let refuse_unprotected = |cause: &str| {
             eprintln!(
-                "error: this sandbox could not enforce its mount-namespace deny set \
-                 on Linux (bubblewrap missing/unusable, or a deny glob exceeded its \
-                 expansion limit — see any message above). Install bubblewrap with \
-                 `apt install -y bubblewrap` if needed. Refusing to start with denied \
-                 paths unprotected.{detail}"
+                "error: this sandbox could not enforce its deny list on Linux: \
+                 {cause} Refusing to start with denied paths unprotected."
             );
         };
         match xai_grok_sandbox::bwrap_reexec_for_profile(&sandbox_profile, &workspace) {
@@ -1419,7 +1416,10 @@ pub fn apply_sandbox(
                 use std::os::unix::process::CommandExt;
                 let err = cmd.exec();
                 if requires_bwrap {
-                    refuse_unprotected(&format!(" (bwrap exec failed: {err})"));
+                    refuse_unprotected(&format!(
+                        "bwrap exec failed: {err}. Install bubblewrap with \
+                         `apt install -y bubblewrap`."
+                    ));
                     std::process::exit(1);
                 }
                 eprintln!(
@@ -1441,7 +1441,10 @@ pub fn apply_sandbox(
                 }
             }
             None if requires_bwrap => {
-                refuse_unprotected("");
+                refuse_unprotected(
+                    "the deny list could not be prepared; see the error above \
+                     for the specific cause.",
+                );
                 std::process::exit(1);
             }
             None => {}
@@ -1469,8 +1472,9 @@ pub fn apply_sandbox(
                 && !xai_grok_sandbox::is_inside_bwrap();
             if unappliable {
                 eprintln!(
-                    "error: could not apply the '{}' sandbox profile (including \
-                     direct global-hook write protection); refusing to start.",
+                    "error: could not apply the '{}' sandbox profile; see the \
+                     warning above for the cause. Refusing to start with its \
+                     protections missing.",
                     sandbox.profile()
                 );
                 std::process::exit(1);

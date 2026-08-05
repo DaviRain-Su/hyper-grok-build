@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use xai_grok_tools::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
 use xai_grok_tools::implementations::grok_build::task::types::{
@@ -20,6 +20,7 @@ use super::tracker::WorkflowTracker;
 
 pub(crate) const WORKFLOW_MAX_AGENT_RUNS: u32 =
     (xai_workflow::MAX_AGENT_BUDGET as u32) * (SCHEMA_CONTRACT_RETRIES + 1);
+pub(crate) const WORKFLOW_MAX_CONCURRENT_AGENTS: usize = 16;
 pub(crate) const WORKFLOW_MAX_SCRIPT_TELEMETRY_EVENTS: u32 = 64;
 pub(crate) const WORKFLOW_MAX_SCRATCH_FILES: usize = 64;
 pub(crate) const WORKFLOW_MAX_SCRATCH_FILE_BYTES: usize = 10 * 1024 * 1024;
@@ -49,6 +50,7 @@ pub(crate) struct WorkflowHostParams {
     pub templates: std::collections::HashMap<String, String>,
     pub telemetry: TelemetryHook,
     pub cancel: CancellationToken,
+    pub concurrency: Arc<Semaphore>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,7 +364,6 @@ impl HostService {
             );
         }
 
-        let id = uuid::Uuid::now_v7().to_string();
         let explicit_label = opts.label.clone();
         let capability_mode = match opts.capability_mode.as_deref() {
             None => None,
@@ -392,6 +393,20 @@ impl HostService {
             Some(schema) => contract_prompt(&opts.prompt, schema),
         };
 
+        let _permit = tokio::select! {
+            biased;
+            () = self.params.cancel.cancelled() => {
+                return Err(HostError::Cancelled);
+            }
+            permit = self.params.concurrency.acquire() => {
+                permit.map_err(|_| HostError::Cancelled)?
+            }
+        };
+        if self.params.cancel.is_cancelled() {
+            return Err(HostError::Cancelled);
+        }
+
+        let id = uuid::Uuid::now_v7().to_string();
         let description = self.params.tracker.lock().agent_started(
             &self.params.run_id,
             crate::session::workflow::tracker::WorkflowAgentRow {
@@ -886,6 +901,7 @@ mod tests {
             templates: Default::default(),
             telemetry: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
+            concurrency: Arc::new(Semaphore::new(WORKFLOW_MAX_CONCURRENT_AGENTS)),
         };
 
         let (host_tx, host_rx) = mpsc::unbounded_channel();
@@ -958,6 +974,7 @@ mod tests {
             templates: Default::default(),
             telemetry: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
+            concurrency: Arc::new(Semaphore::new(WORKFLOW_MAX_CONCURRENT_AGENTS)),
         };
 
         let (host_tx, host_rx) = mpsc::unbounded_channel();

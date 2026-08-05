@@ -78,14 +78,9 @@ async fn handle_trigger_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> Ex
     };
 
     let session_id = acp::SessionId::new(params.session_id.clone());
-    let handle = agent
-        .sessions
-        .borrow()
-        .get(&session_id)
-        .cloned()
-        .ok_or_else(|| {
-            acp::Error::invalid_params().data(format!("session not found: {}", params.session_id))
-        })?;
+    let handle = agent.resident_handle(&session_id).ok_or_else(|| {
+        acp::Error::invalid_params().data(format!("session not found: {}", params.session_id))
+    })?;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     handle
@@ -114,10 +109,7 @@ fn handle_arm_auto_compact(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResul
     let session_id = acp::SessionId::new(session_id_str);
 
     let handle = agent
-        .sessions
-        .borrow()
-        .get(&session_id)
-        .cloned()
+        .resident_handle(&session_id)
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
 
     handle
