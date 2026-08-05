@@ -1535,8 +1535,13 @@ async fn reconstruct_full_config_no_session_resolver_for_open_platform_endpoint(
         .run_until(async {
             let dir = tempfile::tempdir().unwrap();
             let auth_path = dir.path().join("auth.json");
+            // Isolate home + auth so endpoint re-resolve cannot pick up the
+            // developer machine's real Ollama/OpenCode keys from ~/.grok.
+            let _home_guard =
+                xai_grok_test_support::EnvGuard::set("GROK_HOME", dir.path().to_str().unwrap());
             let _auth_guard =
                 xai_grok_test_support::EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap());
+            let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
 
             let (_am_dir, am) = auth_manager_with_valid_token("xai-session-jwt");
             let (actor, _rx) = make_actor_with_method_and_credentials(
