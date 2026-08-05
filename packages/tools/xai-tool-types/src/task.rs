@@ -1241,7 +1241,10 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          - The resumed agent must use the same subagent_type as the source.\n\
          - If the user changed that agent type's model configuration or asks for a fresh restart, do not use {resume_from_param}; start a new child and hand over the needed context in its prompt.\n\n\
          Isolation mode:\n\
-         - Use {isolation_param} to control the child's execution environment. With \"worktree\", the child runs in an isolated git worktree whose edits don't affect the parent workspace; the worktree is preserved after completion and its path is returned in the output."
+         - Use {isolation_param} to control the child's execution environment. With \"worktree\", the child runs in an isolated git worktree whose edits don't affect the parent workspace; the worktree is preserved after completion and its path is returned in the output.\n\n\
+         Multi-agent coordination:\n\
+         - Live peers (Main + running subagents) can message each other with the agent_hub tool (list/send/inbox/wait).\n\
+         - After a subagent finishes, read its last output via read_file path agent://<id>, or its concise transcript via history://<id> (history:// lists peers)."
     );
 
     out

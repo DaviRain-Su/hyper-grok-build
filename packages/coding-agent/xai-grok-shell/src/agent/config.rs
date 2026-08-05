@@ -5448,6 +5448,11 @@ pub struct Features {
     /// `None` = defer to remote settings / env / default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_wake: Option<bool>,
+    /// TTSR-lite: mid-stream rule match + one retry injection.
+    /// `None` = defer to env `GROK_TTSR_ENABLED` / default (false).
+    /// Set under `[features] ttsr = true` in config.toml.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttsr: Option<bool>,
     /// Backend-executed tools (web_search, x_search run server-side).
     /// `None` = defer to env / default (true). Set `false` to force
     /// client-side tool execution.

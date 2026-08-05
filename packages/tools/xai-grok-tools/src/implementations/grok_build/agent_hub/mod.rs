@@ -155,6 +155,11 @@ Ops:
 - inbox: drain your mailbox (non-blocking)
 - wait: block until mail arrives or timeout_ms (max 30000)
 
+Related virtual paths (use read_file, not agent_hub):
+- agent://<id> — last completed subagent output
+- history:// — roster; history://<id> — concise transcript
+- conflict:// — merge-conflict regions (register via path:conflicts)
+
 Rules:
 - Use list before send; never invent peer ids
 - Do not use agent_hub for questions tools can answer (grep, read, build)

@@ -3650,9 +3650,18 @@ fn write_subagent_output(dir: &Path, output: &str) -> bool {
         tracing::warn!(error = %e, "failed to write subagent output");
         return false;
     }
+    // Plain markdown for `agent://` reads (mirrors OMP's `<id>.md` artifacts).
+    if let Err(e) = atomic_write(&dir.join("output.md"), output) {
+        tracing::warn!(error = %e, "failed to write subagent output.md");
+    }
     true
 }
 pub(crate) fn read_subagent_output(dir: &Path) -> Option<String> {
+    if let Ok(md) = std::fs::read_to_string(dir.join("output.md"))
+        && !md.is_empty()
+    {
+        return Some(md);
+    }
     #[derive(serde::Deserialize)]
     struct OutputFile {
         schema_version: u32,

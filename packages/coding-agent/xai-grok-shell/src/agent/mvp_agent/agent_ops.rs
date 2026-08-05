@@ -4253,11 +4253,23 @@ impl MvpAgent {
         tool_ctx.monitor_event_buffer = Some(self.monitor_event_buffer.clone());
         tool_ctx.subagent_depth = 0;
         tool_ctx.auto_wake_enabled = self.cfg.borrow().auto_wake_enabled;
-        // TTSR-lite (default off). Enable with GROK_TTSR_ENABLED=1.
+        // TTSR-lite (default off). Enable with GROK_TTSR_ENABLED=1 or
+        // `[features] ttsr = true` in config.toml.
         {
-            let enabled = std::env::var("GROK_TTSR_ENABLED")
+            let env_on = std::env::var("GROK_TTSR_ENABLED")
                 .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
                 .unwrap_or(false);
+            let env_off = std::env::var("GROK_TTSR_ENABLED")
+                .map(|v| matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "off"))
+                .unwrap_or(false);
+            let cfg_on = self.cfg.borrow().features.ttsr;
+            let enabled = if env_off {
+                false
+            } else if env_on {
+                true
+            } else {
+                cfg_on.unwrap_or(false)
+            };
             if enabled {
                 let cwd = std::path::PathBuf::from(&session_info.cwd);
                 tool_ctx.ttsr = Some(std::sync::Arc::new(

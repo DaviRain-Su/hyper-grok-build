@@ -368,7 +368,14 @@ Grok Build 在智能体屏幕的侧边面板中显示运行中与已完成的工
 
 ## TTSR-lite（流式规则）
 
-可选的中途纠偏（默认 **关**）。设置 `GROK_TTSR_ENABLED=1`，在 `.grok/rules/*.md` 写带 frontmatter 的规则（`condition` 正则 + `interruptMode`）。匹配后会取消当前流、注入规则正文一次，并允许一次自动重试。
+可选的中途纠偏（默认 **关**）。开启方式：`GROK_TTSR_ENABLED=1`，或在 `~/.grok/config.toml` 写：
+
+```toml
+[features]
+ttsr = true
+```
+
+在 `.grok/rules/*.md` 写带 frontmatter 的规则（`condition` 正则 + `interruptMode`）。匹配后会取消当前流、注入规则正文一次，并允许一次自动重试。
 
 ## Agent hub（对等消息）
 

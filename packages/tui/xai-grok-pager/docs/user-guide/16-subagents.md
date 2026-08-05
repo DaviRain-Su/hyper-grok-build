@@ -414,7 +414,14 @@ Register conflicts by reading a normal file with the `:conflicts` suffix (e.g. `
 
 ## TTSR-lite (stream rules)
 
-Optional mid-stream course correction (default **off**). Set `GROK_TTSR_ENABLED=1`, then place rules under `.grok/rules/*.md` with frontmatter:
+Optional mid-stream course correction (default **off**). Enable with `GROK_TTSR_ENABLED=1` or in `~/.grok/config.toml`:
+
+```toml
+[features]
+ttsr = true
+```
+
+Then place rules under `.grok/rules/*.md` with frontmatter:
 
 ```yaml
 ---

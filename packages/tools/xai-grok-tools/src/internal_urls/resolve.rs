@@ -81,6 +81,12 @@ fn resolve_agent(id: &str, ctx: &ResolveContext) -> Result<VirtualRead, String> 
 }
 
 fn read_subagent_output_text(dir: &Path) -> Option<String> {
+    // Prefer plain markdown artifact when present (written alongside output.json).
+    if let Ok(md) = std::fs::read_to_string(dir.join("output.md"))
+        && !md.is_empty()
+    {
+        return Some(md);
+    }
     #[derive(serde::Deserialize)]
     struct OutputFile {
         #[serde(default)]
@@ -89,12 +95,9 @@ fn read_subagent_output_text(dir: &Path) -> Option<String> {
     }
     let data = std::fs::read_to_string(dir.join("output.json")).ok()?;
     let file: OutputFile = serde_json::from_str(&data).ok()?;
-    // Accept v1 (current shell) and bare future versions that still have `output`.
-    if file.schema_version == 0 || file.schema_version == 1 {
-        Some(file.output)
-    } else {
-        Some(file.output)
-    }
+    // Accept v1 (current shell) and versions that still carry `output`.
+    let _ = file.schema_version;
+    Some(file.output)
 }
 
 fn resolve_history(rest: &str, ctx: &ResolveContext) -> Result<VirtualRead, String> {
@@ -477,6 +480,19 @@ mod tests {
         assert_eq!(url.rest, "x");
 
         let _ = ConflictRegistryResource::new();
+    }
+
+    #[test]
+    fn read_prefers_output_md_over_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("output.md"), "from md").unwrap();
+        std::fs::write(
+            dir.join("output.json"),
+            r#"{"schema_version":1,"output":"from json"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_subagent_output_text(dir).as_deref(), Some("from md"));
     }
 
     #[test]
