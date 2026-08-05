@@ -64,6 +64,23 @@ enabled = false
 | `plan`            | 只读规划智能体。可检视代码库并维护规划待办列表；没有 shell 或编辑工具。 |
 | `oracle`          | 深度分析顾问。只读；工作智能体在卡住、调试复杂问题或权衡方案时咨询它，然后按其建议行动。建议固定到更强的模型以获得最佳效果。 |
 
+### 打包附带的专业智能体
+
+发行包还会在 `bundled/agents/` 提供 Markdown 智能体（安装到
+`~/.grok/bundled/agents/`）。它们以 **bundled** 来源出现（优先级低于项目
+`.grok/agents/` 与用户 `~/.grok/agents/`）：
+
+| 类型 | 说明 |
+| ---- | ---- |
+| `scout` | 快速只读侦察，压缩 handoff（Summary / Files / Architecture）。适合「X 在哪」类摸底；与 `explore` 部分重叠。 |
+| `reviewer` | 只读合并前审查；仅报告补丁引入问题，P0–P3。 |
+| `security-reviewer` | 只读安全审查；source→sink 证据链，拒绝无路径臆测。 |
+| `librarian` | 基于**已安装或克隆的源码**做外部库/API 求证，带引用。 |
+| `designer` | UI/UX 实现与审查；设计系统优先，可写。 |
+
+通过 `spawn_subagent` / Task 的 `subagent_type` 填入上表名称即可。同名项目/用户
+智能体可覆盖；也可用 `[subagents.toggle]` 关闭。
+
 项目级或用户定义的智能体可以新增类型，或按名称覆盖这些内置类型。
 
 ### 咨询 Oracle

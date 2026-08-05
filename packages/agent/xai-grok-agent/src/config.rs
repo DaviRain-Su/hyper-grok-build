@@ -2855,4 +2855,47 @@ description: Test default tool config
             }
         }
     }
+
+    /// Community-bundled specialist agents (ported prompt roles) must parse
+    /// as valid `AgentDefinition` files so release packaging cannot ship
+    /// broken frontmatter.
+    #[test]
+    fn bundled_specialist_agents_parse() {
+        let agents_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("bundled/agents");
+        let expected = [
+            ("scout", true),
+            ("reviewer", true),
+            ("security-reviewer", true),
+            ("librarian", true),
+            ("designer", false),
+        ];
+        for (name, read_only) in expected {
+            let path = agents_dir.join(format!("{name}.md"));
+            let def = AgentDefinition::from_file(&path).unwrap_or_else(|e| {
+                panic!("parse bundled agent {}: {e}", path.display())
+            });
+            assert_eq!(def.name, name);
+            assert!(!def.description.is_empty());
+            assert!(
+                def.prompt_body.as_ref().is_some_and(|b| !b.trim().is_empty()),
+                "{name} must have a prompt body"
+            );
+            let mode = def.capability_mode;
+            if read_only {
+                assert_eq!(
+                    mode,
+                    Some(xai_tool_types::SubagentCapabilityMode::ReadOnly),
+                    "{name} should be read-only"
+                );
+            } else {
+                assert_eq!(
+                    mode,
+                    Some(xai_tool_types::SubagentCapabilityMode::ReadWrite),
+                    "{name} should be read-write"
+                );
+            }
+        }
+    }
 }

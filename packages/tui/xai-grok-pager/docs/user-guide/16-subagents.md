@@ -64,6 +64,24 @@ The `spawn_subagent` tool accepts a `subagent_type` parameter that selects the c
 | `plan`            | Read-only planning agent. Inspects the codebase and maintains a planning todo list; it has no shell or editing tools. |
 | `oracle`          | Deep-analysis advisor. Read-only; the working agent consults it when stuck, debugging a complex issue, or weighing approaches, then acts on its recommendation. Pin it to a stronger model for best effect. |
 
+### Bundled specialist agents
+
+Release packages also ship markdown agents under `bundled/agents/` (installed to
+`~/.grok/bundled/agents/`). They appear as **bundled** subagent types (lower
+priority than project `.grok/agents/` or `~/.grok/agents/`):
+
+| Type | Description |
+| ---- | ----------- |
+| `scout` | Fast read-only scout with a compressed handoff map (`Summary` / `Files` / `Architecture`). Prefer for “where is X?” mapping; overlaps `explore`. |
+| `reviewer` | Read-only pre-merge review; P0–P3 findings on the patch only. |
+| `security-reviewer` | Read-only security pass; source→sink evidence, no speculative issues. |
+| `librarian` | External library/API research from **installed or cloned source**, with citations. |
+| `designer` | UI/UX implementation and review; design-system first, read-write. |
+
+Spawn them with `spawn_subagent` / Task using `subagent_type` equal to the name
+above. Override or disable via project/user agents of the same name, or
+`[subagents.toggle]`.
+
 Project- or user-defined agents can add new types or shadow these built-ins by name.
 
 ### Consulting the Oracle
