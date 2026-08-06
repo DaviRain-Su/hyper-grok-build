@@ -578,6 +578,22 @@ fn is_restricted_tier(tier: Option<&str>) -> bool {
         Some(t) => xai_grok_shell::tier::is_restricted_tier_name(t),
     }
 }
+/// True when a model id names an official xAI model.
+///
+/// xAI catalog ids are bare ("grok-4.5", "grok-4.1-…"); prefixed ids
+/// resolve through the provider registry — only the official xAI provider
+/// (`xai-direct`, pi alias `xai`) qualifies. Third-party providers
+/// (kimi-code, openai, anthropic, …) and unknown prefixes are `false`.
+fn is_official_xai_model(model_id: &str) -> bool {
+    let Some((provider, _)) = model_id.split_once('/') else {
+        return true; // Bare xAI catalog id.
+    };
+    matches!(provider, "xai" | "xai-direct")
+        || matches!(
+            xai_grok_models::provider_spec(provider).and_then(|spec| spec.legacy_platform()),
+            Some(xai_grok_models::PlatformId::XaiDirect)
+        )
+}
 /// True for API-key labels from shell/CCP: `"ApiKey"`, `"API Key"`, `"api_key"`.
 pub(crate) fn is_api_key_label(s: &str) -> bool {
     s.trim().to_ascii_lowercase().replace([' ', '_', '-'], "") == "apikey"
@@ -1391,6 +1407,46 @@ impl AppView {
                 .slash_controller
                 .set_usage_command_visible(usage_cmd);
         }
+    }
+    /// Whether xAI subscription promos (the SuperGrok "Click here to
+    /// upgrade" CTA) are relevant for this session.
+    ///
+    /// xAI upsells only make sense on the official surface: an xAI-provider
+    /// model used via the official API key or official login, and only when
+    /// the account has no paid membership. Third-party provider models
+    /// (Kimi Code, OpenAI Codex, Anthropic Claude, GitHub Copilot, Radius,
+    /// BYOK keys, …) never see xAI subscription promos.
+    pub(crate) fn xai_promo_eligible(&self) -> bool {
+        if self.has_external_auth_provider {
+            return false;
+        }
+        if let Some(model_id) = self.models.current_model_id_str()
+            && !is_official_xai_model(model_id)
+        {
+            return false;
+        }
+        // Official surface: prompt only without a paid membership. API-key
+        // billing is not a membership, so official API users still see the
+        // SuperGrok upgrade prompt.
+        self.is_api_key_auth || is_restricted_tier(self.subscription_tier.as_deref())
+    }
+
+    /// Filter an announcement list for this session.
+    ///
+    /// xAI subscription promos (`severity = "promo"`) are dropped unless
+    /// [`Self::xai_promo_eligible`]; critical and other announcements always
+    /// pass through unchanged.
+    pub(crate) fn filter_announcements(
+        &self,
+        announcements: Vec<xai_grok_announcements::RemoteAnnouncement>,
+    ) -> Vec<xai_grok_announcements::RemoteAnnouncement> {
+        if self.xai_promo_eligible() {
+            return announcements;
+        }
+        announcements
+            .into_iter()
+            .filter(|a| a.severity.as_deref() != Some("promo"))
+            .collect()
     }
     /// Force voice on for API-key sessions when only a remote rule left it off.
     /// Requirement / env / config pins still win.
