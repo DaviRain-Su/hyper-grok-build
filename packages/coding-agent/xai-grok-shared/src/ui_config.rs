@@ -177,6 +177,13 @@ pub struct UiConfig {
     /// `None` inherits remote/default; skipped when untouched.
     #[serde(default, skip_serializing_if = "DisplayRefreshSettings::is_default")]
     pub display_refresh: DisplayRefreshSettings,
+    /// Render base backgrounds transparent (`Color::Reset`) so the terminal
+    /// emulator's own background shows through the whole UI — combine with
+    /// terminal transparency / acrylic blur (e.g. Windows Terminal) for a
+    /// frosted-glass effect. `None` = off (default). Read by the pager's
+    /// theme cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparent_background: Option<bool>,
 }
 
 /// User-config opt-outs for the per-tip contextual hints, serialized as
@@ -250,6 +257,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             max_thoughts_width: DEFAULT_MAX_THOUGHTS_WIDTH,
+            transparent_background: None,
             theme: None,
             fork_secondary_model: xai_grok_models::default_model().to_string(),
             yolo: false,

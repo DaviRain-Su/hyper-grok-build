@@ -65,6 +65,36 @@ theme = "tokyonight"
 
 ---
 
+## Transparent Background (Frosted Glass)
+
+By default the TUI paints an opaque theme background (black for dark themes). Set
+`transparent_background = true` to render all base backgrounds as transparent
+(`Color::Reset`), letting your **terminal emulator's own background** show through
+the whole UI:
+
+```toml
+[ui]
+transparent_background = true
+```
+
+This pairs with terminal-side transparency for a frosted-glass look:
+
+| Terminal | Setting |
+|----------|---------|
+| **Windows Terminal** | Settings → Appearance → enable **Acrylic material** (or **Mica**) and lower **Background opacity** |
+| **iTerm2** | Preferences → Profiles → Window → enable **Transparency** and **Blur** |
+| **GNOME Terminal / Konsole** | Terminal profile → enable background **Transparency** |
+
+Notes:
+
+- Text, accents, selection highlights, diff colors, and syntax colors are preserved
+  — only the structural surface backgrounds are cleared, so readability is kept.
+- Works with any theme; toggle it live by editing `config.toml` and restarting the TUI
+  (or via the settings modal in a future release).
+- Modal backdrops lose their dimming tint in transparent mode (they still render).
+
+---
+
 ## Auto Theme (System Appearance)
 
 Set `theme = "auto"` to have Grok follow your operating system's light/dark appearance and switch themes automatically:

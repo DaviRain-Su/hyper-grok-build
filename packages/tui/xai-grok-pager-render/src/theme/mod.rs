@@ -377,6 +377,25 @@ impl Theme {
         }
     }
 
+    /// Return a copy with base backgrounds replaced by `Color::Reset` so the
+    /// terminal emulator's native background shows through the whole UI
+    /// (transparency / acrylic blur — the "frosted glass" look). Text,
+    /// accent, selection (`bg_visual`), diff, and syntax colors are
+    /// preserved; only the structural surface backgrounds are cleared.
+    #[must_use]
+    pub fn transparent(self) -> Self {
+        use ratatui::style::Color;
+        let mut t = self;
+        t.bg_base = Color::Reset;
+        t.bg_light = Color::Reset;
+        t.bg_dark = Color::Reset;
+        t.bg_highlight = Color::Reset;
+        t.bg_hover = Color::Reset;
+        t.bg_terminal = Color::Reset;
+        t.scrollbar_bg = Color::Reset;
+        t
+    }
+
     /// Get the current theme, quantized to the terminal's color level.
     ///
     /// Reads the active theme kind (loaded from `~/.grok/config.toml` on
@@ -440,11 +459,16 @@ impl Theme {
         // explicit gate on the legacy-Windows arm, `ansi16_chrome_overrides`
         // would repaint `Color::Reset` slots with named ANSI colors and
         // partially defeat the user's opt-out on ConHost.
-        if level.has_color()
+        let adapted = if level.has_color()
             && (level == color_support::ColorLevel::Basic
                 || (crate::glyphs::is_legacy_windows_console() && !level.has_truecolor()))
         {
             adapted.ansi16_chrome_overrides(dark)
+        } else {
+            adapted
+        };
+        if cache::transparent_background() {
+            adapted.transparent()
         } else {
             adapted
         }

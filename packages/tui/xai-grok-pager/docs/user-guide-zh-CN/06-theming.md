@@ -65,6 +65,33 @@ theme = "tokyonight"
 
 ---
 
+## 透明背景（磨砂玻璃效果）
+
+默认情况下 TUI 会绘制不透明的主题背景（深色主题为黑色）。设置
+`transparent_background = true` 可让所有基础背景透明化（`Color::Reset`），
+让**终端模拟器自身的背景**透过整个界面显示：
+
+```toml
+[ui]
+transparent_background = true
+```
+
+配合终端侧的透明设置即可实现磨砂玻璃效果：
+
+| 终端 | 设置 |
+|------|------|
+| **Windows Terminal** | 设置 → 外观 → 开启 **Acrylic material**（或 **Mica**）并调低**背景不透明度** |
+| **iTerm2** | 偏好设置 → Profiles → Window → 开启 **Transparency** 和 **Blur** |
+| **GNOME Terminal / Konsole** | 终端配置文件 → 开启背景**透明** |
+
+说明：
+
+- 文字、强调色、选中高亮、diff 颜色和语法配色都会保留——只清除结构性表面背景，保证可读性。
+- 适用于任何主题；编辑 `config.toml` 后重启 TUI 即可生效（无需重新编译）。
+- 透明模式下模态框背后的变暗底色会消失（模态框本身仍正常渲染）。
+
+---
+
 ## 自动主题（系统外观）
 
 设置 `theme = "auto"` 可让 Grok 跟随操作系统的浅色/深色外观并自动切换主题：

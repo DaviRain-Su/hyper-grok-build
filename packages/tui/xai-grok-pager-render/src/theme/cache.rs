@@ -168,6 +168,47 @@ pub fn set_auto_mode(enabled: bool) {
     AUTO_MODE.store(enabled, Ordering::Relaxed);
 }
 
+// -- Transparent background ---------------------------------------------------
+
+/// Whether base backgrounds render as `Color::Reset` so the terminal
+/// emulator's native background (transparency / acrylic blur) shows
+/// through. Loaded once from `[ui].transparent_background` on first
+/// access, then kept in sync by [`set_transparent_background`].
+static TRANSPARENT_BACKGROUND: AtomicBool = AtomicBool::new(false);
+static TRANSPARENT_LOADED: AtomicBool = AtomicBool::new(false);
+
+/// Get the cached transparent-background flag, seeding from disk on first
+/// call. Defaults to `false` (opaque theme backgrounds).
+#[must_use]
+pub fn transparent_background() -> bool {
+    if !TRANSPARENT_LOADED.load(Ordering::Acquire) {
+        TRANSPARENT_BACKGROUND.store(
+            load_transparent_background_from_disk().unwrap_or(false),
+            Ordering::Relaxed,
+        );
+        TRANSPARENT_LOADED.store(true, Ordering::Release);
+    }
+    TRANSPARENT_BACKGROUND.load(Ordering::Relaxed)
+}
+
+/// Update the in-memory transparent-background flag without writing to disk
+/// (used by the settings modal / live preview; disk-write happens via
+/// `Effect::PersistSetting`).
+pub fn set_transparent_background(enabled: bool) {
+    TRANSPARENT_BACKGROUND.store(enabled, Ordering::Relaxed);
+    TRANSPARENT_LOADED.store(true, Ordering::Release);
+}
+
+/// Read `[ui].transparent_background` from the layered effective config.
+fn load_transparent_background_from_disk() -> Option<bool> {
+    let root = xai_grok_config::load_effective_config_disk_only().ok()?;
+    let table = root.as_table()?;
+    table
+        .get("ui")
+        .and_then(|ui| ui.get("transparent_background"))
+        .and_then(|v| v.as_bool())
+}
+
 /// Get the cached auto-theme configuration, loading from config on first access.
 ///
 /// The cache can be invalidated via [`invalidate_auto_theme_config`] so
