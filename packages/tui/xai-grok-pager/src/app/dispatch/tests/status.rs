@@ -955,6 +955,119 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_enum(
     });
 }
 
+fn seed_scrolled_up(app: &mut AppView) {
+    let sb = &mut app.agents.get_mut(&AgentId(0)).unwrap().scrollback;
+    for i in 0..40 {
+        sb.push_block(RenderBlock::agent_message(format!("seed {i}")));
+    }
+    sb.prepare_layout(80, 8);
+    sb.goto_top();
+}
+
+fn current_usage_nonce(app: &AppView) -> u64 {
+    match app.agents[&AgentId(0)].active_modal.as_ref() {
+        Some(crate::views::modal::ActiveModal::UsageInfo { state }) => state.fetch_nonce,
+        _ => 0,
+    }
+}
+
+fn complete_session_usage(app: &mut AppView) {
+    let nonce = current_usage_nonce(app);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionUsageComplete {
+            agent_id: AgentId(0),
+            session_id: "test-session".to_string().into(),
+            usage: Box::default(),
+            nonce,
+        }),
+        app,
+    );
+}
+
+fn context_info_response() -> xai_grok_shell::session::SessionInfoResponse {
+    use xai_grok_shell::session::acp_types::{ContextInfo, SessionInfoData};
+
+    xai_grok_shell::session::SessionInfoResponse {
+        session_id: "test-session".to_string(),
+        cwd: "/tmp/test".to_string(),
+        data: SessionInfoData {
+            agent_name: None,
+            model: Some("grok-build".to_string()),
+            model_display_name: None,
+            resolved_model_id: None,
+            model_fingerprint: None,
+            show_model_fingerprint: false,
+            api_backend: None,
+            conversation_id: None,
+            turns: 0,
+            turn_index: 0,
+            context: ContextInfo::default(),
+        },
+    }
+}
+
+#[test]
+fn stale_context_info_results_do_not_update_replaced_session() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let before = agent_scrollback_len(&app);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .bind_session_id("replacement".into());
+
+    dispatch(
+        Action::TaskComplete(TaskResult::ContextInfoComplete {
+            agent_id: id,
+            session_id: "test-session".into(),
+            info: Box::new(context_info_response()),
+            nonce: 0,
+        }),
+        &mut app,
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::ContextInfoFailed {
+            agent_id: id,
+            session_id: "test-session".into(),
+            error: "request failed".to_string(),
+            nonce: 0,
+        }),
+        &mut app,
+    );
+
+    assert_eq!(agent_scrollback_len(&app), before);
+}
+
+#[test]
+fn session_usage_page_flips_info_to_top() {
+    crate::appearance::cache::set_page_flip_on_send(true);
+    let mut app = test_app_with_agent();
+    // Scrollback flow is minimal-only.
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    app.usage_visible = false;
+    seed_scrolled_up(&mut app);
+    complete_session_usage(&mut app);
+    let sb = &mut app.agents.get_mut(&AgentId(0)).unwrap().scrollback;
+    sb.prepare_layout(80, 8);
+    assert!(sb.is_follow_preserve_scroll());
+    let pinned = sb.scroll_offset();
+    sb.scroll_to_entry_top(sb.len() - 1);
+    assert_eq!(sb.scroll_offset(), pinned);
+}
+
+#[test]
+fn session_usage_keeps_scroll_when_page_flip_off() {
+    let prev = crate::appearance::cache::load_page_flip_on_send();
+    crate::appearance::cache::set_page_flip_on_send(false);
+    let mut app = test_app_with_agent();
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    app.usage_visible = false;
+    seed_scrolled_up(&mut app);
+    complete_session_usage(&mut app);
+    assert_eq!(app.agents[&AgentId(0)].scrollback.scroll_offset(), 0);
+    crate::appearance::cache::set_page_flip_on_send(prev);
+}
+
 #[test]
 fn show_usage_on_welcome_screen_is_noop() {
     let mut app = test_app();
@@ -969,6 +1082,7 @@ fn show_usage_on_welcome_screen_is_noop() {
 fn show_usage_with_redirect_url_fetches_session_only() {
     // Redirect link is deferred until SessionUsageComplete (see billing tests).
     let mut app = test_app_with_agent();
+    app.screen_mode = crate::app::ScreenMode::Minimal;
     app.usage_billing_redirect_url = Some("https://billing.example.com/me".to_string());
     let before = agent_scrollback_len(&app);
     let effects = dispatch(Action::ShowUsage, &mut app);
@@ -1016,4 +1130,193 @@ fn open_tutorial_toggles_overlay_without_effects() {
     let effects = dispatch(Action::OpenTutorial, &mut app);
     assert!(app.tutorial.is_none(), "toggle closes");
     assert!(effects.is_empty(), "close emits nothing, got: {effects:?}");
+}
+
+// ── Usage modal (full TUI) dispatch tests ────────────────────────────
+
+fn usage_modal_state(app: &AppView) -> &crate::views::usage_modal::UsageInfoModalState {
+    match app.agents[&AgentId(0)].active_modal.as_ref() {
+        Some(crate::views::modal::ActiveModal::UsageInfo { state }) => state,
+        _ => panic!("expected the usage modal to be open"),
+    }
+}
+
+#[test]
+fn show_usage_opens_modal_on_usage_limit_tab_with_fetches() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::ShowUsage, &mut app);
+    let state = usage_modal_state(&app);
+    assert_eq!(
+        state.active_tab,
+        crate::views::usage_modal::UsageInfoTab::UsageLimit
+    );
+    assert_eq!(state.ctx.session_id.as_deref(), Some("test-session"));
+    assert!(state.billing_loading);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::ShowContextInfo { .. },
+                Effect::ShowSessionInfo { .. },
+                Effect::FetchSessionUsage { .. },
+                Effect::FetchBilling { silent: true, .. },
+            ]
+        ),
+        "got: {effects:?}"
+    );
+}
+
+#[test]
+fn show_context_info_retabs_open_modal_without_refetching() {
+    let mut app = test_app_with_agent();
+    dispatch(Action::ShowUsage, &mut app);
+    let effects = dispatch(Action::ShowContextInfo, &mut app);
+    assert!(effects.is_empty(), "got: {effects:?}");
+    assert_eq!(
+        usage_modal_state(&app).active_tab,
+        crate::views::usage_modal::UsageInfoTab::ContextUsage
+    );
+}
+
+#[test]
+fn show_session_info_opens_modal_on_session_tab() {
+    let mut app = test_app_with_agent();
+    dispatch(Action::ShowSessionInfo, &mut app);
+    assert_eq!(
+        usage_modal_state(&app).active_tab,
+        crate::views::usage_modal::UsageInfoTab::SessionInfo
+    );
+}
+
+#[test]
+fn usage_results_populate_open_modal_not_scrollback() {
+    let mut app = test_app_with_agent();
+    dispatch(Action::ShowUsage, &mut app);
+    let before = agent_scrollback_len(&app);
+
+    let nonce = current_usage_nonce(&app);
+    complete_session_usage(&mut app);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionInfoComplete {
+            agent_id: AgentId(0),
+            session_id: "test-session".into(),
+            info: Box::new(context_info_response()),
+            text: "  Session ID: test-session".to_string(),
+            nonce,
+        }),
+        &mut app,
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::ContextInfoComplete {
+            agent_id: AgentId(0),
+            session_id: "test-session".into(),
+            info: Box::new(context_info_response()),
+            nonce,
+        }),
+        &mut app,
+    );
+
+    assert_eq!(agent_scrollback_len(&app), before);
+    let state = usage_modal_state(&app);
+    assert!(state.session_usage_text.is_some());
+    assert_eq!(
+        state.session_text.as_deref(),
+        Some("  Session ID: test-session")
+    );
+    assert!(state.context.is_some());
+}
+
+#[test]
+fn usage_results_without_open_modal_are_dropped_in_full_mode() {
+    let mut app = test_app_with_agent();
+    let before = agent_scrollback_len(&app);
+    complete_session_usage(&mut app);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionInfoFailed {
+            agent_id: AgentId(0),
+            session_id: "test-session".into(),
+            error: "boom".to_string(),
+            nonce: 0,
+        }),
+        &mut app,
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::ContextInfoFailed {
+            agent_id: AgentId(0),
+            session_id: "test-session".into(),
+            error: "boom".to_string(),
+            nonce: 0,
+        }),
+        &mut app,
+    );
+    assert_eq!(agent_scrollback_len(&app), before);
+}
+
+#[test]
+fn reply_from_previous_modal_open_is_dropped() {
+    let mut app = test_app_with_agent();
+    dispatch(Action::ShowUsage, &mut app);
+    let old_nonce = current_usage_nonce(&app);
+    // Close and reopen on the same session: a new fetch generation.
+    app.agents.get_mut(&AgentId(0)).unwrap().active_modal = None;
+    dispatch(Action::ShowUsage, &mut app);
+    assert_ne!(current_usage_nonce(&app), old_nonce);
+    // The first open's reply lands late — it must not populate the modal.
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionInfoComplete {
+            agent_id: AgentId(0),
+            session_id: "test-session".into(),
+            info: Box::new(context_info_response()),
+            text: "  Session ID: from-old-open".to_string(),
+            nonce: old_nonce,
+        }),
+        &mut app,
+    );
+    assert!(usage_modal_state(&app).session_text.is_none());
+}
+
+#[test]
+fn stale_session_info_does_not_populate_modal() {
+    let mut app = test_app_with_agent();
+    dispatch(Action::ShowSessionInfo, &mut app);
+    let nonce = current_usage_nonce(&app);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionInfoComplete {
+            agent_id: AgentId(0),
+            session_id: "old-session".into(),
+            info: Box::new(context_info_response()),
+            text: "  Session ID: old-session".to_string(),
+            nonce,
+        }),
+        &mut app,
+    );
+    assert!(usage_modal_state(&app).session_text.is_none());
+}
+
+#[test]
+fn fetch_failures_surface_in_open_modal() {
+    let mut app = test_app_with_agent();
+    dispatch(Action::ShowUsage, &mut app);
+    let nonce = current_usage_nonce(&app);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionInfoFailed {
+            agent_id: AgentId(0),
+            session_id: "test-session".into(),
+            error: "info boom".to_string(),
+            nonce,
+        }),
+        &mut app,
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::ContextInfoFailed {
+            agent_id: AgentId(0),
+            session_id: "test-session".into(),
+            error: "ctx boom".to_string(),
+            nonce,
+        }),
+        &mut app,
+    );
+    let state = usage_modal_state(&app);
+    assert_eq!(state.session_error.as_deref(), Some("info boom"));
+    assert_eq!(state.context_error.as_deref(), Some("ctx boom"));
 }

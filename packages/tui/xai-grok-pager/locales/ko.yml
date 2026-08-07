@@ -84,6 +84,7 @@ modal.title.howto_guides: "사용 가이드"
 modal.title.keyboard_shortcuts: "키보드 단축키"
 modal.title.memory: "메모리"
 modal.title.settings: "설정"
+modal.title.usage: "사용량"
 modal.title.reset_setting: "설정을 재설정하시겠습니까?"
 modal.title.memory_note: "메모리 노트"
 

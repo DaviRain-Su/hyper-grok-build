@@ -20,6 +20,7 @@ pub mod file_system;
 pub mod folder_trust;
 pub mod foreign_sessions;
 pub mod fs_notify;
+pub(crate) mod git_odb;
 pub mod handle;
 pub mod hub;
 pub mod hub_auth;

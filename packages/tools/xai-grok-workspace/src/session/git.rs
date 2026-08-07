@@ -6,7 +6,6 @@ use git2::{DiffOptions, Repository, StatusOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use url::Url;
@@ -56,9 +55,6 @@ pub struct DiffSizeExceededFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit_lines: Option<u64>,
 }
-/// Cache for git status results to avoid redundant expensive computations.
-/// Cache is invalidated after TTL or when commit hash changes.
-pub const GIT_STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
 /// Run a git CLI command and return stdout on success, or error with stderr.
 ///
 /// All invocations use `--no-optional-locks` to prevent background stat-cache
@@ -105,6 +101,14 @@ pub async fn git_cli(cwd: &Path, args: &[&str]) -> Result<String> {
             }
         ))
     }
+}
+/// Mutating [`git_cli`]: bump the gate epoch after the attempt. Failed
+/// commands can still change the repo (`pull --rebase` conflicts, partial
+/// checkout); skipping invalidate would keep pre-mutation snapshots.
+async fn git_cli_mut(cwd: &Path, args: &[&str]) -> Result<String> {
+    let result = git_cli(cwd, args).await;
+    super::git_gate::invalidate(cwd);
+    result
 }
 /// Run a jj CLI command and return stdout on success, or error with stderr.
 ///
@@ -534,9 +538,9 @@ pub async fn checkout_branch(git_root: &Path, branch: &str, create: bool) -> Res
         );
     }
     if create {
-        git_cli(git_root, &["checkout", "-b", branch]).await?;
+        git_cli_mut(git_root, &["checkout", "-b", branch]).await?;
     } else {
-        git_cli(git_root, &["checkout", branch]).await?;
+        git_cli_mut(git_root, &["checkout", branch]).await?;
     }
     Ok(())
 }
@@ -1254,6 +1258,39 @@ pub async fn status(
     ignore_submodules: bool,
     include_patches: bool,
 ) -> Result<GitStatusData> {
+    let git_root_buf = git_root.to_path_buf();
+    super::git_gate::shared()
+        .run(
+            git_root,
+            super::git_gate::FlightOp::Status {
+                include_untracked,
+                include_stats,
+                ignore_submodules,
+                include_patches,
+            },
+            move || {
+                let git_root = git_root_buf.clone();
+                async move {
+                    status_ungated(
+                        &git_root,
+                        include_untracked,
+                        include_stats,
+                        ignore_submodules,
+                        include_patches,
+                    )
+                    .await
+                }
+            },
+        )
+        .await
+}
+async fn status_ungated(
+    git_root: &Path,
+    include_untracked: bool,
+    include_stats: bool,
+    ignore_submodules: bool,
+    include_patches: bool,
+) -> Result<GitStatusData> {
     let start = std::time::Instant::now();
     let cwd = git_root.to_path_buf();
     let (branch, upstream, remote_url) =
@@ -1490,6 +1527,53 @@ pub async fn diffs(
     include_content: bool,
     merge_base: bool,
 ) -> Result<GitDiffsData> {
+    let git_root_buf = git_root.to_path_buf();
+    let paths_buf = paths.map(|p| p.to_vec());
+    let from_owned = from.to_string();
+    let to_owned = to.to_string();
+    let mut key_paths = paths_buf.clone().unwrap_or_default();
+    key_paths.sort();
+    super::git_gate::shared()
+        .run(
+            git_root,
+            super::git_gate::FlightOp::Diff {
+                from: from_owned.clone(),
+                to: to_owned.clone(),
+                merge_base,
+                include_patch,
+                include_content,
+                paths: key_paths,
+            },
+            move || {
+                let git_root = git_root_buf.clone();
+                let paths = paths_buf.clone();
+                let from = from_owned.clone();
+                let to = to_owned.clone();
+                async move {
+                    diffs_ungated(
+                        &git_root,
+                        paths.as_deref(),
+                        &from,
+                        &to,
+                        include_patch,
+                        include_content,
+                        merge_base,
+                    )
+                    .await
+                }
+            },
+        )
+        .await
+}
+async fn diffs_ungated(
+    git_root: &Path,
+    paths: Option<&[String]>,
+    from: &str,
+    to: &str,
+    include_patch: bool,
+    include_content: bool,
+    merge_base: bool,
+) -> Result<GitDiffsData> {
     let start = std::time::Instant::now();
     let cwd = git_root.to_path_buf();
     let paths = paths.map(|p| p.to_vec());
@@ -1641,11 +1725,11 @@ pub async fn stage(git_root: &Path, paths: Option<Vec<String>>) -> Result<StageD
     let start = std::time::Instant::now();
     let paths_to_stage = paths.unwrap_or_default();
     let result = if paths_to_stage.is_empty() {
-        git_cli(git_root, &["add", "-A"]).await
+        git_cli_mut(git_root, &["add", "-A"]).await
     } else {
         let mut args = vec!["add", "--"];
         args.extend(paths_to_stage.iter().map(String::as_str));
-        git_cli(git_root, &args).await
+        git_cli_mut(git_root, &args).await
     };
     tracing::debug!(paths = paths_to_stage.len(), elapsed = ?start.elapsed(), "git.stage");
     result.map(|_| StageData {
@@ -1658,9 +1742,9 @@ pub async fn unstage(git_root: &Path, paths: Option<Vec<String>>) -> Result<()> 
         Some(p) if !p.is_empty() => {
             let mut args = vec!["reset", "HEAD", "--"];
             args.extend(p.iter().map(String::as_str));
-            git_cli(git_root, &args).await
+            git_cli_mut(git_root, &args).await
         }
-        _ => git_cli(git_root, &["reset", "HEAD"]).await,
+        _ => git_cli_mut(git_root, &["reset", "HEAD"]).await,
     };
     tracing::debug!(
         paths = paths.as_ref().map(|v| v.len()).unwrap_or(0),
@@ -1688,7 +1772,7 @@ pub async fn discard(
             args.push("--");
             args.extend(&path_refs);
         }
-        git_cli(git_root, &args).await?;
+        git_cli_mut(git_root, &args).await?;
     }
     if matches!(scope, DiscardScope::Working | DiscardScope::Both) {
         let mut args = vec!["checkout"];
@@ -1698,7 +1782,7 @@ pub async fn discard(
             args.push("--");
             args.extend(&path_refs);
         }
-        let result = git_cli(git_root, &args).await;
+        let result = git_cli_mut(git_root, &args).await;
         if !include_untracked {
             result?;
         }
@@ -1709,7 +1793,7 @@ pub async fn discard(
             args.push("--");
             args.extend(&path_refs);
         }
-        git_cli(git_root, &args).await?;
+        git_cli_mut(git_root, &args).await?;
     }
     tracing::debug!(paths = path_refs.len(), elapsed = ?start.elapsed(), "git.discard");
     Ok(())
@@ -1720,7 +1804,7 @@ pub async fn stash(git_root: &Path, include_untracked: bool) -> Result<()> {
     if include_untracked {
         args.push("--include-untracked");
     }
-    git_cli(git_root, &args).await?;
+    git_cli_mut(git_root, &args).await?;
     tracing::debug!(include_untracked, elapsed = ?start.elapsed(), "git.stash");
     Ok(())
 }
@@ -1831,7 +1915,7 @@ pub async fn stash_before_destructive_op(
         session_id,
         chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
     );
-    if let Err(e) = git_cli(
+    if let Err(e) = git_cli_mut(
         git_root,
         &["stash", "push", "--include-untracked", "-m", &message],
     )
@@ -1919,7 +2003,10 @@ pub async fn checkout_session_commit(
         stash_ref,
         stash_skipped_reason,
     };
-    if git_cli(git_root, &["checkout", target_sha]).await.is_ok() {
+    if git_cli_mut(git_root, &["checkout", target_sha])
+        .await
+        .is_ok()
+    {
         tracing::info!(
             path = %git_root.display(),
             commit = %target_sha,
@@ -1980,7 +2067,10 @@ pub async fn checkout_session_commit(
             return outcome;
         }
     }
-    if git_cli(git_root, &["checkout", target_sha]).await.is_ok() {
+    if git_cli_mut(git_root, &["checkout", target_sha])
+        .await
+        .is_ok()
+    {
         tracing::info!(
             path = %git_root.display(),
             commit = %target_sha,
@@ -2059,7 +2149,7 @@ pub(crate) async fn checkout_commit_with_fetch(
             && !output.trim().is_empty()
         {
             let msg = format!("auto-stash before checkout {head_commit}");
-            if git_cli(git_root, &["stash", "push", "-m", &msg])
+            if git_cli_mut(git_root, &["stash", "push", "-m", &msg])
                 .await
                 .is_ok()
             {
@@ -2067,7 +2157,10 @@ pub(crate) async fn checkout_commit_with_fetch(
             }
         }
     }
-    if git_cli(git_root, &["checkout", head_commit]).await.is_ok() {
+    if git_cli_mut(git_root, &["checkout", head_commit])
+        .await
+        .is_ok()
+    {
         return CheckoutCommitResponse {
             checked_out: true,
             stashed,
@@ -2125,7 +2218,7 @@ pub(crate) async fn checkout_commit_with_fetch(
             .await;
         }
     };
-    match git_cli(git_root, &["checkout", head_commit]).await {
+    match git_cli_mut(git_root, &["checkout", head_commit]).await {
         Ok(_) => CheckoutCommitResponse {
             checked_out: true,
             stashed,
@@ -2144,7 +2237,7 @@ async fn pop_checkout_auto_stash(
     error: String,
 ) -> CheckoutCommitResponse {
     if stashed {
-        let _ = git_cli(git_root, &["stash", "pop"]).await;
+        let _ = git_cli_mut(git_root, &["stash", "pop"]).await;
     }
     CheckoutCommitResponse {
         checked_out: false,
@@ -2386,7 +2479,7 @@ pub async fn soft_restore_git_state(
             };
         }
     };
-    if let Err(e) = git_cli(&git_root, &["reset", "--soft", &git_ref.head]).await {
+    if let Err(e) = git_cli_mut(&git_root, &["reset", "--soft", &git_ref.head]).await {
         tracing::warn!(
             path = %git_root.display(),
             session_id,
@@ -2395,7 +2488,7 @@ pub async fn soft_restore_git_state(
             "soft_restore_git_state: reset --soft failed"
         );
         let stash_ref = match stash_ref {
-            Some(stash) => match git_cli(&git_root, &["stash", "pop"]).await {
+            Some(stash) => match git_cli_mut(&git_root, &["stash", "pop"]).await {
                 Ok(_) => None,
                 Err(pop_err) => {
                     tracing::warn!(
@@ -2418,7 +2511,7 @@ pub async fn soft_restore_git_state(
             stash_ref,
         };
     }
-    let index_reset = match git_cli(&git_root, &["reset", "--quiet", "--", "."]).await {
+    let index_reset = match git_cli_mut(&git_root, &["reset", "--quiet", "--", "."]).await {
         Ok(_) => true,
         Err(e) => {
             tracing::warn!(
@@ -2471,7 +2564,7 @@ pub async fn restage_git_paths(cwd: &Path, git_ref: &GitStateRef, session_id: &s
     let mut batch_args: Vec<&str> = Vec::with_capacity(path_strs.len() + 2);
     batch_args.extend(["add", "--"]);
     batch_args.extend(path_strs.iter().map(String::as_str));
-    if git_cli(&git_root, &batch_args).await.is_ok() {
+    if git_cli_mut(&git_root, &batch_args).await.is_ok() {
         return true;
     }
     tracing::debug!(
@@ -2483,7 +2576,7 @@ pub async fn restage_git_paths(cwd: &Path, git_ref: &GitStateRef, session_id: &s
     let mut failed_adds = 0usize;
     for path in &git_ref.staged {
         let path_str = path.to_string_lossy();
-        if git_cli(&git_root, &["add", "--", path_str.as_ref()])
+        if git_cli_mut(&git_root, &["add", "--", path_str.as_ref()])
             .await
             .is_err()
         {
@@ -2527,6 +2620,13 @@ async fn git_cli_raw(cwd: &Path, args: &[&str]) -> Result<(bool, String)> {
         combined.push_str(&stderr);
     }
     Ok((output.status.success(), combined))
+}
+async fn git_cli_raw_mut(cwd: &Path, args: &[&str]) -> Result<(bool, String)> {
+    let result = git_cli_raw(cwd, args).await;
+    if result.is_ok() {
+        super::git_gate::invalidate(cwd);
+    }
+    result
 }
 /// Marker line guarding the default-exclude seed. Environments may pre-seed
 /// the same block at provision time under this marker; whichever side seeds
@@ -2596,7 +2696,7 @@ async fn seed_default_excludes(git_root: &Path) -> Result<()> {
 /// Push HEAD to origin, classifying the failure mode. Never forces. Returns
 /// the combined output alongside the [`PushStatus`].
 async fn push_classified(git_root: &Path) -> Result<(PushStatus, String)> {
-    let (ok, out) = git_cli_raw(git_root, &["push", "-u", "origin", "HEAD"]).await?;
+    let (ok, out) = git_cli_raw_mut(git_root, &["push", "-u", "origin", "HEAD"]).await?;
     if ok {
         return Ok((PushStatus::Ok, out));
     }
@@ -2628,7 +2728,7 @@ pub async fn commit(git_root: &Path, req: &GitCommitReq) -> Result<CommitResult>
         seed_default_excludes(git_root).await?;
     }
     if req.stage_all {
-        git_cli(git_root, &["add", "-A"]).await?;
+        git_cli_mut(git_root, &["add", "-A"]).await?;
     }
     let clean = req.stage_all
         && !req.amend
@@ -2646,7 +2746,7 @@ pub async fn commit(git_root: &Path, req: &GitCommitReq) -> Result<CommitResult>
         if req.signoff {
             args.push("--signoff");
         }
-        git_cli(git_root, &args).await?;
+        git_cli_mut(git_root, &args).await?;
         combined_output = String::new();
     }
     let mut commit_hash = git_cli(git_root, &["rev-parse", "HEAD"]).await.ok();
@@ -2660,7 +2760,7 @@ pub async fn commit(git_root: &Path, req: &GitCommitReq) -> Result<CommitResult>
     let mut warning = None;
     let mut push_status = PushStatus::NotRequested;
     if req.sync {
-        match git_cli(git_root, &["pull", "--rebase"]).await {
+        match git_cli_mut(git_root, &["pull", "--rebase"]).await {
             Ok(pull_out) => {
                 combined_output.push_str("\n--- Pull ---\n");
                 combined_output.push_str(&pull_out);
@@ -2727,7 +2827,7 @@ pub async fn sync_base(
         )
     }
     if abort {
-        let (_ok, out) = git_cli_raw(git_root, &["merge", "--abort"]).await?;
+        let (_ok, out) = git_cli_raw_mut(git_root, &["merge", "--abort"]).await?;
         anyhow::ensure!(
             !merge_in_progress(git_root).await?,
             "merge --abort failed: {out}"
@@ -2747,7 +2847,7 @@ pub async fn sync_base(
         "working tree is not clean; commit or discard changes before syncing the base"
     );
     let base = base_ref.unwrap_or("HEAD");
-    let (fetched, fetch_out) = git_cli_raw(git_root, &["fetch", "origin", base]).await?;
+    let (fetched, fetch_out) = git_cli_raw_mut(git_root, &["fetch", "origin", base]).await?;
     anyhow::ensure!(fetched, "fetch of base ref '{base}' failed: {fetch_out}");
     if git_cli_raw(
         git_root,
@@ -2760,7 +2860,8 @@ pub async fn sync_base(
             outcome: GitSyncBaseOutcome::UpToDate,
         });
     }
-    let (merged, merge_out) = git_cli_raw(git_root, &["merge", "--no-edit", "FETCH_HEAD"]).await?;
+    let (merged, merge_out) =
+        git_cli_raw_mut(git_root, &["merge", "--no-edit", "FETCH_HEAD"]).await?;
     if merged {
         let sha = git_cli(git_root, &["rev-parse", "HEAD"]).await?;
         return Ok(GitSyncBaseResult {
@@ -2780,10 +2881,11 @@ pub async fn sync_base(
     anyhow::bail!("merge of base ref '{base}' failed: {merge_out}")
 }
 pub async fn stage_content(git_root: &Path, path: &str, content: &str) -> Result<()> {
-    let git_root = git_root.to_path_buf();
+    let git_root_buf = git_root.to_path_buf();
     let path = path.to_string();
     let content = content.to_string();
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let git_root = git_root_buf;
         let repo = Repository::open(&git_root)?;
         let work_dir = repo
             .workdir()
@@ -2827,7 +2929,9 @@ pub async fn stage_content(git_root: &Path, path: &str, content: &str) -> Result
         index.write()?;
         Ok(())
     })
-    .await?
+    .await??;
+    super::git_gate::invalidate(git_root);
+    Ok(())
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -2916,6 +2916,7 @@ impl WorkspaceHandle {
         drop(sessions);
         session.abort_system_notify_forwarder();
         session.shutdown_terminal_backend();
+        session.shutdown_browser_service();
         session.cancel_hunk_tracker();
         self.shared.tool_defs_last_emit.remove(session_id);
         Ok(())
@@ -4043,19 +4044,22 @@ pub fn resolve_workspace_home() -> std::path::PathBuf {
     xai_grok_config::grok_home().join("workspace")
 }
 /// Skill `ignore` entries for the allow-list: subdirs of `dir` not in the
-/// comma-separated list (`bundled__` prefix optional). Blank list → none;
-/// unreadable `dir` → ignore `dir` itself (fail closed).
+/// comma-separated list (`bundled__` prefix optional). Unreadable `dir` fails
+/// closed (ignore `dir` itself).
+///
+/// Unset and set-but-empty differ: unset means no filtering at all, empty means
+/// advertise none. The sandbox service relies on that to forward the tri-state
+/// of `AgentSandboxStartRequest.bundled_skills`.
 fn bundled_allowlist_ignore_dirs(dir: &str, allowlist: Option<&str>) -> Vec<String> {
+    let Some(allowlist) = allowlist else {
+        return vec![];
+    };
     let allowed: std::collections::HashSet<&str> = allowlist
-        .unwrap_or_default()
         .split(',')
         .map(|s| s.trim())
         .map(|s| s.strip_prefix("bundled__").unwrap_or(s))
         .filter(|s| !s.is_empty())
         .collect();
-    if allowed.is_empty() {
-        return vec![];
-    }
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(err) => {
@@ -9332,14 +9336,34 @@ pub(crate) mod tests {
         tmp
     }
     #[test]
-    fn bundled_allowlist_blank_ignores_nothing() {
+    fn bundled_allowlist_unset_ignores_nothing() {
         let tmp = bundled_dir_fixture(&["bundled__pdf", "bundled__xlsx"]);
         let dir = tmp.path().to_string_lossy().into_owned();
-        for allowlist in [None, Some(""), Some("  "), Some(" , ,")] {
+        assert_eq!(
+            bundled_allowlist_ignore_dirs(&dir, None),
+            Vec::<String>::new(),
+            "an unset allow-list must produce no ignore entries"
+        );
+    }
+    #[test]
+    fn bundled_allowlist_empty_ignores_everything() {
+        let tmp = bundled_dir_fixture(&["bundled__pdf", "bundled__xlsx"]);
+        let dir = tmp.path().to_string_lossy().into_owned();
+        let want = vec![
+            tmp.path()
+                .join("bundled__pdf")
+                .to_string_lossy()
+                .into_owned(),
+            tmp.path()
+                .join("bundled__xlsx")
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        for allowlist in ["", "  ", " , ,"] {
             assert_eq!(
-                bundled_allowlist_ignore_dirs(&dir, allowlist),
-                Vec::<String>::new(),
-                "allowlist {allowlist:?} must produce no ignore entries"
+                bundled_allowlist_ignore_dirs(&dir, Some(allowlist)),
+                want,
+                "allow-list {allowlist:?} must ignore every bundled skill"
             );
         }
     }

@@ -477,6 +477,7 @@ impl ToolHarnessBuilder {
             self.on_reconnect.clone(),
             None, // on_disconnect (unused for harness connections)
             None, // on_connect (unused for harness connections)
+            None, // on_terminal_close (unused for harness connections)
             None,
             None,
             None,

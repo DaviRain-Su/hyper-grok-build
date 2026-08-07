@@ -36,7 +36,7 @@ impl WorkspaceRpc for GitStatusReq {
 pub struct GitStatusExtReq {
     #[serde(default)]
     pub git_root: Option<std::path::PathBuf>,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub include_untracked: bool,
     #[serde(default)]
     pub include_stats: bool,
@@ -50,14 +50,14 @@ pub struct GitStatusExtReq {
     pub format: GitStatusFormat,
 }
 
-// Manual `Default` (not derived) so it matches the serde field defaults:
-// `include_untracked` and `ignore_submodules` default to `true`, which a derived
-// `Default` would set to `false`.
+// Manual `Default` (not derived) so it matches serde: `ignore_submodules`
+// defaults to `true`, which a derived `Default` would set to `false`.
+// Omitted `include_untracked` is false so sloppy clients skip the expensive walk.
 impl Default for GitStatusExtReq {
     fn default() -> Self {
         Self {
             git_root: None,
-            include_untracked: true,
+            include_untracked: false,
             include_stats: false,
             ignore_submodules: true,
             include_patches: false,
@@ -664,7 +664,7 @@ pub struct GitReadFile {
     pub is_binary: Option<bool>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitDiffsData {
     pub files: Vec<GitFileChange>,
@@ -981,6 +981,15 @@ pub const UNTRACKED_CONTENT_THRESHOLD: u64 = 1024 * 1024;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_status_ext_req_omitted_include_untracked_is_false() {
+        let from_json: GitStatusExtReq = serde_json::from_str("{}").unwrap();
+        assert!(!from_json.include_untracked);
+        assert!(from_json.ignore_submodules);
+        assert!(!GitStatusExtReq::default().include_untracked);
+        assert!(GitStatusExtReq::default().ignore_submodules);
+    }
 
     #[test]
     fn method_constant() {

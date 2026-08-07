@@ -1141,6 +1141,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         effects.push(Effect::FetchBilling {
             agent_id,
             silent: true,
+            nonce: 0,
         });
         if let Some(switch) = deferred {
             agent.session.model_switch_pending = true;

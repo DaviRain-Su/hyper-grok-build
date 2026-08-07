@@ -1996,11 +1996,15 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         show_resolved_model: bool,
+        /// Usage-modal fetch generation; echoed back on the task result.
+        nonce: u64,
     },
     /// Fetch and display detailed context usage via x.ai/session/info.
     ShowContextInfo {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        /// Usage-modal fetch generation; echoed back on the task result.
+        nonce: u64,
     },
     /// Fetch current bundle cache status via `x.ai/bundle/status`.
     FetchBundleStatus,
@@ -2183,7 +2187,13 @@ pub enum Effect {
     /// When `silent` is true the result updates `credit_balance` without
     /// pushing a system message into scrollback (used for automatic refreshes
     /// on session init and after each turn).
-    FetchBilling { agent_id: AgentId, silent: bool },
+    FetchBilling {
+        agent_id: AgentId,
+        silent: bool,
+        /// Usage-modal fetch generation (`0` = background refresh; those
+        /// never touch the modal's loading/error flags).
+        nonce: u64,
+    },
     /// Fetch billing data at the app level (no agent required).
     /// Used on startup to populate the welcome-screen credit warning.
     FetchAppBilling,
@@ -2191,6 +2201,8 @@ pub enum Effect {
     FetchSessionUsage {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        /// Usage-modal fetch generation; echoed back on the task result.
+        nonce: u64,
     },
     /// Re-fetch remote settings to check subscription gate.
     RefreshGate,
@@ -2719,13 +2731,17 @@ pub enum TaskResult {
     /// Session info fetched successfully.
     SessionInfoComplete {
         agent_id: AgentId,
+        session_id: acp::SessionId,
         info: Box<xai_grok_shell::session::SessionInfoResponse>,
         text: String,
+        nonce: u64,
     },
     /// Session info fetch failed.
     SessionInfoFailed {
         agent_id: AgentId,
+        session_id: acp::SessionId,
         error: String,
+        nonce: u64,
     },
     /// Coding data sharing preference updated.
     CodingDataSharingUpdated {
@@ -2762,27 +2778,33 @@ pub enum TaskResult {
         session_id: String,
         error: String,
     },
-    /// Context info fetched successfully.
+    /// Context info fetched successfully. Drop if `session_id` no longer matches.
     ContextInfoComplete {
         agent_id: AgentId,
+        session_id: acp::SessionId,
         info: Box<xai_grok_shell::session::SessionInfoResponse>,
+        nonce: u64,
     },
-    /// Context info fetch failed.
+    /// Context info fetch failed. Drop if `session_id` no longer matches.
     ContextInfoFailed {
         agent_id: AgentId,
+        session_id: acp::SessionId,
         error: String,
+        nonce: u64,
     },
     /// `/usage` session ledger fetched. Drop if `session_id` no longer matches.
     SessionUsageComplete {
         agent_id: AgentId,
         session_id: acp::SessionId,
         usage: Box<xai_grok_shell::extensions::notification::PromptUsage>,
+        nonce: u64,
     },
     /// `/usage` session ledger fetch failed. Drop if `session_id` no longer matches.
     SessionUsageFailed {
         agent_id: AgentId,
         session_id: acp::SessionId,
         error: String,
+        nonce: u64,
     },
     /// Feedback submitted successfully (fire-and-forget).
     FeedbackComplete {
@@ -2964,6 +2986,8 @@ pub enum TaskResult {
         subscription_tier: Option<String>,
         /// Auto top-up rule fetch result; `Unchanged` keeps any cached rule.
         autotopup: crate::views::credit_bar::AutoTopupFetch,
+        /// Usage-modal fetch generation (`0` = background refresh).
+        nonce: u64,
     },
     /// App-level billing data (welcome screen).
     AppBillingFetched {
@@ -2979,6 +3003,8 @@ pub enum TaskResult {
         error: String,
         /// When true, swallow the error silently (background refresh).
         silent: bool,
+        /// Usage-modal fetch generation (`0` = background refresh).
+        nonce: u64,
     },
     /// Debounce timer for shell suggestions expired. Routed by the arming
     /// `agent_id`, like the sibling `PluginCtaDebounceExpired`.

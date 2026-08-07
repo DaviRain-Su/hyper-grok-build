@@ -236,9 +236,11 @@ impl HubHandle {
         if let Some(diag) = config.diag.clone() {
             let on_connect = diag.clone();
             let on_disconnect = diag.clone();
+            let on_terminal_close = diag.clone();
             server_builder = server_builder
                 .on_connect(move || on_connect.set_connected())
                 .on_disconnect(move || on_disconnect.set_disconnected())
+                .on_terminal_close(move |code| on_terminal_close.set_terminal_close(code))
                 .on_reconnect_settled(move || diag.set_connected());
         }
         if let Some(ref id) = config.server_id {

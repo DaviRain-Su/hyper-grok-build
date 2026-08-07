@@ -450,6 +450,13 @@ pub enum SessionCommand {
         mcp_servers: Vec<acp::McpServer>,
         respond_to: oneshot::Sender<Result<(), acp::Error>>,
     },
+    /// Re-apply per-attachment policy (MCP init strategy, delivery tools)
+    /// from a resident `session/load` whose request carried explicit
+    /// `startupHints`. Spawn-time structural hints are NOT touched. Sent
+    /// fire-and-forget alongside `UpdateMcpServers` on the reconnect rail.
+    UpdateAttachPolicy {
+        startup_hints: Box<crate::session::StartupHints>,
+    },
     /// Toggle an MCP server on/off within the session actor's event loop.
     /// Atomic read-modify-write avoids TOCTOU races with background config
     /// refreshes that can change `mcp_state.configs` between a snapshot read

@@ -1301,6 +1301,9 @@ pub(super) async fn run_session(
                                 .notifications.persistence_tx
                                 .send(PersistenceMsg::FlushAndAck { respond_to });
                         }
+                        SessionCommand::UpdateAttachPolicy { startup_hints } => {
+                            session.apply_attach_policy(&startup_hints);
+                        }
                         SessionCommand::UpdateMcpServers { mcp_servers, respond_to } => {
                             if session.startup_hints.is_subagent {
                                 tracing::debug!(

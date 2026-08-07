@@ -410,6 +410,10 @@ pub type ReconnectCallback = Box<dyn Fn(ReconnectEvent) + Send + Sync + 'static>
 /// Boxed disconnect callback, fired when the live socket drops (before a
 /// reconnect attempt) and on a terminal close.
 pub type DisconnectCallback = Box<dyn Fn() + Send + Sync + 'static>;
+/// Boxed terminal-close callback, fired with the WebSocket close code when
+/// the server ends the connection in the 4100–4199 range (no reconnect).
+/// Always followed by [`DisconnectCallback`] so readiness still flips.
+pub type TerminalCloseCallback = Box<dyn Fn(u16) + Send + Sync + 'static>;
 /// Boxed connect callback, fired once on the initial successful connect
 /// after the writer keepalive loop has entered (so `/ready` cannot race
 /// the first ping) and before the reader actor task spawns. It therefore
@@ -456,6 +460,9 @@ pub struct ConnectionConfig {
     /// Optional disconnect callback, fired when the live socket drops or the
     /// server sends a terminal close.
     pub on_disconnect: Option<Arc<DisconnectCallback>>,
+    /// Optional terminal-close callback, fired with the close code on a
+    /// 4100–4199 close, before [`Self::on_disconnect`].
+    pub on_terminal_close: Option<Arc<TerminalCloseCallback>>,
     /// Optional connect callback, fired once on the initial successful connect
     /// after the writer task enters its loop (happens-before reader start).
     /// The first keepalive may still be in flight or one scheduler quanta away.
@@ -511,6 +518,7 @@ struct HubConnectionInner {
     credential: Arc<dyn AuthProvider>,
     on_reconnect: Option<Arc<ReconnectCallback>>,
     on_disconnect: Option<Arc<DisconnectCallback>>,
+    on_terminal_close: Option<Arc<TerminalCloseCallback>>,
     server_id: Option<xai_tool_protocol::ServerId>,
     server_description: Option<String>,
     server_metadata: Option<serde_json::Value>,
@@ -630,6 +638,7 @@ impl HubConnection {
             credential: config.credential,
             on_reconnect: config.on_reconnect.clone(),
             on_disconnect: config.on_disconnect.clone(),
+            on_terminal_close: config.on_terminal_close.clone(),
             server_id: config.server_id,
             server_description: config.server_description,
             server_metadata: config.server_metadata,
@@ -1437,6 +1446,12 @@ fn fire_on_disconnect(inner: &HubConnectionInner) {
         cb();
     }
 }
+/// Invoke the optional terminal-close callback (best-effort, sync).
+fn fire_on_terminal_close(inner: &HubConnectionInner, code: u16) {
+    if let Some(cb) = &inner.on_terminal_close {
+        cb(code);
+    }
+}
 /// Reader half of the split actor: owns the stream, routes inbound
 /// frames, and drives reconnect. Never touches the sink — it asks the
 /// writer task to `Pause`/`Resume` instead.
@@ -1468,6 +1483,7 @@ async fn run_reader_actor(
             ConnectedExit::Stop => break,
             ConnectedExit::TerminalClose(code) => {
                 info!(code, url = %url, "server sent terminal close; not reconnecting");
+                fire_on_terminal_close(inner.as_ref(), code);
                 fire_on_disconnect(inner.as_ref());
                 inner.demux.drain_waiters_with(|| {
                     ClientError::Closed(format!("server terminal close (code {code})"))
@@ -3269,6 +3285,7 @@ mod tests {
             credential,
             on_reconnect: None,
             on_disconnect: None,
+            on_terminal_close: None,
             server_id: None,
             server_description: None,
             server_metadata: None,
@@ -3640,6 +3657,7 @@ mod tests {
             kind: ConnectionKind::ToolServer,
             on_reconnect: None,
             on_disconnect: None,
+            on_terminal_close: None,
             on_connect: None,
             server_id: None,
             server_description: None,
@@ -3732,6 +3750,7 @@ mod tests {
             kind: ConnectionKind::ToolServer,
             on_reconnect: Some(on_reconnect),
             on_disconnect: None,
+            on_terminal_close: None,
             on_connect: None,
             server_id: None,
             server_description: None,
@@ -3830,6 +3849,7 @@ mod tests {
             kind: ConnectionKind::ToolServer,
             on_reconnect: Some(on_reconnect),
             on_disconnect: None,
+            on_terminal_close: None,
             on_connect: None,
             server_id: None,
             server_description: None,
@@ -3932,6 +3952,7 @@ mod tests {
             kind: ConnectionKind::ToolServer,
             on_reconnect: Some(on_reconnect),
             on_disconnect,
+            on_terminal_close: None,
             on_connect: None,
             server_id: None,
             server_description: None,
@@ -4087,6 +4108,7 @@ mod tests {
             kind: ConnectionKind::ToolServer,
             on_reconnect: Some(on_reconnect),
             on_disconnect: None,
+            on_terminal_close: None,
             on_connect: None,
             server_id: None,
             server_description: None,
@@ -4167,6 +4189,7 @@ mod tests {
                 kind: ConnectionKind::ToolServer,
                 on_reconnect: None,
                 on_disconnect: None,
+                on_terminal_close: None,
                 on_connect: None,
                 server_id: None,
                 server_description: None,
@@ -4683,5 +4706,153 @@ mod tests {
         )
         .await;
         assert!(matches!(exit, ConnectedExit::TerminalClose(4100)));
+    }
+    async fn spawn_hub_close_after_ack(close: Option<u16>) -> std::net::SocketAddr {
+        use futures::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock hub");
+        let addr = listener.local_addr().expect("mock addr");
+        tokio::spawn(async move {
+            let Ok((tcp, _)) = listener.accept().await else {
+                return;
+            };
+            let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                return;
+            };
+            let _ = ws.next().await;
+            let ack = serde_json::json!({
+                "connection_id": "mock",
+                "user_id": "test",
+                "computer_hub_version": "test",
+                "supported_protocol_versions": ["1.0.0"],
+            });
+            if ws
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    ack.to_string().into(),
+                ))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            match close {
+                Some(code) => {
+                    let _ = ws
+                        .send(tokio_tungstenite::tungstenite::Message::Close(Some(
+                            CloseFrame {
+                                code: CloseCode::from(code),
+                                reason: "test".into(),
+                            },
+                        )))
+                        .await;
+                }
+                None => drop(ws),
+            }
+        });
+        addr
+    }
+    #[tokio::test]
+    async fn terminal_close_fires_on_terminal_close_then_on_disconnect() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let terminal_events = Arc::clone(&events);
+        let disconnect_events = Arc::clone(&events);
+        let addr = spawn_hub_close_after_ack(Some(4103)).await;
+        let credential: Arc<dyn AuthProvider> = Arc::new(AuthCredential::bearer("test-token"));
+        let conn = HubConnection::connect(ConnectionConfig {
+            url: url::Url::parse(&format!("ws://{addr}/v1/tools")).expect("mock url"),
+            credential,
+            kind: ConnectionKind::ToolServer,
+            on_reconnect: None,
+            on_disconnect: Some(Arc::new(Box::new(move || {
+                disconnect_events
+                    .lock()
+                    .expect("events")
+                    .push("disconnect".into());
+            }))),
+            on_terminal_close: Some(Arc::new(Box::new(move |code| {
+                terminal_events
+                    .lock()
+                    .expect("events")
+                    .push(format!("terminal:{code}"));
+            }))),
+            on_connect: None,
+            server_id: None,
+            server_description: None,
+            server_metadata: None,
+            outbound_buffer: None,
+            tuning: ConnectionTuning::default(),
+            alpha_test_key: None,
+            allow_insecure_ws: false,
+            on_fatal: None,
+        })
+        .await
+        .expect("initial connect");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = events.lock().expect("events").clone();
+            if snapshot.as_slice() == ["terminal:4103", "disconnect"] {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "callbacks not observed in order: {snapshot:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        conn.request_shutdown();
+        conn.await_shutdown().await;
+    }
+    #[tokio::test]
+    async fn socket_close_does_not_fire_on_terminal_close() {
+        let terminal = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let disconnect = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let terminal_cb = Arc::clone(&terminal);
+        let disconnect_cb = Arc::clone(&disconnect);
+        let addr = spawn_hub_close_after_ack(Some(1000)).await;
+        let credential: Arc<dyn AuthProvider> = Arc::new(AuthCredential::bearer("test-token"));
+        let conn = HubConnection::connect(ConnectionConfig {
+            url: url::Url::parse(&format!("ws://{addr}/v1/tools")).expect("mock url"),
+            credential,
+            kind: ConnectionKind::ToolServer,
+            on_reconnect: None,
+            on_disconnect: Some(Arc::new(Box::new(move || {
+                disconnect_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }))),
+            on_terminal_close: Some(Arc::new(Box::new(move |_code| {
+                terminal_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }))),
+            on_connect: None,
+            server_id: None,
+            server_description: None,
+            server_metadata: None,
+            outbound_buffer: None,
+            tuning: ConnectionTuning {
+                reconnect_backoff: Some(Arc::from([Duration::from_secs(60)])),
+                ..Default::default()
+            },
+            alpha_test_key: None,
+            allow_insecure_ws: false,
+            on_fatal: None,
+        })
+        .await
+        .expect("initial connect");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while disconnect.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "on_disconnect must fire on a non-terminal close"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            0,
+            terminal.load(std::sync::atomic::Ordering::SeqCst),
+            "socket close must not invoke on_terminal_close"
+        );
+        conn.request_shutdown();
+        conn.await_shutdown().await;
     }
 }

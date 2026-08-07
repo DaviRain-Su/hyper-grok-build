@@ -93,7 +93,7 @@ impl SessionActor {
     }
     pub(super) async fn build_prefix_background(&self) -> String {
         let start = std::time::Instant::now();
-        if matches!(self.mcp_strategy, McpInitStrategy::Blocking) {
+        if matches!(self.mcp_strategy.get(), McpInitStrategy::Blocking) {
             use xai_grok_agent::prompt::user_message::UserMessageTemplate;
             let mcp_wait = match self.agent.borrow().definition().user_message_template {
                 UserMessageTemplate::Default => std::time::Duration::from_secs(15),

@@ -14,44 +14,14 @@ use super::{Empty, ExtResult, parse_params, to_ext_response, to_ext_response_par
 use crate::agent::MvpAgent;
 use crate::session::ExtMethodResult;
 use agent_client_protocol as acp;
-use parking_lot::Mutex;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Instant;
-use xai_grok_workspace::session::git::{
-    self, DiscardScope, GIT_STATUS_CACHE_TTL, GitDiffsData, GitStatusData, check_diff_size_limits,
-};
+use xai_grok_workspace::session::git::{self, DiscardScope, GitDiffsData, check_diff_size_limits};
 use xai_grok_workspace::workspace_ops::{
     GitBranchesReq, GitCheckoutCommitReq, GitCheckoutReq, GitCommitReq, GitCurrentCommitReq,
     GitDiffReq, GitDiscardReq, GitFilesReq, GitInfoReq, GitStageContentReq, GitStageReq,
     GitStashReq, GitStatusExtReq, GitStatusFormat, GitUnstageReq,
 };
-/// Global cache for git status results, keyed by git_root path.
-/// This provides caching at the extension API layer while keeping git::status pure.
-static GIT_STATUS_CACHE: std::sync::LazyLock<Mutex<HashMap<PathBuf, GitStatusCacheEntry>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-struct GitStatusCacheEntry {
-    result: GitStatusData,
-    commit: String,
-    cached_at: Instant,
-    include_untracked: bool,
-    include_stats: bool,
-}
-impl GitStatusCacheEntry {
-    fn is_valid(&self, commit: &str, include_untracked: bool, include_stats: bool) -> bool {
-        self.commit == commit
-            && self.include_untracked == include_untracked
-            && self.include_stats == include_stats
-            && self.cached_at.elapsed() < GIT_STATUS_CACHE_TTL
-    }
-}
-/// Invalidate the git status cache for a given git_root.
-/// Should be called after any mutation operation (stage, unstage, discard, commit).
-fn invalidate_status_cache(git_root: &PathBuf) {
-    let mut cache = GIT_STATUS_CACHE.lock();
-    cache.remove(git_root);
-}
 fn default_head() -> String {
     "HEAD".to_string()
 }
@@ -344,42 +314,15 @@ pub async fn handle(
         }
         "x.ai/git/status" => {
             let req = parse_params::<GitStatusRequest>(args)?;
-            let include_untracked = req.include_untracked.unwrap_or(true);
+            let include_untracked = req.include_untracked.unwrap_or(false);
             let include_stats = req.include_stats.unwrap_or(false);
             let ignore_submodules = req.ignore_submodules.unwrap_or(true);
             let include_patches = req.include_patches.unwrap_or(false);
             let git_root = resolve_git_root(agent, ops, req.git_root, req.session_id.as_ref())
                 .await
                 .ok();
-            if let Some(ref git_root) = git_root {
-                let current_commit = ops
-                    .dispatch(
-                        &xai_grok_workspace::workspace_ops::GitCurrentCommitReq {
-                            git_root: git_root.clone(),
-                        },
-                        None,
-                    )
-                    .await
-                    .unwrap_or(None);
-                if let Some(commit) = &current_commit {
-                    let cached_result = {
-                        let cache = GIT_STATUS_CACHE.lock();
-                        cache.get(git_root).and_then(|entry| {
-                            if entry.is_valid(commit, include_untracked, include_stats) {
-                                tracing::debug!("git.status (cached)");
-                                Some(entry.result.clone())
-                            } else {
-                                None
-                            }
-                        })
-                    };
-                    if let Some(result) = cached_result {
-                        return to_ext_response(Ok(result));
-                    }
-                }
-            }
             let op = GitStatusExtReq {
-                git_root: git_root.clone(),
+                git_root,
                 include_untracked,
                 include_stats,
                 ignore_submodules,
@@ -393,21 +336,6 @@ pub async fn handle(
             let result = response.data.ok_or_else(|| {
                 acp::Error::internal_error().data("git_status_ext returned no structured data")
             })?;
-            if let Some(git_root) = git_root
-                && let Some(ref commit) = result.commit
-            {
-                let mut cache = GIT_STATUS_CACHE.lock();
-                cache.insert(
-                    git_root,
-                    GitStatusCacheEntry {
-                        result: result.clone(),
-                        commit: commit.clone(),
-                        cached_at: Instant::now(),
-                        include_untracked,
-                        include_stats,
-                    },
-                );
-            }
             to_ext_response(Ok(result))
         }
         "x.ai/git/files" => {
@@ -468,9 +396,6 @@ pub async fn handle(
                 .dispatch(&op, None)
                 .await
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-            if let Some(ref git_root) = git_root {
-                invalidate_status_cache(git_root);
-            }
             to_ext_response(Ok(result))
         }
         "x.ai/git/stage/content" => {
@@ -486,9 +411,6 @@ pub async fn handle(
             ops.dispatch(&op, None)
                 .await
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-            if let Some(ref git_root) = git_root {
-                invalidate_status_cache(git_root);
-            }
             to_ext_response(Ok(Empty {}))
         }
         "x.ai/git/unstage" => {
@@ -503,9 +425,6 @@ pub async fn handle(
             ops.dispatch(&op, None)
                 .await
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-            if let Some(ref git_root) = git_root {
-                invalidate_status_cache(git_root);
-            }
             to_ext_response(Ok(Empty {}))
         }
         "x.ai/git/discard" => {
@@ -522,9 +441,6 @@ pub async fn handle(
             ops.dispatch(&op, None)
                 .await
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-            if let Some(ref git_root) = git_root {
-                invalidate_status_cache(git_root);
-            }
             to_ext_response(Ok(Empty {}))
         }
         "x.ai/git/commit" => {
@@ -545,9 +461,6 @@ pub async fn handle(
                 .dispatch(&op, None)
                 .await
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-            if let Some(ref git_root) = git_root {
-                invalidate_status_cache(git_root);
-            }
             to_ext_response_partial(Ok(commit_result.data), commit_result.warning)
         }
         "x.ai/git/checkout" => {
@@ -563,9 +476,6 @@ pub async fn handle(
             ops.dispatch(&op, None)
                 .await
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-            if let Some(ref git_root) = git_root {
-                invalidate_status_cache(git_root);
-            }
             to_ext_response(Ok(Empty {}))
         }
         "x.ai/git/stash" => {
@@ -580,9 +490,6 @@ pub async fn handle(
             ops.dispatch(&op, None)
                 .await
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-            if let Some(ref git_root) = git_root {
-                invalidate_status_cache(git_root);
-            }
             to_ext_response(Ok(Empty {}))
         }
         "x.ai/git/info" => {
@@ -662,7 +569,6 @@ pub async fn handle(
                 )
                 .await
                 .map_err(|e| acp::Error::internal_error().data(format!("checkout failed: {e}")))?;
-            invalidate_status_cache(&git_root);
             super::to_raw_response(&result)
         }
         "x.ai/git/checkout_commit" => {
@@ -695,7 +601,6 @@ pub async fn handle(
                 )
                 .await
                 .map_err(|e| acp::Error::internal_error().data(format!("checkout failed: {e}")))?;
-            invalidate_status_cache(&git_root);
             super::to_raw_response(&result)
         }
         _ => Err(acp::Error::method_not_found()),

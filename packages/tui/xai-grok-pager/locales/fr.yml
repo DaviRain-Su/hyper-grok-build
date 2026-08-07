@@ -84,6 +84,7 @@ modal.title.howto_guides: "Guides pratiques"
 modal.title.keyboard_shortcuts: "Raccourcis clavier"
 modal.title.memory: "Mémoire"
 modal.title.settings: "Paramètres"
+modal.title.usage: "Utilisation"
 modal.title.reset_setting: "Réinitialiser le paramètre ?"
 modal.title.memory_note: "Note de mémoire"
 

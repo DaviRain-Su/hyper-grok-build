@@ -12,11 +12,23 @@ use crate::app::agent_view::{AgentView, PromptMode};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::EntryId;
 use crate::scrollback::block::RenderBlock;
+use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
 use std::time::Instant;
 
 fn page_flip_on_send() -> bool {
     crate::appearance::cache::load_page_flip_on_send()
+}
+
+/// Slash output skips the prompt drain; pin it at the top when page-flip is on.
+pub(super) fn push_and_page_flip(scrollback: &mut ScrollbackState, block: RenderBlock) {
+    scrollback.push_block(block);
+    if !page_flip_on_send() {
+        return;
+    }
+    let idx = scrollback.len() - 1;
+    scrollback.scroll_to_entry_top(idx);
+    scrollback.enable_follow_with_preserve();
 }
 
 fn combine_queued_prompts_enabled() -> bool {

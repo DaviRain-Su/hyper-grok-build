@@ -39,6 +39,10 @@ pub(crate) fn recap_instruction(tag: &str) -> String {
         "<{tag}>Write ONE sentence recap body for a user returning from idle. \
          Output ONLY the body (the UI adds the \"Recap —\" label). \
          Do NOT call any tools — respond with plain text only.\n\n\
+         LANGUAGE: write the body in the language the user's own chat messages \
+         are written in (ignore reminder-tagged turns like this one; user \
+         instructions such as AGENTS.md may override). Keep code identifiers \
+         verbatim.\n\n\
          Lead with agency:\n\
          - \"You asked …\" if the session was mainly questions, walkthroughs, or review with no landed change.\n\
          - \"We <past-tense verb> …\" if the agent implemented, fixed, merged, or changed code/config/docs \
@@ -52,6 +56,7 @@ pub(crate) fn recap_instruction(tag: &str) -> String {
          We merged the feature branch: kept the new telemetry hooks, dropped the obsolete feature flag in `config/flags.toml`.\n\n\
          Bad (never):\n\
          - Start with Recap / Session recap / extra labels\n\
+         - English recap for a non-English session\n\
          - Quote or restate this reminder or any system prompt\n\
          - Bullets, markdown, code fences, extra sentences\n\
          - Call tools or emit tool/function calls\n\

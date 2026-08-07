@@ -45,7 +45,7 @@ use crate::auth::{AuthCredential, AuthProvider};
 use crate::cancel::CancelRegistry;
 use crate::connection::{
     ConnectCallback, ConnectionTuning, DisconnectCallback, HubConnection, ReconnectCallback,
-    ReconnectEvent,
+    ReconnectEvent, TerminalCloseCallback,
 };
 use crate::connection_borrow::ConnectionBorrow;
 use crate::demux::InboundFrame;
@@ -221,6 +221,7 @@ pub struct ToolServerBuilder {
     /// precede server session re-serve.
     on_reconnect_settled: Option<Arc<ReconnectSettledCallback>>,
     on_disconnect: Option<Arc<DisconnectCallback>>,
+    on_terminal_close: Option<Arc<TerminalCloseCallback>>,
     on_connect: Option<Arc<ConnectCallback>>,
     metadata: Option<serde_json::Value>,
     server_id: Option<xai_tool_protocol::ServerId>,
@@ -387,9 +388,10 @@ impl ToolServerBuilder {
     /// "server-ready" means registered **and** session tools re-served.
     ///
     /// It only fires when **every** session re-served successfully **and** no
-    /// disconnect raced the (async) replay; otherwise it is skipped and the
-    /// next reconnect's replay settles instead. This keeps a readiness marker
-    /// from being resurrected while the socket is already down again.
+    /// disconnect or terminal close raced the (async) replay; otherwise it is
+    /// skipped and the next reconnect's replay settles instead. This keeps a
+    /// readiness marker from being resurrected while the socket is already down
+    /// again.
     pub fn on_reconnect_settled<F>(mut self, cb: F) -> Self
     where
         F: Fn() + Send + Sync + 'static,
@@ -404,6 +406,19 @@ impl ToolServerBuilder {
         F: Fn() + Send + Sync + 'static,
     {
         self.on_disconnect = Some(Arc::new(Box::new(cb) as DisconnectCallback));
+        self
+    }
+
+    /// Optional callback fired with the close code when the server sends a
+    /// terminal close (4100–4199). Invoked before [`Self::on_disconnect`].
+    /// Advances the same disconnect epoch as [`Self::on_disconnect`] so a
+    /// reconnect settle that still holds the pre-close generation cannot fire
+    /// [`Self::on_reconnect_settled`] after this callback.
+    pub fn on_terminal_close<F>(mut self, cb: F) -> Self
+    where
+        F: Fn(u16) + Send + Sync + 'static,
+    {
+        self.on_terminal_close = Some(Arc::new(Box::new(cb) as TerminalCloseCallback));
         self
     }
 
@@ -506,6 +521,18 @@ impl ToolServerBuilder {
             }
         }));
 
+        // Terminal close runs before on_disconnect. Bump the same epoch so a
+        // reconnect settle that still holds the pre-close generation cannot
+        // fire on_reconnect_settled after last_close_code is latched.
+        let user_on_terminal_close = self.on_terminal_close;
+        let epoch_for_terminal_close = Arc::clone(&disconnect_epoch);
+        let combined_terminal_close: Arc<TerminalCloseCallback> = Arc::new(Box::new(move |code| {
+            epoch_for_terminal_close.fetch_add(1, Ordering::Release);
+            if let Some(ref cb) = user_on_terminal_close {
+                cb(code);
+            }
+        }));
+
         let borrow = ConnectionBorrow::acquire(
             pool,
             url,
@@ -514,6 +541,7 @@ impl ToolServerBuilder {
             Some(combined_reconnect),
             Some(combined_disconnect),
             self.on_connect,
+            Some(combined_terminal_close),
             self.server_id,
             self.server_description,
             self.metadata,
@@ -633,10 +661,11 @@ struct ToolServerInner {
     /// Optional readiness / settle hook after serve replay (see
     /// [`ToolServerBuilder::on_reconnect_settled`]).
     on_reconnect_settled: Option<Arc<ReconnectSettledCallback>>,
-    /// Bumped on every disconnect. The reconnect task snapshots this before
-    /// `serve` replay and only fires `on_reconnect_settled` if it is unchanged
-    /// afterward — so a disconnect racing the (async) replay cannot resurrect a
-    /// stale ready marker while the socket is already down.
+    /// Bumped on every disconnect and terminal close. The reconnect task
+    /// snapshots this before `serve` replay and only fires `on_reconnect_settled`
+    /// if it is unchanged afterward — so a disconnect or terminal close racing
+    /// the (async) replay cannot resurrect a stale ready marker while the socket
+    /// is already down.
     disconnect_epoch: Arc<AtomicU64>,
     /// Three-tier (session/connection/global) admission controller. Drives
     /// the bounded-wait-then-overloaded backpressure on the spawned path.
@@ -1566,8 +1595,9 @@ impl ToolServer {
                     notify.notified().await;
                     // Snapshot the disconnect epoch for the connection we are
                     // now replaying onto; if it advances during replay a fresh
-                    // disconnect raced us and `settled` must not fire (it would
-                    // resurrect a stale ready marker over a downed socket).
+                    // disconnect or terminal close raced us and `settled` must
+                    // not fire (it would resurrect a stale ready marker over a
+                    // downed socket).
                     let epoch_at_start = epoch.load(Ordering::Acquire);
                     let sessions: Vec<SessionId> = server.active_sessions();
                     tracing::info!(
@@ -1586,8 +1616,8 @@ impl ToolServer {
                         }
                     }
                     // Only settle when every session re-served AND no disconnect
-                    // raced this replay — otherwise the next reconnect's notify
-                    // re-runs this loop and settles then.
+                    // or terminal close raced this replay — otherwise the next
+                    // reconnect's notify re-runs this loop and settles then.
                     let raced = epoch.load(Ordering::Acquire) != epoch_at_start;
                     if !all_served || raced {
                         tracing::info!(

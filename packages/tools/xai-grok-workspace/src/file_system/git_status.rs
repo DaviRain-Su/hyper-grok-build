@@ -18,10 +18,14 @@ use std::path::{Path, PathBuf};
 /// Total output is capped at ~1k characters.
 pub async fn git_status(working_directory: impl Into<PathBuf>) -> Result<String, FsError> {
     let working_directory = working_directory.into();
+    let permit = crate::git_odb::try_acquire_odb();
 
-    tokio::task::spawn_blocking(move || git_status_impl(&working_directory))
-        .await
-        .map_err(|e| FsError::Other(format!("git status task failed: {}", e)))?
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        git_status_impl(&working_directory)
+    })
+    .await
+    .map_err(|e| FsError::Other(format!("git status task failed: {e}")))?
 }
 
 /// Matches Node's default `execFile` `maxBuffer` (1 MiB). This cap is
@@ -66,8 +70,10 @@ fn collapse_status_spaces(s: &str) -> String {
 
 pub async fn git_status_short(working_directory: impl Into<PathBuf>) -> Result<String, FsError> {
     let working_directory = working_directory.into();
+    let permit = crate::git_odb::try_acquire_odb();
 
     tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         let output = xai_tty_utils::git_command()
             .args(["status", "--short", "--branch", "--untracked-files=normal"])
             .current_dir(&working_directory)

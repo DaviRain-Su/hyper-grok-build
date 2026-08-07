@@ -1134,6 +1134,7 @@ impl ToolServerHandler for WorkspaceRpcHandler {
             if let Some(session) = sessions.remove(sid) {
                 session.abort_system_notify_forwarder();
                 session.shutdown_terminal_backend();
+                session.shutdown_browser_service();
                 session.cancel_hunk_tracker();
             }
             let empty = sessions.is_empty();

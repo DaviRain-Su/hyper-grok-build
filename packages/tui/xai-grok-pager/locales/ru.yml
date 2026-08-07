@@ -84,6 +84,7 @@ modal.title.howto_guides: "Руководства"
 modal.title.keyboard_shortcuts: "Горячие клавиши"
 modal.title.memory: "Память"
 modal.title.settings: "Настройки"
+modal.title.usage: "Usage"
 modal.title.reset_setting: "Сбросить настройку?"
 modal.title.memory_note: "Заметка в памяти"
 

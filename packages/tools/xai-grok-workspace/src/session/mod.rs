@@ -2,6 +2,7 @@ pub(crate) mod checkpoint;
 pub(crate) mod checkpoint_store;
 pub mod file_state;
 pub mod git;
+pub(crate) mod git_gate;
 pub mod jj;
 pub(crate) mod swap_policy;
 pub mod tool_config;
@@ -308,6 +309,8 @@ impl WorkspaceSession {
     pub(crate) fn shutdown_terminal_backend(&self) {
         self.terminal_backend.shutdown();
     }
+    /// No-op when the browser tools are compiled out.
+    pub(crate) fn shutdown_browser_service(&self) {}
     /// Cancel the workspace-spawned hunk-tracker actor, if this session owns
     /// one. Runs at the session drop chokepoints so the actor (which pins file
     /// contents in `file_states`) stops even while leaked handle clones hold

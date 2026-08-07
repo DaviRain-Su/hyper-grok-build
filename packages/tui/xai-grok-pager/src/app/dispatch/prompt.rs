@@ -10,7 +10,8 @@ use super::interject;
 use super::permissions::drain_permission_queue;
 use super::queue::{
     apply_turn_start_shim, drain_prompt_state_to_last_queued, immediate_server_send_eligible,
-    maybe_drain_queue, note_peek_page_flip, push_server_queue_echo, retire_optimistic_echo,
+    maybe_drain_queue, note_peek_page_flip, push_and_page_flip, push_server_queue_echo,
+    retire_optimistic_echo,
 };
 use super::router::dispatch;
 use super::voice::{merge_prompt_with_voice_interim, voice_stop_on_submit};
@@ -654,14 +655,14 @@ pub(super) fn dispatch_send_prompt_inner(
                 if consume_input {
                     agent.prompt.set_text("");
                 }
-                agent.scrollback.push_block(RenderBlock::system(msg));
+                push_and_page_flip(&mut agent.scrollback, RenderBlock::system(msg));
                 return vec![];
             }
             CommandResult::Message(msg) => {
                 if consume_input {
                     agent.prompt.set_text("");
                 }
-                agent.scrollback.push_block(RenderBlock::system(msg));
+                push_and_page_flip(&mut agent.scrollback, RenderBlock::system(msg));
                 return vec![];
             }
             CommandResult::Doctor(request) => {
@@ -1613,6 +1614,7 @@ pub(super) fn handle_prompt_response(
         effects.push(Effect::FetchBilling {
             agent_id,
             silent: true,
+            nonce: 0,
         });
         note_peek_page_flip(app, agent_id, page_flip_entry);
         return effects;

@@ -1659,6 +1659,7 @@ fn set_panic_hook(mode: ScreenMode) {
         xai_crash_handler::disable_terminal_escape_restore();
         xai_tty_utils::restore_native_stderr();
         xai_tty_utils::global_process_scope().kill_all();
+        crate::memory_trace::record_crash_sample();
         hook(info);
     }));
 }

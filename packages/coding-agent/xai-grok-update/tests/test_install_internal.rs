@@ -562,6 +562,54 @@ async fn install_internal_from_bases_falls_back_to_secondary_when_primary_fails(
 
 #[tokio::test]
 #[serial]
+async fn install_internal_from_bases_does_not_fallback_on_smoke_failure() {
+    // A --version failure is a property of the artifact, not the CDN. The
+    // fallback base must not be contacted (a dead fallback would fail
+    // differently if we retried).
+    let _ = test_home();
+    reset_home();
+    let platform = host_platform();
+
+    let primary = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/stable"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("0.1.181"))
+        .mount(&primary)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-0.1.181-{platform}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\nexit 1\n".to_vec()))
+        .mount(&primary)
+        .await;
+
+    // Live fallback so we can assert it was never contacted.
+    let fallback = MockServer::start().await;
+
+    let cfg = make_config("stable");
+    let err = install_internal_from_bases(
+        Some("0.1.181"),
+        &cfg,
+        &[primary.uri().as_str(), fallback.uri().as_str()],
+    )
+    .await
+    .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("failed to run") || msg.contains("exited"),
+        "expected smoke failure, got: {msg}"
+    );
+    assert!(
+        fallback
+            .received_requests()
+            .await
+            .expect("request recording enabled")
+            .is_empty(),
+        "smoke failure must not trigger a fallback-base retry"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn install_internal_from_bases_uses_primary_when_it_works() {
     // Both bases work; the install must use the primary (first one) and
     // never touch the fallback. Verified by tearing down the fallback

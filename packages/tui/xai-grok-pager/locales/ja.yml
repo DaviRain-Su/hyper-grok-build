@@ -84,6 +84,7 @@ modal.title.howto_guides: "使い方ガイド"
 modal.title.keyboard_shortcuts: "キーボードショートカット"
 modal.title.memory: "メモリ"
 modal.title.settings: "設定"
+modal.title.usage: "使用状況"
 modal.title.reset_setting: "設定をリセット?"
 modal.title.memory_note: "メモリノート"
 

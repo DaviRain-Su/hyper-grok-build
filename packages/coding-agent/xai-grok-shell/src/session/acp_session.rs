@@ -659,8 +659,12 @@ pub(crate) struct SessionActor {
     /// Consolidated MCP state (configs, clients, init status) protected by a single lock.
     /// This ensures atomicity when updating configs or checking initialization status.
     pub(crate) mcp_state: Arc<TokioMutex<McpState>>,
-    /// MCP initialization strategy
-    pub(crate) mcp_strategy: McpInitStrategy,
+    /// MCP initialization strategy. `Cell`: per-attachment policy — a
+    /// resident `session/load` carrying explicit `startupHints` re-applies
+    /// the attaching client's strategy (`UpdateAttachPolicy`), so a headless
+    /// client attaching to an actor spawned by an interactive one still gets
+    /// Blocking MCP init on its turns (and vice versa).
+    pub(crate) mcp_strategy: std::cell::Cell<McpInitStrategy>,
     /// Actor-based chat state handle — manages conversation, tokens, timing, and persistence.
     /// Also stores credentials (api_key, optional extra access key,
     /// client_version) opaquely.
@@ -703,6 +707,20 @@ pub(crate) struct SessionActor {
     pub(crate) rewind_pending_prompt: std::sync::Mutex<Option<String>>,
     /// Startup hints for the session: currently responsible for customizing the user message prefix and the git status mode (fast no untracked for non-interactive mode)
     pub(crate) startup_hints: StartupHints,
+    /// Delivery-tool names for the CURRENT attachment, seeded from the spawn
+    /// `startupHints.deliveryTools` and re-applied when a resident
+    /// `session/load` carries explicit hints (`UpdateAttachPolicy`). Kept
+    /// separate from the frozen `startup_hints`: structural spawn-time hints
+    /// (subagent identity, inherited prefix) never change on re-attach,
+    /// per-attachment policy may.
+    pub(crate) delivery_tools: std::cell::RefCell<Vec<String>>,
+    /// `nonInteractive` for the CURRENT attachment (same lifecycle as
+    /// `delivery_tools`). Drives operational can-a-human-act-now decisions —
+    /// today the MCP OAuth interactivity on (re)init, which pairs with the
+    /// `UpdateMcpServers` sent by the same resident load. The frozen
+    /// `startup_hints.non_interactive` keeps governing spawn-time structure
+    /// (system prompt variant, user-message prefix, git-status mode).
+    pub(crate) attach_non_interactive: std::cell::Cell<bool>,
     /// Verbatim mirror-fork override: when `Some`, every turn sends this exact
     /// parent tool schema instead of the locally-built toolset, keeping the
     /// child's request prefix byte-identical to the parent for radix cache reuse.
@@ -1915,6 +1933,9 @@ mod laziness_integration_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/load_user_prompts_tests.rs"]
 mod load_user_prompts_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/mcp_connecting_reminder_tests.rs"]
+mod mcp_connecting_reminder_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/media_gen_auth_retry_tests.rs"]
 mod media_gen_auth_retry_tests;

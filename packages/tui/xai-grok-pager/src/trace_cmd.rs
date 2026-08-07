@@ -99,6 +99,19 @@ pub fn build_session_tar(
 
         file_count += add_directory_to_tar(&mut archive, session_dir, session_id)?;
 
+        let memtrace = crate::memory_trace::collect_for_export(
+            &crate::memory_trace::default_dir(),
+            crate::memory_trace::ExportLimits::default(),
+        );
+        for trace in &memtrace {
+            append_bytes(
+                &mut archive,
+                &format!("{session_id}/memtrace/{}", trace.name),
+                &trace.data,
+            );
+        }
+        file_count += memtrace.len() as u32;
+
         let trace_config = build_trace_config_snapshot(agent_config);
         let config_bytes = serde_json::to_vec_pretty(&trace_config)?;
         append_bytes(
@@ -114,6 +127,7 @@ pub fn build_session_tar(
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
             exported_at: chrono::Utc::now().to_rfc3339(),
+            memtrace_files: memtrace.len(),
         };
         let meta_bytes = serde_json::to_vec_pretty(&metadata)?;
         append_bytes(
@@ -146,6 +160,7 @@ struct ExportMetadata {
     os: String,
     arch: String,
     exported_at: String,
+    memtrace_files: usize,
 }
 
 /// No URLs, paths, or bucket names -- only booleans and config source indicators.

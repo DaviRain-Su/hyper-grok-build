@@ -889,8 +889,17 @@ impl MvpAgent {
                 mcp_server_count = mcp_servers.len(),
                 "load_session: reconnecting to existing session, updating MCP servers"
             );
+            let attach_hints = explicit_startup_hints(request_meta.as_ref());
             self.with_resident_mut(&session_id, |handle| {
                 handle.initial_client_mcp_servers = initial_client_mcp_servers;
+                if let Some(hints) = attach_hints {
+                    let _ =
+                        handle
+                            .cmd_tx
+                            .send(crate::session::SessionCommand::UpdateAttachPolicy {
+                                startup_hints: Box::new(hints),
+                            });
+                }
                 let (tx, _rx) = tokio::sync::oneshot::channel();
                 let _ = handle
                     .cmd_tx

@@ -946,6 +946,32 @@ fn read_session_or_init_meta_str_ignores_non_string_values() {
     );
 }
 #[test]
+fn startup_hints_from_meta_prefers_session_request_over_init() {
+    let session = serde_json::json!({
+        "startupHints": { "nonInteractive": true, "deliveryTools": ["srv__post"] }
+    });
+    let init = serde_json::json!({ "startupHints": { "nonInteractive": false } });
+    let hints = startup_hints_from_meta(session.as_object(), init.as_object());
+    assert!(hints.non_interactive);
+    assert_eq!(hints.delivery_tools, vec!["srv__post"]);
+    assert!(startup_hints_from_meta(None, session.as_object()).non_interactive);
+}
+#[test]
+fn startup_hints_from_meta_session_object_wins_whole_not_merged() {
+    let session = serde_json::json!({ "startupHints": { "skipGitStatus": true } });
+    let init = serde_json::json!({ "startupHints": { "nonInteractive": true } });
+    let hints = startup_hints_from_meta(session.as_object(), init.as_object());
+    assert!(hints.skip_git_status);
+    assert!(!hints.non_interactive);
+}
+#[test]
+fn startup_hints_from_meta_unparseable_falls_through_then_defaults() {
+    let bad = serde_json::json!({ "startupHints": "yes" });
+    let init = serde_json::json!({ "startupHints": { "nonInteractive": true } });
+    assert!(startup_hints_from_meta(bad.as_object(), init.as_object()).non_interactive);
+    assert!(!startup_hints_from_meta(None, None).non_interactive);
+}
+#[test]
 fn system_prompt_override_from_meta_prefers_session_and_rejects_empty() {
     let session = serde_json::json!({ "systemPromptOverride": "from session" });
     let init = serde_json::json!({ "systemPromptOverride": "from init" });

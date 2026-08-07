@@ -1278,9 +1278,11 @@ async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) ->
 ///
 /// Download-phase side effects (download dir creation, binary fetch) are
 /// idempotent, so retrying with a different base after a partial failure is
-/// safe. Local activation ([`activate_verified_download`]: link swap,
-/// cleanup, config persist) runs once after the first successful download —
-/// its failures are not base-dependent, so they abort the install instead of
+/// safe. Smoke-test failures ([`SmokeTestFailure`]) are a property of the
+/// published artifact, not the CDN — retrying another base will not help.
+/// Local activation ([`activate_verified_download`]: link swap, cleanup,
+/// config persist) runs once after the first successful download — its
+/// failures are not base-dependent, so they abort the install instead of
 /// triggering a pointless re-download from the next base.
 #[doc(hidden)]
 pub async fn install_internal_from_bases(
@@ -1292,6 +1294,11 @@ pub async fn install_internal_from_bases(
     for (i, base) in bases.iter().enumerate() {
         match download_verified_from_base(target, update_config, base).await {
             Ok(download) => return activate_verified_download(&download).await,
+            Err(e) if e.is::<SmokeTestFailure>() => {
+                // Same published artifact on every base — retrying will not
+                // change a --version timeout or crash.
+                return Err(e);
+            }
             Err(e) => {
                 if i + 1 < bases.len() {
                     tracing::warn!(
@@ -1307,7 +1314,9 @@ pub async fn install_internal_from_bases(
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no CLI base URLs to try")))
 }
 
-const SMOKE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// First-launch of a freshly downloaded macOS binary can exceed 10s (Rosetta
+/// AOT + Gatekeeper on ~140MB). A short cap false-fails a good artifact.
+const SMOKE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Retry budget for exec attempts refused with ETXTBSY. The failure window
 /// is normally the microseconds another spawn in this process sits between
@@ -1317,7 +1326,49 @@ const SMOKE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 const SMOKE_TEST_ETXTBSY_ATTEMPTS: u32 = 8;
 const SMOKE_TEST_ETXTBSY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(25);
 
-async fn smoke_test_binary(binary_path: &std::path::Path) -> bool {
+fn truncate_err(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max.saturating_sub(3);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
+}
+
+#[derive(Debug, thiserror::Error)]
+enum SmokeTestFailure {
+    #[error(
+        "downloaded binary failed to run (--version timed out after {}s).\n\
+         Your current version is unchanged.",
+        SMOKE_TEST_TIMEOUT.as_secs()
+    )]
+    Timeout,
+    #[error(
+        "downloaded binary failed to run (could not start: {0}).\n\
+         Your current version is unchanged."
+    )]
+    Spawn(String),
+    #[error("{}", nonzero_message(status, stderr))]
+    NonZero { status: String, stderr: String },
+}
+
+/// `--version` exited nonzero; include stderr only when there is any.
+fn nonzero_message(status: &str, stderr: &str) -> String {
+    let stderr_line = if stderr.is_empty() {
+        String::new()
+    } else {
+        format!("stderr: {stderr}\n")
+    };
+    format!(
+        "downloaded binary failed to run (--version exited {status}).\n\
+         {stderr_line}Your current version is unchanged."
+    )
+}
+
+async fn smoke_test_binary(binary_path: &std::path::Path) -> Result<(), SmokeTestFailure> {
     // ETXTBSY race: while a concurrent updater in this process is between
     // fork and exec (pre_exec in detach_command forces the fork/exec path),
     // its child briefly holds every open fd — including the write-side fd of
@@ -1325,25 +1376,39 @@ async fn smoke_test_binary(binary_path: &std::path::Path) -> bool {
     // binary whose inode is still open for write fails with ETXTBSY even
     // though the file is complete and healthy, so retry instead of failing
     // the install (and deleting a racer's freshly installed binary).
+    let mut last_spawn = String::new();
     for attempt in 1..=SMOKE_TEST_ETXTBSY_ATTEMPTS {
         let mut cmd = tokio::process::Command::new(binary_path);
         cmd.arg("--version")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
         xai_grok_tools::util::detach_command(&mut cmd);
-        match tokio::time::timeout(SMOKE_TEST_TIMEOUT, cmd.status()).await {
-            Ok(Ok(status)) => return status.success(),
-            Ok(Err(e))
-                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
-                    && attempt < SMOKE_TEST_ETXTBSY_ATTEMPTS =>
-            {
-                tokio::time::sleep(SMOKE_TEST_ETXTBSY_BACKOFF * attempt).await;
+        match tokio::time::timeout(SMOKE_TEST_TIMEOUT, cmd.output()).await {
+            Err(_) => return Err(SmokeTestFailure::Timeout),
+            Ok(Ok(output)) if output.status.success() => return Ok(()),
+            Ok(Ok(output)) => {
+                let status = output
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| output.status.to_string());
+                let stderr = truncate_err(&String::from_utf8_lossy(&output.stderr), 400);
+                return Err(SmokeTestFailure::NonZero { status, stderr });
             }
-            _ => return false,
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                last_spawn = e.to_string();
+                if attempt < SMOKE_TEST_ETXTBSY_ATTEMPTS {
+                    tokio::time::sleep(SMOKE_TEST_ETXTBSY_BACKOFF * attempt).await;
+                }
+            }
+            Ok(Err(e)) => return Err(SmokeTestFailure::Spawn(e.to_string())),
         }
     }
-    false
+    // Reached only when every attempt hit ETXTBSY; `last_spawn` holds the
+    // final spawn error.
+    Err(SmokeTestFailure::Spawn(last_spawn))
 }
 
 /// Test-only entry point: same as [`install_internal`] but reads from
@@ -1368,8 +1433,9 @@ struct VerifiedDownload {
 }
 
 /// Base-dependent install phase: resolve the version (per base when no
-/// target is pinned), download the binary, and smoke-test it. Failures here
-/// are worth retrying against another base URL.
+/// target is pinned), download the binary, and smoke-test it. Network /
+/// fetch failures here are worth retrying against another base URL.
+/// [`SmokeTestFailure`] is not — see [`install_internal_from_bases`].
 async fn download_verified_from_base(
     target: Option<&str>,
     update_config: &UpdateConfig,
@@ -1404,15 +1470,10 @@ async fn download_verified_from_base(
 
     // Smoke-test: run the binary before activating it. A truncated or
     // corrupt download is caught here and never becomes the active grok.
-    if !smoke_test_binary(&binary_path).await {
+    if let Err(fail) = smoke_test_binary(&binary_path).await {
         let _ = tokio::fs::remove_file(&binary_path).await;
         // No prefix: run_install_script's wrap adds "Auto-update failed:".
-        anyhow::bail!(
-            "downloaded binary failed to run.\n\
-             Your current version is unchanged.\n\
-             To update manually: {}",
-            manual_install_cmd()
-        );
+        return Err(fail.into());
     }
 
     Ok(VerifiedDownload {
@@ -3727,6 +3788,33 @@ mod tests {
     fn test_reinstall_hint_empty_falls_back_to_internal() {
         let hint = reinstall_hint("");
         assert_eq!(hint, reinstall_hint("internal"));
+    }
+
+    #[test]
+    fn test_smoke_test_failure_messages_distinguish_causes() {
+        let timeout = SmokeTestFailure::Timeout.to_string();
+        assert!(
+            timeout.contains(&format!(
+                "timed out after {}s",
+                SMOKE_TEST_TIMEOUT.as_secs()
+            )),
+            "{timeout}"
+        );
+        let spawn = SmokeTestFailure::Spawn("os error 2".into()).to_string();
+        assert!(spawn.contains("could not start: os error 2"), "{spawn}");
+        let nz = SmokeTestFailure::NonZero {
+            status: "137".into(),
+            stderr: "killed".into(),
+        }
+        .to_string();
+        assert!(nz.contains("exited 137"), "{nz}");
+        assert!(nz.contains("stderr: killed"), "{nz}");
+    }
+
+    #[test]
+    fn test_truncate_err() {
+        assert_eq!(truncate_err("  short  ", 10), "short");
+        assert_eq!(truncate_err("abcdefghij", 8), "abcde...");
     }
 
     // ──────────────────────────────────────────────────────────────────────
