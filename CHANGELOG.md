@@ -4,6 +4,26 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.0-r1] — 2026-08-08
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `afbc0fb`
+  (monorepo `SOURCE_REV` `3e620a7…`), basing this community revision on
+  upstream **1.0.0**. Notable upstream:
+  - Guard in-process git status/diff from client spam (`git_gate` / `git_odb`)
+  - Plugin CTA debounce raised to 500ms
+  - Bundle memory traces in the session trace export
+  - Tabbed usage / session-info / context modal for `/usage`, `/session-info`,
+    and `/context`
+  - Session recaps follow the session language (not always English)
+  - Honor `startupHints` on session request metadata; fix headless MCP
+    connecting reminder
+  - Windows download named `Grok Setup.exe`
+
+### Fixed
+- Hyper i18n modal titles retained; added `modal.title.usage` locales and
+  Cow-compatible usage-modal shortcuts after packages/* merge.
+
 ## [0.2.122-r1] — 2026-08-07
 
 ### Changed
