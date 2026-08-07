@@ -4,6 +4,28 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.122-r1] — 2026-08-07
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `393430e`
+  (monorepo `SOURCE_REV` `796754a…`). Notable upstream:
+  - `grok du` shows what `~/.grok` uses on disk
+  - Session search index no longer locks when launching many shell instances
+  - Startup phase naming for slow launches; empty TUI exit faster
+  - Conversation-only `/rewind` with confirm-before-rewind
+  - Bound subagent concurrency and post-kill reaps (D-state children)
+  - Colliding skills stay invocable beside builtins
+  - Leader version mismatch shown in scrollback
+  - Auto decision telemetry; Esc/[stop] suppress task wakes like Ctrl+C
+  - Typed Voice/Finance tool-usage cards; full-jitter reconnect backoff
+  - WebLogin users told to `grok update` before re-auth
+  - Drop Beta label from the product
+
+### Fixed
+- Hyper package-path merge after crates→packages; restore `accent_feedback`
+  theme field and Wasm extension telemetry events across the events module
+  split.
+
 ## [0.2.121-r1] — 2026-08-06
 
 ### Changed

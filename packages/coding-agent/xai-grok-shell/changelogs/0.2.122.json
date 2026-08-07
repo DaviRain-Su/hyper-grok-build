@@ -1,0 +1,57 @@
+[
+  {
+    "category": "features",
+    "description": "**`grok du`** shows what `~/.grok` uses on disk.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Session search** no longer locks the shared index when launching many shells.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Confirm before `/rewind`** on conversation-only rewinds.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Subagent bounds** measure and limit how many subagents a session runs at once.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Auto decision telemetry** is exposed for Auto mode.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Voice / Finance** tool-usage cards are typed with client render support.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Leader version mismatch** is shown in scrollback.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Empty TUI exit** is faster.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Esc and [stop]** suppress task wakes like Ctrl+C.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**WebLogin** users are told to run `grok update` before re-authenticating.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Colliding skills** stay invocable beside builtins.",
+    "breaking_change": false
+  }
+]
