@@ -61,6 +61,11 @@ pub struct ChildRunRequest<C> {
     pub request: SubagentRequest,
     pub cancellation: CancellationToken,
     pub reporter: ChildReporter<C>,
+    /// Time parked in the admission queue; `None` if admitted immediately.
+    pub queued_for: Option<std::time::Duration>,
+    /// The session's running non-workflow children when this spawn started,
+    /// including itself when it is one of them.
+    pub session_running: usize,
 }
 
 /// Terminal output from one runtime-specific child run.
@@ -128,10 +133,46 @@ pub trait ChildRunner: 'static {
     }
 }
 
-/// Host-configurable lifecycle policy. The transition logic remains shared.
+/// What an admission limit did to a spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentLimitDecision {
+    QueuedAtConcurrentLimit { limit: usize },
+    RejectedAtConcurrentLimit { limit: usize },
+}
+
+/// What asked for the spawn that hit a limit. Workflow-owned spawns bypass
+/// admission, so a workflow arm never appears here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitedSpawnOrigin {
+    Task,
+    SchedulerLoop,
+}
+
+/// One admission decision at a session limit; workflow-owned spawns bypass
+/// admission and never appear here.
 #[derive(Debug, Clone)]
+pub struct SubagentLimitNotice {
+    pub parent_session_id: String,
+    pub decision: SubagentLimitDecision,
+    /// Session children running against the limit at decision time.
+    pub running: usize,
+    /// The session's queue depth after the decision applies: a queued spawn
+    /// counts itself, a rejected spawn does not.
+    pub queue_depth: usize,
+    pub origin: LimitedSpawnOrigin,
+}
+
+/// Host-injected observer for admission decisions.
+pub type SubagentLimitSink = Arc<dyn Fn(SubagentLimitNotice) + Send + Sync>;
+
+/// Host-configurable lifecycle policy. The transition logic remains shared.
+#[derive(Clone)]
 pub struct CoordinatorConfig {
     pub foreground_budget: std::time::Duration,
+    /// Session-scoped spawn limits enforced by the coordinator.
+    pub limits: super::admission::SubagentLimits,
+    /// Observer for spawns that hit an admission limit.
+    pub limit_sink: Option<SubagentLimitSink>,
     /// Whether the host drains completion summaries between turns.
     pub buffer_completions: bool,
     /// Extra cap applied to BUFFERED summary outputs only (the request's own
@@ -148,9 +189,26 @@ impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {
             foreground_budget: std::time::Duration::from_secs(45),
+            limits: super::admission::SubagentLimits::default(),
+            limit_sink: None,
             buffer_completions: false,
             buffered_completion_output_cap: None,
         }
+    }
+}
+
+impl std::fmt::Debug for CoordinatorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoordinatorConfig")
+            .field("foreground_budget", &self.foreground_budget)
+            .field("limits", &self.limits)
+            .field("limit_sink", &self.limit_sink.is_some())
+            .field("buffer_completions", &self.buffer_completions)
+            .field(
+                "buffered_completion_output_cap",
+                &self.buffered_completion_output_cap,
+            )
+            .finish()
     }
 }
 
@@ -622,6 +680,38 @@ pub(super) fn pending_inspection(child: &PendingChild) -> SubagentInspection {
         child_session_id: String::new(),
         fork_parent_prompt_id: child.request.parent_prompt_id.clone(),
         resumed_from: child.request.resume_from.clone(),
+    }
+}
+
+/// A spawn parked at the session's concurrent limit reads as initializing
+/// rather than "not found".
+pub(super) fn queued_snapshot(
+    request: &SubagentRequest,
+    queued_at: std::time::Instant,
+) -> SubagentSnapshot {
+    SubagentSnapshot {
+        subagent_id: request.id.clone(),
+        description: request.description.clone(),
+        subagent_type: request.subagent_type.clone(),
+        status: SubagentSnapshotStatus::Initializing,
+        // Stable across polls: the enqueue time, with the duration showing
+        // how long the spawn has waited for a slot.
+        started_at_epoch_ms: instant_to_epoch_ms(queued_at),
+        duration_ms: queued_at.elapsed().as_millis() as u64,
+        persona: request.runtime_overrides.persona.clone(),
+    }
+}
+
+pub(super) fn queued_inspection(
+    request: &SubagentRequest,
+    queued_at: std::time::Instant,
+) -> SubagentInspection {
+    SubagentInspection {
+        snapshot: queued_snapshot(request, queued_at),
+        parent_session_id: request.parent_session_id.clone(),
+        child_session_id: String::new(),
+        fork_parent_prompt_id: request.parent_prompt_id.clone(),
+        resumed_from: request.resume_from.clone(),
     }
 }
 

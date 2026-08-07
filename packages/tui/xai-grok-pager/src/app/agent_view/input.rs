@@ -243,20 +243,15 @@ impl AgentView {
             && self.no_esc_consumer_pending()
             && self.no_input_overlay_pending()
     }
-    /// Esc on the prompt pane in a dashboard overlay backs out to the dashboard
-    /// list (the prompt-focus mirror of the Left-arrow back-out), but only for an
-    /// empty, Normal-mode composer with no per-pane Esc consumer pending. Beyond
-    /// [`Self::is_empty_focused_prompt`] it also requires `PromptInputMode::Normal`
-    /// (so a Bash/Remember/Feedback empty prompt keeps Esc as its mode-exit,
-    /// matching the full-screen view) and [`Self::no_esc_consumer_pending`] (so
-    /// Esc still clears or dismisses a pending text selection / link highlight /
-    /// goal detail / rewind first — Esc, unlike Left, is their consumer). A
-    /// non-empty draft fails the guard so Esc still arms "press again to clear".
-    /// Used only in the overlay cascade; the full-screen Esc policy (clear /
-    /// rewind while idle; mid-turn cancel or swallow) is untouched.
+    /// Esc on the prompt pane in a dashboard overlay backs out to the dashboard list (the prompt-focus mirror of the Left-arrow back-out), but only
+    /// for an empty, Normal-mode composer with no per-pane Esc consumer pending. Beyond [`Self::is_empty_focused_prompt`] it also requires
+    /// `PromptInputMode::Normal` (so a Bash/Remember empty prompt keeps Esc as its mode-exit, matching the full-screen view) and
+    /// [`Self::no_esc_consumer_pending`] (so Esc still clears or dismisses a pending text selection / link highlight / goal detail / rewind first;
+    /// Esc, unlike Left, is their consumer). A non-empty draft fails the guard so Esc still arms "press again to clear".
+    /// Used only in the overlay cascade; the full-screen Esc policy (clear / rewind while idle; mid-turn cancel or swallow) is untouched.
     ///
-    /// Also gated to an idle agent (`!is_turn_running() && !is_cancelling()`):
-    /// while a turn is running or cancelling, Esc must fall through to
+    /// Also gated to an idle agent (no running, cancelling, or wake turn):
+    /// while one is in flight, Esc must fall through to
     /// [`Self::try_handle_esc_policy`] (running → cancel in minimal / non-vim
     /// mode, swallow in vim mode; cancelling → retry CancelTurn), not detach
     /// to the dashboard. Detach mid-turn stays on
@@ -267,6 +262,7 @@ impl AgentView {
             && self.no_esc_consumer_pending()
             && !self.session.state.is_turn_running()
             && !self.session.state.is_cancelling()
+            && !self.wake_turn_active()
     }
     /// True when a pending plan / Q&A overlay is at its top navigation state
     /// (nothing left for `Esc` to clear), so the next `Esc` backs out of the
@@ -1031,9 +1027,7 @@ impl AgentView {
                         return InputOutcome::Unchanged;
                     }
                     if registry.matches_id(ActionId::CancelTurn, key)
-                        && (self.session.state.is_turn_running()
-                            || self.session.state.is_compact_running()
-                            || self.session.state.is_cancelling())
+                        && (self.stoppable_activity_running() || self.any_cancel_pending())
                     {
                         self.dismiss_jump_picker();
                         return self
@@ -1348,11 +1342,11 @@ impl AgentView {
     ) -> InputOutcome {
         match action_id {
             ActionId::CancelTurn => {
-                if self.session.state.is_turn_running() || self.session.state.is_compact_running() {
+                if self.stoppable_activity_running() {
                     self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::CtrlC);
                     return InputOutcome::Action(Action::CancelTurn);
                 }
-                if self.session.state.is_cancelling() {
+                if self.any_cancel_pending() {
                     return InputOutcome::Action(Action::Quit);
                 }
                 if crate::app::minimal_mode_active()
@@ -2464,6 +2458,27 @@ mod jump_backout_key_tests {
         assert!(
             matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
             "Ctrl+C during /compact with /jump open must cancel, got {outcome:?}"
+        );
+    }
+    /// Once a wake cancel is in flight, Ctrl+C must reach the same quit
+    /// escalation as a stuck normal cancel instead of re-sending forever.
+    #[test]
+    fn ctrl_c_escalates_to_quit_while_wake_cancel_is_stuck() {
+        let mut agent = make_agent();
+        agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+            prompt_id: "task-completed-bg1".into(),
+            cancel_sent: false,
+        });
+        let outcome = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "the first Ctrl+C cancels the wake turn, got {outcome:?}"
+        );
+        agent.running_wake_turn.as_mut().unwrap().cancel_sent = true;
+        let outcome = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::Quit)),
+            "Ctrl+C during a stuck wake cancel must escalate to quit, got {outcome:?}"
         );
     }
 }

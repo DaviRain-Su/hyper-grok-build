@@ -311,6 +311,54 @@ pub enum PromptOutcome {
     Error(String),
 }
 
+crate::permission::wire_enum! {
+    /// Data-free projection of [`PromptOutcome`] — the single owner of the
+    /// `prompt_outcome` wire vocabulary. The enum, its `ALL` inventory, and
+    /// `wire_str` are generated from one list, and [`PromptOutcome::kind`] is an
+    /// exhaustive `match` into it, so a new payload-bearing `PromptOutcome`
+    /// variant fails to compile until it is mapped here and a brand-new outcome is
+    /// a single list entry that produces variant, `ALL`, and wire together.
+    pub enum PromptOutcomeKind {
+        AllowOnce => "allow_once",
+        AllowAlways => "allow_always",
+        AllowEditsForSession => "allow_edits_for_session",
+        AllowAlwaysBash => "allow_always_bash",
+        AllowAlwaysBashGlob => "allow_always_bash_glob",
+        AllowAlwaysDomain => "allow_always_domain",
+        AllowAlwaysMcpTool => "allow_always_mcp_tool",
+        AllowAlwaysMcpServer => "allow_always_mcp_server",
+        RejectOnce => "reject_once",
+        RejectAlwaysBash => "reject_always_bash",
+        Cancelled => "cancelled",
+        Followup => "followup",
+        Error => "error",
+    }
+}
+
+impl PromptOutcome {
+    /// Data-free owner kind for this outcome. Exhaustive: a new payload-bearing
+    /// `PromptOutcome` variant fails compilation here until it is mapped, and the
+    /// manager emits `prompt_outcome.kind().wire_str()` (never a raw literal), so
+    /// the owner projection is on the production path.
+    pub const fn kind(&self) -> PromptOutcomeKind {
+        match self {
+            Self::AllowOnce => PromptOutcomeKind::AllowOnce,
+            Self::AllowAlways => PromptOutcomeKind::AllowAlways,
+            Self::AllowEditsForSession => PromptOutcomeKind::AllowEditsForSession,
+            Self::AllowAlwaysBashCommand(_) => PromptOutcomeKind::AllowAlwaysBash,
+            Self::AllowAlwaysBashGlob(_) => PromptOutcomeKind::AllowAlwaysBashGlob,
+            Self::AllowAlwaysDomain(_) => PromptOutcomeKind::AllowAlwaysDomain,
+            Self::AllowAlwaysMcpTool(_) => PromptOutcomeKind::AllowAlwaysMcpTool,
+            Self::AllowAlwaysMcpServer(_) => PromptOutcomeKind::AllowAlwaysMcpServer,
+            Self::RejectOnce => PromptOutcomeKind::RejectOnce,
+            Self::RejectAlwaysBashCommand(_) => PromptOutcomeKind::RejectAlwaysBash,
+            Self::Cancelled => PromptOutcomeKind::Cancelled,
+            Self::FollowupMessage(_) => PromptOutcomeKind::Followup,
+            Self::Error(_) => PromptOutcomeKind::Error,
+        }
+    }
+}
+
 pub struct AcpPrompter {
     session_id: acp::SessionId,
     gateway: GatewaySender,
@@ -1016,6 +1064,58 @@ fn map_selected_outcome(
 mod tests {
     use super::*;
     use tokio::sync::mpsc;
+
+    /// Wire-compatibility pin: `PromptOutcome::kind()` maps each payload-bearing
+    /// variant to the owner [`PromptOutcomeKind`] whose `wire_str` is the exact,
+    /// stable product-event/artifact string. If a variant's kind or a kind's wire ever
+    /// changes, this fails (guarding event-JSON compatibility). Completeness of
+    /// `kind()` is enforced by the compiler (exhaustive match); completeness of
+    /// `PromptOutcomeKind::{ALL, wire_str}` is enforced structurally by
+    /// `wire_enum!`.
+    #[test]
+    fn prompt_outcome_kind_pins_wire_strings() {
+        let cases = [
+            (PromptOutcome::AllowOnce, "allow_once"),
+            (PromptOutcome::AllowAlways, "allow_always"),
+            (
+                PromptOutcome::AllowEditsForSession,
+                "allow_edits_for_session",
+            ),
+            (
+                PromptOutcome::AllowAlwaysBashCommand(String::new()),
+                "allow_always_bash",
+            ),
+            (
+                PromptOutcome::AllowAlwaysBashGlob(String::new()),
+                "allow_always_bash_glob",
+            ),
+            (
+                PromptOutcome::AllowAlwaysDomain(String::new()),
+                "allow_always_domain",
+            ),
+            (
+                PromptOutcome::AllowAlwaysMcpTool(String::new()),
+                "allow_always_mcp_tool",
+            ),
+            (
+                PromptOutcome::AllowAlwaysMcpServer(String::new()),
+                "allow_always_mcp_server",
+            ),
+            (PromptOutcome::RejectOnce, "reject_once"),
+            (
+                PromptOutcome::RejectAlwaysBashCommand(String::new()),
+                "reject_always_bash",
+            ),
+            (PromptOutcome::Cancelled, "cancelled"),
+            (PromptOutcome::FollowupMessage(String::new()), "followup"),
+            (PromptOutcome::Error(String::new()), "error"),
+        ];
+        for (outcome, wire) in &cases {
+            assert_eq!(outcome.kind().wire_str(), *wire);
+        }
+        // Every owner kind is exercised by exactly one case (no kind unmapped).
+        assert_eq!(cases.len(), PromptOutcomeKind::ALL.len());
+    }
 
     fn prompter(client_type: ClientType) -> AcpPrompter {
         // Existing tests assert the always-allow options are present; off-state

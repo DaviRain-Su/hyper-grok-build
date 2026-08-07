@@ -70,7 +70,7 @@ pub(crate) fn pending_diamond_color(theme: &Theme, accent: Color, tick: u64) -> 
 #[derive(Debug, Default)]
 pub struct TurnStatusOutput {
     /// Hit area for the cancel button, if rendered.
-    /// `None` when the button is not shown (idle, cancelling, drain-blocked).
+    /// `None` when the button is not shown (idle, parked, drain-blocked).
     pub cancel_button: Option<Rect>,
     /// Hit area for the background-demote button, if rendered.
     pub bg_button: Option<Rect>,
@@ -346,14 +346,15 @@ pub fn render_turn_status(
         return TurnStatusOutput::default();
     }
 
-    // Determine if cancel button should be shown.
-    // Show when: TurnRunning or CommandRunning.
-    // Hide when: Idle, Cancelling (already cancelling), or a keyboard-only host
-    // (no clickable buttons — see `buttons`).
+    // Shown while running AND while cancelling (the click routes to the
+    // cancel-retry path); hidden when idle or on a keyboard-only host.
     let show_cancel = show_buttons
         && matches!(
             state,
-            AgentState::TurnRunning | AgentState::CommandRunning { .. }
+            AgentState::TurnRunning
+                | AgentState::CommandRunning { .. }
+                | AgentState::TurnCancelling
+                | AgentState::CommandCancelling { .. }
         );
 
     // ── Compute activity style and label ──
@@ -381,9 +382,14 @@ pub fn render_turn_status(
     };
     let turn_timer_width = turn_timer_str.width();
 
-    // Bg button: [↓] normally, [send to bg] when hovered (only for running execute
-    // tools). `show_cancel` already implies a mouse host, so no extra check.
-    let show_bg = show_cancel && has_running_execute;
+    // Bg button: [↓] normally, [send to bg] when hovered. Running execute
+    // tools only, and never while cancelling (demote no-ops there).
+    let show_bg = show_cancel
+        && has_running_execute
+        && matches!(
+            state,
+            AgentState::TurnRunning | AgentState::CommandRunning { .. }
+        );
     let bg_str = if show_bg {
         if bg_hovered {
             " [send to bg]"
@@ -1032,6 +1038,46 @@ mod tests {
             Watchers::default(),
             false
         ));
+    }
+
+    /// Cancelling keeps `[stop]` clickable (the retry affordance for a lost
+    /// cancel); a revert to the running-only gate strands mouse users.
+    #[test]
+    fn cancelling_keeps_stop_button_clickable() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 1));
+        let output = render_turn_status(
+            &mut buf,
+            Rect::new(0, 0, 80, 1),
+            TurnStatusArgs {
+                state: &AgentState::TurnCancelling,
+                activity: &None,
+                turn_elapsed: Some(Duration::from_secs(3)),
+                activity_started_at: None,
+                tick: 0,
+                drain_blocked: false,
+                buttons: Some(MouseButtons::default()),
+                has_running_execute: false,
+                total_tokens: None,
+                mcp_init_progress: None,
+                is_bash_turn: false,
+                is_pending_user_input: false,
+                goal_verifying: false,
+                watchers: Watchers::default(),
+                parked: false,
+                flat_background: false,
+                held_queue: 0,
+                held_queue_top_sendable: false,
+            },
+        );
+        assert!(
+            output.cancel_button.is_some(),
+            "cancelling must keep a clickable [stop] (cancel-retry affordance)"
+        );
+        let text = buffer_text(&buf, Rect::new(0, 0, 80, 1));
+        assert!(
+            text.contains("Cancelling") && text.contains("[stop]"),
+            "got: {text:?}"
+        );
     }
 
     #[test]

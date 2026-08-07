@@ -821,6 +821,9 @@ message ToolCapabilities {
   /// Supports timeout configuration
   bool supports_timeout = 6;
 
+  /// Read-only. Absent if the server is too old to say.
+  optional bool is_read_only = 7;
+
   /// Custom capability flags
   repeated string custom_capabilities = 10;
 }

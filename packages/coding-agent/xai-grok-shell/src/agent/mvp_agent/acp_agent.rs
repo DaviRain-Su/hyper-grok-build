@@ -45,6 +45,9 @@ impl acp::Agent for MvpAgent {
     ) -> Result<acp::InitializeResponse, acp::Error> {
         tracing::debug!(target: "sampling_log", "Received initialize request");
         xai_grok_telemetry::unified_log::info("agent initialized", None, None);
+        if xai_grok_telemetry::startup::agent_owned().is_some() {
+            xai_grok_telemetry::startup::clear();
+        }
         self.start_subagent_coordinator();
         if self.cfg.borrow().remote_settings.is_none() {
             self.spawn_settings_reapply();
@@ -2439,7 +2442,9 @@ impl acp::Agent for MvpAgent {
             let rewind_if_no_output = args
                 .meta
                 .as_ref()
-                .and_then(|m| m.get("rewindIfPristine"))
+                .and_then(|m| {
+                    m.get("rewindIfNoOutput").or_else(|| m.get("rewindIfPristine"))
+                })
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let dispatch_lock = self.dispatch_lock(&args.session_id);
@@ -3060,47 +3065,42 @@ impl acp::Agent for MvpAgent {
                 );
             }
         }
-        if matches!(
-            args.method.as_ref(),
-            "x.ai/queue/remove"
-                | "x.ai/queue/reorder"
-                | "x.ai/queue/clear"
-                | "x.ai/queue/edit"
-                | "x.ai/queue/interject"
-        )
+        if args.method.as_ref().starts_with("x.ai/queue/")
             && let Ok(params) = serde_json::from_str::<
                 serde_json::Value,
             >(args.params.get())
         {
-            let session_id_str = params
-                .get("sessionId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
             let owner = params
                 .get("owner")
                 .or_else(|| params.get("clientIdentifier"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let handle = self.resident_handle(&acp::SessionId::new(session_id_str));
-            if let Some(handle) = handle {
-                let cmd = crate::agent::ext_parsers::parse_queue_edit_command(
-                    args.method.as_ref(),
-                    &params,
-                    owner,
-                );
-                if let Some(cmd) = cmd && handle.cmd_tx.send(cmd).is_err() {
+            if let Some(cmd) = crate::agent::ext_parsers::parse_queue_edit_command(
+                args.method.as_ref(),
+                &params,
+                owner,
+            ) {
+                let session_id_str = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if let Some(handle) = self
+                    .resident_handle(&acp::SessionId::new(session_id_str))
+                {
+                    if handle.cmd_tx.send(cmd).is_err() {
+                        tracing::warn!(
+                            session_id = %session_id_str,
+                            method = %args.method,
+                            "queue edit: failed to forward SessionCommand (session actor gone)"
+                        );
+                    }
+                } else {
                     tracing::warn!(
                         session_id = %session_id_str,
                         method = %args.method,
-                        "queue edit: failed to forward SessionCommand (session actor gone)"
+                        "queue edit: session not found"
                     );
                 }
-            } else {
-                tracing::warn!(
-                    session_id = %session_id_str,
-                    method = %args.method,
-                    "queue edit: session not found"
-                );
             }
         }
         if args.method.as_ref() == "x.ai/terminal/pty/input"

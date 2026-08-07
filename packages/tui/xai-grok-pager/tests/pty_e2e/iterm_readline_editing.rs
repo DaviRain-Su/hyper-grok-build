@@ -117,20 +117,26 @@ async fn iterm_raw_readline_sequences_edit_picker_and_dashboard_rename() {
         .inject_keys(b"\x12")
         .expect("dashboard Ctrl+R rename");
     harness
-        .wait_for_text("rename:", Duration::from_secs(10))
-        .expect("empty rename editor opened for the titled session row");
+        .wait_for_text(&format!("rename: {ROW_TITLE}"), Duration::from_secs(10))
+        .expect("rename editor opened with prefilled session title");
     inject_keys_paced(&mut harness, b"LEFT RIGHT");
     harness.inject_keys(ALT_LEFT).expect("iTerm Alt+Left");
     inject_keys_paced(&mut harness, b"MID");
     harness.inject_keys(ALT_RIGHT).expect("iTerm Alt+Right");
     inject_keys_paced(&mut harness, b"END");
     harness
-        .wait_for_text("rename: LEFT MIDRIGHTEND", Duration::from_secs(10))
+        .wait_for_text(
+            &format!("rename: {ROW_TITLE}LEFT MIDRIGHTEND"),
+            Duration::from_secs(10),
+        )
         .expect("raw Alt arrows changed rename draft");
     harness.inject_keys(keys::ENTER).expect("commit rename");
     wait_for_labels_absent(&mut harness, &["rename:"], Duration::from_secs(10));
     harness
-        .wait_for_text("LEFT MIDRIGHTEND", Duration::from_secs(10))
+        .wait_for_text(
+            &format!("{ROW_TITLE}LEFT MIDRIGHTEND"),
+            Duration::from_secs(10),
+        )
         .expect("committed dashboard rename visible");
 
     assert!(

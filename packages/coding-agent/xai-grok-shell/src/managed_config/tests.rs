@@ -444,3 +444,17 @@ fn claim_persists_only_when_bound_to_served_principal() {
 fn absent_claim_is_skipped() {
     assert!(verified_claim_sidecar(&ManagedConfigResponse::default(), Some("team-007")).is_none());
 }
+
+/// The startup label: a deployment key wins outright, and an unreadable
+/// `auth.json` is `unknown`, never `personal` — the sync still runs and
+/// mislabeling it would hide the deployment-cost split.
+#[test]
+fn auth_mode_classification() {
+    use xai_grok_telemetry::startup::AuthMode;
+    let err = || std::io::Error::other("unreadable");
+    assert_eq!(auth_mode(true, &Ok(true)), AuthMode::Deployment);
+    assert_eq!(auth_mode(true, &Err(err())), AuthMode::Deployment);
+    assert_eq!(auth_mode(false, &Ok(true)), AuthMode::Team);
+    assert_eq!(auth_mode(false, &Ok(false)), AuthMode::Personal);
+    assert_eq!(auth_mode(false, &Err(err())), AuthMode::Unknown);
+}

@@ -484,11 +484,8 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // 0e. Exit special input mode on empty prompt using per-mode exit keys
-        //     (Bash/Remember: Backspace/Esc/Ctrl+W/U/C; Feedback: Backspace/Esc only).
-        //     With non-empty text, Esc falls through to Esc policy
-        //     (cancel / mid-turn swallow / clear / rewind). Mode is preserved
-        //     for re-focus.
+        // 0e. Exit special input mode on empty prompt using per-mode exit keys (Bash/Remember: Backspace/Esc/Ctrl+W/U/C).
+        //     With non-empty text, Esc falls through to Esc policy (cancel / mid-turn swallow / clear / rewind). Mode is preserved for re-focus.
         if self.prompt_input_mode.is_exit_key(key) && self.prompt.text().is_empty() {
             self.prompt_input_mode = PromptInputMode::Normal;
             return InputOutcome::Changed;
@@ -816,8 +813,12 @@ impl AgentView {
         // Mid-turn running, fullscreen vim mode: swallow Esc (do not cancel or
         // arm clear/rewind — Ctrl+C stays the cancel gesture there).
         // `is_minimal_mode` is the per-agent injected screen mode, not the
-        // process global, so tests stay race-free.
-        if self.session.state.is_turn_running()
+        // process global, so tests stay race-free. A streaming wake turn
+        // follows the same policy as a running turn (the pane state is Idle
+        // only because wake turns are not adopted); once its cancel was sent
+        // it follows the cancelling retry below instead, in every mode.
+        if (self.session.state.is_turn_running()
+            || (self.wake_turn_active() && !self.wake_turn_cancelling()))
             && !crate::app::esc_cancels_turn(self.is_minimal_mode(), self.vim_mode)
         {
             return Some(InputOutcome::Changed);
@@ -827,7 +828,10 @@ impl AgentView {
         // cancelling, so a lost cancel notification is re-sent (Ctrl+C
         // escalates to Quit instead). Push the grace deadline out so an Esc
         // mash past the cancel cannot silently arm the rewind picker below.
-        if self.session.state.is_turn_running() || self.session.state.is_cancelling() {
+        if self.session.state.is_turn_running()
+            || self.wake_turn_active()
+            || self.any_cancel_pending()
+        {
             self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
             self.suppress_rewind_arm(std::time::Instant::now());
             return Some(InputOutcome::Action(Action::CancelTurn));
@@ -861,10 +865,10 @@ impl AgentView {
         // undoable prompts". The last three guards restate shields that the
         // PROMPT pane gets upstream but that the SCROLLBACK pane bypasses (so
         // they are vacuously true on the prompt pane): step 0e exits a latent
-        // Bash/Remember/Feedback mode on an empty-composer Esc before the
-        // policy runs — without the mode guard a rewind restore would drop
-        // conversation text into a still-armed `!` composer; the needs-input
-        // overlay intercepts exempt the scrollback pane while the open
+        // Bash/Remember mode on an empty-composer Esc before the policy runs
+        // (without the mode guard a rewind restore would drop conversation
+        // text into a still-armed `!` composer); the needs-input overlay
+        // intercepts exempt the scrollback pane while the open
         // picker's own intercept does not, so arming under a pending
         // permission/plan/cancel-turn/question overlay would let the picker
         // key-starve it (and a rewind mutate the session out from under it);
@@ -991,11 +995,8 @@ impl AgentView {
                 .map(str::to_owned)
             {
                 self.prompt.history_search.deactivate();
-                // Detect `! ` prefix to restore bash mode. Refined: only reset to Normal
-                // if currently in Bash (preserve Feedback/Remember if active). The ! prefix
-                // restore only applies when not in Feedback/Remember.
-                if self.prompt_input_mode != PromptInputMode::Feedback
-                    && self.prompt_input_mode != PromptInputMode::Remember
+                // Restore bash mode from a `! ` history entry unless Remember is active.
+                if self.prompt_input_mode != PromptInputMode::Remember
                     && let Some(cmd) = text.strip_prefix("! ")
                 {
                     self.prompt_input_mode = PromptInputMode::Bash;

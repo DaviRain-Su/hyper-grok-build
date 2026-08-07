@@ -282,7 +282,7 @@ impl xai_tool_runtime::Tool for GlobTool {
         }
 
         // ── Sort by mtime descending (most recent first) ────────
-        entries.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.mtime_ms));
 
         // ── Format output ───────────────────────────────────────
         let count = entries.len();

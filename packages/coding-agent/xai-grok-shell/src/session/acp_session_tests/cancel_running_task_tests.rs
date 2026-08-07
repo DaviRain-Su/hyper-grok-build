@@ -1191,7 +1191,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                         send_now: false,
                     });
             }
-            actor
+            let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
                     cancel_subagents: true,
                     kill_background_tasks: true,
@@ -1267,7 +1267,7 @@ async fn cancel_records_mid_turn_abort_interrupt_marker() {
                 });
             }
             assert_eq!(actor.events.take_prior_interrupt_category(), None);
-            actor
+            let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
                     cancel_subagents: true,
                     trigger: Some(crate::session::CancelTrigger::CtrlC),
@@ -1315,7 +1315,7 @@ async fn cancel_without_active_tool_arms_interrupt_reminder() {
             }
             assert!(!actor.events.has_active_tool());
             assert!(!actor.events.take_pending_interrupt_reminder());
-            actor
+            let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
                     cancel_subagents: true,
                     trigger: Some(crate::session::CancelTrigger::CtrlC),
@@ -1424,7 +1424,7 @@ async fn cancel_with_dangling_tool_call_skips_interrupt_reminder() {
                 });
             }
             assert!(!actor.events.has_active_tool());
-            actor
+            let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
                     cancel_subagents: true,
                     trigger: Some(crate::session::CancelTrigger::CtrlC),
@@ -1659,7 +1659,7 @@ async fn cancel_running_task_interactive_preserves_queued_work() {
                 state.pending_inputs.push_back(q1_item);
                 state.pending_inputs.push_back(q2_item);
             }
-            actor
+            let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
                     cancel_subagents: true,
                     user_initiated: true,
@@ -1751,7 +1751,7 @@ async fn cancel_after_own_completion_sweep_preserves_queued_user_prompt() {
             actor
                 .drop_pending_items_for_consumed_completions(&["bg-1"])
                 .await;
-            actor
+            let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
                     cancel_subagents: true,
                     trigger: Some(crate::session::CancelTrigger::CtrlC),
@@ -1855,7 +1855,7 @@ async fn interactive_cancel_drops_queued_task_wakes_and_promotes_user() {
                             .is_some_and(|gate| gate.get()),
                         "Ctrl+C must arm the reminder gate before the first await"
                     );
-                    cancel.await;
+                    let _ = cancel.await;
                 }
             }
             assert!(
@@ -1932,7 +1932,7 @@ async fn ctrl_c_clears_turn_active_before_background_completion_routes() {
                 state.running_task = Some(running_task_stub("user-running"));
                 state.pending_inputs.push_back(running_item);
             }
-            actor
+            let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
                     cancel_subagents: true,
                     trigger: Some(crate::session::CancelTrigger::CtrlC),
@@ -1945,12 +1945,144 @@ async fn ctrl_c_clears_turn_active_before_background_completion_routes() {
         })
         .await;
 }
-#[tokio::test(flavor = "current_thread")]
-async fn non_ctrl_c_cancel_preserves_queued_task_wakes_and_does_not_arm_barrier() {
+async fn assert_stop_trigger_arms_wake_barrier(trigger: &str) {
+    use tokio::sync::oneshot::error::TryRecvError;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            for trigger in [Some("esc"), Some("mouse"), Some("dashboard"), None] {
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let reservations = actor
+                .tool_context
+                .task_completion_reservations
+                .clone()
+                .expect("completion reservations");
+            reservations.reserve("bg-queued".to_string());
+            let actor = Arc::new(actor);
+            let (running_item, mut running_rx) =
+                input_with_origin_rx("user-running", crate::session::PromptOrigin::User);
+            let (mut wake_item, mut wake_rx) = input_with_origin_rx(
+                "task-completed-bg-queued",
+                crate::session::PromptOrigin::TaskCompleted {
+                    task_id: "bg-queued".to_string(),
+                },
+            );
+            wake_item.task_wake_fallback = Some(crate::session::commands::TaskWakeFallback {
+                prompt_id: "bash-completed-bg-queued".to_string(),
+                prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                    "completion bg-queued",
+                ))],
+                source: NotificationSource::BashTaskCompleted {
+                    task_id: "bg-queued".to_string(),
+                },
+            });
+            let (queued_user, mut queued_user_rx) =
+                input_with_origin_rx("user-next", crate::session::PromptOrigin::User);
+            {
+                let mut state = actor.state.lock().await;
+                state.running_task = Some(running_task_stub("user-running"));
+                state.pending_inputs.push_back(running_item);
+                state.pending_inputs.push_back(wake_item);
+                state.pending_inputs.push_back(queued_user);
+            }
+            let barrier = actor
+                .cancel_running_task(crate::session::CancelOptions {
+                    cancel_subagents: true,
+                    trigger: Some(crate::session::CancelTrigger::from_client(trigger)),
+                    user_initiated: true,
+                    ..Default::default()
+                })
+                .await;
+            assert_eq!(
+                barrier,
+                super::tasks_cancel::WakeBarrier::Armed,
+                "{trigger}: outcome must report the armed barrier"
+            );
+            assert!(
+                actor
+                    .tool_context
+                    .task_wake_suppressed
+                    .as_ref()
+                    .is_some_and(|gate| gate.get()),
+                "{trigger}: an interactive stop must arm the reminder gate"
+            );
+            {
+                let state = actor.state.lock().await;
+                let remaining: Vec<&str> = state
+                    .pending_inputs
+                    .iter()
+                    .map(|item| item.prompt_id.as_str())
+                    .collect();
+                assert_eq!(
+                    remaining,
+                    vec!["user-next"],
+                    "{trigger}: wake dropped (cannot restart the model), user prompt kept"
+                );
+                assert!(
+                    matches!(
+                        state.pending_notifications.as_slice(),
+                        [PendingNotification {
+                            source: NotificationSource::BashTaskCompleted { task_id },
+                            ..
+                        }] if task_id == "bg-queued"
+                    ),
+                    "{trigger}: completion parks as a fallback"
+                );
+                assert!(
+                    state.notifications_suppressed,
+                    "{trigger}: suppression stays armed until the user re-engages"
+                );
+            }
+            assert!(
+                matches!(running_rx.try_recv(), Ok(Ok(_))),
+                "{trigger}: the running turn resolves"
+            );
+            assert!(
+                matches!(
+                    wake_rx.try_recv(),
+                    Ok(Ok(crate::session::commands::PromptTurnOk {
+                        completion_kind: PromptCompletionKind::RemovedFromQueue,
+                        ..
+                    }))
+                ),
+                "{trigger}: the queued wake resolves as removed"
+            );
+            assert!(
+                matches!(queued_user_rx.try_recv(), Err(TryRecvError::Empty)),
+                "{trigger}: the queued user prompt stays pending"
+            );
+            assert!(
+                reservations.contains("bg-queued"),
+                "{trigger}: the dropped wake's completion is reserved for redelivery"
+            );
+            actor.consume_deferred_completions_for_user_turn().await;
+            assert!(
+                actor.state.lock().await.pending_notifications.is_empty(),
+                "{trigger}: the next user turn consumes the fallback exactly once"
+            );
+            assert!(!reservations.contains("bg-queued"));
+        })
+        .await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn stop_gestures_arm_wake_barrier() {
+    for trigger in ["esc", "mouse", "dashboard_stop", "some_future_gesture"] {
+        assert_stop_trigger_arms_wake_barrier(trigger).await;
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn non_stop_cancels_preserve_queued_task_wakes_and_do_not_arm_barrier() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            for trigger in [
+                Some(crate::session::CancelTrigger::SendNow),
+                Some(crate::session::CancelTrigger::SessionDelete),
+                None,
+            ] {
                 let (gateway_tx, _gateway_rx) =
                     tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
                 let (persistence_tx, _persistence_rx) =
@@ -1973,14 +2105,19 @@ async fn non_ctrl_c_cancel_preserves_queued_task_wakes_and_does_not_arm_barrier(
                     state.pending_inputs.push_back(wake_item);
                     state.pending_inputs.push_back(queued_user);
                 }
-                actor
+                let barrier = actor
                     .cancel_running_task(crate::session::CancelOptions {
                         cancel_subagents: true,
-                        trigger: trigger.map(crate::session::CancelTrigger::from_client),
+                        trigger: trigger.clone(),
                         user_initiated: true,
                         ..Default::default()
                     })
                     .await;
+                assert_eq!(
+                    barrier,
+                    super::tasks_cancel::WakeBarrier::Clear,
+                    "non-stop cancel {trigger:?} must report an unarmed barrier"
+                );
                 let state = actor.state.lock().await;
                 let remaining: Vec<&str> = state
                     .pending_inputs
@@ -1990,11 +2127,11 @@ async fn non_ctrl_c_cancel_preserves_queued_task_wakes_and_does_not_arm_barrier(
                 assert_eq!(
                     remaining,
                     vec!["task-completed-bg-preserved", "user-next"],
-                    "non-Ctrl+C cancel {trigger:?} must preserve the queued task wake"
+                    "non-stop cancel {trigger:?} must preserve the queued task wake"
                 );
                 assert!(
                     !state.notifications_suppressed,
-                    "non-Ctrl+C cancel {trigger:?} must not arm task-wake suppression"
+                    "non-stop cancel {trigger:?} must not arm task-wake suppression"
                 );
             }
         })
@@ -2070,7 +2207,7 @@ async fn cancel_resolves_front_when_running_task_is_none() {
                 state.pending_inputs.push_back(running_item);
                 state.pending_inputs.push_back(q2_item);
             }
-            actor
+            let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
                     cancel_subagents: true,
                     user_initiated: true,
@@ -2501,7 +2638,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     handle: task.abort_handle(),
                 });
             }
-            actor
+            let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
                     cancel_subagents: true,
                     user_initiated: true,
@@ -2658,7 +2795,7 @@ async fn cancel_keeps_remaining_queued_prompts_visible_to_clients() {
                 state.pending_inputs.push_back(make_item("q1-pid", "q1"));
                 state.pending_inputs.push_back(make_item("q2-pid", "q2"));
             }
-            actor
+            let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
                     cancel_subagents: true,
                     user_initiated: true,

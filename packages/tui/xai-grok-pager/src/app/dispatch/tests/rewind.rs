@@ -119,33 +119,26 @@ fn app_mid_inline_edit(edited: &str) -> AppView {
 }
 
 /// Rewind point for the fixture's single prompt.
-fn rewind_point(
-    prompt_index: usize,
-    has_file_changes: bool,
-) -> crate::views::rewind::RewindPointInfo {
+fn rewind_point(prompt_index: usize) -> crate::views::rewind::RewindPointInfo {
     crate::views::rewind::RewindPointInfo {
         prompt_index,
         created_at: String::new(),
         num_file_snapshots: 0,
         prompt_preview: Some("fix the bug".into()),
-        has_file_changes,
+        has_file_changes: false,
     }
 }
 
 /// Points-loaded task result carrying the fixture's single rewind point.
-fn points_loaded(id: AgentId, has_file_changes: bool) -> Action {
+fn points_loaded(id: AgentId) -> Action {
     Action::TaskComplete(TaskResult::RewindPointsLoaded {
         agent_id: id,
-        points: vec![rewind_point(0, has_file_changes)],
+        points: vec![rewind_point(0)],
     })
 }
 
-/// Successful rewind/execute response in the given mode.
-fn rewind_success(
-    target: usize,
-    mode: &str,
-    prompt_text: &str,
-) -> crate::views::rewind::RewindResponse {
+/// Successful rewind/execute response (conversation-only).
+fn rewind_success(target: usize, prompt_text: &str) -> crate::views::rewind::RewindResponse {
     crate::views::rewind::RewindResponse {
         success: true,
         target_prompt_index: target,
@@ -153,15 +146,13 @@ fn rewind_success(
         clean_files: vec![],
         conflicts: vec![],
         error: None,
-        mode: Some(mode.into()),
+        mode: Some("conversation_only".into()),
         prompt_text: Some(prompt_text.into()),
     }
 }
 
-/// Drive an idle inline-edit submit through the classic flow up to the
-/// rewind execute: points fetch → ModeSelect → "conversation only" →
-/// last-prompt confirm popup → Executing. Returns the effects of the step
-/// that emitted `RewindExecute`.
+/// Drive an idle inline-edit submit through to execute: points fetch →
+/// confirm (setting on) → Executing. Returns the effects of the confirm step.
 fn drive_inline_submit_to_execute(app: &mut AppView) -> Vec<Effect> {
     let id = AgentId(0);
     let effects = dispatch(Action::InlineEditSubmit, app);
@@ -169,14 +160,13 @@ fn drive_inline_submit_to_execute(app: &mut AppView) -> Vec<Effect> {
         matches!(&effects[0], Effect::FetchRewindPoints { .. }),
         "got {effects:?}"
     );
-    dispatch(points_loaded(id, false), app);
-    // Target 0 is the newest prompt: conversation-only inserts its
-    // last-prompt confirm popup before executing, exactly like /rewind.
-    dispatch(
-        Action::RewindSelectMode(crate::views::rewind::RewindMode::ConversationOnly, 0),
-        app,
-    );
-    dispatch(Action::RewindConversationOnlyConfirm(0), app)
+    dispatch(points_loaded(id), app);
+    // Confirm-before-rewind (default on) gates every target, including 0.
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Confirm { .. }
+    ));
+    dispatch(Action::RewindConfirm(0), app)
 }
 
 /// Submitting an inline edit enters the exact same flow as `/rewind`: a
@@ -225,25 +215,25 @@ fn inline_edit_submit_with_unchanged_text_closes_editor() {
     assert!(agent.scrollback.inline_edit_height().is_none());
 }
 
-/// Points loaded with a pre-selected target skip the picker straight into
-/// ModeSelect — the same popup `/rewind` shows — with the editor still open
-/// behind it. In this inline context the "File changes only" row is hidden
-/// (`offer_files_only: false`): the conversation rewind is a given.
+/// Points loaded with a pre-selected target skip the picker and open confirm
+/// when the setting is on; the editor stays open behind it.
 #[test]
-fn inline_edit_points_loaded_opens_mode_select_over_open_editor() {
+fn inline_edit_points_loaded_opens_target_zero_confirm_over_open_editor() {
     let mut app = app_mid_inline_edit("fix the bug properly");
     let id = AgentId(0);
     dispatch(Action::InlineEditSubmit, &mut app);
 
-    dispatch(points_loaded(id, true), &mut app);
+    let effects = dispatch(points_loaded(id), &mut app);
+    assert!(
+        effects.is_empty(),
+        "confirm setting on waits for Yes/No, got {effects:?}"
+    );
 
     let agent = &app.agents[&id];
     assert!(matches!(
         agent.rewind_state.as_ref().unwrap().phase,
-        crate::views::rewind::RewindPhase::ModeSelect {
+        crate::views::rewind::RewindPhase::Confirm {
             target_prompt_index: 0,
-            has_file_changes: true,
-            offer_files_only: false,
             ..
         }
     ));
@@ -251,10 +241,10 @@ fn inline_edit_points_loaded_opens_mode_select_over_open_editor() {
     assert!(agent.pending_inline_resubmit.is_none());
 }
 
-/// The classic `/rewind` flow is untouched: with no inline editor open, the
-/// ModeSelect popup keeps all three options (files-only row offered).
+/// Classic `/rewind` with a selected turn also lands on the confirm
+/// when confirm-before-rewind is on (default).
 #[test]
-fn classic_rewind_mode_select_keeps_files_only_row() {
+fn classic_rewind_target_zero_opens_confirm() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
@@ -274,86 +264,359 @@ fn classic_rewind_mode_select_keeps_files_only_row() {
         matches!(&effects[0], Effect::FetchRewindPoints { .. }),
         "got {effects:?}"
     );
-    dispatch(points_loaded(id, true), &mut app);
+    let effects = dispatch(points_loaded(id), &mut app);
+    assert!(
+        effects.is_empty(),
+        "confirm setting on waits for Yes/No, got {effects:?}"
+    );
 
     assert!(matches!(
         app.agents[&id].rewind_state.as_ref().unwrap().phase,
-        crate::views::rewind::RewindPhase::ModeSelect {
-            offer_files_only: true,
+        crate::views::rewind::RewindPhase::Confirm {
+            target_prompt_index: 0,
             ..
         }
     ));
 }
 
-/// Backspace from the preview Confirm during an inline flow returns to a
-/// ModeSelect that still hides the files-only row (the editor is still
-/// open, so the inline context is re-derived).
+/// Settings action updates the live confirm-before-rewind value.
 #[test]
-fn inline_edit_back_to_mode_select_preserves_hidden_files_only_row() {
-    let mut app = app_mid_inline_edit("fix the bug properly");
-    let id = AgentId(0);
-    dispatch(Action::InlineEditSubmit, &mut app);
-    dispatch(points_loaded(id, true), &mut app);
-    dispatch(
-        Action::RewindSelectMode(crate::views::rewind::RewindMode::All, 0),
-        &mut app,
+fn set_confirm_before_rewind_updates_live_value() {
+    let mut app = test_app_with_agent();
+    assert!(app.current_ui.confirm_before_rewind_enabled());
+
+    let effects = dispatch(Action::SetConfirmBeforeRewind(false), &mut app);
+    assert!(
+        matches!(
+            &effects[0],
+            Effect::PersistSetting {
+                key: "confirm_before_rewind",
+                value: crate::settings::SettingValue::Bool(false),
+                ..
+            }
+        ),
+        "got {effects:?}"
     );
-    let mut preview = rewind_success(0, "all", "fix the bug");
-    preview.clean_files = vec!["src/main.rs".into()];
+    assert!(!app.current_ui.confirm_before_rewind_enabled());
+    assert_eq!(app.current_ui.confirm_before_rewind, Some(false));
+
+    let effects = dispatch(Action::SetConfirmBeforeRewind(false), &mut app);
+    assert!(
+        effects.is_empty(),
+        "idempotent when already false, got {effects:?}"
+    );
+}
+
+/// Multi-turn fixture with two user prompts for picker / non-zero target tests.
+fn app_with_two_turns() -> AppView {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess".to_string()));
+        for i in 0..2 {
+            let mut b = UserPromptBlock::new(format!("turn {i}"));
+            b.prompt_index = Some(i);
+            agent.scrollback.push_block(RenderBlock::UserPrompt(b));
+            agent
+                .scrollback
+                .push_block(RenderBlock::agent_message("ok"));
+        }
+        agent.scrollback.prepare_layout(80, 40);
+    }
+    app
+}
+
+/// With confirm-before-rewind off, picking a non-zero turn executes immediately.
+#[test]
+fn picker_select_nonzero_target_executes_immediately_when_confirm_off() {
+    let mut app = app_with_two_turns();
+    app.current_ui.confirm_before_rewind = Some(false);
+    let id = AgentId(0);
+
+    dispatch(Action::RewindShowPicker, &mut app);
     dispatch(
-        Action::TaskComplete(TaskResult::RewindPreviewComplete {
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
             agent_id: id,
-            response: preview,
-            target_prompt_index: 0,
-            mode: crate::views::rewind::RewindMode::All,
+            points: vec![rewind_point(1), rewind_point(0)],
         }),
         &mut app,
     );
     assert!(matches!(
         app.agents[&id].rewind_state.as_ref().unwrap().phase,
-        crate::views::rewind::RewindPhase::Confirm { .. }
+        crate::views::rewind::RewindPhase::Picker { .. }
     ));
 
-    dispatch(Action::RewindBackToModeSelect, &mut app);
-
-    let agent = &app.agents[&id];
+    let effects = dispatch(Action::RewindPickerSelect(1), &mut app);
+    assert!(
+        matches!(
+            &effects[0],
+            Effect::RewindExecute {
+                target_prompt_index: 1,
+                ..
+            }
+        ),
+        "got {effects:?}"
+    );
     assert!(matches!(
-        agent.rewind_state.as_ref().unwrap().phase,
-        crate::views::rewind::RewindPhase::ModeSelect {
-            offer_files_only: false,
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Executing {
+            target_prompt_index: 1
+        }
+    ));
+}
+
+/// With confirm-before-rewind on (default), picking a non-zero target opens confirm.
+#[test]
+fn picker_select_nonzero_target_opens_confirm_when_setting_on() {
+    let mut app = app_with_two_turns();
+    assert!(app.current_ui.confirm_before_rewind_enabled());
+    let id = AgentId(0);
+
+    dispatch(Action::RewindShowPicker, &mut app);
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![rewind_point(1), rewind_point(0)],
+        }),
+        &mut app,
+    );
+
+    let effects = dispatch(Action::RewindPickerSelect(1), &mut app);
+    assert!(
+        effects.is_empty(),
+        "confirm setting on waits, got {effects:?}"
+    );
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Confirm {
+            target_prompt_index: 1,
+            active_idx: 0,
             ..
         }
     ));
-    assert!(agent.inline_edit.is_some(), "editor still open");
 }
 
-/// ModeSelect → "conversation only" → execute: the edited text is stashed
-/// exactly when the rewind executes; on success the transcript truncates
-/// at the prompt, the edited text is resubmitted from there, the editor
-/// closes, and the composer draft survives (no "Reverted conversation"
-/// system note).
+/// Picking any target (including 0) opens confirm when the setting is on.
+#[test]
+fn picker_select_target_zero_opens_confirm() {
+    let mut app = app_with_two_turns();
+    let id = AgentId(0);
+
+    dispatch(Action::RewindShowPicker, &mut app);
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![rewind_point(1), rewind_point(0)],
+        }),
+        &mut app,
+    );
+
+    let effects = dispatch(Action::RewindPickerSelect(0), &mut app);
+    assert!(
+        effects.is_empty(),
+        "confirm setting on waits for Yes/No, got {effects:?}"
+    );
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Confirm {
+            target_prompt_index: 0,
+            active_idx: 0,
+            ..
+        }
+    ));
+}
+
+/// Confirm Yes executes conversation-only rewind.
+#[test]
+fn confirm_yes_executes_rewind() {
+    let mut app = app_with_two_turns();
+    let id = AgentId(0);
+
+    dispatch(Action::RewindShowPicker, &mut app);
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![rewind_point(1), rewind_point(0)],
+        }),
+        &mut app,
+    );
+    dispatch(Action::RewindPickerSelect(1), &mut app);
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Confirm {
+            target_prompt_index: 1,
+            ..
+        }
+    ));
+
+    let effects = dispatch(Action::RewindConfirm(1), &mut app);
+    assert!(
+        matches!(
+            &effects[0],
+            Effect::RewindExecute {
+                target_prompt_index: 1,
+                ..
+            }
+        ),
+        "got {effects:?}"
+    );
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Executing {
+            target_prompt_index: 1
+        }
+    ));
+}
+
+/// "Yes, and don't ask again" turns the setting off and executes this rewind.
+#[test]
+fn confirm_never_ask_persists_setting_off_and_executes() {
+    let mut app = app_with_two_turns();
+    assert!(app.current_ui.confirm_before_rewind_enabled());
+    let id = AgentId(0);
+
+    dispatch(Action::RewindShowPicker, &mut app);
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![rewind_point(1), rewind_point(0)],
+        }),
+        &mut app,
+    );
+    dispatch(Action::RewindPickerSelect(1), &mut app);
+
+    let effects = dispatch(Action::RewindConfirmNeverAsk(1), &mut app);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::PersistSetting {
+                key: "confirm_before_rewind",
+                value: crate::settings::SettingValue::Bool(false),
+                ..
+            }
+        )),
+        "must persist setting off, got {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::RewindExecute {
+                target_prompt_index: 1,
+                ..
+            }
+        )),
+        "must execute rewind, got {effects:?}"
+    );
+    assert!(!app.current_ui.confirm_before_rewind_enabled());
+    assert_eq!(app.current_ui.confirm_before_rewind, Some(false));
+    assert!(
+        app.agents[&id].toast.is_none(),
+        "never-ask must not toast settings checkmark, got {:?}",
+        app.agents[&id].toast
+    );
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Executing {
+            target_prompt_index: 1
+        }
+    ));
+}
+
+/// With confirm off, target 0 executes immediately (same as non-zero targets).
+#[test]
+fn picker_select_target_zero_executes_immediately_when_confirm_off() {
+    let mut app = app_with_two_turns();
+    app.current_ui.confirm_before_rewind = Some(false);
+    let id = AgentId(0);
+
+    dispatch(Action::RewindShowPicker, &mut app);
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![rewind_point(1), rewind_point(0)],
+        }),
+        &mut app,
+    );
+
+    let effects = dispatch(Action::RewindPickerSelect(0), &mut app);
+    assert!(
+        matches!(
+            &effects[0],
+            Effect::RewindExecute {
+                target_prompt_index: 0,
+                ..
+            }
+        ),
+        "got {effects:?}"
+    );
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Executing {
+            target_prompt_index: 0
+        }
+    ));
+}
+
+/// Non-zero success keeps earlier turns, truncates from the target, and toasts.
+#[test]
+fn rewind_success_nonzero_target_keeps_prefix_and_toasts() {
+    let mut app = app_with_two_turns();
+    let id = AgentId(0);
+    let len_before = app.agents[&id].scrollback.len();
+
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindExecuteComplete {
+            agent_id: id,
+            response: rewind_success(1, "turn 1"),
+        }),
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    assert!(
+        agent.scrollback.len() < len_before,
+        "tail from target 1 must drop"
+    );
+    assert!(matches!(
+        &agent.scrollback.entry(0).unwrap().block,
+        RenderBlock::UserPrompt(b) if b.text == "turn 0"
+    ));
+    assert!(matches!(
+        &agent.scrollback.entry(1).unwrap().block,
+        RenderBlock::AgentMessage(_)
+    ));
+    assert_eq!(
+        agent.scrollback.len(),
+        2,
+        "only turn 0 (prompt + reply) remains"
+    );
+    assert_eq!(
+        agent.toast.as_ref().map(|(m, _)| m.as_str()),
+        Some("Reverted conversation")
+    );
+}
+
+/// Target-0 confirm → execute: the edited text is stashed exactly when the
+/// rewind executes; on success the transcript truncates at the prompt, the
+/// edited text is resubmitted from there, the editor closes, and the
+/// composer draft survives (no "Reverted conversation" system note).
 #[test]
 fn inline_edit_conversation_only_success_resubmits_and_closes_editor() {
     let mut app = app_mid_inline_edit("fix the bug properly");
     let id = AgentId(0);
     dispatch(Action::InlineEditSubmit, &mut app);
-    dispatch(points_loaded(id, false), &mut app);
-    dispatch(
-        Action::RewindSelectMode(crate::views::rewind::RewindMode::ConversationOnly, 0),
-        &mut app,
-    );
-    // Newest prompt → the flow's last-prompt confirm popup shows first.
+    dispatch(points_loaded(id), &mut app);
     assert!(matches!(
         app.agents[&id].rewind_state.as_ref().unwrap().phase,
-        crate::views::rewind::RewindPhase::ConversationOnlyConfirm { .. }
+        crate::views::rewind::RewindPhase::Confirm { .. }
     ));
 
-    let effects = dispatch(Action::RewindConversationOnlyConfirm(0), &mut app);
+    let effects = dispatch(Action::RewindConfirm(0), &mut app);
     assert!(matches!(
         &effects[0],
         Effect::RewindExecute {
             target_prompt_index: 0,
-            mode: crate::views::rewind::RewindMode::ConversationOnly,
             ..
         }
     ));
@@ -373,7 +636,7 @@ fn inline_edit_conversation_only_success_resubmits_and_closes_editor() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
-            response: rewind_success(0, "conversation_only", "fix the bug"),
+            response: rewind_success(0, "fix the bug"),
         }),
         &mut app,
     );
@@ -402,153 +665,230 @@ fn inline_edit_conversation_only_success_resubmits_and_closes_editor() {
     }
 }
 
-/// ModeSelect → "conversation + files" over a point with file changes goes
-/// through the preview → Confirm popup (same as /rewind); confirming
-/// executes with the edited text stashed, and success resubmits it.
+/// No / Esc dismiss from confirm during inline edit restores the editor draft.
 #[test]
-fn inline_edit_all_mode_previews_confirms_and_resubmits() {
+fn inline_edit_dismiss_from_confirm_keeps_editor() {
     let mut app = app_mid_inline_edit("fix the bug properly");
     let id = AgentId(0);
     dispatch(Action::InlineEditSubmit, &mut app);
-    dispatch(points_loaded(id, true), &mut app);
-
-    let effects = dispatch(
-        Action::RewindSelectMode(crate::views::rewind::RewindMode::All, 0),
-        &mut app,
-    );
-    assert!(
-        matches!(&effects[0], Effect::RewindPreview { .. }),
-        "file changes present → preview first, got {effects:?}"
-    );
-    assert!(
-        app.agents[&id].pending_inline_resubmit.is_none(),
-        "no stash before an execute"
-    );
-
-    // Preview lands → Confirm popup, editor still open behind it.
-    let mut preview = rewind_success(0, "all", "fix the bug");
-    preview.clean_files = vec!["src/main.rs".into()];
-    dispatch(
-        Action::TaskComplete(TaskResult::RewindPreviewComplete {
-            agent_id: id,
-            response: preview,
-            target_prompt_index: 0,
-            mode: crate::views::rewind::RewindMode::All,
-        }),
-        &mut app,
-    );
+    dispatch(points_loaded(id), &mut app);
     assert!(matches!(
         app.agents[&id].rewind_state.as_ref().unwrap().phase,
         crate::views::rewind::RewindPhase::Confirm { .. }
     ));
-    assert!(app.agents[&id].inline_edit.is_some());
 
-    let effects = dispatch(
-        Action::RewindConfirm(0, crate::views::rewind::RewindMode::All),
-        &mut app,
-    );
-    assert!(matches!(
-        &effects[0],
-        Effect::RewindExecute {
-            mode: crate::views::rewind::RewindMode::All,
-            ..
-        }
-    ));
-    assert_eq!(
-        app.agents[&id].pending_inline_resubmit.as_deref(),
-        Some("fix the bug properly")
-    );
+    dispatch(Action::RewindDismiss, &mut app);
 
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::RewindExecuteComplete {
-            agent_id: id,
-            response: rewind_success(0, "all", "fix the bug"),
-        }),
-        &mut app,
-    );
-    assert!(
-        effects.iter().any(
-            |e| matches!(e, Effect::SendPrompt { text, .. } if text == "fix the bug properly")
-        ),
-        "got {effects:?}"
-    );
-    assert!(
-        app.agents[&id].inline_edit.is_none(),
-        "editor closed on success"
-    );
-}
-
-/// ModeSelect → "files only": no conversation rewind happens, so nothing
-/// is resubmitted — the edited text lands in the composer instead (never
-/// silently dropped), the editor closes, and the conversation transcript
-/// stays intact.
-#[test]
-fn inline_edit_files_only_success_prefills_composer_without_resubmit() {
-    let mut app = app_mid_inline_edit("fix the bug properly");
-    let id = AgentId(0);
-    dispatch(Action::InlineEditSubmit, &mut app);
-    // No file changes recorded → FilesOnly skips the preview and executes
-    // directly.
-    dispatch(points_loaded(id, false), &mut app);
-    let effects = dispatch(
-        Action::RewindSelectMode(crate::views::rewind::RewindMode::FilesOnly, 0),
-        &mut app,
-    );
-    assert!(matches!(
-        &effects[0],
-        Effect::RewindExecute {
-            mode: crate::views::rewind::RewindMode::FilesOnly,
-            ..
-        }
-    ));
-    assert_eq!(
-        app.agents[&id].pending_inline_resubmit.as_deref(),
-        Some("fix the bug properly")
-    );
-
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::RewindExecuteComplete {
-            agent_id: id,
-            response: rewind_success(0, "files_only", "fix the bug"),
-        }),
-        &mut app,
-    );
-
-    assert!(
-        effects
-            .iter()
-            .all(|e| !matches!(e, Effect::SendPrompt { .. })),
-        "files-only must not resubmit, got {effects:?}"
-    );
     let agent = &app.agents[&id];
-    assert!(agent.inline_edit.is_none(), "editor closed");
+    assert!(agent.rewind_state.is_none(), "overlay dismissed");
+    assert_eq!(
+        agent
+            .inline_edit
+            .as_ref()
+            .expect("editor still open")
+            .textarea
+            .text(),
+        "fix the bug properly"
+    );
     assert!(agent.pending_inline_resubmit.is_none());
     assert_eq!(
         agent.prompt.text(),
-        "fix the bug properly",
-        "edit surfaced in the composer"
+        "composer draft",
+        "composer draft restored on dismiss"
     );
-    // Conversation untouched: the original prompt + reply are still there
-    // (the classic flow appends its "Reverted file changes" note after).
+}
+
+/// Inline-edit of an older prompt with confirm off: points load executes
+/// immediately — resubmit armed.
+#[test]
+fn inline_edit_nonzero_target_points_loaded_executes_immediately_when_confirm_off() {
+    let mut app = test_app_with_agent();
+    app.current_ui.confirm_before_rewind = Some(false);
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess".to_string()));
+        for i in 0..2 {
+            let mut b = UserPromptBlock::new(format!("turn {i}"));
+            b.prompt_index = Some(i);
+            agent.scrollback.push_block(RenderBlock::UserPrompt(b));
+            agent
+                .scrollback
+                .push_block(RenderBlock::agent_message("ok"));
+        }
+        agent.scrollback.prepare_layout(80, 40);
+        // Entry 2 is the second user prompt (index 1).
+        assert!(agent.enter_inline_edit(2));
+        agent
+            .inline_edit
+            .as_mut()
+            .unwrap()
+            .textarea
+            .set_text("turn 1 edited");
+        agent.prompt.set_text("composer draft");
+    }
+
+    let effects = dispatch(Action::InlineEditSubmit, &mut app);
+    assert!(matches!(&effects[0], Effect::FetchRewindPoints { .. }));
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![rewind_point(1), rewind_point(0)],
+        }),
+        &mut app,
+    );
+    assert!(
+        matches!(
+            &effects[0],
+            Effect::RewindExecute {
+                target_prompt_index: 1,
+                ..
+            }
+        ),
+        "got {effects:?}"
+    );
+    let agent = &app.agents[&id];
     assert!(matches!(
-        &agent.scrollback.entry(0).unwrap().block,
-        RenderBlock::UserPrompt(b) if b.text == "fix the bug"
+        agent.rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Executing {
+            target_prompt_index: 1
+        }
     ));
+    assert_eq!(
+        agent.pending_inline_resubmit.as_deref(),
+        Some("turn 1 edited")
+    );
+    assert!(
+        agent.inline_edit.is_some(),
+        "editor open until execute lands"
+    );
+}
+
+/// Inline-edit of an older prompt with confirm on (default): opens confirm.
+#[test]
+fn inline_edit_nonzero_target_opens_confirm_when_setting_on() {
+    let mut app = test_app_with_agent();
+    assert!(app.current_ui.confirm_before_rewind_enabled());
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess".to_string()));
+        for i in 0..2 {
+            let mut b = UserPromptBlock::new(format!("turn {i}"));
+            b.prompt_index = Some(i);
+            agent.scrollback.push_block(RenderBlock::UserPrompt(b));
+            agent
+                .scrollback
+                .push_block(RenderBlock::agent_message("ok"));
+        }
+        agent.scrollback.prepare_layout(80, 40);
+        assert!(agent.enter_inline_edit(2));
+        agent
+            .inline_edit
+            .as_mut()
+            .unwrap()
+            .textarea
+            .set_text("turn 1 edited");
+    }
+
+    dispatch(Action::InlineEditSubmit, &mut app);
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![rewind_point(1), rewind_point(0)],
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty(), "confirm setting on, got {effects:?}");
     assert!(matches!(
-        &agent.scrollback.entry(1).unwrap().block,
-        RenderBlock::AgentMessage(_)
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Confirm {
+            target_prompt_index: 1,
+            active_idx: 0,
+            ..
+        }
+    ));
+    assert!(app.agents[&id].pending_inline_resubmit.is_none());
+}
+
+/// Points-loaded begin_rewind path: confirm off executes immediately.
+#[test]
+fn inline_edit_target_zero_executes_immediately_when_confirm_off() {
+    let mut app = app_mid_inline_edit("fix the bug properly");
+    app.current_ui.confirm_before_rewind = Some(false);
+    let id = AgentId(0);
+
+    dispatch(Action::InlineEditSubmit, &mut app);
+    let effects = dispatch(points_loaded(id), &mut app);
+    assert!(
+        matches!(
+            &effects[0],
+            Effect::RewindExecute {
+                target_prompt_index: 0,
+                ..
+            }
+        ),
+        "got {effects:?}"
+    );
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Executing {
+            target_prompt_index: 0
+        }
+    ));
+    assert_eq!(
+        app.agents[&id].pending_inline_resubmit.as_deref(),
+        Some("fix the bug properly")
+    );
+}
+
+/// Classic points-loaded path with confirm off executes immediately.
+#[test]
+fn classic_points_loaded_target_zero_executes_when_confirm_off() {
+    let mut app = test_app_with_agent();
+    app.current_ui.confirm_before_rewind = Some(false);
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("fix the bug"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::agent_message("done"));
+        agent.scrollback.prepare_layout(80, 40);
+        agent.scrollback.set_selected(Some(0));
+    }
+
+    dispatch(Action::Rewind, &mut app);
+    let effects = dispatch(points_loaded(id), &mut app);
+    assert!(
+        matches!(
+            &effects[0],
+            Effect::RewindExecute {
+                target_prompt_index: 0,
+                ..
+            }
+        ),
+        "got {effects:?}"
+    );
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Executing {
+            target_prompt_index: 0
+        }
     ));
 }
 
-/// Dismissing the ModeSelect popup aborts the whole thing: the overlay
-/// closes, nothing was stashed, and the editor is still open with the
-/// edit intact.
+/// Dismissing the confirm aborts: the overlay closes, nothing was stashed,
+/// and the editor is still open with the edit intact.
 #[test]
-fn inline_edit_dismiss_from_mode_select_returns_to_editor() {
+fn inline_edit_dismiss_from_confirm_returns_to_editor() {
     let mut app = app_mid_inline_edit("fix the bug properly");
     let id = AgentId(0);
     dispatch(Action::InlineEditSubmit, &mut app);
-    dispatch(points_loaded(id, false), &mut app);
+    dispatch(points_loaded(id), &mut app);
 
     dispatch(Action::RewindDismiss, &mut app);
 
@@ -658,10 +998,12 @@ fn inline_edit_execute_failure_keeps_editor_open() {
         agent.pending_inline_resubmit.is_none(),
         "stash dies with its rewind"
     );
-    assert!(matches!(
-        agent.rewind_state.as_ref().unwrap().phase,
-        crate::views::rewind::RewindPhase::Error { .. }
-    ));
+    match &agent.rewind_state.as_ref().unwrap().phase {
+        crate::views::rewind::RewindPhase::Error { message } => {
+            assert_eq!(message, "boom");
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
     assert_eq!(
         agent
             .inline_edit
@@ -682,7 +1024,7 @@ fn inline_edit_unsuccessful_response_keeps_editor_open() {
     let id = AgentId(0);
     drive_inline_submit_to_execute(&mut app);
 
-    let mut response = rewind_success(0, "conversation_only", "fix the bug");
+    let mut response = rewind_success(0, "fix the bug");
     response.success = false;
     response.error = Some("conflict".into());
     let effects = dispatch(
@@ -696,10 +1038,12 @@ fn inline_edit_unsuccessful_response_keeps_editor_open() {
     assert!(effects.is_empty());
     let agent = &app.agents[&id];
     assert!(agent.pending_inline_resubmit.is_none());
-    assert!(matches!(
-        agent.rewind_state.as_ref().unwrap().phase,
-        crate::views::rewind::RewindPhase::Error { .. }
-    ));
+    match &agent.rewind_state.as_ref().unwrap().phase {
+        crate::views::rewind::RewindPhase::Error { message } => {
+            assert_eq!(message, "conflict");
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
     assert!(agent.inline_edit.is_some(), "editor stays open");
     assert_eq!(agent.scrollback.len(), 2, "transcript untouched");
 }
@@ -716,7 +1060,7 @@ fn inline_edit_resubmit_sends_slash_text_literally() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
-            response: rewind_success(0, "conversation_only", "fix the bug"),
+            response: rewind_success(0, "fix the bug"),
         }),
         &mut app,
     );
@@ -742,7 +1086,7 @@ fn inline_edit_rewind_success_after_view_switch_appends_to_draft() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
-            response: rewind_success(0, "conversation_only", "fix the bug"),
+            response: rewind_success(0, "fix the bug"),
         }),
         &mut app,
     );
@@ -787,7 +1131,7 @@ fn inline_edit_view_switch_preserves_image_draft_when_appending_resubmit() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
-            response: rewind_success(0, "conversation_only", "fix the bug"),
+            response: rewind_success(0, "fix the bug"),
         }),
         &mut app,
     );
@@ -862,52 +1206,35 @@ fn user_block(text: &str, pi: Option<usize>) -> RenderBlock {
 }
 
 /// A successful conversation rewind truncates the transcript tail
-/// (`remove_from`) — the purge must fire exactly once, and a
-/// files-only rewind (no truncation) must not purge.
+/// (`remove_from`) — the purge must fire exactly once.
 #[test]
 fn rewind_success_truncation_releases_retained_memory() {
     use crate::memory_release::test_support;
     test_support::install_counting_hook();
 
-    let response = |mode: &str| crate::views::rewind::RewindResponse {
+    let response = crate::views::rewind::RewindResponse {
         success: true,
         target_prompt_index: 0,
         reverted_files: Vec::new(),
         clean_files: Vec::new(),
         conflicts: Vec::new(),
         error: None,
-        mode: Some(mode.into()),
+        mode: Some("conversation_only".into()),
         prompt_text: Some("alpha".into()),
     };
 
-    // files_only: transcript untouched → no purge.
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     if let Some(agent) = app.agents.get_mut(&id) {
         agent.scrollback.push_block(user_block("alpha", Some(0)));
         agent.scrollback.push_block(RenderBlock::agent_message("a"));
     }
-    let before = test_support::calls();
-    dispatch(
-        Action::TaskComplete(TaskResult::RewindExecuteComplete {
-            agent_id: id,
-            response: response("files_only"),
-        }),
-        &mut app,
-    );
-    assert_eq!(
-        test_support::calls(),
-        before,
-        "a files-only rewind truncates nothing and must not purge"
-    );
-
-    // Conversation rewind: the tail from the anchor drops → one purge.
     let len_before = app.agents[&id].scrollback.len();
     let before = test_support::calls();
     dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
-            response: response("all"),
+            response,
         }),
         &mut app,
     );
@@ -926,14 +1253,14 @@ fn rewind_success_truncation_releases_retained_memory() {
 /// keeps the scrollback system block (it never renders toasts).
 #[test]
 fn rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal() {
-    let response = |mode: &str| crate::views::rewind::RewindResponse {
+    let response = crate::views::rewind::RewindResponse {
         success: true,
         target_prompt_index: 0,
         reverted_files: Vec::new(),
         clean_files: Vec::new(),
         conflicts: Vec::new(),
         error: None,
-        mode: Some(mode.into()),
+        mode: Some("conversation_only".into()),
         prompt_text: None,
     };
 
@@ -946,13 +1273,13 @@ fn rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal() {
     dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
-            response: response("all"),
+            response: response.clone(),
         }),
         &mut app,
     );
     assert_eq!(
         app.agents[&id].toast.as_ref().map(|(m, _)| m.as_str()),
-        Some("Reverted conversation and file changes")
+        Some("Reverted conversation")
     );
     assert_eq!(
         app.agents[&id].scrollback.len(),
@@ -962,15 +1289,19 @@ fn rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal() {
 
     let mut app = test_app_with_agent();
     app.screen_mode = crate::app::ScreenMode::Minimal;
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.scrollback.push_block(user_block("alpha", Some(0)));
+        agent.scrollback.push_block(RenderBlock::agent_message("a"));
+    }
     dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
-            response: response("files_only"),
+            response,
         }),
         &mut app,
     );
     assert!(app.agents[&id].toast.is_none());
-    assert_eq!(last_system_text(&app, id), "Reverted file changes");
+    assert_eq!(last_system_text(&app, id), "Reverted conversation");
 }
 
 #[test]

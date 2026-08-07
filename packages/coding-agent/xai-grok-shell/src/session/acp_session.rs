@@ -218,7 +218,8 @@ pub(crate) struct InputItem {
     /// Who originated this prompt — user or auto-wake system.
     pub(crate) origin: super::PromptOrigin,
     /// Typed deferred completion retained while an admitted task wake is queued.
-    /// Consumed by Ctrl+C if it removes the wake before the turn starts.
+    /// Consumed by an interactive stop if it removes the wake before the
+    /// turn starts.
     pub(crate) task_wake_fallback: Option<TaskWakeFallback>,
     pub(crate) tool_overrides_update: Option<xai_grok_sampling_types::ToolOverridesUpdate>,
     pub(crate) respond_to: oneshot::Sender<PromptTurnResult>,
@@ -302,7 +303,8 @@ pub(crate) struct State {
     /// Prompt ids held out of combine-on-promote (composer edit in progress).
     pub(crate) combine_edit_holds: std::collections::HashSet<String>,
     /// When true, notifications are buffered but not drained until genuine
-    /// user re-engagement. Set by interactive Ctrl+C, cleared by a user prompt.
+    /// user re-engagement. Set by an interactive stop, cleared by a user
+    /// prompt.
     pub(crate) notifications_suppressed: bool,
     /// Active prompt is still rewindable until the first outbound
     /// prompt-scoped event is emitted; armed at promote, cleared at first
@@ -377,7 +379,7 @@ impl State {
 /// so they share one definition of idleness, with no drift between them.
 ///
 /// Returns `true` exactly when: no turn is running, no user prompt is
-/// queued, and interactive Ctrl+C has not suppressed notifications pending
+/// queued, and an interactive stop has not suppressed notifications pending
 /// genuine user re-engagement.
 pub(crate) fn is_session_idle_for_injection(state: &State) -> bool {
     state.running_task.is_none()
@@ -1807,7 +1809,12 @@ mod tool_meta_stamp_tests {
                         } = cmd
                         {
                             *captured_in_task.lock().await = Some(tool_call_update);
-                            let _ = respond_to.send(Decision::Allow);
+                            let _ = respond_to.send(
+                                xai_grok_workspace::permission::PermissionResolution {
+                                    decision: Decision::Allow,
+                                    event: None,
+                                },
+                            );
                         }
                     }
                 });

@@ -397,11 +397,11 @@ impl WelcomeLayout {
 
 /// Controls what the version badge renders.
 pub(super) enum VersionBadgeMode<'a> {
-    /// Full badge: team | tier | api_key | **Grok Build** VERSION+channel **Beta** (right-aligned).
+    /// Full badge: team | tier | api_key | **Grok Build** VERSION+channel (right-aligned).
     Full { subscription_tier: Option<&'a str> },
-    /// Hero footer: team | api_key | Grok Build Beta [channel] (right-aligned, gray).
+    /// Hero footer: team | api_key | channel (right-aligned, gray).
     HeroFooter,
-    /// Hero inline: **Grok Build Beta**  VERSION (left-aligned).
+    /// Hero inline: **Grok Build**  VERSION (left-aligned).
     HeroInline,
 }
 
@@ -418,8 +418,9 @@ pub(super) fn render_version_badge(
         width: version_rect.width.saturating_sub(h_margin),
         ..version_rect
     };
+    const SEP: &str = "  \u{2502}  ";
     let sep = Span::styled(
-        "  \u{2502}  ",
+        SEP,
         Style::default().fg(theme.gray).add_modifier(Modifier::DIM),
     );
     let mut spans = Vec::new();
@@ -466,27 +467,18 @@ pub(super) fn render_version_badge(
                 format!("{}{}", xai_grok_version::VERSION, channel),
                 Style::default().fg(theme.gray),
             ));
-            spans.push(Span::styled(
-                " Beta",
-                Style::default()
-                    .fg(theme.text_primary)
-                    .add_modifier(Modifier::BOLD),
-            ));
         }
         VersionBadgeMode::HeroFooter => {
-            let channel_display = if channel.is_empty() {
-                "Beta"
-            } else {
-                channel.trim()
-            };
-            spans.push(Span::styled(
-                channel_display,
-                Style::default().fg(theme.gray),
-            ));
+            if !channel.is_empty() {
+                spans.push(Span::styled(
+                    channel.trim(),
+                    Style::default().fg(theme.gray),
+                ));
+            }
         }
         VersionBadgeMode::HeroInline => {
             spans.push(Span::styled(
-                "Grok Build Beta  ",
+                "Grok Build  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -496,6 +488,11 @@ pub(super) fn render_version_badge(
                 Style::default().fg(theme.gray),
             ));
         }
+    }
+
+    // Only alpha and beta builds print a channel, so on stable the spans can end on a separator.
+    if spans.last().is_some_and(|s| s.content == SEP) {
+        spans.pop();
     }
 
     let version_line = Line::from(spans).alignment(align);
@@ -2720,6 +2717,45 @@ mod tests {
     use crate::app::app_view::SessionPickerEntry;
     use crate::views::picker::PickerState;
     use crate::views::session_picker::{build_grouped_picker_entries, build_session_entry_data};
+
+    fn badge_text(mode: VersionBadgeMode<'_>, team: Option<&str>) -> String {
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+        render_version_badge(area, &mut buf, &Theme::current(), team, 0, false, mode);
+        (0..area.width)
+            .map(|x| buf.cell((x, 0)).map_or(" ", |c| c.symbol()).to_string())
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
+    /// The badge carries the product name, the version, and the channel, and never a release label.
+    /// The hero footer prints a channel only on alpha and beta builds, so on stable it must not end on a separator.
+    #[test]
+    fn version_badge_carries_no_release_label() {
+        let full = badge_text(
+            VersionBadgeMode::Full {
+                subscription_tier: None,
+            },
+            Some("acme"),
+        );
+        let inline = badge_text(VersionBadgeMode::HeroInline, None);
+        let footer = badge_text(VersionBadgeMode::HeroFooter, Some("acme"));
+
+        for rendered in [&full, &inline, &footer] {
+            assert!(
+                !rendered.contains("Beta"),
+                "badge must not label the product: {rendered:?}"
+            );
+        }
+        assert!(full.contains("Grok Build"), "full badge: {full:?}");
+        assert!(inline.contains("Grok Build"), "inline badge: {inline:?}");
+        assert!(footer.contains("acme"), "footer keeps the team: {footer:?}");
+        assert!(
+            !footer.ends_with('\u{2502}'),
+            "footer must not end on a separator: {footer:?}"
+        );
+    }
 
     #[test]
     fn auth_copy_feedback_covers_delivery_states() {

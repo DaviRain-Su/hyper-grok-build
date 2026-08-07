@@ -76,7 +76,7 @@ pub(crate) struct DefaultModeEffects {
 /// Errors from parsing a permission rule string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleParseError {
-    /// Tool prefix is recognized but not supported (e.g., "EnterWorktree").
+    /// Tool prefix is recognized but not supported (e.g., "EnterWorktree", "NotebookEdit", "NotebookRead").
     UnsupportedToolPrefix { prefix: String },
     /// Tool prefix is unrecognized.
     UnknownToolPrefix { prefix: String },
@@ -110,8 +110,8 @@ impl std::error::Error for RuleParseError {}
 ///
 /// Supported tool prefixes:
 ///   - `Bash(...)` -> `ToolFilter::Bash`
-///   - `Read(...)` / `NotebookRead(...)` -> `ToolFilter::Read`
-///   - `Edit(...)` / `Write(...)` / `NotebookEdit(...)` -> `ToolFilter::Edit`
+///   - `Read(...)` -> `ToolFilter::Read`
+///   - `Edit(...)` / `Write(...)` -> `ToolFilter::Edit`
 ///   - `MCPTool(...)` -> `ToolFilter::Mcp`
 ///   - `Grep(...)` / `Glob(...)` -> `ToolFilter::Grep`
 ///   - `WebFetch(...)` -> `ToolFilter::WebFetch`
@@ -121,8 +121,10 @@ impl std::error::Error for RuleParseError {}
 /// `WebFetch` patterns support a `domain:` prefix (e.g., `WebFetch(domain:example.com)`)
 /// which sets `PatternMode::Domain` for host-level matching instead of glob.
 ///
-/// Explicitly unsupported (returns `Err`):
+/// Explicitly unsupported (returns `Err`; the rule is skipped):
 ///   - `EnterWorktree(...)`
+///   - `NotebookEdit` / `NotebookEdit(...)`
+///   - `NotebookRead` / `NotebookRead(...)`
 ///   - Any unrecognized tool prefix
 ///
 /// Pattern semantics:
@@ -142,6 +144,7 @@ impl std::error::Error for RuleParseError {}
 ///   - `Ok`: `"Edit(src/**/*.rs)"` → `{ Allow, Edit, "src/**/*.rs" }`
 ///   - `Ok`: `"Bash"` → `{ Allow, Bash, None }` (bare tool name)
 ///   - `Err`: `"EnterWorktree(*)"` → `UnsupportedToolPrefix`
+///   - `Err`: `"NotebookEdit"` / `"NotebookRead"` → `UnsupportedToolPrefix`
 pub fn parse_permission_rule(
     rule: &str,
     action: RuleAction,
@@ -172,7 +175,11 @@ pub fn parse_permission_rule(
 
         let tool = match tool_name_to_filter(prefix_trimmed) {
             Some(f) => f,
-            None if prefix_trimmed == "EnterWorktree" => {
+            None if matches!(
+                prefix_trimmed,
+                "EnterWorktree" | "NotebookEdit" | "NotebookRead"
+            ) =>
+            {
                 return Err(RuleParseError::UnsupportedToolPrefix {
                     prefix: prefix_trimmed.to_string(),
                 });
@@ -206,6 +213,12 @@ pub fn parse_permission_rule(
             pattern_mode,
         })
     } else {
+        if matches!(rule, "EnterWorktree" | "NotebookEdit" | "NotebookRead") {
+            return Err(RuleParseError::UnsupportedToolPrefix {
+                prefix: rule.to_string(),
+            });
+        }
+
         if let Some(tool) = tool_name_to_filter(rule) {
             return Ok(PermissionRule {
                 action,
@@ -236,8 +249,8 @@ pub fn parse_permission_rule(
 pub(crate) fn tool_name_to_filter(name: &str) -> Option<ToolFilter> {
     match name {
         "Bash" => Some(ToolFilter::Bash),
-        "Read" | "NotebookRead" => Some(ToolFilter::Read),
-        "Edit" | "Write" | "NotebookEdit" => Some(ToolFilter::Edit),
+        "Read" => Some(ToolFilter::Read),
+        "Edit" | "Write" => Some(ToolFilter::Edit),
         "MCPTool" => Some(ToolFilter::Mcp),
         "Grep" | "Glob" => Some(ToolFilter::Grep),
         "WebFetch" => Some(ToolFilter::WebFetch),

@@ -20,13 +20,13 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget, Wrap};
 use crate::prompt_images::PastedImage;
 use crate::terminal::image as terminal_image;
 use crate::terminal::overlay;
+use crate::util::format_bytes;
 
 mod content;
 mod geometry;
 
-use content::{
-    build_meta_line, format_bytes, format_mime, paint_path_line, truncate_path_for_overlay,
-};
+use content::{build_meta_line, format_mime, paint_path_line, truncate_path_for_overlay};
+
 #[cfg(test)]
 use geometry::ImagePlacement;
 use geometry::{
@@ -157,7 +157,7 @@ fn render_image_overlay_inner(
             None
         };
         lines.push(Line::from(status.map(str::to_owned).unwrap_or_else(|| {
-            format!("Size: {}", format_bytes(image.byte_len))
+            format!("Size: {}", format_bytes(image.byte_len as u64))
         })));
         // Short boxes need the path in the body because no footer fits.
         if path_footer.is_none()

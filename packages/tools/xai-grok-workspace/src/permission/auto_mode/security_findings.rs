@@ -43,6 +43,21 @@ pub enum ClassifierSecurityFinding {
 }
 
 impl ClassifierSecurityFinding {
+    /// Every finding variant, in canonical order. The single owner-side source of
+    /// truth for the finding vocabulary, so cross-crate consumers (telemetry
+    /// tokens) can assert coverage against it rather than a hand-copied list.
+    pub const ALL: &'static [Self] = &[
+        Self::FailClosedPolicy,
+        Self::UnparseableShell,
+        Self::OpaqueShell,
+        Self::ExecOrAmbientGit,
+        Self::EnvInjection,
+        Self::UnvettedEnv,
+        Self::FileWrite,
+        Self::DangerousCommand,
+        Self::SpecialExecSurface,
+    ];
+
     /// Stable wire token rendered into the classifier system message. Never
     /// changes without a matching classifier-prompt update.
     pub const fn token(self) -> &'static str {
@@ -144,6 +159,15 @@ impl BashSecurityAssessment {
     pub(crate) fn render_tokens(&self) -> String {
         let tokens: Vec<&str> = self.0.iter().map(|f| f.token()).collect();
         format!("[{}]", tokens.join(", "))
+    }
+
+    /// Stable, ordered, deduplicated wire tokens for one request — the single
+    /// projection consumed by manager telemetry and trace evidence. Findings are
+    /// never recomputed for analytics; this is the canonical set handed to the
+    /// classifier. Crate-private so the finding set never crosses the crate
+    /// boundary (external OTEL must not gain finding fields).
+    pub(crate) fn tokens(&self) -> Vec<String> {
+        self.0.iter().map(|f| f.token().to_owned()).collect()
     }
 
     /// One `- token: description` line per present finding, in canonical order.

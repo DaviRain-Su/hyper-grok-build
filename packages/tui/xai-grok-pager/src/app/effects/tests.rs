@@ -905,6 +905,17 @@ async fn persist_setting_type_mismatch_errors_page_flip_on_send() {
         );
 }
 #[tokio::test]
+async fn persist_setting_type_mismatch_errors_confirm_before_rewind() {
+    use crate::settings::SettingValue;
+    let r = persist_setting("confirm_before_rewind", SettingValue::String("nope".into()))
+        .await;
+    let err = r.expect_err("confirm_before_rewind with String payload must return Err");
+    assert!(
+            err.contains("persist_setting(confirm_before_rewind) expected Bool"),
+            "got: {err}",
+        );
+}
+#[tokio::test]
 async fn persist_setting_type_mismatch_errors_combine_queued_prompts() {
     use crate::settings::SettingValue;
     let r = persist_setting(
@@ -2740,4 +2751,13 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert_eq!(roster.last_change_unix_ms, updated.timestamp_millis());
     assert_eq!(roster.origin.kind, "local");
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
+}
+#[test]
+fn rewind_execute_params_sends_conversation_only_with_force() {
+    let params = rewind_execute_params("sess-1", 3);
+    assert_eq!(params["sessionId"], "sess-1");
+    assert_eq!(params["targetPromptIndex"], 3);
+    assert_eq!(params["force"], true);
+    assert_eq!(params["mode"], REWIND_MODE_WIRE);
+    assert_eq!(params["mode"], "conversation_only");
 }

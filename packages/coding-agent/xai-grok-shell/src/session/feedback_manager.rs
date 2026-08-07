@@ -225,8 +225,11 @@ pub struct FeedbackManagerConfig {
     /// distinguish "tracking off" (zeros are noise) from "tracking on,
     /// no code changed" (zeros are real data).
     pub loc_tracking_enabled: bool,
-    /// Timeout for draining the upload queue on shutdown (default: 30s).
-    /// If uploads don't complete within this time, remaining items are abandoned.
+    /// Preferred timeout for draining the upload queue on shutdown
+    /// (default: 30s). Process-exit still clamps this under
+    /// [`SHUTDOWN_DRAIN_CAP`] (or `GROK_SESSION_EXIT_DRAIN_SECS`) so a
+    /// hung upload cannot exceed the agent join grace; abandoned durable
+    /// pairs are recovered on next-session startup.
     pub drain_timeout: Duration,
     pub user: Option<crate::agent::config::FeedbackUserConfig>,
 }
@@ -709,29 +712,39 @@ impl FeedbackManager {
     }
 
     /// Inner sync implementation with optional cooldown bypass.
+    ///
+    /// On `force` (process-exit final sync): skip the HTTP POST when the session
+    /// has no turns/tools so empty open→exit does not hang on slow egress.
+    /// Periodic sync (`force=false`) still may send empty snapshots.
     async fn sync_signals_inner(&self, force: bool) -> anyhow::Result<()> {
         if !self.config.telemetry_enabled {
             return Ok(());
         }
 
         let Some(client) = &self.feedback_client else {
-            return Ok(()); // No client, skip sync
+            return Ok(());
         };
 
-        // Check if sync is needed (skip cooldown check if forced)
         if !force && !self.signals_handle.check_and_mark_sync().await {
-            return Ok(()); // Not time to sync yet
+            return Ok(());
         }
 
-        // Snapshot GCS upload queue stats into signals before taking the snapshot.
-        // This ensures the sync payload includes the latest queue metrics.
         if let Some(stats) = self.upload_queue_stats.get() {
             self.signals_handle.snapshot_gcs_queue(stats);
         }
 
         let Some(signals) = self.signals_handle.snapshot().await else {
-            return Ok(()); // Actor shut down
+            return Ok(());
         };
+
+        // Empty open→exit: no reportable activity — skip the analytics POST.
+        if force && !signals_are_reportable(&signals) {
+            tracing::debug!(
+                session_id = %self.session_id,
+                "Skipping final signal sync on empty session"
+            );
+            return Ok(());
+        }
 
         let update = signals_to_update(&signals, self.config.client_type);
 
@@ -821,9 +834,11 @@ impl FeedbackManager {
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
+                    // Exit paths that need a final sync call
+                    // `FeedbackManager::shutdown` (which owns the budgeted
+                    // force-sync + drain). Cancel alone must not double-POST
+                    // or hang on a dead analytics endpoint.
                     tracing::debug!("Feedback sync loop cancelled");
-                    // Final sync before exiting — force-bypass cooldown to ensure latest signals are persisted
-                    let _ = self.force_sync_signals().await;
                     break;
                 }
                 _ = interval.tick() => {
@@ -870,48 +885,127 @@ impl FeedbackManager {
         }
     }
 
-    /// Shutdown the manager, performing a final sync and draining the upload queue.
-    ///
-    /// This ensures:
-    /// 1. Final signal sync to the analytics backend (bypass cooldown)
-    /// 2. Upload queue is drained (pending uploads complete before exit)
-    /// 3. Signals actor is shut down
-    ///
-    /// The drain uses a configurable timeout (`config.drain_timeout`) to avoid
-    /// hanging indefinitely on stuck uploads. Items not uploaded within the
-    /// timeout are abandoned with a warning log.
-    ///
-    /// The caller passes the upload queue from `SessionHandle` — the
-    /// `FeedbackManager` no longer owns the queue.
-    pub async fn shutdown(&self, queue: Option<&xai_file_utils::queue::UploadQueue>) {
-        // Final sync — force-bypass cooldown
-        let _ = self.force_sync_signals().await;
-
-        // Drain the upload queue to ensure pending uploads complete before exit.
-        // Uses configurable timeout to avoid hanging indefinitely on stuck uploads.
-        if let Some(queue) = queue {
-            let remaining = queue.drain(self.config.drain_timeout).await;
-            if remaining > 0 {
-                let pending_bytes = queue.stats().pending_bytes.load(Ordering::Relaxed);
+    /// Force-sync with [`SHUTDOWN_SIGNAL_SYNC_TIMEOUT`]. Empty sessions and
+    /// telemetry-off are no-ops inside [`Self::sync_signals_inner`].
+    async fn bounded_final_sync(&self) {
+        match tokio::time::timeout(SHUTDOWN_SIGNAL_SYNC_TIMEOUT, self.force_sync_signals()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
                 tracing::warn!(
                     session_id = %self.session_id,
-                    remaining,
-                    pending_bytes,
-                    "Upload queue drain incomplete, {} items abandoned ({} bytes pending)",
-                    remaining,
-                    pending_bytes
+                    error = %e,
+                    "Final signal sync failed during exit"
                 );
-            } else {
+            }
+            Err(_) => {
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    timeout_ms = SHUTDOWN_SIGNAL_SYNC_TIMEOUT.as_millis() as u64,
+                    "Final signal sync timed out during exit; continuing"
+                );
+            }
+        }
+    }
+
+    /// Shutdown: final signal sync (budget-capped), optional upload drain, then
+    /// signals actor stop.
+    ///
+    /// Empty open→exit: `sync_signals_inner(force)` skips the analytics POST
+    /// when there are no turns/tools; drain is skipped when pending is also 0.
+    /// Non-empty drains use `min(config.drain_timeout, cap)` (default cap 5s,
+    /// `GROK_SESSION_EXIT_DRAIN_SECS` up to hard max 7s). Incomplete drains
+    /// leave durable pairs on disk for next-session recovery.
+    pub async fn shutdown(&self, queue: Option<&xai_file_utils::queue::UploadQueue>) {
+        let pending = queue
+            .map(|q| q.stats().pending.load(Ordering::Relaxed))
+            .unwrap_or(0);
+        // Snapshot before final sync/shutdown so drain can still see activity
+        // after the signals actor is torn down later.
+        let reportable = match self.signals_handle.snapshot().await {
+            Some(s) => signals_are_reportable(&s),
+            None => false,
+        };
+
+        // (1) Final force-sync: telem/empty gates live in sync_signals_inner.
+        self.bounded_final_sync().await;
+
+        // (2) Drain only when needed (empty session + zero pending → skip).
+        if let Some(queue) = queue {
+            if pending == 0 && !reportable {
                 tracing::debug!(
                     session_id = %self.session_id,
-                    "Upload queue drained successfully"
+                    "Skipping upload drain on empty session with nothing pending"
                 );
+            } else {
+                let budget = if pending == 0 {
+                    SHUTDOWN_EMPTY_DRAIN_TIMEOUT
+                } else {
+                    nonempty_drain_budget(self.config.drain_timeout)
+                };
+                let remaining = queue.drain(budget).await;
+                if remaining > 0 {
+                    let pending_bytes = queue.stats().pending_bytes.load(Ordering::Relaxed);
+                    tracing::warn!(
+                        session_id = %self.session_id,
+                        remaining,
+                        pending_bytes,
+                        budget_ms = budget.as_millis() as u64,
+                        "Upload queue drain incomplete, {} items deferred to next-session recovery ({} bytes pending)",
+                        remaining,
+                        pending_bytes
+                    );
+                } else {
+                    tracing::debug!(
+                        session_id = %self.session_id,
+                        "Upload queue drained successfully"
+                    );
+                }
             }
         }
 
         // Shutdown the signals actor
         self.signals_handle.shutdown();
     }
+}
+
+/// Bound on the final signals POST at process exit. Prefer a fast exit over
+/// waiting out a hung analytics endpoint — session metrics are best-effort.
+const SHUTDOWN_SIGNAL_SYNC_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Default ceiling on non-empty upload-queue drain at process exit.
+/// Keeps sync+drain under [`crate::agent::activity::SESSION_FLUSH_GRACE`] with
+/// residual time for hooks/memory. Override with `GROK_SESSION_EXIT_DRAIN_SECS`
+/// (still hard-capped by [`SHUTDOWN_DRAIN_HARD_MAX`]).
+const SHUTDOWN_DRAIN_CAP: Duration = Duration::from_secs(5);
+
+/// Absolute max non-empty drain at process exit: leave ≥1s residual under the
+/// 10s flush grace after the 2s signal-sync budget (10 − 2 − 1 = 7).
+const SHUTDOWN_DRAIN_HARD_MAX: Duration = Duration::from_secs(7);
+
+/// When nothing is pending, only wait this long for the upload worker to exit
+/// after the shutdown signal — should be milliseconds in practice.
+const SHUTDOWN_EMPTY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Non-empty drain wait: honor config (tests / shorter defaults) but never
+/// exceed the process-exit cap. Cap defaults to [`SHUTDOWN_DRAIN_CAP`]; fleets
+/// on slow networks may raise it with `GROK_SESSION_EXIT_DRAIN_SECS` up to
+/// [`SHUTDOWN_DRAIN_HARD_MAX`] without regressing the empty-session fast path.
+fn nonempty_drain_budget(config_timeout: Duration) -> Duration {
+    let cap = std::env::var("GROK_SESSION_EXIT_DRAIN_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(SHUTDOWN_DRAIN_CAP)
+        .min(SHUTDOWN_DRAIN_HARD_MAX)
+        // Zero/garbage env must not skip drain entirely.
+        .max(Duration::from_secs(1));
+    config_timeout.min(cap)
+}
+
+/// Any user turn or tool call — used to skip exit force_sync POST and empty
+/// upload drain when open→exit has nothing to report.
+fn signals_are_reportable(s: &crate::session::signals::SessionSignals) -> bool {
+    s.turn_count > 0 || s.tool_call_count > 0
 }
 
 // Auth outcome handler used by run_sync_loop on 401.
@@ -1274,19 +1368,363 @@ mod tests {
         assert!(snapshot.is_none(), "Signals actor should be shut down");
     }
 
+    /// Exit budgets must stay under the agent join grace so hangy telemetry
+    /// cannot push past `SESSION_FLUSH_GRACE` again.
+    #[test]
+    #[serial_test::serial]
+    fn test_shutdown_budgets_fit_under_session_flush_grace() {
+        use crate::agent::activity::SESSION_FLUSH_GRACE;
+        // `nonempty_drain_budget` reads env; pin default regardless of CI presets.
+        let _unset = xai_grok_test_support::env::EnvGuard::unset("GROK_SESSION_EXIT_DRAIN_SECS");
+        assert!(
+            SHUTDOWN_SIGNAL_SYNC_TIMEOUT + SHUTDOWN_DRAIN_HARD_MAX <= SESSION_FLUSH_GRACE,
+            "sync + hard-max drain must fit under flush grace"
+        );
+        assert!(
+            SHUTDOWN_SIGNAL_SYNC_TIMEOUT + SHUTDOWN_DRAIN_CAP < SESSION_FLUSH_GRACE,
+            "sync + default drain cap must leave residual grace for hooks/memory"
+        );
+        assert!(
+            SHUTDOWN_EMPTY_DRAIN_TIMEOUT < SHUTDOWN_DRAIN_CAP,
+            "empty drain must be strictly shorter than the non-empty cap"
+        );
+        assert_eq!(
+            nonempty_drain_budget(Duration::from_secs(30)),
+            SHUTDOWN_DRAIN_CAP,
+            "default config 30s must clamp to the process-exit cap"
+        );
+        assert_eq!(
+            nonempty_drain_budget(Duration::from_secs(2)),
+            Duration::from_secs(2),
+            "config shorter than the cap must be honored"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_nonempty_drain_budget_env_raises_cap() {
+        {
+            let _guard =
+                xai_grok_test_support::env::EnvGuard::set("GROK_SESSION_EXIT_DRAIN_SECS", "7");
+            assert_eq!(
+                nonempty_drain_budget(Duration::from_secs(30)),
+                Duration::from_secs(7),
+                "env may raise the cap for slow networks"
+            );
+        }
+        {
+            let _guard =
+                xai_grok_test_support::env::EnvGuard::set("GROK_SESSION_EXIT_DRAIN_SECS", "99");
+            assert_eq!(
+                nonempty_drain_budget(Duration::from_secs(30)),
+                SHUTDOWN_DRAIN_HARD_MAX,
+                "env must not exceed the hard max under flush grace"
+            );
+        }
+    }
+
+    /// Sync-loop cancel must return promptly once the loop is idle in `select!`.
+    /// Final force-sync is owned by `shutdown` only (cancel does not re-POST).
+    ///
+    /// Uses a closed-port base URL so the immediate first tick's sync fails
+    /// fast and parks on the long interval — cancel is then observed without
+    /// racing a hung in-flight force-sync (pre-existing select behavior).
     #[tokio::test]
-    async fn test_drain_timeout_is_configurable() {
-        // Verify that drain_timeout can be customized via config
+    async fn test_sync_loop_cancel_returns_without_force_sync() {
+        use crate::agent::feedback_client::FeedbackClient;
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .connect_timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        // Nothing listening — first periodic sync errors quickly.
+        let client = FeedbackClient::with_client(http, "http://127.0.0.1:1", None);
         let config = FeedbackManagerConfig {
-            drain_timeout: Duration::from_secs(5), // Custom timeout
+            telemetry_enabled: true,
+            sync_interval: Duration::from_secs(3600),
             ..Default::default()
         };
-        let manager = FeedbackManager::new("test-session-custom-timeout", None, config.clone());
+        let manager = Arc::new(FeedbackManager::new(
+            "test-cancel-no-sync",
+            Some(client),
+            config,
+        ));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let loop_handle = tokio::spawn(manager.clone().run_sync_loop(cancel.clone()));
+        // First tick + failed sync, then idle waiting on the long interval.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let started = Instant::now();
+        cancel.cancel();
+        loop_handle.await.expect("sync loop join");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "cancel must not wait out a force-sync budget, got {elapsed:?}"
+        );
+    }
 
-        // Verify config was stored
-        assert_eq!(manager.config.drain_timeout, Duration::from_secs(5));
+    /// Helper: TCP accept that never answers (slow egress / hung analytics).
+    async fn blackhole_http_addr() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind blackhole listener");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(120)).await;
+                    drop(stream);
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
 
+    /// Empty open→exit (no turns/tools) must not wait on a hung analytics
+    /// endpoint — the final force_sync is skipped entirely.
+    #[tokio::test]
+    async fn test_shutdown_empty_session_skips_force_sync_on_slow_egress() {
+        use crate::agent::feedback_client::FeedbackClient;
+        use std::time::Instant;
+
+        let base = blackhole_http_addr().await;
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .expect("reqwest client");
+        let client = FeedbackClient::with_client(http, base, None);
+        let config = FeedbackManagerConfig {
+            telemetry_enabled: true,
+            ..Default::default()
+        };
+        let manager = FeedbackManager::new("test-empty-skip-sync", Some(client), config);
+        // No increment_turn / record_tool_call — empty session.
+
+        let started = Instant::now();
         manager.shutdown(None).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "empty session must skip force_sync and return immediately, got {elapsed:?}"
+        );
+    }
+
+    /// Telemetry off: never hit the network on exit even with turns recorded.
+    #[tokio::test]
+    async fn test_shutdown_telemetry_off_skips_force_sync() {
+        use crate::agent::feedback_client::FeedbackClient;
+        use std::time::Instant;
+
+        let base = blackhole_http_addr().await;
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .expect("reqwest client");
+        let client = FeedbackClient::with_client(http, base, None);
+        let config = FeedbackManagerConfig {
+            telemetry_enabled: false,
+            ..Default::default()
+        };
+        let manager = FeedbackManager::new("test-telemetry-off", Some(client), config);
+        manager.signals_handle().increment_turn();
+
+        let started = Instant::now();
+        manager.shutdown(None).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "telemetry-off shutdown must not wait on the network, got {elapsed:?}"
+        );
+    }
+
+    /// A hung analytics endpoint must not hold process exit for the full HTTP
+    /// client timeout when the session *does* have reportable activity.
+    /// `shutdown` wraps the final force-sync in `SHUTDOWN_SIGNAL_SYNC_TIMEOUT` (2s).
+    #[tokio::test]
+    async fn test_shutdown_force_sync_is_timeout_capped() {
+        use crate::agent::feedback_client::FeedbackClient;
+        use std::time::Instant;
+
+        let base = blackhole_http_addr().await;
+        let http = reqwest::Client::builder()
+            // Deliberately longer than the shutdown budget so the outer
+            // timeout is what must fire — not the client.
+            .timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .expect("reqwest client");
+        let client = FeedbackClient::with_client(http, base, None);
+        let config = FeedbackManagerConfig {
+            telemetry_enabled: true,
+            ..Default::default()
+        };
+        let manager = FeedbackManager::new("test-session-hung-sync", Some(client), config);
+        // Non-empty session so force_sync is not skipped.
+        manager.signals_handle().increment_turn();
+
+        let started = Instant::now();
+        manager.shutdown(None).await;
+        let elapsed = started.elapsed();
+        // Outer budget is 2s; allow generous slack for slow CI hosts, but
+        // never approach the 60s client timeout.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "shutdown must return within the signal-sync budget + slack on a hung signals POST, got {elapsed:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(1500),
+            "expected to wait most of the force_sync budget when reportable, got {elapsed:?}"
+        );
+    }
+
+    /// Empty upload queue uses the short worker-exit budget.
+    #[tokio::test]
+    async fn test_shutdown_empty_queue_uses_short_drain_budget() {
+        use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
+        use std::sync::Arc;
+        use std::time::Instant;
+        use xai_file_utils::queue::{TraceExportSource, UploadQueue, UploadRetryPolicy};
+
+        struct MockResolver;
+        impl TraceExportSource for MockResolver {
+            fn resolve(&self) -> TraceExportConfig {
+                TraceExportConfig {
+                    bucket_url: Some("gs://test-bucket".to_string()),
+                    service_account_key: None,
+                    upload_method: UploadMethod::Direct {
+                        service_account_key: None,
+                    },
+                    prefix_dir: None,
+                    gcs_prefix: None,
+                    absolute_paths: false,
+                    archive_name_override: None,
+                }
+            }
+        }
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let queue = UploadQueue::spawn(
+            temp.path(),
+            Arc::new(MockResolver),
+            UploadRetryPolicy::default(),
+        );
+        let manager = FeedbackManager::local_only("test-session-empty-drain");
+
+        let started = Instant::now();
+        manager.shutdown(Some(&queue)).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "empty-queue shutdown must finish well under the non-empty budget, got {elapsed:?}"
+        );
+    }
+
+    /// Non-empty queue drain is clamped to the process-exit cap (default 5s),
+    /// not left open-ended at the 30s config default. Abandoned durable-pair
+    /// items stay on disk for next-session orphan recovery.
+    #[tokio::test]
+    async fn test_shutdown_nonempty_queue_clamps_drain_and_leaves_durable_pair() {
+        use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
+        use axum::{Router, body::Body, http::StatusCode, response::IntoResponse, routing::post};
+        use std::sync::Arc;
+        use std::time::Instant;
+        use xai_file_utils::queue::{TraceExportSource, UploadQueue, UploadRetryPolicy};
+
+        async fn slow_handler(_body: Body) -> impl IntoResponse {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            (StatusCode::OK, "ok")
+        }
+
+        let app = Router::new().route("/v1/storage", post(slow_handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        struct SlowProxyResolver {
+            base: String,
+        }
+        impl TraceExportSource for SlowProxyResolver {
+            fn resolve(&self) -> TraceExportConfig {
+                TraceExportConfig {
+                    bucket_url: Some("gs://test-bucket".to_string()),
+                    service_account_key: None,
+                    upload_method: UploadMethod::Proxy {
+                        proxy_base_url: self.base.clone(),
+                        user_token: "test-token".to_string(),
+                        deployment_key: None,
+                        alpha_test_key: None,
+                    },
+                    prefix_dir: None,
+                    gcs_prefix: None,
+                    absolute_paths: false,
+                    archive_name_override: None,
+                }
+            }
+        }
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let policy = UploadRetryPolicy {
+            max_attempts: 1,
+            ..Default::default()
+        };
+        let queue = UploadQueue::spawn_with_concurrency(
+            temp.path(),
+            Arc::new(SlowProxyResolver {
+                base: format!("http://{addr}/v1"),
+            }),
+            policy,
+            1,
+        );
+        queue
+            .enqueue(
+                b"payload",
+                "session/turn_0/slow.json",
+                "application/json",
+                "slow",
+                "sess-shutdown-clamp",
+                0,
+            )
+            .await
+            .expect("enqueue");
+        // Let the worker pick up the item so drain waits on a stuck upload.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            queue.stats().pending.load(Ordering::Relaxed) > 0,
+            "item must still be pending against the slow handler"
+        );
+
+        let manager = FeedbackManager::local_only("test-session-nonempty-drain");
+        let started = Instant::now();
+        manager.shutdown(Some(&queue)).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(8),
+            "non-empty drain must clamp near 5s (+slack), got {elapsed:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(4),
+            "expected to wait most of the non-empty budget, got {elapsed:?}"
+        );
+
+        let queue_dir = temp.path().join("upload_queue");
+        let leftover: Vec<_> = std::fs::read_dir(&queue_dir)
+            .expect("queue dir")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            !leftover.is_empty(),
+            "abandoned durable-pair artifacts must remain for startup recovery"
+        );
     }
 
     // ── handle_auth_outcome tests ──────────────────────────────────────────

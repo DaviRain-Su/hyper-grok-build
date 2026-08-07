@@ -85,6 +85,7 @@ pub(super) fn prompt_style(
         accent_color_override: input_mode.accent_color(theme),
         border_color_override: None,
         prefix_override: input_mode.prefix_override(theme),
+        placeholder_when_focused: false,
         placeholder_override: input_mode
             .placeholder_override(multiline)
             .map(std::borrow::Cow::Borrowed),

@@ -53,6 +53,37 @@ pub enum SessionEndResult {
     Failed(String),
 }
 
+/// Real user queries iff the conversation meets the session-end size gate
+/// (enough real prompts, enough total bytes). `None` for empty/brief sessions.
+/// Independent of `save_on_end` so exit dream can still consolidate prior
+/// logs when auto-save is off for a substantial session.
+pub(crate) fn queries_meeting_session_end_threshold(
+    conversation: &[ConversationItem],
+) -> Option<Vec<String>> {
+    // Real queries exclude synthetic metadata prefixes and `__auto_continue__`
+    // sentinels (raw user-item counts inflate the gate).
+    let real_queries =
+        crate::session::helpers::session_compact::extract_real_user_queries(conversation);
+    if real_queries.len() < MIN_USER_MESSAGES {
+        tracing::debug!(
+            real_count = real_queries.len(),
+            min = MIN_USER_MESSAGES,
+            "session too short for memory save/dream"
+        );
+        return None;
+    }
+    let total_bytes: usize = real_queries.iter().map(|q| q.len()).sum();
+    if total_bytes < MIN_TOTAL_QUERY_BYTES {
+        tracing::debug!(
+            total_bytes,
+            min = MIN_TOTAL_QUERY_BYTES,
+            "session content too brief for memory save/dream"
+        );
+        return None;
+    }
+    Some(real_queries)
+}
+
 /// Run the session end hook — save a structured metadata summary to memory.
 ///
 /// This is called from the `SessionCommand::Shutdown` handler and the
@@ -79,37 +110,11 @@ pub fn on_session_end(
         return SessionEndResult::Skipped;
     }
 
-    // Extract real user queries — this excludes the synthetic metadata-only
-    // prefix (`<user_info>/<git_status>`) that appears as
-    // the first ConversationItem::User in every session, as well as the
-    // internal `__auto_continue__` sentinel.  Using raw user-item counts
-    // inflates the gate and pollutes slugs/topics with metadata text.
-    let real_queries =
-        crate::session::helpers::session_compact::extract_real_user_queries(conversation);
-
-    // Gate: skip sessions with too few real user prompts.
-    if real_queries.len() < MIN_USER_MESSAGES {
-        tracing::debug!(
-            real_count = real_queries.len(),
-            min = MIN_USER_MESSAGES,
-            "session too short for memory save, skipping"
-        );
+    let Some(real_queries) = queries_meeting_session_end_threshold(conversation) else {
         return SessionEndResult::Skipped;
-    }
+    };
 
-    // Gate: skip sessions whose real queries are too brief in aggregate.
-    let total_bytes: usize = real_queries.iter().map(|q| q.len()).sum();
-    if total_bytes < MIN_TOTAL_QUERY_BYTES {
-        tracing::debug!(
-            total_bytes,
-            min = MIN_TOTAL_QUERY_BYTES,
-            "session content too brief for memory save, skipping"
-        );
-        return SessionEndResult::Skipped;
-    }
-
-    // Derive the slug from the first *real* query, not the raw first User item
-    // (which is the synthetic prefix and would produce a meaningless slug).
+    // Slug from first *real* query (not the synthetic prefix User item).
     let first_real_query = real_queries.first().map(String::as_str).unwrap_or("");
     let slug = slugify(first_real_query, 30);
     let slug = if slug.is_empty() { "session" } else { &slug };
@@ -420,6 +425,37 @@ mod tests {
         assert!(
             session_logs.is_empty(),
             "no session log should be created when save_on_end=false"
+        );
+    }
+
+    /// Threshold is independent of `save_on_end` so exit dream can still run.
+    #[test]
+    fn test_conversation_meets_session_end_threshold_ignores_save_config() {
+        let short = vec![make_user("hi"), make_assistant("hey")];
+        assert!(
+            queries_meeting_session_end_threshold(&short).is_none(),
+            "brief session must fail threshold"
+        );
+
+        let substantial = vec![
+            make_user("help me fix the auth bug in login"),
+            make_assistant("looking"),
+            make_user("also check the integration tests please"),
+            make_assistant("found it"),
+            make_user("great, can you patch the login page too"),
+            make_assistant("done"),
+        ];
+        assert!(
+            queries_meeting_session_end_threshold(&substantial).is_some(),
+            "substantial session must pass threshold even when save is off"
+        );
+        let tmp = TempDir::new().unwrap();
+        let storage = test_storage(&tmp);
+        storage.ensure_initialized().unwrap();
+        assert_eq!(
+            on_session_end(&storage, &substantial, "sess-no-save", false),
+            SessionEndResult::Skipped,
+            "save_on_end=false still skips write"
         );
     }
 

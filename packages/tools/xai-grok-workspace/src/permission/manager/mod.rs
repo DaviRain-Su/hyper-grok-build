@@ -8,8 +8,8 @@ use tokio::sync::{mpsc, oneshot};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 
 use crate::permission::auto_mode::{
-    BashSecurityAssessment, ClassifierSecurityFinding, EnvRisk, KUBECTL_UNSAFE_FLAGS,
-    script_env_risk,
+    BashSecurityAssessment, ClassifierSecurityFinding, ClassifierVerdict, EnvRisk,
+    KUBECTL_UNSAFE_FLAGS, script_env_risk,
 };
 use crate::permission::bash_command_splitting::{
     is_setup_command, try_parse_shell, try_parse_word_only_commands_sequence, unwrap_wrappers,
@@ -21,15 +21,15 @@ use crate::permission::exec_risk::{
 };
 use crate::permission::gate_preflight::GatePreflight;
 use crate::permission::policy::{CompiledPolicy, ShellWord};
-use crate::permission::prompter::{AcpPrompter, PromptOutcome};
+use crate::permission::prompter::{AcpPrompter, PromptOutcome, PromptOutcomeKind};
 use crate::permission::shell_access::{
     command_write_paths_in_tree, edit_target_protection, is_safe_write_sink, tree_has_opaque_shell,
     words_are_opaque_shell,
 };
 use crate::permission::state::{PermissionState, load_state_from_disk, persist_state};
 use crate::permission::types::{
-    AccessKind, ClientType, Decision, EditPolicy, PermissionCommand, PermissionEvent, PromptPolicy,
-    RequestPathContext,
+    AccessKind, ClientType, Decision, EditPolicy, PermissionCommand, PermissionEvent,
+    PermissionResolution, PromptPolicy, RequestPathContext,
 };
 use xai_grok_mcp::servers::parse_mcp_qualified_name;
 use xai_grok_paths::AbsPathBuf;
@@ -38,100 +38,14 @@ use xai_grok_tools::implementations::grok_build::web_fetch::{
 };
 use xai_grok_tools::types::resources::resolve_model_path;
 
-/// Canonical `decision_reason` values for the uploaded artifact.
-pub(crate) mod reasons {
-    pub const YOLO: &str = "yolo";
-    pub const POLICY_ALLOW: &str = "policy_allow";
-    pub const POLICY_DENY: &str = "policy_deny";
-    pub const POLICY_ASK: &str = "policy_ask";
-    pub const BASH_COMMAND_GATE_ASK: &str = "bash_command_gate_ask";
-    pub const SHELL_FILE_GATE_ASK: &str = "shell_file_gate_ask";
-    pub const AUTO_FAST_PATH: &str = "auto_fast_path";
-    pub const AUTO_CLASSIFIER_ALLOW: &str = "auto_classifier_allow";
-    pub const AUTO_CLASSIFIER_DENY: &str = "auto_classifier_deny";
-    pub const AUTO_CLASSIFIER_TIMEOUT: &str = "auto_classifier_timeout";
-    pub const AUTO_CLASSIFIER_UNAVAILABLE: &str = "auto_classifier_unavailable";
-    pub const AUTO_DENIAL_LIMIT: &str = "auto_denial_limit";
-    pub const SANDBOX_AUTO: &str = "sandbox_auto";
-    pub const PERSISTED_GRANT: &str = "persisted_grant";
-    pub const SESSION_GRANT: &str = "session_grant";
-    pub const STATIC_ALLOWLIST: &str = "static_allowlist";
-    pub const SAFE_COMMAND: &str = "safe_command";
-    pub const SESSION_DENY: &str = "session_deny";
-    pub const PROMPT_DENY: &str = "prompt_deny";
-    pub const NEEDS_USER: &str = "needs_user";
-    pub const BASH_REQUEST_FLOOR: &str = "bash_request_floor";
-    pub const OPAQUE_SHELL: &str = "opaque_shell";
-    pub const REQUESTER_GONE: &str = "requester_gone";
-}
+pub mod reasons;
+mod request_classification;
 
-pub const AUTO_DENY_CONSECUTIVE_LIMIT: u32 = 3;
-pub const AUTO_DENY_TOTAL_LIMIT: u32 = 20;
-
-const AUTO_DENY_GUIDANCE: &str = "Take a safer approach that stays within what the user asked \
-     for; do not retry this exact action or attempt to work around the denial. If no safer \
-     alternative exists, ask the user how to proceed.";
-
-#[derive(Clone, Copy)]
-enum ClassifierTelemetrySnapshot {
-    FastPath,
-    Completed {
-        source: crate::permission::auto_mode::ClassifierSource,
-        latency_ms: u64,
-    },
-}
-
-impl ClassifierTelemetrySnapshot {
-    const fn source(self) -> &'static str {
-        match self {
-            Self::FastPath => "fast_path",
-            Self::Completed { source, .. } => source.as_str(),
-        }
-    }
-
-    const fn latency_ms(self) -> Option<u64> {
-        match self {
-            Self::FastPath => None,
-            Self::Completed { latency_ms, .. } => Some(latency_ms),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct PermissionTelemetrySnapshot {
-    classifier: Option<ClassifierTelemetrySnapshot>,
-    auto_denials_consecutive: u32,
-    auto_denials_total: u32,
-}
-
-impl PermissionTelemetrySnapshot {
-    const fn with_classifier(self, classifier: ClassifierTelemetrySnapshot) -> Self {
-        Self {
-            classifier: Some(classifier),
-            ..self
-        }
-    }
-
-    const fn with_auto_denials(self, consecutive: u32, total: u32) -> Self {
-        Self {
-            auto_denials_consecutive: consecutive,
-            auto_denials_total: total,
-            ..self
-        }
-    }
-}
-
-/// Canonical permission-mode string for the uploaded artifact. Matches
-/// `config.ui.permission_mode` (hyphenated) for trace-internal consistency,
-/// deliberately diverging from the telemetry enum's underscore Mixpanel serde.
-fn permission_mode_artifact_str(mode: xai_grok_telemetry::enums::PermissionMode) -> &'static str {
-    use xai_grok_telemetry::enums::PermissionMode;
-    match mode {
-        PermissionMode::AlwaysApprove => "always-approve",
-        PermissionMode::Auto => "auto",
-        PermissionMode::Ask => "ask",
-    }
-}
+pub use request_classification::{AUTO_DENY_CONSECUTIVE_LIMIT, AUTO_DENY_TOTAL_LIMIT};
+use request_classification::{
+    AUTO_DENY_GUIDANCE, ClassificationOutcome, ClassificationSource, DenialCounters,
+    RequestClassification, permission_mode_artifact_str,
+};
 
 /// Increments the in-flight permission-request counter on construction and
 /// decrements it on drop, so every `request()` return path stays balanced.
@@ -969,6 +883,10 @@ impl PermissionHandle {
     /// Request permission with the requesting session's execution cwd.
     /// Shared parent/subagent managers must use this for every path-bearing
     /// access: path rules and edit-target resolution anchor to it.
+    ///
+    /// Compatibility delegate: returns only the [`Decision`]. Analytics callers
+    /// that also need the authoritative manager event use
+    /// [`Self::request_with_path_context_resolved`].
     pub async fn request_with_path_context(
         &self,
         access: AccessKind,
@@ -978,15 +896,45 @@ impl PermissionHandle {
         subagent_type: Option<String>,
         subagent_description: Option<String>,
     ) -> Decision {
+        self.request_with_path_context_resolved(
+            access,
+            tool_call_update,
+            path_context,
+            session_id,
+            subagent_type,
+            subagent_description,
+        )
+        .await
+        .decision
+    }
+
+    /// Like [`Self::request_with_path_context`], but returns the full
+    /// [`PermissionResolution`]: the decision plus the authoritative manager
+    /// [`PermissionEvent`] (the identical event the manager sent to its trace
+    /// receiver). `event` is `None` for event-less paths (`AllowAll`, or a
+    /// channel send/receive failure); the caller must omit manager-only analytics
+    /// fields rather than fabricate them, and must never re-enqueue the event.
+    pub async fn request_with_path_context_resolved(
+        &self,
+        access: AccessKind,
+        tool_call_update: acp::ToolCallUpdate,
+        path_context: Option<RequestPathContext>,
+        session_id: Option<String>,
+        subagent_type: Option<String>,
+        subagent_description: Option<String>,
+    ) -> PermissionResolution {
         match self {
-            PermissionHandle::AllowAll => Decision::Allow,
+            PermissionHandle::AllowAll => PermissionResolution {
+                decision: Decision::Allow,
+                event: None,
+            },
             PermissionHandle::Actor {
                 cmd_tx, in_flight, ..
             } => {
                 // Count as in-flight before sending, so the actor's emit-time
                 // snapshot includes this request.
                 let _in_flight_guard = InFlightGuard::new(in_flight);
-                let (tx, rx) = oneshot::channel::<Decision>();
+                let (tx, rx) = oneshot::channel::<PermissionResolution>();
                 let msg = PermissionCommand::Request {
                     access,
                     tool_call_update,
@@ -998,14 +946,22 @@ impl PermissionHandle {
                 };
                 if let Err(e) = cmd_tx.send(msg) {
                     tracing::error!(?e, "failed to send permission request");
-                    return Decision::Reject("permission manager unavailable".to_owned());
+                    return PermissionResolution {
+                        decision: Decision::Reject("permission manager unavailable".to_owned()),
+                        event: None,
+                    };
                 }
 
                 match rx.await {
-                    Ok(decision) => decision,
+                    Ok(resolution) => resolution,
                     Err(e) => {
                         tracing::error!(?e, "failed to receive permission decision");
-                        Decision::Reject("failed to receive permission decision".to_owned())
+                        PermissionResolution {
+                            decision: Decision::Reject(
+                                "failed to receive permission decision".to_owned(),
+                            ),
+                            event: None,
+                        }
                     }
                 }
             }
@@ -1346,11 +1302,11 @@ fn spawn_permission_manager_with_pin(
         // "Yes, allow all edits during this session".
         //
         // Prior to this change, that choice would set edit_policy=Allow and
-        // persist it to ~/.grok/sessions/<cwd>/permission.toml. This caused
-        // the allow to survive full restarts (new grok process, new agent
-        // session in the same directory), which did not match the label or
-        // user expectation (and did not match upstream session-scoped
-        // behavior).
+        // persist it to the per-cwd permission.toml under the local session
+        // state directory. This caused the allow to survive full restarts
+        // (new grok process, new agent session in the same directory), which
+        // did not match the label or user expectation (and did not match
+        // upstream session-scoped behavior).
         //
         // We now keep "session" allows purely in-memory (see
         // allow_edits_for_session flag + AllowEditsForSession outcome).
@@ -1513,65 +1469,80 @@ fn spawn_permission_manager_with_pin(
                         }
                     };
 
-                    let telemetry = std::cell::Cell::new(PermissionTelemetrySnapshot {
-                        classifier: None,
-                        auto_denials_consecutive: auto_consecutive_denials,
-                        auto_denials_total: auto_total_denials,
+                    let denials = std::cell::Cell::new(DenialCounters {
+                        consecutive: auto_consecutive_denials,
+                        total: auto_total_denials,
                     });
+                    // The one canonical per-request classification state; set when
+                    // the classifier route (or fast path) is entered. The finalizer
+                    // projects the event from it once.
+                    let classification: std::cell::RefCell<RequestClassification> =
+                        std::cell::RefCell::new(RequestClassification::NotClassified);
+                    // The single decision finalizer: build the one authoritative
+                    // event, send exactly one clone to the trace channel, and return
+                    // the event so the live-requester caller can hand the identical
+                    // event back in the `PermissionResolution`. Requester-gone callers
+                    // invoke it trace-only and drop the return value.
                     // `decision_reason` is the trigger (always set); `prompt_outcome` is
                     // the user's choice, so it is None on auto/non-prompt decisions.
-                    let emit_event =
-                        |decision: &Decision,
-                         auto_approved: bool,
-                         user_prompted: bool,
-                         prompt_outcome: Option<&str>,
-                         decision_reason: Option<&str>| {
-                            let (decision_str, reject_reason) = match decision {
-                                Decision::Allow => ("allow".to_string(), None),
-                                Decision::Ask => ("ask".to_string(), None),
-                                Decision::Reject(reason) | Decision::PolicyDeny(reason) => {
-                                    ("reject".to_string(), Some(reason.clone()))
-                                }
-                                Decision::FollowupMessage(_) => ("followup".to_string(), None),
-                                Decision::Cancelled => ("cancelled".to_string(), None),
-                            };
-
-                            let telemetry = telemetry.get();
-                            let event = PermissionEvent {
-                                tool_id: tool_id.clone(),
-                                tool_name: tool_name.clone(),
-                                access_kind: access_kind_str.clone(),
-                                access_detail: access_detail.clone(),
-                                yolo_mode,
-                                auto_approved,
-                                user_prompted,
-                                decision: decision_str,
-                                prompt_outcome: prompt_outcome.map(|s| s.to_string()),
-                                reject_reason,
-                                timestamp: Utc::now(),
-                                subagent_session_id: request_session_id.clone(),
-                                subagent_type: request_subagent_type.clone(),
-                                subagent_description: request_subagent_description.clone(),
-                                permission_mode: Some(
-                                    permission_mode_artifact_str(permission_mode).to_string(),
-                                ),
-                                decision_reason: decision_reason.map(|s| s.to_string()),
-                                classifier_source: telemetry
-                                    .classifier
-                                    .map(|snapshot| snapshot.source().to_owned()),
-                                classifier_latency_ms: telemetry
-                                    .classifier
-                                    .and_then(ClassifierTelemetrySnapshot::latency_ms),
-                                auto_denials_consecutive: auto_mode
-                                    .then_some(telemetry.auto_denials_consecutive),
-                                auto_denials_total: auto_mode
-                                    .then_some(telemetry.auto_denials_total),
-                                wait_ms: Some(request_received.elapsed().as_millis() as u64),
-                                // Live count at emit, this request included.
-                                queue_depth: Some(in_flight_actor.load(Ordering::Relaxed) as u32),
-                            };
-                            let _ = event_tx.send(event);
+                    let emit_event = |decision: &Decision,
+                                      auto_approved: bool,
+                                      user_prompted: bool,
+                                      prompt_outcome: Option<&str>,
+                                      decision_reason: Option<&str>|
+                     -> PermissionEvent {
+                        let (decision_str, reject_reason) = match decision {
+                            Decision::Allow => ("allow".to_string(), None),
+                            Decision::Ask => ("ask".to_string(), None),
+                            Decision::Reject(reason) | Decision::PolicyDeny(reason) => {
+                                ("reject".to_string(), Some(reason.clone()))
+                            }
+                            Decision::FollowupMessage(_) => ("followup".to_string(), None),
+                            Decision::Cancelled => ("cancelled".to_string(), None),
                         };
+
+                        let denials = denials.get();
+                        let classification = classification.borrow();
+                        let event = PermissionEvent {
+                            tool_id: tool_id.clone(),
+                            tool_name: tool_name.clone(),
+                            access_kind: access_kind_str.clone(),
+                            access_detail: access_detail.clone(),
+                            yolo_mode,
+                            auto_approved,
+                            user_prompted,
+                            decision: decision_str,
+                            prompt_outcome: prompt_outcome.map(|s| s.to_string()),
+                            reject_reason,
+                            timestamp: Utc::now(),
+                            subagent_session_id: request_session_id.clone(),
+                            subagent_type: request_subagent_type.clone(),
+                            subagent_description: request_subagent_description.clone(),
+                            permission_mode: Some(
+                                permission_mode_artifact_str(permission_mode).to_string(),
+                            ),
+                            decision_reason: decision_reason.map(|s| s.to_string()),
+                            // Projected once from the canonical classification state
+                            // through the typed owner vocabulary (never a raw literal).
+                            classifier_source: classification
+                                .classifier_source()
+                                .map(|k| k.wire_str().to_owned()),
+                            classifier_latency_ms: classification.classifier_latency_ms(),
+                            auto_denials_consecutive: auto_mode.then_some(denials.consecutive),
+                            auto_denials_total: auto_mode.then_some(denials.total),
+                            wait_ms: Some(request_received.elapsed().as_millis() as u64),
+                            // Live count at emit, this request included.
+                            queue_depth: Some(in_flight_actor.load(Ordering::Relaxed) as u32),
+                            security_findings: classification.security_findings_tokens(),
+                            classifier_verdict: classification
+                                .classifier_verdict()
+                                .map(|v| v.wire_str().to_owned()),
+                        };
+                        // Exactly one clone to the trace receiver; the identical
+                        // event is returned to the requester via the resolution.
+                        let _ = event_tx.send(event.clone());
+                        event
+                    };
 
                     if respond_to.is_closed() {
                         tracing::info!(tool = %tool_name, "permission requester gone; skipped at dequeue");
@@ -1674,16 +1645,23 @@ fn spawn_permission_manager_with_pin(
                             "permission policy: deny rule matched (enforced before YOLO)"
                         );
                         let decision = Decision::PolicyDeny(reason);
-                        emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
-                        let _ = respond_to.send(decision);
+                        let event =
+                            emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
+                        let _ = respond_to.send(PermissionResolution {
+                            decision,
+                            event: Some(event),
+                        });
                         continue;
                     }
 
                     if yolo_mode && !shell_forced_prompt {
                         tracing::debug!("YOLO mode: auto-approving permission request");
                         let decision = Decision::Allow;
-                        emit_event(&decision, true, false, None, Some(reasons::YOLO));
-                        let _ = respond_to.send(decision);
+                        let event = emit_event(&decision, true, false, None, Some(reasons::YOLO));
+                        let _ = respond_to.send(PermissionResolution {
+                            decision,
+                            event: Some(event),
+                        });
                         continue;
                     }
 
@@ -1707,8 +1685,11 @@ fn spawn_permission_manager_with_pin(
                             %reason,
                             "session grant short-circuit before auto classifier"
                         );
-                        emit_event(&decision, true, false, None, Some(reason));
-                        let _ = respond_to.send(decision);
+                        let event = emit_event(&decision, true, false, None, Some(reason));
+                        let _ = respond_to.send(PermissionResolution {
+                            decision,
+                            event: Some(event),
+                        });
                         continue;
                     }
 
@@ -1729,8 +1710,12 @@ fn spawn_permission_manager_with_pin(
                             "permission policy: allow rule matched (before auto classifier)"
                         );
                         let decision = Decision::Allow;
-                        emit_event(&decision, true, false, None, Some(reasons::POLICY_ALLOW));
-                        let _ = respond_to.send(decision);
+                        let event =
+                            emit_event(&decision, true, false, None, Some(reasons::POLICY_ALLOW));
+                        let _ = respond_to.send(PermissionResolution {
+                            decision,
+                            event: Some(event),
+                        });
                         continue;
                     }
 
@@ -1742,32 +1727,30 @@ fn spawn_permission_manager_with_pin(
                     // one) keeps the classifier out via `admits_auto_classifier`.
                     if auto_mode && preflight.admits_auto_classifier() {
                         use crate::permission::auto_mode::{
-                            AutoFastPath, ClassifierVerdict, access_requires_user_interaction,
-                            auto_mode_fast_path,
+                            AutoFastPath, access_requires_user_interaction, auto_mode_fast_path,
                         };
                         let needs_user = protected_edit.is_some()
                             || access_requires_user_interaction(&tool_name, &access);
                         let fast = auto_mode_fast_path(&access, &tool_name, needs_user);
                         match fast {
                             AutoFastPath::Allow => {
-                                telemetry.set(
-                                    telemetry
-                                        .get()
-                                        .with_classifier(ClassifierTelemetrySnapshot::FastPath),
-                                );
+                                *classification.borrow_mut() = RequestClassification::FastPath;
                                 tracing::debug!(
                                     tool = %tool_name,
                                     "auto mode: fast-path allow (allowlist / accept-edits)"
                                 );
                                 let decision = Decision::Allow;
-                                emit_event(
+                                let event = emit_event(
                                     &decision,
                                     true,
                                     false,
                                     None,
                                     Some(reasons::AUTO_FAST_PATH),
                                 );
-                                let _ = respond_to.send(decision);
+                                let _ = respond_to.send(PermissionResolution {
+                                    decision,
+                                    event: Some(event),
+                                });
                                 continue;
                             }
                             AutoFastPath::PromptUser => {
@@ -1776,15 +1759,30 @@ fn spawn_permission_manager_with_pin(
                                 auto_prompt_reason = Some(reasons::NEEDS_USER);
                             }
                             AutoFastPath::Classify => {
+                                // Build the trusted assessment once: hand a clone to
+                                // the classifier context and keep the original as this
+                                // request's frozen evidence, so the event carries the
+                                // same findings even when the decision finalizes later
+                                // at the denial-limit prompt. Entering this arm marks
+                                // the classifier route, so the event reports `Some([])`
+                                // (not `None`) for an empty assessment.
+                                let assessment = classifier_assessment(
+                                    bash_evaluation.as_ref(),
+                                    preflight.defers_gate_ask(),
+                                );
                                 let classify_started = std::time::Instant::now();
-                                let outcome = if let Some(ref clf) = auto_classifier {
+                                // Distinguish "no classifier installed" (not-wired)
+                                // from a real verdict and from an abandoned side query,
+                                // so not-wired is never mislabeled as a heuristic result.
+                                enum RouteResult {
+                                    Completed(crate::permission::auto_mode::ClassifierOutcome),
+                                    NotWired,
+                                    Abandoned,
+                                }
+                                let route = if let Some(ref clf) = auto_classifier {
                                     use crate::permission::auto_mode::ClassifierContext;
                                     let mut turns = classifier_turns.clone();
                                     turns.extend(recorded_permission_decisions.iter().cloned());
-                                    let security_findings = classifier_assessment(
-                                        bash_evaluation.as_ref(),
-                                        preflight.defers_gate_ask(),
-                                    );
                                     let classify = clf.classify(
                                         &tool_name,
                                         &access,
@@ -1792,63 +1790,101 @@ fn spawn_permission_manager_with_pin(
                                         ClassifierContext {
                                             turns,
                                             project_instructions: project_instructions.clone(),
-                                            security_findings,
+                                            security_findings: assessment.clone(),
                                         },
                                     );
                                     tokio::select! {
-                                        verdict = classify => Some(verdict),
-                                        _ = respond_to.closed() => None,
+                                        verdict = classify => RouteResult::Completed(verdict),
+                                        _ = respond_to.closed() => RouteResult::Abandoned,
                                     }
                                 } else {
-                                    Some(ClassifierVerdict::Unavailable.into())
-                                };
-                                let Some(outcome) = outcome else {
-                                    tracing::info!(tool = %tool_name, "permission requester gone; classify abandoned");
-                                    emit_event(
-                                        &Decision::Cancelled,
-                                        false,
-                                        false,
-                                        None,
-                                        Some(reasons::REQUESTER_GONE),
-                                    );
-                                    continue;
+                                    RouteResult::NotWired
                                 };
                                 let classifier_latency_ms =
                                     u64::try_from(classify_started.elapsed().as_millis())
                                         .unwrap_or(u64::MAX);
-                                telemetry.set(telemetry.get().with_classifier(
-                                    ClassifierTelemetrySnapshot::Completed {
-                                        source: outcome.source(),
-                                        latency_ms: classifier_latency_ms,
-                                    },
-                                ));
+                                // Freeze the one canonical classification state, then
+                                // derive control flow (verdict / reason / is_timeout)
+                                // from it — no second store to keep in sync.
+                                let outcome: Option<
+                                    crate::permission::auto_mode::ClassifierOutcome,
+                                > = match route {
+                                    RouteResult::Abandoned => {
+                                        *classification.borrow_mut() =
+                                            RequestClassification::Classified {
+                                                assessment,
+                                                outcome: None,
+                                            };
+                                        tracing::info!(tool = %tool_name, "permission requester gone; classify abandoned");
+                                        emit_event(
+                                            &Decision::Cancelled,
+                                            false,
+                                            false,
+                                            None,
+                                            Some(reasons::REQUESTER_GONE),
+                                        );
+                                        continue;
+                                    }
+                                    RouteResult::NotWired => {
+                                        *classification.borrow_mut() =
+                                            RequestClassification::Classified {
+                                                assessment,
+                                                outcome: Some(ClassificationOutcome {
+                                                    verdict: ClassifierVerdict::Unavailable,
+                                                    source: ClassificationSource::NotWired,
+                                                    latency_ms: None,
+                                                }),
+                                            };
+                                        None
+                                    }
+                                    RouteResult::Completed(o) => {
+                                        *classification.borrow_mut() =
+                                            RequestClassification::Classified {
+                                                assessment,
+                                                outcome: Some(ClassificationOutcome {
+                                                    verdict: o.verdict(),
+                                                    source: ClassificationSource::Classifier(
+                                                        o.source(),
+                                                    ),
+                                                    latency_ms: Some(classifier_latency_ms),
+                                                }),
+                                            };
+                                        Some(o)
+                                    }
+                                };
+                                let verdict = outcome
+                                    .as_ref()
+                                    .map_or(ClassifierVerdict::Unavailable, |o| o.verdict());
+                                let is_timeout = outcome.as_ref().is_some_and(|o| o.is_timeout());
                                 tracing::info!(
                                     tool = %tool_name,
-                                    verdict = ?outcome.verdict(),
-                                    source = outcome.source().as_str(),
+                                    verdict = ?verdict,
                                     classifier_latency_ms,
-                                    "auto mode: classifier completed"
+                                    "auto mode: classifier route completed"
                                 );
-                                match outcome.verdict() {
+                                match verdict {
                                     ClassifierVerdict::Allow => {
                                         tracing::debug!(
                                             tool = %tool_name,
                                             "auto mode: classifier allow"
                                         );
                                         auto_consecutive_denials = 0;
-                                        telemetry.set(telemetry.get().with_auto_denials(
-                                            auto_consecutive_denials,
-                                            auto_total_denials,
-                                        ));
+                                        denials.set(DenialCounters {
+                                            consecutive: auto_consecutive_denials,
+                                            total: auto_total_denials,
+                                        });
                                         let decision = Decision::Allow;
-                                        emit_event(
+                                        let event = emit_event(
                                             &decision,
                                             true,
                                             false,
                                             None,
                                             Some(reasons::AUTO_CLASSIFIER_ALLOW),
                                         );
-                                        let _ = respond_to.send(decision);
+                                        let _ = respond_to.send(PermissionResolution {
+                                            decision,
+                                            event: Some(event),
+                                        });
                                         continue;
                                     }
                                     // A classifier Block on any built-in Bash
@@ -1862,17 +1898,18 @@ fn spawn_permission_manager_with_pin(
                                     {
                                         auto_consecutive_denials += 1;
                                         auto_total_denials += 1;
-                                        telemetry.set(telemetry.get().with_auto_denials(
-                                            auto_consecutive_denials,
-                                            auto_total_denials,
-                                        ));
+                                        denials.set(DenialCounters {
+                                            consecutive: auto_consecutive_denials,
+                                            total: auto_total_denials,
+                                        });
                                         tracing::info!(
                                             tool = %tool_name,
                                             consecutive = auto_consecutive_denials,
                                             total = auto_total_denials,
                                             "auto mode: classifier blocked — denying and continuing"
                                         );
-                                        let reason = match outcome.reason() {
+                                        let reason = match outcome.as_ref().and_then(|o| o.reason())
+                                        {
                                             Some(r) => format!(
                                                 "Auto mode blocked this action ({}). \
                                                  {AUTO_DENY_GUIDANCE}",
@@ -1884,14 +1921,17 @@ fn spawn_permission_manager_with_pin(
                                             ),
                                         };
                                         let decision = Decision::PolicyDeny(reason);
-                                        emit_event(
+                                        let event = emit_event(
                                             &decision,
                                             false,
                                             false,
                                             None,
                                             Some(reasons::AUTO_CLASSIFIER_DENY),
                                         );
-                                        let _ = respond_to.send(decision);
+                                        let _ = respond_to.send(PermissionResolution {
+                                            decision,
+                                            event: Some(event),
+                                        });
                                         continue;
                                     }
                                     ClassifierVerdict::Block => {
@@ -1904,7 +1944,7 @@ fn spawn_permission_manager_with_pin(
                                         auto_forced_prompt = true;
                                         auto_prompt_reason = Some(reasons::AUTO_DENIAL_LIMIT);
                                     }
-                                    ClassifierVerdict::Unavailable if outcome.is_timeout() => {
+                                    ClassifierVerdict::Unavailable if is_timeout => {
                                         tracing::info!(
                                             tool = %tool_name,
                                             "auto mode: classifier timed out — prompting user"
@@ -1936,8 +1976,12 @@ fn spawn_permission_manager_with_pin(
                     {
                         tracing::debug!("sandbox: auto-approving bash");
                         let decision = Decision::Allow;
-                        emit_event(&decision, true, false, None, Some(reasons::SANDBOX_AUTO));
-                        let _ = respond_to.send(decision);
+                        let event =
+                            emit_event(&decision, true, false, None, Some(reasons::SANDBOX_AUTO));
+                        let _ = respond_to.send(PermissionResolution {
+                            decision,
+                            event: Some(event),
+                        });
                         continue;
                     }
 
@@ -1984,8 +2028,17 @@ fn spawn_permission_manager_with_pin(
                             );
                             // Deny was already handled above; a `Some(decision)` here
                             // is a managed policy allow.
-                            emit_event(&decision, true, false, None, Some(reasons::POLICY_ALLOW));
-                            let _ = respond_to.send(decision);
+                            let event = emit_event(
+                                &decision,
+                                true,
+                                false,
+                                None,
+                                Some(reasons::POLICY_ALLOW),
+                            );
+                            let _ = respond_to.send(PermissionResolution {
+                                decision,
+                                event: Some(event),
+                            });
                             continue;
                         }
                         None => {}
@@ -2130,8 +2183,11 @@ fn spawn_permission_manager_with_pin(
                     }
                     // no prompt needed if we have a pre-decision
                     if let Some((decision, reason)) = pre_decision {
-                        emit_event(&decision, true, false, None, Some(reason));
-                        let _ = respond_to.send(decision);
+                        let event = emit_event(&decision, true, false, None, Some(reason));
+                        let _ = respond_to.send(PermissionResolution {
+                            decision,
+                            event: Some(event),
+                        });
                         continue;
                     }
 
@@ -2140,8 +2196,12 @@ fn spawn_permission_manager_with_pin(
                         let decision = Decision::PolicyDeny(
                             "denied by prompt policy (tool not pre-approved)".to_owned(),
                         );
-                        emit_event(&decision, false, false, None, Some(reasons::PROMPT_DENY));
-                        let _ = respond_to.send(decision);
+                        let event =
+                            emit_event(&decision, false, false, None, Some(reasons::PROMPT_DENY));
+                        let _ = respond_to.send(PermissionResolution {
+                            decision,
+                            event: Some(event),
+                        });
                         continue;
                     }
 
@@ -2188,57 +2248,60 @@ fn spawn_permission_manager_with_pin(
                                 _ = respond_to.closed() => PromptOutcome::Cancelled,
                             };
 
+                            // Wire string comes from the owner projection, never a
+                            // literal, so production emission and the vocabulary
+                            // cannot drift. The match carries out the decision +
+                            // session-grant side effects and, for impossible
+                            // access/outcome combinations, projects the *effective*
+                            // kind so the legacy normalized wire value is preserved.
+                            let mut effective_kind = prompt_outcome.kind();
                             // One event per decision is emitted by the shared `emit_event`
                             // after this match; do not emit inline here.
-                            let (decision, outcome_str) = match prompt_outcome {
-                                PromptOutcome::AllowOnce => (Decision::Allow, "allow_once"),
+                            let decision = match prompt_outcome {
+                                PromptOutcome::AllowOnce => Decision::Allow,
                                 PromptOutcome::AllowAlways => {
                                     state.allowed_bash_commands.insert(cmd.clone());
                                     persist_state(&cwd, &state, client_id_ref).await;
-                                    (Decision::Allow, "allow_always")
+                                    Decision::Allow
                                 }
                                 PromptOutcome::AllowAlwaysBashCommand(prefix) => {
                                     state.allowed_bash_commands.insert(prefix.clone());
                                     persist_state(&cwd, &state, client_id_ref).await;
-                                    (Decision::Allow, "allow_always_bash")
+                                    Decision::Allow
                                 }
                                 PromptOutcome::AllowAlwaysBashGlob(pattern) => {
                                     state.allowed_bash_globs.insert(pattern.clone());
                                     persist_state(&cwd, &state, client_id_ref).await;
-                                    (Decision::Allow, "allow_always_bash_glob")
+                                    Decision::Allow
                                 }
                                 PromptOutcome::AllowAlwaysDomain(_)
                                 | PromptOutcome::AllowAlwaysMcpTool(_)
                                 | PromptOutcome::AllowAlwaysMcpServer(_)
                                 | PromptOutcome::AllowEditsForSession => {
-                                    // Not reachable for Bash access; defensive.
-                                    (Decision::Allow, "allow_once")
+                                    // Not reachable for Bash access; preserve the
+                                    // legacy normalized `allow_once` wire value.
+                                    effective_kind = PromptOutcomeKind::AllowOnce;
+                                    Decision::Allow
                                 }
-                                PromptOutcome::RejectOnce => (
-                                    Decision::Reject("User rejected the execution".to_owned()),
-                                    "reject_once",
-                                ),
+                                PromptOutcome::RejectOnce => {
+                                    Decision::Reject("User rejected the execution".to_owned())
+                                }
                                 PromptOutcome::RejectAlwaysBashCommand(prefix) => {
                                     state.disallowed_bash_commands.insert(prefix.clone());
                                     persist_state(&cwd, &state, client_id_ref).await;
-                                    (
-                                        Decision::Reject(format!(
-                                            "User rejected the execution and excluded {prefix} from this session"
-                                        )),
-                                        "reject_always_bash",
-                                    )
-                                }
-                                PromptOutcome::Cancelled => (Decision::Cancelled, "cancelled"),
-                                PromptOutcome::FollowupMessage(msg) => {
-                                    (Decision::FollowupMessage(msg), "followup")
-                                }
-                                PromptOutcome::Error(e) => (
                                     Decision::Reject(format!(
-                                        "Failed to request permission from user: {e}"
-                                    )),
-                                    "error",
-                                ),
+                                        "User rejected the execution and excluded {prefix} from this session"
+                                    ))
+                                }
+                                PromptOutcome::Cancelled => Decision::Cancelled,
+                                PromptOutcome::FollowupMessage(msg) => {
+                                    Decision::FollowupMessage(msg)
+                                }
+                                PromptOutcome::Error(e) => Decision::Reject(format!(
+                                    "Failed to request permission from user: {e}"
+                                )),
                             };
+                            let outcome_str = effective_kind.wire_str();
 
                             (decision, outcome_str, true)
                         }
@@ -2248,13 +2311,17 @@ fn spawn_permission_manager_with_pin(
                                 outcome = prompter.request(&access, &tool_call_update, protected_edit) => outcome,
                                 _ = respond_to.closed() => PromptOutcome::Cancelled,
                             };
-                            let (decision, outcome_str) = match &prompt_outcome {
-                                PromptOutcome::AllowOnce => (Decision::Allow, "allow_once"),
+                            // Wire string from the owner projection (never a
+                            // literal); the match projects the *effective* kind so
+                            // impossible combinations keep their legacy wire value.
+                            let mut effective_kind = prompt_outcome.kind();
+                            let decision = match &prompt_outcome {
+                                PromptOutcome::AllowOnce => Decision::Allow,
                                 PromptOutcome::AllowEditsForSession => {
                                     // Session-scoped only (in-memory). Do not persist edit_policy.
                                     // This matches the label "during this session".
                                     allow_edits_for_session = true;
-                                    (Decision::Allow, "allow_edits_for_session")
+                                    Decision::Allow
                                 }
                                 PromptOutcome::AllowAlways => {
                                     // Fallback clients (Generic / GrokWeb /
@@ -2268,19 +2335,21 @@ fn spawn_permission_manager_with_pin(
                                         state.allowed_mcp_tools.insert(name.clone());
                                     }
                                     persist_state(&cwd, &state, client_id_ref).await;
-                                    (Decision::Allow, "allow_always")
+                                    Decision::Allow
                                 }
                                 PromptOutcome::AllowAlwaysBashCommand(_)
                                 | PromptOutcome::AllowAlwaysBashGlob(_) => {
-                                    // Not reachable for non-bash access; defensive.
-                                    (Decision::Allow, "allow_always_bash")
+                                    // Not reachable for non-bash access; preserve the
+                                    // legacy normalized `allow_always_bash` wire value.
+                                    effective_kind = PromptOutcomeKind::AllowAlwaysBash;
+                                    Decision::Allow
                                 }
                                 PromptOutcome::AllowAlwaysDomain(domain) => {
                                     if let AccessKind::WebFetch(_) = &access {
                                         state.allowed_web_fetch_domains.insert(domain.clone());
                                         persist_state(&cwd, &state, client_id_ref).await;
                                     }
-                                    (Decision::Allow, "allow_always_domain")
+                                    Decision::Allow
                                 }
                                 PromptOutcome::AllowAlwaysMcpTool(tool_name) => {
                                     // Persist the name from the current AccessKind, NOT the
@@ -2303,7 +2372,7 @@ fn spawn_permission_manager_with_pin(
                                         state.allowed_mcp_tools.insert(access_name.clone());
                                         persist_state(&cwd, &state, client_id_ref).await;
                                     }
-                                    (Decision::Allow, "allow_always_mcp_tool")
+                                    Decision::Allow
                                 }
                                 PromptOutcome::AllowAlwaysMcpServer(server_prefix) => {
                                     // Derive the canonical server prefix from the current
@@ -2344,31 +2413,24 @@ fn spawn_permission_manager_with_pin(
                                             }
                                         }
                                     }
-                                    (Decision::Allow, "allow_always_mcp_server")
+                                    Decision::Allow
                                 }
                                 PromptOutcome::RejectAlwaysBashCommand(_) => {
                                     // Not reachable for non-bash access; defensive.
-                                    (
-                                        Decision::Reject("User rejected the execution".to_owned()),
-                                        "reject_always_bash",
-                                    )
+                                    Decision::Reject("User rejected the execution".to_owned())
                                 }
-                                PromptOutcome::RejectOnce => (
-                                    Decision::Reject("User rejected the execution".to_owned()),
-                                    "reject_once",
-                                ),
-                                PromptOutcome::Cancelled => (Decision::Cancelled, "cancelled"),
-                                PromptOutcome::Error(e) => (
-                                    Decision::Reject(format!(
-                                        "Failed to request permission from user: {e}"
-                                    )),
-                                    "error",
-                                ),
-                                PromptOutcome::FollowupMessage(followup_message) => (
-                                    Decision::FollowupMessage(followup_message.clone()),
-                                    "followup",
-                                ),
+                                PromptOutcome::RejectOnce => {
+                                    Decision::Reject("User rejected the execution".to_owned())
+                                }
+                                PromptOutcome::Cancelled => Decision::Cancelled,
+                                PromptOutcome::Error(e) => Decision::Reject(format!(
+                                    "Failed to request permission from user: {e}"
+                                )),
+                                PromptOutcome::FollowupMessage(followup_message) => {
+                                    Decision::FollowupMessage(followup_message.clone())
+                                }
                             };
+                            let outcome_str = effective_kind.wire_str();
                             (decision, outcome_str, true)
                         }
                     };
@@ -2393,28 +2455,34 @@ fn spawn_permission_manager_with_pin(
                     }
                     let requester_gone =
                         matches!(decision, Decision::Cancelled) && respond_to.is_closed();
-                    if user_prompted && outcome_str != "error" && !requester_gone {
-                        auto_consecutive_denials = 0;
-                        telemetry.set(
-                            telemetry
-                                .get()
-                                .with_auto_denials(auto_consecutive_denials, auto_total_denials),
-                        );
-                    }
                     let trigger = if requester_gone {
                         tracing::info!(tool = %tool_name, "permission requester gone; open prompt abandoned");
                         reasons::REQUESTER_GONE
                     } else {
                         prompt_trigger
                     };
-                    emit_event(
+                    // Emit before resetting the running consecutive counter so the
+                    // per-request `denials` Cell still holds the at-decision snapshot
+                    // (DenialCounters is documented for this: product telemetry and
+                    // the Auto Block→human KPI cohort need the pre-reset values).
+                    let event = emit_event(
                         &decision,
                         false,
                         user_prompted,
                         Some(outcome_str),
                         Some(trigger),
                     );
-                    let _ = respond_to.send(decision);
+                    // Successful human prompt clears consecutive for the *next*
+                    // request only; the Cell is about to drop with this request.
+                    if user_prompted && outcome_str != "error" && !requester_gone {
+                        auto_consecutive_denials = 0;
+                    }
+                    // A no-op when the requester is gone (send fails on a closed
+                    // channel); the sole trace clone already went out via emit_event.
+                    let _ = respond_to.send(PermissionResolution {
+                        decision,
+                        event: Some(event),
+                    });
                 }
 
                 PermissionCommand::Shutdown => break,
@@ -3581,6 +3649,48 @@ mod tests {
         }
     }
 
+    /// A client that answers every prompt by selecting the first allow-once (when
+    /// `allow`) or reject-once option, for exercising human Allow vs Reject at a
+    /// denial-limit escalation prompt.
+    struct SelectingClient {
+        allow: bool,
+    }
+
+    impl SelectingClient {
+        fn new(allow: bool) -> Self {
+            Self { allow }
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl acp::Client for SelectingClient {
+        async fn request_permission(
+            &self,
+            args: acp::RequestPermissionRequest,
+        ) -> acp::Result<acp::RequestPermissionResponse> {
+            let want = if self.allow {
+                acp::PermissionOptionKind::AllowOnce
+            } else {
+                acp::PermissionOptionKind::RejectOnce
+            };
+            let option_id = args
+                .options
+                .iter()
+                .find(|o| o.kind == want)
+                .map(|o| o.option_id.clone())
+                .expect("prompt must offer the desired allow/reject option");
+            Ok(acp::RequestPermissionResponse::new(
+                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                    option_id,
+                )),
+            ))
+        }
+
+        async fn session_notification(&self, _: acp::SessionNotification) -> acp::Result<()> {
+            Ok(())
+        }
+    }
+
     /// Spawn a manager whose prompter is wired to a live gateway receiver backed
     /// by `client`, so prompting performs a real `request_permission` round-trip.
     /// `client_type` selects the option set the prompter builds (e.g. the
@@ -3626,6 +3736,81 @@ mod tests {
             acp::ToolCallId::new(Arc::from("tc")),
             acp::ToolCallUpdateFields::default(),
         )
+    }
+
+    /// Build an actor-backed handle whose command channel is `cmd_tx` (the actor
+    /// task, if any, is the caller's responsibility). Lets failure tests observe
+    /// the event-less resolutions the real handle returns.
+    fn handle_with_cmd_tx(cmd_tx: mpsc::UnboundedSender<PermissionCommand>) -> PermissionHandle {
+        PermissionHandle::Actor {
+            cmd_tx,
+            yolo_state: Arc::new(AtomicBool::new(false)),
+            auto_state: Arc::new(AtomicBool::new(false)),
+            side_query_wired: Arc::new(AtomicBool::new(false)),
+            yolo_pin: None,
+            deny_read_globs: Arc::new(vec![]),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// A manager command-send failure (actor gone) must resolve to an event-less
+    /// `Reject`, so the shell omits manager-only analytics rather than fabricating
+    /// a `user_reject`.
+    #[tokio::test]
+    async fn handle_send_failure_returns_event_less_reject() {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<PermissionCommand>();
+        drop(cmd_rx); // no actor: the send fails immediately
+        let handle = handle_with_cmd_tx(cmd_tx);
+        let resolution = handle
+            .request_with_path_context_resolved(
+                AccessKind::Bash("echo hi".into()),
+                tool_call(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            resolution.event.is_none(),
+            "manager send failure must be event-less"
+        );
+        assert!(matches!(resolution.decision, Decision::Reject(_)));
+    }
+
+    /// A dropped reply sender (actor received the request but never answered) must
+    /// likewise resolve to an event-less `Reject`.
+    #[tokio::test]
+    async fn handle_receive_failure_returns_event_less_reject() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<PermissionCommand>();
+                tokio::task::spawn_local(async move {
+                    while let Some(cmd) = cmd_rx.recv().await {
+                        if let PermissionCommand::Request { respond_to, .. } = cmd {
+                            drop(respond_to); // never answer → receive failure
+                        }
+                    }
+                });
+                let handle = handle_with_cmd_tx(cmd_tx);
+                let resolution = handle
+                    .request_with_path_context_resolved(
+                        AccessKind::Bash("echo hi".into()),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(
+                    resolution.event.is_none(),
+                    "dropped reply must be event-less"
+                );
+                assert!(matches!(resolution.decision, Decision::Reject(_)));
+            })
+            .await;
     }
 
     struct ApprovingClient;
@@ -4507,6 +4692,216 @@ mod tests {
                         Some(reasons::AUTO_CLASSIFIER_ALLOW)
                     );
                     assert!(ev.auto_approved && !ev.user_prompted);
+                })
+                .await;
+        }
+
+        /// Auto enabled but the classifier cleared (`set_classifier(None)`): the
+        /// route is entered but nothing judges the request, so the event must
+        /// report `classifier_source = not_wired` (NOT `heuristic`) with no
+        /// latency, while findings are still frozen and the request escalates to a
+        /// prompt as unavailable.
+        #[tokio::test]
+        async fn cleared_classifier_reports_not_wired_not_heuristic() {
+            use crate::permission::auto_mode::ClassifierSecurityFinding;
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let client = RecordingClient::default();
+                    let prompts = client.prompts.clone();
+                    let (mgr, mut events) = manager_with_recording_client(
+                        &cwd,
+                        Some(armed_bash_config()),
+                        client,
+                        ClientType::Generic,
+                    );
+                    mgr.set_auto_mode(true);
+                    // Public supported command: clear the classifier after Auto is on.
+                    mgr.set_classifier(None);
+
+                    let d = request(&mgr, AccessKind::Bash("bash -c \"$X\"".into())).await;
+                    // Unavailable → prompt; RecordingClient answers reject-once.
+                    assert!(matches!(d, Decision::Reject(_)), "{d:?}");
+                    assert_eq!(prompts.borrow().len(), 1);
+                    let ev = events.try_recv().expect("event must be emitted");
+                    assert_eq!(
+                        ev.classifier_source.as_deref(),
+                        Some("not_wired"),
+                        "no classifier ran; must not report heuristic"
+                    );
+                    assert_eq!(ev.classifier_verdict.as_deref(), Some("unavailable"));
+                    assert!(
+                        ev.classifier_latency_ms.is_none(),
+                        "no classifier ran → no latency"
+                    );
+                    assert_eq!(
+                        ev.decision_reason.as_deref(),
+                        Some(reasons::AUTO_CLASSIFIER_UNAVAILABLE)
+                    );
+                    // Findings are still frozen from the attempted assessment.
+                    let findings = ev.security_findings.clone().expect("route entered");
+                    assert!(
+                        findings
+                            .iter()
+                            .any(|t| t.as_str() == ClassifierSecurityFinding::OpaqueShell.token())
+                    );
+                })
+                .await;
+        }
+
+        /// The single finalizer returns the identical event it sent to the trace
+        /// receiver (one clone), and never emits a duplicate. The frozen
+        /// classifier evidence (verdict + findings) rides that one event on a
+        /// non-prompt path (Block within budget).
+        #[tokio::test]
+        async fn resolved_event_equals_sole_receiver_event_and_no_duplicate() {
+            use crate::permission::auto_mode::ClassifierSecurityFinding;
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let client = RecordingClient::default();
+                    let (mgr, mut events) = manager_with_recording_client(
+                        &cwd,
+                        Some(armed_bash_config()),
+                        client,
+                        ClientType::Generic,
+                    );
+                    mgr.set_auto_mode(true);
+                    let (clf, _seen) = capturing_classifier(ClassifierVerdict::Block);
+                    mgr.set_classifier(Some(clf));
+
+                    let resolution = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        mgr.request_with_path_context_resolved(
+                            AccessKind::Bash("bash -c \"$X\"".into()),
+                            tool_call(),
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                    )
+                    .await
+                    .expect("request must resolve");
+                    assert!(matches!(resolution.decision, Decision::PolicyDeny(_)));
+                    let returned = resolution.event.expect("actor path returns an event");
+                    // Findings/verdict frozen from the classifier route onto the event.
+                    assert_eq!(returned.classifier_verdict.as_deref(), Some("block"));
+                    let findings = returned
+                        .security_findings
+                        .clone()
+                        .expect("classifier route sets Some(findings)");
+                    assert!(
+                        findings
+                            .iter()
+                            .any(|t| t.as_str() == ClassifierSecurityFinding::OpaqueShell.token())
+                    );
+                    assert_eq!(
+                        returned.decision_reason.as_deref(),
+                        Some(reasons::AUTO_CLASSIFIER_DENY)
+                    );
+
+                    // Exactly one event reached the trace receiver, byte-identical
+                    // to the one returned in the resolution.
+                    let received = events.try_recv().expect("one trace event");
+                    assert_eq!(
+                        serde_json::to_value(&returned).unwrap(),
+                        serde_json::to_value(&received).unwrap(),
+                        "returned event must equal the sole trace event"
+                    );
+                    assert!(
+                        events.try_recv().is_err(),
+                        "no duplicate trace event for one request"
+                    );
+                })
+                .await;
+        }
+
+        /// The exact request that itself hits the denial limit and escalates to a
+        /// UI prompt must retain Block + its findings on the finalized event, with
+        /// `decision_reason = auto_denial_limit` and the exact tool id — under both
+        /// a human Allow and a human Reject at the prompt.
+        #[tokio::test]
+        async fn denial_limit_prompt_retains_block_findings_under_allow_and_reject() {
+            use crate::permission::auto_mode::ClassifierSecurityFinding;
+
+            async fn run_case(select_allow: bool) {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let (mgr, mut events) = manager_with_recording_client_remember(
+                    &cwd,
+                    Some(armed_bash_config()),
+                    SelectingClient::new(select_allow),
+                    ClientType::GrokPager,
+                    true,
+                );
+                mgr.set_auto_mode(true);
+                let (clf, _seen) = capturing_classifier(ClassifierVerdict::Block);
+                mgr.set_classifier(Some(clf));
+
+                let bash = || AccessKind::Bash("bash -c \"$X\"".into());
+                // Exhaust the consecutive budget: each Block denies within budget.
+                for _ in 0..AUTO_DENY_CONSECUTIVE_LIMIT {
+                    let d = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        mgr.request(bash(), tool_call(), None, None, None),
+                    )
+                    .await
+                    .expect("in-budget deny resolves");
+                    assert!(matches!(d, Decision::PolicyDeny(_)));
+                }
+                // The next Block escalates to a prompt on the SAME request shape.
+                let update = tool_call();
+                let expected_tool_id = update.tool_call_id.to_string();
+                let resolution = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    mgr.request_with_path_context_resolved(bash(), update, None, None, None, None),
+                )
+                .await
+                .expect("escalated prompt resolves");
+                let event = resolution.event.expect("actor path returns an event");
+                assert_eq!(event.tool_id, expected_tool_id, "exact tool id retained");
+                assert_eq!(
+                    event.decision_reason.as_deref(),
+                    Some(reasons::AUTO_DENIAL_LIMIT)
+                );
+                assert_eq!(event.classifier_verdict.as_deref(), Some("block"));
+                let findings = event.security_findings.clone().expect("findings retained");
+                assert!(
+                    findings
+                        .iter()
+                        .any(|t| t.as_str() == ClassifierSecurityFinding::OpaqueShell.token())
+                );
+                assert!(event.user_prompted, "denial-limit escalation prompts");
+                if select_allow {
+                    assert!(matches!(resolution.decision, Decision::Allow));
+                    assert_eq!(event.prompt_outcome.as_deref(), Some("allow_once"));
+                } else {
+                    assert!(matches!(resolution.decision, Decision::Reject(_)));
+                    assert_eq!(event.prompt_outcome.as_deref(), Some("reject_once"));
+                }
+                // The finalized escalation event is the last event on the rail.
+                let mut last = None;
+                while let Ok(ev) = events.try_recv() {
+                    last = Some(ev);
+                }
+                let last = last.expect("at least one event");
+                assert_eq!(
+                    serde_json::to_value(&event).unwrap(),
+                    serde_json::to_value(&last).unwrap(),
+                    "returned escalation event equals the trace copy"
+                );
+            }
+
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    run_case(true).await;
+                    run_case(false).await;
                 })
                 .await;
         }
@@ -5519,7 +5914,7 @@ mod tests {
                 let PermissionHandle::Actor { ref cmd_tx, .. } = mgr else {
                     panic!("recording-client manager must be actor-backed");
                 };
-                let (tx, rx) = oneshot::channel::<Decision>();
+                let (tx, rx) = oneshot::channel::<PermissionResolution>();
                 drop(rx);
                 cmd_tx
                     .send(PermissionCommand::Request {
@@ -5615,7 +6010,7 @@ mod tests {
                 let PermissionHandle::Actor { ref cmd_tx, .. } = mgr else {
                     panic!("manager must be actor-backed");
                 };
-                let (respond_to, response) = oneshot::channel::<Decision>();
+                let (respond_to, response) = oneshot::channel::<PermissionResolution>();
                 cmd_tx
                     .send(PermissionCommand::Request {
                         access: AccessKind::MCPTool {
@@ -5684,7 +6079,7 @@ mod tests {
                     panic!("manager must be actor-backed");
                 };
 
-                let (tx, rx) = oneshot::channel::<Decision>();
+                let (tx, rx) = oneshot::channel::<PermissionResolution>();
                 cmd_tx
                     .send(PermissionCommand::Request {
                         access: AccessKind::Bash("curl http://example.com".into()),
@@ -8585,7 +8980,7 @@ mod tests {
                 let PermissionHandle::Actor { ref cmd_tx, .. } = mgr else {
                     panic!("manager must be actor-backed");
                 };
-                let (respond_to, response) = oneshot::channel::<Decision>();
+                let (respond_to, response) = oneshot::channel::<PermissionResolution>();
                 cmd_tx
                     .send(PermissionCommand::Request {
                         access: access(),

@@ -975,13 +975,13 @@ fn parse_plain_command_from_node(cmd: Node, src: &str) -> Option<PlainCommand> {
 
                 words.push(text);
             }
-            "string" => {
+            "string"
                 // Allow only simple double-quoted strings with plain content.
                 if child.child_count() == 3
                     && child.child(0)?.kind() == "\""
                     && child.child(1)?.kind() == "string_content"
                     && child.child(2)?.kind() == "\""
-                {
+                => {
                     let content_node = child.child(1)?;
                     let text = content_node.utf8_text(src.as_bytes()).ok()?.to_owned();
 
@@ -993,11 +993,7 @@ fn parse_plain_command_from_node(cmd: Node, src: &str) -> Option<PlainCommand> {
                     span_end = Some(child.end_byte());
 
                     words.push(text);
-                } else {
-                    // Reject complex / interpolated strings
-                    return None;
                 }
-            }
             "raw_string" => {
                 let raw_string = child.utf8_text(src.as_bytes()).ok()?;
                 let stripped = raw_string

@@ -1,6 +1,7 @@
 //! ACP slash command advertising and resolution.
 use agent_client_protocol as acp;
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 use xai_grok_tools::implementations::grok_build::LoopFireMode;
 use xai_grok_tools::implementations::skills::skill::format_skill_name;
 use xai_grok_tools::implementations::skills::types::SkillInfo;
@@ -414,6 +415,146 @@ pub(crate) fn build_tools_meta(tool_names: &[String]) -> acp::Meta {
     meta.insert("tools".to_owned(), serde_json::json!(tool_names));
     meta
 }
+/// Pager-owned slash trigger keys (canonical + aliases) plus shell command
+/// names the pager never offers (`hooks-add`, `reload-plugins`, …). Burned
+/// when advertising skills so a colliding skill ships qualified (`acme:login`,
+/// `local:hooks-add`) instead of a bare name the pager will drop.
+///
+/// Synced by pager contract tests (`pager_builtin_triggers_are_reserved_in_shell`,
+/// `pager_blocked_acp_names_are_reserved_in_shell`). Add names here when adding
+/// a pager builtin or a pager-blocked shell command.
+pub const PAGER_COMMAND_KEYS: &[&str] = &[
+    "agents",
+    "agents-dashboard",
+    "always-approve",
+    "announcements",
+    "auto",
+    "btw",
+    "cd",
+    "changelog",
+    "chat",
+    "clear",
+    "cloud",
+    "compact",
+    "compact-mode",
+    "config",
+    "config-agents",
+    "context",
+    "copy",
+    "cost",
+    "dashboard",
+    "debug",
+    "delete",
+    "docs",
+    "doctor",
+    "edit-prompt",
+    "effort",
+    "exit",
+    "expand",
+    "export",
+    "feedback",
+    "find",
+    "fork",
+    "full",
+    "fullscreen",
+    "gboom",
+    "guides",
+    "help",
+    "history",
+    "home",
+    "hooks",
+    "hooks-add",
+    "hooks-list",
+    "hooks-remove",
+    "hooks-trust",
+    "hooks-untrust",
+    "howto",
+    "imagine",
+    "imagine-video",
+    "import-claude",
+    "jump",
+    "login",
+    "logout",
+    "log",
+    "loop",
+    "m",
+    "marketplace",
+    "mcps",
+    "minimal",
+    "ml",
+    "model",
+    "multiline",
+    "new",
+    "onboarding",
+    "personas",
+    "plan",
+    "plan-view",
+    "plugins",
+    "preferences",
+    "prefs",
+    "privacy",
+    "queue",
+    "quit",
+    "recap",
+    "release-notes",
+    "reload-plugins",
+    "remember",
+    "rename",
+    "resume",
+    "rewind",
+    "scroll-debug",
+    "session-info",
+    "sessions",
+    "settings",
+    "share",
+    "show-plan",
+    "skills",
+    "summarize",
+    "tasks",
+    "terminal-check",
+    "terminal-info",
+    "terminal-setup",
+    "theme",
+    "timeline",
+    "timestamps",
+    "title",
+    "toggle-mouse-reporting",
+    "tour",
+    "transcript",
+    "tutorial",
+    "t",
+    "undo",
+    "usage",
+    "view-plan",
+    "vim-mode",
+    "voice",
+    "welcome",
+    "workflows",
+    "yolo",
+];
+/// Unconditional reservations for `grok inspect`. Live advertising still
+/// includes currently gated-on shell builtins plus [`PAGER_COMMAND_KEYS`].
+static RESERVED_SLASH_NAMES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    let mut taken: HashSet<&'static str> = PAGER_COMMAND_KEYS.iter().copied().collect();
+    for builtin in BUILTIN_COMMANDS
+        .iter()
+        .chain(PROMPT_COMMANDS.iter())
+        .filter(|builtin| builtin.gate == BuiltinGate::AlwaysOn)
+    {
+        taken.insert(builtin.name);
+        taken.extend(builtin.aliases.iter().copied());
+    }
+    taken
+});
+/// Pager `CommandRegistry::apply_acp_commands` lowercases ACP names before
+/// reservation / dedup. Catalog keys, resolve, and inspect must fold the
+/// same way or a SKILL.md name like `Login` is advertised bare and dropped.
+fn slash_key(name: &str) -> String {
+    name.to_lowercase()
+}
+pub(crate) fn is_reserved_slash_name(name: &str) -> bool {
+    RESERVED_SLASH_NAMES.contains(slash_key(name).as_str())
+}
 struct EffectiveCommandCatalog<'a> {
     builtins: Vec<&'a BuiltinCommand>,
     skills: Vec<SkillCommand<'a>>,
@@ -434,136 +575,40 @@ impl<'a> EffectiveCommandCatalog<'a> {
             .chain(PROMPT_COMMANDS.iter())
             .filter(|builtin| availability.allows(builtin.gate))
             .collect();
-        const PAGER_COMMAND_KEYS: &[&str] = &[
-            "agents",
-            "agents-dashboard",
-            "always-approve",
-            "announcements",
-            "auto",
-            "btw",
-            "cd",
-            "changelog",
-            "chat",
-            "clear",
-            "cloud",
-            "compact",
-            "compact-mode",
-            "config",
-            "config-agents",
-            "context",
-            "copy",
-            "cost",
-            "dashboard",
-            "debug",
-            "docs",
-            "doctor",
-            "effort",
-            "exit",
-            "expand",
-            "export",
-            "feedback",
-            "find",
-            "fork",
-            "full",
-            "fullscreen",
-            "gboom",
-            "guides",
-            "help",
-            "history",
-            "home",
-            "hooks",
-            "howto",
-            "imagine",
-            "imagine-video",
-            "import-claude",
-            "jump",
-            "login",
-            "logout",
-            "log",
-            "loop",
-            "m",
-            "marketplace",
-            "mcps",
-            "minimal",
-            "ml",
-            "model",
-            "multiline",
-            "new",
-            "onboarding",
-            "personas",
-            "plan",
-            "plan-view",
-            "plugins",
-            "preferences",
-            "prefs",
-            "privacy",
-            "queue",
-            "quit",
-            "recap",
-            "release-notes",
-            "remember",
-            "rename",
-            "resume",
-            "rewind",
-            "scroll-debug",
-            "session-info",
-            "sessions",
-            "settings",
-            "share",
-            "show-plan",
-            "skills",
-            "tasks",
-            "terminal-check",
-            "terminal-info",
-            "terminal-setup",
-            "theme",
-            "timeline",
-            "timestamps",
-            "title",
-            "toggle-mouse-reporting",
-            "tour",
-            "transcript",
-            "tutorial",
-            "t",
-            "undo",
-            "usage",
-            "view-plan",
-            "vim-mode",
-            "voice",
-            "welcome",
-            "workflows",
-            "yolo",
-        ];
         let mut taken: HashSet<String> = builtins
             .iter()
             .flat_map(|builtin| {
-                std::iter::once(builtin.name)
-                    .chain(builtin.aliases.iter().copied())
-                    .map(str::to_owned)
+                std::iter::once(builtin.name).chain(builtin.aliases.iter().copied())
             })
-            .chain(PAGER_COMMAND_KEYS.iter().copied().map(str::to_owned))
+            .chain(PAGER_COMMAND_KEYS.iter().copied())
+            .map(slash_key)
             .collect();
         let candidates: Vec<_> = skills
             .iter()
             .filter(|skill| skill.user_invocable && skill.enabled)
             .collect();
-        let mut bare_counts: HashMap<&str, usize> = HashMap::new();
+        let mut bare_counts: HashMap<String, usize> = HashMap::new();
         let mut qualified_counts: HashMap<String, usize> = HashMap::new();
         for skill in &candidates {
-            *bare_counts.entry(skill.name.as_str()).or_default() += 1;
+            *bare_counts.entry(slash_key(&skill.name)).or_default() += 1;
             *qualified_counts
-                .entry(format_skill_name(skill))
+                .entry(slash_key(&format_skill_name(skill)))
                 .or_default() += 1;
         }
         let mut effective_skills = Vec::new();
         for skill in candidates {
-            let bare_available = bare_counts.get(skill.name.as_str()) == Some(&1)
-                && !taken.contains(skill.name.as_str());
-            let name = if bare_available {
-                skill.name.clone()
+            let bare_key = slash_key(&skill.name);
+            let name = if bare_counts.get(&bare_key) == Some(&1) && !taken.contains(&bare_key) {
+                bare_key
             } else {
-                let qualified = format_skill_name(skill);
+                let qualified = slash_key(&format_skill_name(skill));
                 if qualified_counts.get(&qualified) != Some(&1) || taken.contains(&qualified) {
+                    tracing::debug!(
+                        skill = %skill.name,
+                        path = %skill.path,
+                        %qualified,
+                        "skill not advertised: both its bare and qualified names are taken"
+                    );
                     continue;
                 }
                 qualified
@@ -571,17 +616,24 @@ impl<'a> EffectiveCommandCatalog<'a> {
             taken.insert(name.clone());
             effective_skills.push(SkillCommand { name, skill });
         }
-        taken.extend(bare_counts.keys().map(|name| (*name).to_owned()));
+        taken.extend(bare_counts.keys().cloned());
         let effective_workflows = if availability.allows(BuiltinGate::WorkflowLaunches) {
-            let mut counts: HashMap<&str, usize> = HashMap::new();
+            let mut counts: HashMap<String, usize> = HashMap::new();
             for workflow in workflows {
-                *counts.entry(workflow.name.as_str()).or_default() += 1;
+                *counts.entry(slash_key(&workflow.name)).or_default() += 1;
             }
             workflows
                 .iter()
                 .filter(|workflow| {
-                    counts.get(workflow.name.as_str()) == Some(&1)
-                        && !taken.contains(workflow.name.as_str())
+                    let key = slash_key(&workflow.name);
+                    let advertisable = counts.get(&key) == Some(&1) && !taken.contains(&key);
+                    if !advertisable {
+                        tracing::debug!(
+                            workflow = %workflow.name,
+                            "workflow not advertised: name is taken by a command or skill"
+                        );
+                    }
+                    advertisable
                 })
                 .collect()
         } else {
@@ -593,20 +645,35 @@ impl<'a> EffectiveCommandCatalog<'a> {
             workflows: effective_workflows,
         }
     }
+    /// Skill by its advertised (effective) name.
     fn skill(&self, name: &str) -> Option<&'a SkillInfo> {
+        let key = slash_key(name);
         self.skills
             .iter()
-            .find(|command| command.name == name)
+            .find(|command| command.name == key)
             .map(|command| command.skill)
+    }
+    /// Advertised name, else the canonical qualified form. Leading-token
+    /// only — mid-prose `/word` matches advertised names so an unadvertised
+    /// spelling can't hijack sentence tails.
+    fn skill_resolvable(&self, name: &str) -> Option<&'a SkillInfo> {
+        self.skill(name).or_else(|| {
+            let key = slash_key(name);
+            self.skills
+                .iter()
+                .find(|command| slash_key(&format_skill_name(command.skill)) == key)
+                .map(|command| command.skill)
+        })
     }
     fn workflow(
         &self,
         name: &str,
     ) -> Option<&'a crate::session::workflow::registry::WorkflowListing> {
+        let key = slash_key(name);
         self.workflows
             .iter()
             .copied()
-            .find(|workflow| workflow.name == name)
+            .find(|workflow| slash_key(&workflow.name) == key)
     }
 }
 /// Build the ACP `AvailableCommand` list for the client autocomplete menu.
@@ -641,6 +708,14 @@ pub(super) fn available_commands(
         let mut meta_map = serde_json::Map::new();
         meta_map.insert("scope".into(), serde_json::json!(skill.scope));
         meta_map.insert("path".into(), serde_json::json!(skill.path));
+        meta_map.insert("bareName".into(), serde_json::json!(skill.name));
+        meta_map.insert(
+            "qualifiedName".into(),
+            serde_json::json!(slash_key(&format_skill_name(skill))),
+        );
+        if let Some(ref plugin_name) = skill.plugin_name {
+            meta_map.insert("pluginName".into(), serde_json::json!(plugin_name));
+        }
         if let Some(display_name) = skill.display_name.as_deref().filter(|s| !s.is_empty()) {
             meta_map.insert("displayName".into(), serde_json::json!(display_name));
         }
@@ -651,7 +726,6 @@ pub(super) fn available_commands(
                 }
             }
         }
-        let meta = Some(meta_map);
         acp::AvailableCommand::new(
             command.name.clone(),
             skill
@@ -665,7 +739,7 @@ pub(super) fn available_commands(
                 hint.clone(),
             ))
         }))
-        .meta(meta)
+        .meta(Some(meta_map))
     }));
     commands.extend(catalog.workflows.iter().map(|workflow| {
         let meta = serde_json::json!({
@@ -1334,7 +1408,12 @@ fn parse_skill_references_with_catalog(
             .map(|relative| start + relative)
             .unwrap_or(trimmed.len());
         let word = &trimmed[start..end];
-        if let Some(skill) = catalog.skill(word) {
+        let hit = if i == 0 {
+            catalog.skill_resolvable(word)
+        } else {
+            catalog.skill(word)
+        };
+        if let Some(skill) = hit {
             hits.push(SkillHit {
                 offset: i,
                 typed_name: word.to_string(),
@@ -1455,7 +1534,10 @@ pub(super) fn resolve(
     let Some((command_name, args)) = parse_slash_prefix(&prompt_blocks) else {
         return Ok(prompt_blocks);
     };
-    if let Some(prompt_cmd) = PROMPT_COMMANDS.iter().find(|c| c.name == command_name)
+    let command_key = slash_key(command_name);
+    if let Some(prompt_cmd) = PROMPT_COMMANDS
+        .iter()
+        .find(|c| slash_key(c.name) == command_key)
         && availability.allows(prompt_cmd.gate)
     {
         let mut blocks = match prompt_cmd.name {
@@ -1482,11 +1564,13 @@ pub(super) fn resolve(
         });
     }
     let catalog = EffectiveCommandCatalog::build(skills, availability, workflows);
-    if let Some(builtin) = catalog
-        .builtins
-        .iter()
-        .find(|builtin| builtin.name == command_name || builtin.aliases.contains(&command_name))
-    {
+    if let Some(builtin) = catalog.builtins.iter().find(|builtin| {
+        slash_key(builtin.name) == command_key
+            || builtin
+                .aliases
+                .iter()
+                .any(|alias| slash_key(alias) == command_key)
+    }) {
         let action = (builtin.resolve)(args);
         if matches!(action, BuiltinAction::WorkflowLaunch { .. }) && !availability.workflows {
             return Ok(prompt_blocks);
@@ -1509,7 +1593,7 @@ pub(super) fn resolve(
             skills: parsed_skills,
         });
     }
-    if let Some(workflow) = catalog.workflow(command_name) {
+    if let Some(workflow) = catalog.workflow(&command_key) {
         return Err(SlashCommandOutcome::Builtin(
             BuiltinAction::WorkflowLaunch {
                 name: workflow.name.clone(),
@@ -2340,6 +2424,53 @@ mod tests {
         assert!(flush.input.is_none());
         let skill = commands.iter().find(|c| c.name == "commit").unwrap();
         assert_eq!(skill.description, "Short: commit");
+        let meta = skill.meta.as_ref().expect("skill meta");
+        assert_eq!(meta.get("scope").and_then(|v| v.as_str()), Some("local"));
+        assert!(meta.get("path").and_then(|v| v.as_str()).is_some());
+        assert_eq!(
+            meta.get("qualifiedName").and_then(|v| v.as_str()),
+            Some("local:commit")
+        );
+        assert!(meta.get("pluginName").is_none());
+    }
+    #[test]
+    fn pager_blocked_shell_command_skill_is_advertised_qualified() {
+        let skills = vec![make_skill("hooks-add", true)];
+        let commands = available_commands(&skills, CommandAvailability::default(), &[]);
+        assert!(
+            !commands.iter().any(|c| c.name == "hooks-add"),
+            "pager-blocked name must not be advertised bare"
+        );
+        assert!(
+            commands.iter().any(|c| c.name == "local:hooks-add"),
+            "skill must stay reachable as /local:hooks-add, got {:?}",
+            commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    #[test]
+    fn plugin_skill_colliding_with_pager_builtin_is_advertised_qualified() {
+        let mut skill = make_scoped_skill("login", SkillScope::Plugin);
+        skill.plugin_name = Some("acme".into());
+        let commands = available_commands(&[skill], all_gated(), &[]);
+        assert!(
+            !commands.iter().any(|c| c.name == "login"),
+            "colliding skill must not take the bare name (pager owns /login)"
+        );
+        let cmd = commands
+            .iter()
+            .find(|c| c.name == "acme:login")
+            .expect("plugin skill stays reachable as /acme:login");
+        let meta = cmd.meta.as_ref().expect("skill meta");
+        assert_eq!(meta.get("scope").and_then(|v| v.as_str()), Some("plugin"));
+        assert_eq!(meta.get("bareName").and_then(|v| v.as_str()), Some("login"));
+        assert_eq!(
+            meta.get("pluginName").and_then(|v| v.as_str()),
+            Some("acme")
+        );
+        assert_eq!(
+            meta.get("qualifiedName").and_then(|v| v.as_str()),
+            Some("acme:login")
+        );
     }
     #[test]
     fn flush_resolves_to_builtin_action() {
@@ -2496,6 +2627,31 @@ mod tests {
         assert_eq!(skill.args, "");
     }
     #[test]
+    fn resolve_accepts_qualified_form_of_bare_advertised_skill() {
+        let skills = vec![make_scoped_skill("deploy", SkillScope::Local)];
+        let names: Vec<String> = available_commands(&skills, all_gated(), &[])
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert!(names.iter().any(|n| n == "deploy"));
+        let outcome = resolve(
+            vec![text_block("/local:deploy to staging")],
+            &skills,
+            all_gated(),
+            SkillSlashRewrite::default(),
+            &[],
+        )
+        .unwrap_err();
+        let skill = first_skill(outcome);
+        assert_eq!(skill.name, "local:deploy");
+        assert_eq!(skill.args, "to staging");
+        assert!(
+            parse_skill_references("see /local:deploy for how we ship", &skills, all_gated())
+                .is_none(),
+            "unadvertised qualified spelling must not match mid-prose"
+        );
+    }
+    #[test]
     fn available_commands_uses_qualified_names_for_duplicates() {
         let skills = vec![
             make_scoped_skill("commit", SkillScope::Local),
@@ -2555,6 +2711,180 @@ mod tests {
         let skill = first_skill(outcome);
         assert_eq!(skill.name, "local:compact");
         assert_eq!(skill.args, "");
+    }
+    fn make_plugin_skill(name: &str, plugin: &str) -> SkillInfo {
+        let mut skill = make_scoped_skill(name, SkillScope::Plugin);
+        skill.plugin_name = Some(plugin.to_string());
+        skill.path = format!("/plugins/{plugin}/skills/{name}/SKILL.md");
+        skill
+    }
+    #[test]
+    fn plugin_login_skill_resolves_by_qualified_name_only() {
+        let skills = vec![make_plugin_skill("login", "acme")];
+        assert!(
+            resolve(
+                vec![text_block("/login")],
+                &skills,
+                all_gated(),
+                SkillSlashRewrite::default(),
+                &[],
+            )
+            .is_ok()
+        );
+        let outcome = resolve(
+            vec![text_block("/acme:login now")],
+            &skills,
+            all_gated(),
+            SkillSlashRewrite::default(),
+            &[],
+        )
+        .unwrap_err();
+        let skill = first_skill(outcome);
+        assert_eq!(skill.name, "acme:login");
+        assert_eq!(skill.args, "now");
+        assert_eq!(skill.plugin_name.as_deref(), Some("acme"));
+    }
+    #[test]
+    fn inspect_reserved_names_exclude_gated_shell_builtins() {
+        assert!(super::is_reserved_slash_name("login"));
+        assert!(super::is_reserved_slash_name("Login"));
+        assert!(super::is_reserved_slash_name("delete"));
+        assert!(super::is_reserved_slash_name("compact"));
+        assert!(super::is_reserved_slash_name("hooks-add"));
+        assert!(super::is_reserved_slash_name("HOOKS-ADD"));
+        assert!(!super::is_reserved_slash_name("flush"));
+        assert!(!super::is_reserved_slash_name("deploy"));
+    }
+    #[test]
+    fn mixed_case_pager_collision_is_advertised_qualified_lowercase() {
+        let skills = vec![make_scoped_skill("Login", SkillScope::Local)];
+        let commands = available_commands(&skills, all_gated(), &[]);
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            !names.contains(&"Login") && !names.contains(&"login"),
+            "mixed-case colliding skill must not take the bare name, got {names:?}"
+        );
+        let cmd = commands
+            .iter()
+            .find(|c| c.name == "local:login")
+            .expect("pager folds ACP names; advertised form must be lowercase qualified");
+        let meta = cmd.meta.as_ref().expect("skill meta");
+        assert_eq!(meta.get("bareName").and_then(|v| v.as_str()), Some("Login"));
+        assert_eq!(
+            meta.get("qualifiedName").and_then(|v| v.as_str()),
+            Some("local:login")
+        );
+    }
+    #[test]
+    fn mixed_case_unique_skill_advertises_lowercase_bare_name() {
+        let names: Vec<String> = available_commands(
+            &[make_scoped_skill("Deploy", SkillScope::Local)],
+            all_gated(),
+            &[],
+        )
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+        assert!(names.iter().any(|n| n == "deploy"), "{names:?}");
+        assert!(!names.iter().any(|n| n == "Deploy"), "{names:?}");
+    }
+    #[test]
+    fn resolve_mixed_case_skill_invocation() {
+        let skills = vec![make_scoped_skill("Deploy", SkillScope::Local)];
+        for typed in ["/deploy to prod", "/Deploy to prod", "/DEPLOY to prod"] {
+            let outcome = resolve(
+                vec![text_block(typed)],
+                &skills,
+                all_gated(),
+                SkillSlashRewrite::default(),
+                &[],
+            )
+            .unwrap_err();
+            let skill = first_skill(outcome);
+            assert_eq!(skill.qualified_name, "local:Deploy", "{typed}");
+            assert_eq!(skill.args, "to prod", "{typed}");
+        }
+    }
+    #[test]
+    fn resolve_mixed_case_builtin() {
+        let outcome = resolve(
+            vec![text_block("/Compact keep auth")],
+            &[],
+            all_gated(),
+            SkillSlashRewrite::default(),
+            &[],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            outcome,
+            SlashCommandOutcome::Builtin(BuiltinAction::Compact {
+                user_context: Some(ref ctx)
+            }) if ctx == "keep auth"
+        ));
+    }
+    #[test]
+    fn same_bare_name_differing_only_by_case_qualifies_both() {
+        let skills = vec![
+            make_scoped_skill("Commit", SkillScope::Local),
+            make_scoped_skill("commit", SkillScope::User),
+        ];
+        let names: Vec<String> = available_commands(&skills, all_gated(), &[])
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert!(names.iter().any(|n| n == "local:commit"), "{names:?}");
+        assert!(names.iter().any(|n| n == "user:commit"), "{names:?}");
+        assert!(!names.iter().any(|n| n == "commit"));
+        assert!(!names.iter().any(|n| n == "Commit"));
+    }
+    #[test]
+    fn same_qualified_name_differing_only_by_case_is_withheld() {
+        let skills = vec![
+            make_scoped_skill("Commit", SkillScope::Local),
+            make_scoped_skill("commit", SkillScope::Local),
+        ];
+        let names: Vec<String> = available_commands(&skills, all_gated(), &[])
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert!(
+            names
+                .iter()
+                .all(|name| name != "local:commit" && name != "local:Commit"),
+            "got {names:?}"
+        );
+    }
+    #[test]
+    fn mixed_case_workflow_does_not_take_reserved_name() {
+        let workflows = vec![listing("Login"), listing("Review")];
+        let names: Vec<String> = available_commands(&[], all_gated(), &workflows)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.eq_ignore_ascii_case("login")),
+            "{names:?}"
+        );
+        assert!(names.iter().any(|n| n == "Review"), "{names:?}");
+    }
+    #[test]
+    fn resolve_mixed_case_workflow_launch_keeps_listing_name() {
+        let workflows = vec![listing("Triage-Flakes")];
+        match resolve(
+            vec![text_block("/triage-flakes now")],
+            &[],
+            all_gated(),
+            SkillSlashRewrite::default(),
+            &workflows,
+        )
+        .unwrap_err()
+        {
+            SlashCommandOutcome::Builtin(BuiltinAction::WorkflowLaunch { name, input }) => {
+                assert_eq!(name, "Triage-Flakes");
+                assert_eq!(input, "now");
+            }
+            other => panic!("expected WorkflowLaunch, got {other:?}"),
+        }
     }
     #[test]
     fn feedback_does_not_resolve_when_disabled() {

@@ -165,6 +165,21 @@ events only, never metrics.
 | `grok_code.tool.decision` | `{decision}` | `tool_name`, `decision` = `allow` \| `deny` \| `cancelled` \| `followup`, `access_kind`, `permission_mode` |
 | `grok_code.tool.usage` | `{call}` | `tool_name`, `outcome` |
 | `grok_code.error.count` | `{error}` | `error_category`, `model` |
+| `grok_code.startup.total` | `ms` | `outcome` = `ok` \| `timeout` \| `error`; `auth_mode` |
+| `grok_code.startup.phase_duration` | `ms` | `phase`, `outcome`, `auth_mode` |
+| `grok_code.startup.timeout` | `{timeout}` | `stuck_in`, `auth_mode` |
+
+`startup.total` measures process start to a usable session, recorded once per
+process; `outcome` = `timeout` or `error` means startup ended without one.
+`phase_duration` breaks the connect attempt down by step (`load_config`,
+`managed_policy`, `bootstrap`, `model_catalog`, `spawn_worker`,
+`leader_connect`, `acp_initialize`, `eager_auth`); filter on its `outcome`
+(`ok` | `timeout` | `cancelled` | `error`) so truncated samples do not skew
+`ok` percentiles. The later `app_init`
+and `session_create` phases appear in the log timeline and the summary
+strings, not in this metric. `stuck_in` on a timeout names the step that did
+not finish. `auth_mode` is `personal`, `team`, `deployment`, or `unknown`:
+startup cost differs by kind, so split by it before comparing.
 
 There is no `cost.usage` metric: join `grok_code.token.usage` with your own
 price sheet. `lines_of_code.count` and `active_time.total` are planned for a

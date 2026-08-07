@@ -331,7 +331,7 @@ pub fn build_entries(
 
     for f in files {
         let label = file_label(&f.path);
-        let size = format_size(f.size_bytes);
+        let size = crate::util::format_bytes(f.size_bytes);
         let modified = format_modified(f.modified_epoch_secs, now_secs);
         let meta_display = format!("{size} \u{00B7} {modified}");
         let bucket = match f.source.as_str() {
@@ -1125,18 +1125,6 @@ fn file_label(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        return format!("{bytes}B");
-    }
-    let kb = bytes as f64 / 1024.0;
-    if kb < 1024.0 {
-        return format!("{kb:.1}KB");
-    }
-    let mb = kb / 1024.0;
-    format!("{mb:.1}MB")
-}
-
 fn format_modified(epoch_secs: Option<u64>, now_secs: u64) -> String {
     let Some(modified) = epoch_secs else {
         return "unknown".to_string();
@@ -1174,15 +1162,6 @@ fn load_fullscreen_pref() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn format_size_ranges() {
-        assert_eq!(format_size(0), "0B");
-        assert_eq!(format_size(512), "512B");
-        assert_eq!(format_size(1024), "1.0KB");
-        assert_eq!(format_size(1536), "1.5KB");
-        assert_eq!(format_size(1048576), "1.0MB");
-    }
 
     #[test]
     fn format_modified_relative() {

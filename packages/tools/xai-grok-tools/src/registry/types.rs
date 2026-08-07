@@ -2517,6 +2517,42 @@ mod tests {
         assert_eq!(unchanged["backend"], true);
         assert!(unchanged.get(TOOL_META_KEY).is_none());
     }
+    /// The wire (`ToolMetadata::is_read_only`) and doom-loop
+    /// (`Tool::capabilities().is_read_only`) must agree for every registered
+    /// tool. Drift here is a client classifying a tool differently from
+    /// in-process loop detection.
+    #[test]
+    fn capabilities_is_read_only_matches_metadata() {
+        let builder = ToolRegistryBuilder::new();
+        let mismatches: Vec<String> = builder
+            .tools
+            .iter()
+            .filter_map(|(name, entry)| {
+                let lr = xai_computer_hub_sdk::LocalRegistry::new();
+                (entry.register_in_local)(&lr);
+                let id = xai_tool_protocol::ToolId::new(&entry.id)
+                    .unwrap_or_else(|_| panic!("{name}: invalid tool id {:?}", entry.id));
+                let caps = lr
+                    .find(&id)
+                    .unwrap_or_else(|| panic!("{name}: missing from LocalRegistry"))
+                    .capabilities()
+                    .is_read_only;
+                let meta = entry.metadata.is_read_only();
+                (meta != caps).then(|| {
+                    format!(
+                        "{name}: ToolMetadata::is_read_only()={meta} \
+                         Tool::capabilities().is_read_only={caps}"
+                    )
+                })
+            })
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "every registered tool must give the same is_read_only from \
+             ToolMetadata and Tool::capabilities(); mismatches:\n{}",
+            mismatches.join("\n")
+        );
+    }
     /// `read_only` must come from the per-tool override, not the kind default:
     /// `get_task_output` is `BackgroundTaskAction` (default mutating) but
     /// overrides to read-only.

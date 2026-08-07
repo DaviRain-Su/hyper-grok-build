@@ -710,6 +710,15 @@ fn run_pending_suspends(
     Ok(())
 }
 
+/// Minimal mode opens an empty session after the welcome branch (now, or
+/// post-auth via the deferred drain), so that session create owns the
+/// startup latch.
+fn minimal_will_open_session(term_state: &TerminalState, app: &AppView) -> bool {
+    term_state.screen_mode.is_minimal()
+        && matches!(app.active_view, ActiveView::Welcome)
+        && !app.is_zdr_blocked()
+}
+
 /// Run the main event loop until quit.
 ///
 /// Returns a [`RunResult`] with optional exit info (for the resume hint)
@@ -745,6 +754,7 @@ pub(crate) async fn run(
 
     crate::unified_log::init(connection.tx.clone());
     crate::unified_log::info("pager started", None, None);
+    xai_grok_telemetry::startup::enter(xai_grok_telemetry::startup::StartupPhase::AppInit);
     let mut app = AppView::new(
         connection.tx,
         connection.models,
@@ -1739,6 +1749,9 @@ pub(crate) async fn run(
             return Ok(make_run_result(&app));
         }
         presenter.request_presentation(&mut app, terminal, false);
+    } else if args.initial_prompt().is_none() && !minimal_will_open_session(&term_state, &app) {
+        // No session work follows: latch at interactive.
+        xai_grok_telemetry::startup::report_total(xai_grok_telemetry::startup::StartupOutcome::Ok);
     }
 
     // Initial prompt from the CLI positional (`grok "fix the bug"`). When
@@ -1756,6 +1769,11 @@ pub(crate) async fn run(
                 return Ok(make_run_result(&app));
             }
             presenter.request_presentation(&mut app, terminal, false);
+        } else {
+            // ZDR drops the prompt; no session will latch, so latch at interactive.
+            xai_grok_telemetry::startup::report_total(
+                xai_grok_telemetry::startup::StartupOutcome::Ok,
+            );
         }
     }
 
@@ -1787,10 +1805,7 @@ pub(crate) async fn run(
     // empty one so the user lands directly at the prompt. Unauthenticated /
     // ZDR-blocked startup stays on Welcome, where `crate::minimal::live` shows
     // a sign-in hint instead of a blank region.
-    if term_state.screen_mode.is_minimal()
-        && matches!(app.active_view, ActiveView::Welcome)
-        && !app.is_zdr_blocked()
-    {
+    if minimal_will_open_session(&term_state, &app) {
         if app.session_startup_allowed() {
             // Already authenticated + trusted: open the empty session now so the
             // user lands directly at the prompt.
@@ -2429,16 +2444,19 @@ pub(crate) async fn run(
 
             _ = animation_tick => {
                 animation_tick_at = None;
+                // Lost-cancel recovery: re-send cancels for panes still
+                // cancelling past the grace (`dispatch::reconcile_overdue_cancels`).
+                // `needs_animation()` keeps ticks alive while either recovery
+                // is armed, so these checks cannot be starved.
+                if let Some(resends) = dispatch::reconcile_overdue_cancels(&mut app)
+                    && process_effects(resends, &mut tasks, &mut app, &progress_tx)
+                {
+                    break;
+                }
                 // Lost-response recovery: finish any turn whose
                 // `prompt_complete` broadcast outlived the grace window
                 // without its `session/prompt` RPC response arriving
                 // (see `dispatch::reconcile_overdue_turn_ends`).
-                // `needs_animation()` keeps ticks alive while a reconcile
-                // is armed, so this check cannot be starved.
-                // Lost-response recovery: finish turns whose terminal armed
-                // reconcile and grace expired without PromptResponse
-                // (`dispatch::reconcile_overdue_turn_ends`). `needs_animation()`
-                // keeps ticks alive while reconcile is armed.
                 let reconciled = dispatch::reconcile_overdue_turn_ends(&mut app);
                 if let Some(effs) = reconciled {
                     if process_effects(effs, &mut tasks, &mut app, &progress_tx) {

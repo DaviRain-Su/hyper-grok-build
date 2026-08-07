@@ -599,7 +599,7 @@ pub(in crate::app::dispatch) fn dispatch_delete_current_session_answered(
         session_id: session_id.clone(),
         cancel_subagents: true,
         trigger: None,
-        rewind_if_pristine: false,
+        rewind_if_no_output: false,
     }];
     effects.extend(
         running_bg_tasks

@@ -244,8 +244,8 @@ async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
     *text = format!(
         "{}\n\n[MCP output truncated: showing first {} of {}.{}{}]",
         truncated,
-        format_bytes(trunc_ctx.max_output_bytes),
-        format_bytes(total_bytes),
+        format_bytes(trunc_ctx.max_output_bytes as u64),
+        format_bytes(total_bytes as u64),
         file_hint,
         steer,
     );

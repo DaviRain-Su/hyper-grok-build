@@ -3,6 +3,14 @@
 
 use super::*;
 
+/// Outcome of `cancel_running_task`: rewind/non-stop clears; a stop gesture arms.
+#[must_use = "gate the post-cancel notification drain on this outcome"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WakeBarrier {
+    Armed,
+    Clear,
+}
+
 pub(super) struct TurnSubagentScopeGuard {
     current_prompt_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     prompt_id: String,
@@ -242,11 +250,12 @@ impl SessionActor {
                 Some(serde_json::json!({ "count": flushed })),
             );
         }
-        self.cancel_running_task(crate::session::CancelOptions {
-            trigger: Some(crate::session::CancelTrigger::SendNow),
-            ..Default::default()
-        })
-        .await;
+        let _ = self
+            .cancel_running_task(crate::session::CancelOptions {
+                trigger: Some(crate::session::CancelTrigger::SendNow),
+                ..Default::default()
+            })
+            .await;
         // Re-enable notification drains: unlike Ctrl+C, a send-now means the user is re-engaged.
         if let Some(gate) = &self.tool_context.task_wake_suppressed {
             gate.set(false);
@@ -259,7 +268,10 @@ impl SessionActor {
         );
     }
 
-    pub(super) async fn cancel_running_task(&self, options: crate::session::CancelOptions) {
+    pub(super) async fn cancel_running_task(
+        &self,
+        options: crate::session::CancelOptions,
+    ) -> WakeBarrier {
         let crate::session::CancelOptions {
             cancel_subagents,
             kill_background_tasks,
@@ -267,7 +279,9 @@ impl SessionActor {
             trigger,
             user_initiated,
         } = options;
-        let suppress_task_wakes = matches!(trigger, Some(crate::session::CancelTrigger::CtrlC));
+        let suppress_task_wakes = trigger
+            .as_ref()
+            .is_some_and(crate::session::CancelTrigger::is_stop_gesture);
         // Abort in-flight `/compact` or auto-compact generation (stream select +
         // pre-replace guard). Safe when no compact is running.
         self.compaction.cancel.request_cancel();
@@ -275,13 +289,15 @@ impl SessionActor {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(true);
             }
+            // Arm before the first await so a racing completion cannot slip
+            // a wake in.
             let mut state = self.state.try_lock().expect("session state is actor-owned");
             state.notifications_suppressed = true;
             xai_grok_telemetry::unified_log::info(
                 "shell.task_wake.cancel_barrier",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
-                    "ctrl_c": true,
+                    "trigger": trigger.as_ref().map(crate::session::CancelTrigger::as_str),
                     "gate": self
                         .tool_context
                         .task_wake_suppressed
@@ -401,7 +417,8 @@ impl SessionActor {
             // is_turn_active may still be true, causing InjectNotification
             // to route Next-priority events to the buffer instead of
             // pending_notifications. Moving them here ensures they survive in
-            // the queue; Ctrl+C defers their drain, while other cancels do not.
+            // the queue; an interactive stop defers their drain, while other
+            // cancels do not.
             self.sweep_monitor_buffer_into_pending(&mut state, "monitor-cancel-drain");
 
             // When killing all background tasks, also clear their pending
@@ -449,8 +466,9 @@ impl SessionActor {
             //   path that sends `Shutdown` next): drain the WHOLE queue — there
             //   is no point starting the next prompt and draining resolves every
             //   queued input's `respond_to` cleanly.
-            // * normal cancel: remove the running turn; only Ctrl+C also removes
-            //   queued task/workflow completion wakes. Preserve real user prompts
+            // * normal cancel: remove the running turn; only an interactive stop
+            //   (Ctrl+C / Esc / [stop]) also removes queued task/workflow
+            //   completion wakes. Preserve real user prompts
             //   and unrelated synthetic entries so `maybe_start_running_task` can
             //   promote the next genuine user turn.
             //   The cancelling client does not pull any prompt back into its
@@ -669,7 +687,8 @@ impl SessionActor {
                 usage: None,
                 tool_overrides: self.effective_tool_overrides().await,
             }));
-            return;
+            // The rewound branch cleared the barrier above; wakes flow again.
+            return WakeBarrier::Clear;
         }
 
         for (idx, input) in pending_inputs.into_iter().enumerate() {
@@ -721,6 +740,11 @@ impl SessionActor {
                     },
                 }))
                 .ok();
+        }
+        if suppress_task_wakes {
+            WakeBarrier::Armed
+        } else {
+            WakeBarrier::Clear
         }
     }
 }

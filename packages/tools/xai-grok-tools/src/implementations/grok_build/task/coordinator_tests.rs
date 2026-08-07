@@ -1,4 +1,5 @@
 use super::*;
+use crate::implementations::grok_build::task::admission::{LimitBehavior, SubagentLimits};
 use crate::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
 use crate::implementations::grok_build::task::types::{
     SubagentCancelRequest, SubagentClearUsageNotAppliedRequest, SubagentCompletionsRequest,
@@ -41,6 +42,7 @@ struct TestRunner {
     completions: mpsc::UnboundedSender<CompletionDisposition>,
     requests: mpsc::UnboundedSender<SubagentRequest>,
     started: mpsc::UnboundedSender<String>,
+    queue_waits: mpsc::UnboundedSender<(String, Option<std::time::Duration>, usize)>,
 }
 
 impl ChildRunner for TestRunner {
@@ -57,12 +59,16 @@ impl ChildRunner for TestRunner {
         let mut finish = self.finish.subscribe();
         let requests = self.requests.clone();
         let started = self.started.clone();
+        let queue_waits = self.queue_waits.clone();
         Box::pin(async move {
             let ChildRunRequest {
                 request,
                 cancellation,
                 reporter,
+                queued_for,
+                session_running,
             } = run;
+            let _ = queue_waits.send((request.id.clone(), queued_for, session_running));
             let _ = requests.send(request.clone());
             if wait_before_start {
                 tokio::select! {
@@ -187,6 +193,7 @@ struct Harness {
     completions: mpsc::UnboundedReceiver<CompletionDisposition>,
     requests: mpsc::UnboundedReceiver<SubagentRequest>,
     started: mpsc::UnboundedReceiver<String>,
+    queue_waits: mpsc::UnboundedReceiver<(String, Option<std::time::Duration>, usize)>,
     actor: tokio::task::JoinHandle<()>,
 }
 
@@ -215,6 +222,7 @@ fn harness_with_options(
     let (completion_tx, completions) = mpsc::unbounded_channel();
     let (request_tx, requests) = mpsc::unbounded_channel();
     let (started_tx, started) = mpsc::unbounded_channel();
+    let (queue_wait_tx, queue_waits) = mpsc::unbounded_channel();
     let actor = tokio::spawn(
         SubagentCoordinator::new(
             command_rx,
@@ -226,6 +234,7 @@ fn harness_with_options(
                 completions: completion_tx,
                 requests: request_tx,
                 started: started_tx,
+                queue_waits: queue_wait_tx,
             },
             config,
         )
@@ -241,6 +250,7 @@ fn harness_with_options(
         completions,
         requests,
         started,
+        queue_waits,
         actor,
     }
 }
@@ -323,6 +333,7 @@ async fn foreground_deadline_hands_off_without_stopping_child() {
             pending: 0,
             active: 1,
             completed: 0,
+            queued: 0,
         }
     );
 
@@ -1561,7 +1572,13 @@ async fn session_backend_cannot_query_or_cancel_foreign_child() {
 
 #[tokio::test]
 async fn completed_cache_evicts_oldest_entry_at_cap() {
-    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let mut harness = harness_with_config(
+        false,
+        CoordinatorConfig {
+            foreground_budget: std::time::Duration::from_secs(60),
+            ..CoordinatorConfig::default()
+        },
+    );
     for index in 0..=MAX_COMPLETED_ENTRIES {
         let id = format!("cache-{index:04}");
         let spawn = tokio::spawn({
@@ -1594,6 +1611,714 @@ async fn completed_cache_evicts_oldest_entry_at_cap() {
             .query(&format!("cache-{MAX_COMPLETED_ENTRIES:04}"), false, None,)
             .await
             .is_some()
+    );
+    harness.actor.abort();
+}
+
+fn limited(max_concurrent: usize, behavior: LimitBehavior) -> CoordinatorConfig {
+    CoordinatorConfig {
+        limits: SubagentLimits {
+            max_concurrent,
+            behavior,
+        },
+        ..CoordinatorConfig::default()
+    }
+}
+
+/// `limited`, plus a recording sink so tests can assert the notice payloads.
+fn limited_with_sink(
+    max_concurrent: usize,
+    behavior: LimitBehavior,
+) -> (
+    CoordinatorConfig,
+    mpsc::UnboundedReceiver<SubagentLimitNotice>,
+) {
+    let (notice_tx, notices) = mpsc::unbounded_channel();
+    let config = CoordinatorConfig {
+        limit_sink: Some(std::sync::Arc::new(move |notice| {
+            let _ = notice_tx.send(notice);
+        })),
+        ..limited(max_concurrent, behavior)
+    };
+    (config, notices)
+}
+
+async fn await_queued(backend: &ChannelBackend, queued: usize) {
+    for _ in 0..400 {
+        if backend.registry_counts().await.queued == queued {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("queued count never reached {queued}");
+}
+
+#[tokio::test]
+async fn spawns_past_the_concurrent_limit_queue_until_a_slot_frees() {
+    let mut harness = harness_with_config(false, limited(2, LimitBehavior::Queue));
+    let spawns: Vec<_> = (0..4)
+        .map(|i| {
+            tokio::spawn({
+                let backend = harness.backend.clone();
+                async move { backend.spawn(request(&format!("wave-{i}"), true)).await }
+            })
+        })
+        .collect();
+
+    for _ in 0..2 {
+        harness.requests.recv().await.expect("child started");
+    }
+    await_queued(&harness.backend, 2).await;
+    assert!(
+        harness.requests.try_recv().is_err(),
+        "a child started past the concurrent limit"
+    );
+    for i in 0..4 {
+        assert!(
+            harness
+                .backend
+                .query(&format!("wave-{i}"), false, None)
+                .await
+                .is_some(),
+            "a queued or running spawn must stay queryable"
+        );
+    }
+
+    let _ = harness.finish.send(());
+    for _ in 0..2 {
+        harness.requests.recv().await.expect("queued child started");
+    }
+    let _ = harness.finish.send(());
+    for spawn in spawns {
+        let result = spawn.await.expect("join").expect("spawn round-trips");
+        assert!(result.success, "every queued spawn still runs: {result:?}");
+    }
+    // The launch-time concurrency count never exceeds the limit.
+    for _ in 0..4 {
+        let (id, _, session_running) = harness.queue_waits.recv().await.expect("ran");
+        assert!(
+            (1..=2).contains(&session_running),
+            "{id} launched with session_running={session_running}, limit is 2"
+        );
+    }
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn fail_mode_rejects_at_the_limit_and_recovers_when_a_slot_frees() {
+    let mut harness = harness_with_config(false, limited(1, LimitBehavior::Fail));
+    let held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("held", true)).await }
+    });
+    harness.requests.recv().await.expect("first child started");
+
+    let rejected = harness
+        .backend
+        .spawn(request("rejected", true))
+        .await
+        .expect("spawn round-trips");
+    assert!(!rejected.success);
+    assert!(
+        rejected
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Concurrent subagent limit reached"),
+        "unexpected error: {:?}",
+        rejected.error
+    );
+    // The rejection surfaces like any failed background child and leaves a
+    // failed record, so the id the model holds does not vanish.
+    let disposition = harness.completions.recv().await.expect("disposition");
+    assert!(disposition.should_surface);
+    let snapshot = harness
+        .backend
+        .query("rejected", false, None)
+        .await
+        .expect("rejected id resolves");
+    assert!(
+        matches!(snapshot.status, SubagentSnapshotStatus::Failed { .. }),
+        "expected a failed record, got {:?}",
+        snapshot.status
+    );
+
+    let _ = harness.finish.send(());
+    let held = held.await.expect("join").expect("spawn round-trips");
+    assert!(held.success);
+
+    let next = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("next", true)).await }
+    });
+    harness
+        .requests
+        .recv()
+        .await
+        .expect("spawning succeeds again once a slot frees");
+    let _ = harness.finish.send(());
+    let next = next.await.expect("join").expect("spawn round-trips");
+    assert!(next.success);
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn limit_notices_report_running_count_queue_depth_and_origin() {
+    let (config, mut notices) = limited_with_sink(1, LimitBehavior::Queue);
+    let mut harness = harness_with_config(false, config);
+    let held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("held", true)).await }
+    });
+    harness.requests.recv().await.expect("first child started");
+    assert!(
+        notices.try_recv().is_err(),
+        "an admitted spawn must not notify the sink"
+    );
+
+    let parked = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("parked", true)).await }
+    });
+    await_queued(&harness.backend, 1).await;
+    let notice = notices.recv().await.expect("queued notice");
+    assert_eq!(notice.parent_session_id, "parent");
+    assert_eq!(
+        notice.decision,
+        SubagentLimitDecision::QueuedAtConcurrentLimit { limit: 1 }
+    );
+    assert_eq!(
+        (notice.running, notice.queue_depth),
+        (1, 1),
+        "a queued spawn counts itself in queue_depth"
+    );
+    assert_eq!(notice.origin, LimitedSpawnOrigin::Task);
+
+    let mut loop_request = request("loop-fire", true);
+    loop_request.runtime_overrides.loop_task_id = Some("loop-1".to_owned());
+    let looped = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(loop_request).await }
+    });
+    await_queued(&harness.backend, 2).await;
+    let notice = notices.recv().await.expect("loop-fire notice");
+    assert_eq!((notice.running, notice.queue_depth), (1, 2));
+    assert_eq!(notice.origin, LimitedSpawnOrigin::SchedulerLoop);
+
+    let _ = harness.finish.send(());
+    harness.requests.recv().await.expect("parked started");
+    let _ = harness.finish.send(());
+    harness.requests.recv().await.expect("loop-fire started");
+    let _ = harness.finish.send(());
+    for spawn in [held, parked, looped] {
+        assert!(spawn.await.expect("join").expect("round-trips").success);
+    }
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn a_rejected_spawn_notice_excludes_itself_from_queue_depth() {
+    let (config, mut notices) = limited_with_sink(1, LimitBehavior::Fail);
+    let mut harness = harness_with_config(false, config);
+    let held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("held", true)).await }
+    });
+    harness.requests.recv().await.expect("first child started");
+
+    let rejected = harness
+        .backend
+        .spawn(request("rejected", true))
+        .await
+        .expect("spawn round-trips");
+    assert!(!rejected.success);
+    let notice = notices.recv().await.expect("rejected notice");
+    assert_eq!(
+        notice.decision,
+        SubagentLimitDecision::RejectedAtConcurrentLimit { limit: 1 }
+    );
+    assert_eq!(
+        (notice.running, notice.queue_depth),
+        (1, 0),
+        "a rejected spawn never enters the queue"
+    );
+
+    let _ = harness.finish.send(());
+    assert!(held.await.expect("join").expect("round-trips").success);
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn teardown_purges_a_queued_spawn_without_rebuffering() {
+    let mut harness = harness_with_config(
+        false,
+        CoordinatorConfig {
+            buffer_completions: true,
+            ..limited(1, LimitBehavior::Queue)
+        },
+    );
+    let held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("held", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("held"));
+    let parked = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("parked", true)).await }
+    });
+    await_queued(&harness.backend, 1).await;
+
+    harness
+        .backend
+        .sender()
+        .send(SubagentEvent::TeardownSession {
+            parent_session_id: "parent".to_owned(),
+        })
+        .expect("actor command channel open");
+
+    let parked = parked.await.expect("join").expect("spawn round-trips");
+    assert!(parked.cancelled, "teardown must cancel the queued spawn");
+    let held = held.await.expect("join").expect("spawn round-trips");
+    assert!(held.cancelled);
+    // Both completions processed; neither may rebuffer for a later resume
+    // of the torn-down session id.
+    for _ in 0..2 {
+        let _ = harness.completions.recv().await;
+    }
+    let (tx, rx) = oneshot::channel();
+    harness
+        .backend
+        .sender()
+        .send(SubagentEvent::Completions(SubagentCompletionsRequest {
+            parent_session_id: Some("parent".to_owned()),
+            suppress_ids: Vec::new(),
+            respond_to: tx,
+        }))
+        .expect("actor command channel open");
+    assert!(
+        rx.await.unwrap().is_empty(),
+        "a spawn parked at teardown must not rebuffer a completion"
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn dropping_the_actor_resolves_queued_callers_without_host_callbacks() {
+    let mut harness = harness_with_config(false, limited(1, LimitBehavior::Queue));
+    let held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("held", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("held"));
+    let parked = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("parked", true)).await }
+    });
+    await_queued(&harness.backend, 1).await;
+
+    // Aborting the actor drops it mid-run: the destructor path.
+    harness.actor.abort();
+    let parked = parked.await.expect("join").expect("queued caller resolves");
+    assert!(
+        parked.cancelled,
+        "the destructor must resolve a queued caller: {parked:?}"
+    );
+    // The running child's caller gets the channel-closed error: its reply
+    // sender dies with the actor (pre-existing contract).
+    assert!(held.await.expect("join").is_err());
+    assert!(
+        harness.completions.try_recv().is_err(),
+        "the destructor must not run host completion callbacks"
+    );
+}
+
+#[tokio::test]
+async fn a_spawn_cancelled_while_queued_never_starts() {
+    let mut harness = harness_with_config(false, limited(1, LimitBehavior::Queue));
+    let held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("held", true)).await }
+    });
+    harness.requests.recv().await.expect("first child started");
+
+    let mut queued = request("queued", true);
+    let cancel = CancellationToken::new();
+    queued.cancel_token = cancel.clone();
+    let queued = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(queued).await }
+    });
+    await_queued(&harness.backend, 1).await;
+
+    cancel.cancel();
+    let _ = harness.finish.send(());
+    let result = queued.await.expect("join").expect("spawn round-trips");
+    assert!(
+        result.cancelled,
+        "a spawn cancelled while queued must not run: {result:?}"
+    );
+    assert!(
+        held.await
+            .expect("join")
+            .expect("spawn round-trips")
+            .success
+    );
+    assert!(
+        harness.requests.try_recv().is_err(),
+        "the cancelled spawn reached the runner"
+    );
+    let snapshot = harness
+        .backend
+        .query("queued", false, None)
+        .await
+        .expect("a spawn cancelled while queued leaves a completed record");
+    assert!(
+        matches!(snapshot.status, SubagentSnapshotStatus::Cancelled { .. }),
+        "queued-cancelled id must read as cancelled: {:?}",
+        snapshot.status
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_queued_spawn_auto_backgrounds_its_caller_at_the_await_budget() {
+    let mut harness = harness_with_config(
+        false,
+        CoordinatorConfig {
+            foreground_budget: std::time::Duration::from_secs(1),
+            limits: SubagentLimits {
+                max_concurrent: 1,
+                behavior: LimitBehavior::Queue,
+            },
+            ..CoordinatorConfig::default()
+        },
+    );
+    let held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("held", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("held"));
+
+    let parked = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("parked", false)).await }
+    });
+    await_queued(&harness.backend, 1).await;
+
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    let interim = parked.await.expect("join").expect("spawn round-trips");
+    assert!(
+        interim.backgrounded,
+        "queued caller must be handed off at the await budget: {interim:?}"
+    );
+    assert!(
+        !interim.success,
+        "interim handoff must not read as completed"
+    );
+    assert_eq!(
+        harness.backend.registry_counts().await.queued,
+        1,
+        "the spawn itself stays queued for a slot"
+    );
+    assert_eq!(
+        outstanding(&harness.backend, "prompt").await,
+        SubagentOutstandingReply {
+            live_ids: Vec::new(),
+            background_live: true,
+            subagent_usage_not_applied: false,
+        }
+    );
+
+    let _ = harness.finish.send(());
+    assert!(
+        held.await
+            .expect("join")
+            .expect("spawn round-trips")
+            .success
+    );
+    // The freed slot starts the parked spawn as a background child.
+    assert_eq!(harness.started.recv().await.as_deref(), Some("parked"));
+    let _ = harness.finish.send(());
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn an_abandoned_queued_caller_stops_turn_blocking() {
+    let mut harness = harness_with_config(false, limited(1, LimitBehavior::Queue));
+    let held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("held", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("held"));
+
+    // No await budget: only the caller-gone reap can unblock the turn.
+    let mut abandoned = request("abandoned", false);
+    abandoned.await_to_completion = true;
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(abandoned).await }
+    });
+    await_queued(&harness.backend, 1).await;
+    spawn.abort();
+    let _ = spawn.await;
+
+    assert_eq!(
+        outstanding(&harness.backend, "prompt").await,
+        SubagentOutstandingReply {
+            live_ids: Vec::new(),
+            background_live: true,
+            subagent_usage_not_applied: false,
+        }
+    );
+
+    let _ = harness.finish.send(());
+    assert!(
+        held.await
+            .expect("join")
+            .expect("spawn round-trips")
+            .success
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dequeued_spawn_keeps_spending_its_enqueue_await_budget() {
+    let mut harness = harness_with_config(
+        false,
+        CoordinatorConfig {
+            foreground_budget: std::time::Duration::from_secs(2),
+            limits: SubagentLimits {
+                max_concurrent: 1,
+                behavior: LimitBehavior::Queue,
+            },
+            ..CoordinatorConfig::default()
+        },
+    );
+    let held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("held", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("held"));
+
+    let parked = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("parked", false)).await }
+    });
+    await_queued(&harness.backend, 1).await;
+    assert!(
+        outstanding(&harness.backend, "prompt")
+            .await
+            .live_ids
+            .contains(&"parked".to_owned()),
+        "a queued foreground spawn blocks the turn until the budget handoff"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    let _ = harness.finish.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("parked"));
+
+    let (id, queued_for, _) = harness.queue_waits.recv().await.expect("held ran");
+    assert_eq!((id.as_str(), queued_for), ("held", None));
+    let (id, queued_for, _) = harness.queue_waits.recv().await.expect("parked ran");
+    assert_eq!(id, "parked");
+    let queued_for = queued_for.expect("a dequeued spawn reports its time parked");
+    assert!(
+        queued_for >= std::time::Duration::from_secs(1)
+            && queued_for < std::time::Duration::from_secs(2),
+        "queued_for must measure the paused-clock park time, got {queued_for:?}"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        parked.is_finished(),
+        "the caller must be handed off at the enqueue-time deadline, \
+         not a restarted budget"
+    );
+    let interim = parked.await.expect("join").expect("spawn round-trips");
+    assert!(interim.backgrounded);
+    assert!(
+        held.await
+            .expect("join")
+            .expect("spawn round-trips")
+            .success
+    );
+    let _ = harness.finish.send(());
+    harness.actor.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_out_of_band_token_cancel_resolves_without_other_actor_traffic() {
+    let mut harness = harness_with_config(false, limited(1, LimitBehavior::Queue));
+    let held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("held", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("held"));
+
+    let mut queued = request("queued", true);
+    let cancel = CancellationToken::new();
+    queued.cancel_token = cancel.clone();
+    let queued = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(queued).await }
+    });
+    await_queued(&harness.backend, 1).await;
+
+    // Send nothing after the cancel: the periodic queue sweep must resolve
+    // it alone.
+    cancel.cancel();
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        queued.is_finished(),
+        "a token-cancelled queued spawn must resolve without other traffic"
+    );
+    let result = queued.await.expect("join").expect("spawn round-trips");
+    assert!(result.cancelled);
+
+    let _ = harness.finish.send(());
+    assert!(
+        held.await
+            .expect("join")
+            .expect("spawn round-trips")
+            .success
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn a_cancel_command_by_id_resolves_a_queued_spawn() {
+    let mut harness = harness_with_config(false, limited(1, LimitBehavior::Queue));
+    let held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("held", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("held"));
+
+    let queued = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("queued", true)).await }
+    });
+    await_queued(&harness.backend, 1).await;
+
+    let (respond_to, outcome) = oneshot::channel();
+    harness
+        .backend
+        .sender()
+        .send(SubagentEvent::Cancel(SubagentCancelRequest {
+            parent_session_id: Some("parent".to_owned()),
+            target: SubagentCancelTarget::SubagentId("queued".to_owned()),
+            respond_to,
+        }))
+        .expect("actor command channel open");
+    assert!(matches!(
+        outcome.await.unwrap(),
+        SubagentCancelOutcome::Cancelled
+    ));
+    let result = queued.await.expect("join").expect("spawn round-trips");
+    assert!(
+        result.cancelled,
+        "cancel by id must resolve the spawn caller"
+    );
+    let snapshot = harness
+        .backend
+        .query("queued", false, None)
+        .await
+        .expect("cancelled queued id stays queryable");
+    assert!(matches!(
+        snapshot.status,
+        SubagentSnapshotStatus::Cancelled { .. }
+    ));
+
+    let _ = harness.finish.send(());
+    assert!(
+        held.await
+            .expect("join")
+            .expect("spawn round-trips")
+            .success
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn a_saturated_session_does_not_block_another_sessions_spawns() {
+    let mut harness = harness_with_config(false, limited(1, LimitBehavior::Queue));
+    let a_held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("a-held", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("a-held"));
+
+    let a_queued = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("a-queued", true)).await }
+    });
+    await_queued(&harness.backend, 1).await;
+
+    // Session B must start despite sitting behind session A's parked entry.
+    let mut for_b = request("b-first", true);
+    for_b.parent_session_id = "other".to_owned();
+    let b_first = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(for_b).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("b-first"));
+
+    let _ = harness.finish.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("a-queued"));
+    let _ = harness.finish.send(());
+    for spawn in [a_held, a_queued, b_first] {
+        assert!(
+            spawn
+                .await
+                .expect("join")
+                .expect("spawn round-trips")
+                .success
+        );
+    }
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn workflow_spawns_bypass_the_session_concurrent_limit() {
+    let mut harness = harness_with_config(false, limited(1, LimitBehavior::Fail));
+    let task_child = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("task-child", true)).await }
+    });
+    harness.requests.recv().await.expect("task child started");
+
+    let mut workflow = request("wf-child", true);
+    workflow.owner = SubagentOwner::workflow("run-1");
+    let workflow = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(workflow).await }
+    });
+    harness
+        .requests
+        .recv()
+        .await
+        .expect("workflow child started with the session at the concurrent limit");
+
+    let _ = harness.finish.send(());
+    assert!(
+        task_child
+            .await
+            .expect("join")
+            .expect("spawn round-trips")
+            .success
+    );
+    assert!(
+        workflow
+            .await
+            .expect("join")
+            .expect("spawn round-trips")
+            .success
     );
     harness.actor.abort();
 }

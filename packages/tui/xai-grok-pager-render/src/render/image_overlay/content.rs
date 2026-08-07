@@ -6,6 +6,7 @@ use ratatui::text::Span;
 
 use crate::prompt_images::PastedImage;
 use crate::render::SafeBuf;
+use crate::util::format_bytes;
 
 pub(super) fn paint_path_line(
     buf: &mut Buffer,
@@ -36,7 +37,7 @@ pub(super) fn build_meta_line(image: &PastedImage, display_path: Option<&Path>) 
     if let Some((width, height)) = image.preview_dimensions() {
         parts.push(format!("{}x{}", width, height));
     }
-    parts.push(format_bytes(image.byte_len));
+    parts.push(format_bytes(image.byte_len as u64));
     if let Some(path) = display_path
         && let Some(name) = path.file_name()
     {
@@ -54,16 +55,6 @@ pub(super) fn format_mime(mime: &str) -> String {
         "image/webp" => "WebP".into(),
         "image/bmp" => "BMP".into(),
         other => other.into(),
-    }
-}
-
-pub(super) fn format_bytes(bytes: usize) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
 

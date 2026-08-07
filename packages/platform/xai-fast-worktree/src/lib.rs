@@ -55,11 +55,16 @@ pub use auto_gc::{
 };
 #[cfg(feature = "metadata")]
 pub use db::{
-    DbStats, ListFilter, WorktreeDb, WorktreeKind, WorktreeRecord, WorktreeStatus, id_from_path,
-    now_epoch_secs, repo_name_from_path, resolve_grok_home,
+    DbStats, ListFilter, META_KEY_LABEL, RegistryOpen, SqliteFailureKind, WorktreeDb, WorktreeKind,
+    WorktreeRecord, WorktreeStatus, classify_sqlite_error, id_from_path, now_epoch_secs,
+    repo_name_from_path, resolve_grok_home,
 };
 #[cfg(feature = "metadata")]
-pub use discovery::{RebuildReport, discover_worktrees, rebuild_worktree_db};
+pub use discovery::{
+    RebuildReport, WORKTREE_DEPTH, WORKTREE_POOL_DIR, WORKTREES_DIR, discover_worktrees,
+    managed_worktree_roots, path_under_managed_worktree_roots, path_under_worktree_roots,
+    rebuild_worktree_db,
+};
 pub use git::checkout::{
     rehydrate_worktree_from_ref, snapshot_worktree_to_ref, transfer_snapshot_to_repo,
 };

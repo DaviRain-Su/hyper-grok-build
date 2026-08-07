@@ -825,7 +825,7 @@ async fn interject_after_cancel_does_nothing_and_keeps_prompt_queued() {
                 .lock()
                 .expect("current_prompt_id mutex poisoned") = Some("running".into());
 
-            actor
+            let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
                     cancel_subagents: true,
                     user_initiated: true,

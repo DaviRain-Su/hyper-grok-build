@@ -586,7 +586,10 @@ impl InstrumentationTimer {
     }
 
     pub fn with_field(&mut self, key: impl Into<String>, value: impl Into<Value>) -> &mut Self {
-        if self.mode != InstrumentationMode::Disabled && self.mode != InstrumentationMode::Chrome {
+        // Startup keeps fields in every mode: the `unified.jsonl` mirror needs them.
+        if (self.mode != InstrumentationMode::Disabled && self.mode != InstrumentationMode::Chrome)
+            || crate::startup::is_active()
+        {
             self.fields.push((key.into(), value.into()));
         }
         self
@@ -595,6 +598,24 @@ impl InstrumentationTimer {
 
 impl Drop for InstrumentationTimer {
     fn drop(&mut self) {
+        // Mirror into `unified.jsonl` while startup is active, so a slow-launch
+        // report needs no env vars or repro; the first usable session latches this off.
+        if crate::startup::is_active() {
+            let mut ctx = serde_json::Map::new();
+            ctx.insert("name".to_string(), Value::String(self.name.to_string()));
+            ctx.insert(
+                "elapsed_ms".to_string(),
+                Value::Number((self.start.elapsed().as_millis() as u64).into()),
+            );
+            for (key, value) in &self.fields {
+                ctx.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+            crate::unified_log::info(
+                crate::startup::STARTUP_TIMING_MSG,
+                None,
+                Some(Value::Object(ctx)),
+            );
+        }
         if self.mode == InstrumentationMode::Disabled {
             return;
         }

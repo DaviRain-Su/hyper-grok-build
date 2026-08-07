@@ -584,6 +584,8 @@ pub enum Action {
     SetTimeline(bool),
     /// Set `[ui].page_flip_on_send` (default ON). Persists via `Effect::PersistSetting`.
     SetPageFlipOnSend(bool),
+    /// Set `[ui].confirm_before_rewind` (default ON). Persists via `Effect::PersistSetting`.
+    SetConfirmBeforeRewind(bool),
     /// Set whether the drain call site merges the run of leading queued
     /// `Prompt` entries into one turn instead of sending them one by one.
     /// SHARED-owned: updates the process-wide cache mirror (read by the
@@ -777,9 +779,9 @@ pub enum Action {
     /// to config.toml). `/plan <desc>` uses `EnterPlanMode` instead
     /// because it also starts a turn.
     SetPlanMode(PlanModeKind),
-    /// Enter feedback mode (visual prompt change, not a send).
-    EnterFeedbackMode,
-    /// Send feedback text collected in feedback mode.
+    /// Open the freeform feedback bottom pane (bare `/feedback`).
+    OpenFeedbackPane,
+    /// Submit feedback text (inline `/feedback <text>` or pane submit).
     SendFeedback(String),
     /// Enter remember mode (visual prompt change, not a send).
     EnterRememberMode,
@@ -1061,12 +1063,11 @@ pub enum Action {
     Rewind,
     RewindShowPicker,
     RewindPickerSelect(usize),
-    RewindSelectMode(crate::views::rewind::RewindMode, usize),
-    RewindConfirm(usize, crate::views::rewind::RewindMode),
-    RewindConversationOnlyConfirm(usize),
+    RewindConfirm(usize),
+    /// Confirm rewind and turn off `confirm_before_rewind` for future rewinds.
+    RewindConfirmNeverAsk(usize),
     RewindCancelOffer,
     RewindDismiss,
-    RewindBackToModeSelect,
     RewindDismissError,
     /// Submit an inline edit: conversation-only rewind to that prompt, then
     /// resubmit the edited text (state lives on `AgentView::inline_edit`).
@@ -1218,16 +1219,9 @@ impl PlanModeKind {
         if b { Self::On } else { Self::Off }
     }
 }
-/// Async side effect produced by [`super::dispatch::dispatch`].
-///
-/// The event loop spawns these into a `JoinSet`. When they complete,
-/// the result is wrapped in [`TaskResult`] and fed back through
-/// `Action::TaskComplete`.
-/// What user gesture triggered a turn cancel. Recorded on `session/cancel`'s
-/// `_meta.cancelTrigger` so the agent's `mid_turn_abort` telemetry can tell
-/// ESC from Ctrl+C (and a mouse click on the cancel button) apart. Free-form
-/// on the wire (the agent stores it in `cancellation_context`), so adding a
-/// variant needs no agent/schema change.
+/// What user gesture triggered a turn cancel; sent as `session/cancel`'s
+/// `_meta.cancelTrigger`. The shell's deny-list treats every gesture value
+/// as a stop, so new variants need no shell change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelTrigger {
     /// Wire value `"esc"` (bare Esc mid-turn cancel in minimal / non-vim
@@ -1237,6 +1231,9 @@ pub enum CancelTrigger {
     CtrlC,
     /// The on-screen cancel button was clicked.
     Mouse,
+    /// The dashboard's stop key (Ctrl+X), from the overlay or a busy row,
+    /// downgraded to a turn cancel.
+    DashboardStop,
 }
 impl CancelTrigger {
     /// Snake_case wire string sent as `_meta.cancelTrigger`.
@@ -1245,6 +1242,7 @@ impl CancelTrigger {
             Self::Esc => "esc",
             Self::CtrlC => "ctrl_c",
             Self::Mouse => "mouse",
+            Self::DashboardStop => "dashboard_stop",
         }
     }
 }
@@ -1456,6 +1454,9 @@ pub enum AfterSessionDelete {
     /// `/delete` from a dashboard-attached agent, or dashboard row delete.
     Dashboard,
 }
+/// Async side effect produced by [`super::dispatch::dispatch`]. The event
+/// loop spawns these into a `JoinSet`; completions come back through
+/// [`TaskResult`] as `Action::TaskComplete`.
 #[derive(Debug)]
 pub enum Effect {
     /// Fetch pending changes (files + hunks) for the review modal.
@@ -1625,13 +1626,13 @@ pub enum Effect {
         /// programmatic cancels (login/reauth flows).
         trigger: Option<CancelTrigger>,
         /// Ask the shell to trim the in-flight prompt from session history when
-        /// the turn is still pristine (no server activity), sent as
-        /// `_meta.rewindIfPristine`. Set true ONLY when the pager has locally
+        /// the turn has produced no output yet, sent as
+        /// `_meta.rewindIfNoOutput`. Set true ONLY when the pager has locally
         /// rewound the prompt back into the composer, so the shell's history
         /// matches the UI. Without it the shell keeps the prompt plus an
         /// interruption marker, and a later resend pairs the kept copy with the
         /// resend — the send+Ctrl+C double-prompt bug.
-        rewind_if_pristine: bool,
+        rewind_if_no_output: bool,
     },
     /// Run a manual `/compact` command.
     Compact {
@@ -2173,17 +2174,10 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
-    RewindPreview {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-        target_prompt_index: usize,
-        mode: crate::views::rewind::RewindMode,
-    },
     RewindExecute {
         agent_id: AgentId,
         session_id: acp::SessionId,
         target_prompt_index: usize,
-        mode: crate::views::rewind::RewindMode,
     },
     /// Fetch billing/credit usage from the agent's `x.ai/billing` extension.
     /// When `silent` is true the result updates `credit_balance` without
@@ -2794,7 +2788,7 @@ pub enum TaskResult {
     FeedbackComplete {
         agent_id: AgentId,
     },
-    /// Feedback submission failed.
+    /// Feedback submission failed. The shell already persisted the report locally, so only the error is surfaced.
     FeedbackFailed {
         agent_id: AgentId,
         error: String,
@@ -2949,16 +2943,6 @@ pub enum TaskResult {
         points: Vec<crate::views::rewind::RewindPointInfo>,
     },
     RewindPointsFailed {
-        agent_id: AgentId,
-        error: String,
-    },
-    RewindPreviewComplete {
-        agent_id: AgentId,
-        response: crate::views::rewind::RewindResponse,
-        target_prompt_index: usize,
-        mode: crate::views::rewind::RewindMode,
-    },
-    RewindPreviewFailed {
         agent_id: AgentId,
         error: String,
     },

@@ -455,7 +455,7 @@ mod hyperlink_tests {
                 .iter()
                 .map(|h| (h.url.clone(), h.line_index, h.column_range.clone()))
                 .collect();
-            v.sort_by(|a, b| (a.1, a.2.start).cmp(&(b.1, b.2.start)));
+            v.sort_by_key(|a| (a.1, a.2.start));
             v
         };
         assert_eq!(

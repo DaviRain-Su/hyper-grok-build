@@ -68,8 +68,26 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
         // response may have been lost in transit. Re-send instead of silently
         // no-opping (cancel is idempotent on the agent), so Ctrl+C / palette
         // CancelTurn is never a dead key on a stuck "Cancelling…" spinner.
-        // Skips the subagent panel — that
-        // choice was already made (or defaulted) on the first cancel.
+        //
+        // Retry and wake cancels skip the subagent panel and share one rule
+        // for the choice: reuse the first cancel's recorded decision (a retry
+        // after a one-shot "Continue to run" must not escalate to killing the
+        // subagents the user chose to keep), else the preference, else stop
+        // them.
+        let resolve_cancel_subagents = |agent: &crate::app::agent_view::AgentView| {
+            let target = agent
+                .running_wake_turn
+                .as_ref()
+                .map(|wake| wake.prompt_id.clone())
+                .or_else(|| agent.session.current_prompt_id.clone());
+            agent
+                .pending_cancel_resend
+                .as_ref()
+                .filter(|p| p.prompt_id == target)
+                .map(|p| p.cancel_subagents)
+                .or(resolved_pref)
+                .unwrap_or(true)
+        };
         if agent.session.state.is_cancelling() {
             let Some(session_id) = agent.session.session_id.clone() else {
                 return vec![];
@@ -83,22 +101,37 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             );
             // Explicit user cancel supersedes any pending send-now expectation (its marker renders).
             agent.clear_send_now_expectation();
-            return vec![Effect::CancelTurn {
+            let cancel_subagents = resolve_cancel_subagents(agent);
+            return vec![emit_cancel_turn(
+                agent,
                 session_id,
-                cancel_subagents: resolved_pref.unwrap_or(true),
-                // A fresh gesture (e.g. a second Ctrl+C on a stuck spinner) re-set
-                // the hint; consume it so the re-sent cancel still carries the trigger.
-                trigger: agent.cancel_trigger_hint.take(),
-                // Retry cancel of a stuck turn — no local prompt rewind here.
-                rewind_if_pristine: false,
-            }];
+                cancel_subagents,
+                /* rewind_if_no_output */ false,
+            )];
         }
-        if !agent.session.state.is_turn_running() && !agent.session.state.is_compact_running() {
-            return vec![];
-        }
+        // Compact owns the pane (`CommandRunning`) even if a leftover wake
+        // marker is still set — `/compact` can drain while that marker is live.
+        // Must beat the wake early-return or Esc never calls cancel_compact.
         if agent.session.state.is_compact_running() {
-            // No subagent picker for `/compact` — just stop the generation.
             resolved_pref.or(Some(true))
+        } else if agent.running_wake_turn.is_some() {
+            // Marker, not idle-only: a local send during a wake start_turn's
+            // the pane while the shell front is still the wake. Cancel that
+            // wake; the queued user prompt must survive.
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            agent.clear_send_now_expectation();
+            let cancel_subagents = resolve_cancel_subagents(agent);
+            agent.mark_wake_cancel_sent();
+            return vec![emit_cancel_turn(
+                agent,
+                session_id,
+                cancel_subagents,
+                /* rewind_if_no_output */ false,
+            )];
+        } else if !agent.session.state.is_turn_running() {
+            return vec![];
         } else if let Some(stop) = resolved_pref {
             Some(stop)
         } else {
@@ -195,12 +228,26 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
             return vec![];
         };
         agent.clear_send_now_expectation();
-        return vec![Effect::CancelTurn {
+        return vec![emit_cancel_turn(
+            agent,
             session_id,
             cancel_subagents,
-            trigger: agent.cancel_trigger_hint.take(),
-            rewind_if_pristine: false,
-        }];
+            /* rewind_if_no_output */ false,
+        )];
+    }
+    // Wake marker, not idle-only — same reason as `dispatch_cancel_turn`.
+    if agent.running_wake_turn.is_some() {
+        let Some(session_id) = agent.session.session_id.clone() else {
+            return vec![];
+        };
+        agent.clear_send_now_expectation();
+        agent.mark_wake_cancel_sent();
+        return vec![emit_cancel_turn(
+            agent,
+            session_id,
+            cancel_subagents,
+            /* rewind_if_no_output */ false,
+        )];
     }
     if !agent.session.state.is_turn_running() {
         return vec![];
@@ -295,18 +342,147 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
     // pager adopts it via `handle_queue_changed` / `apply_turn_start_shim`. We
     // do NOT pull any queued prompt back into the input or predict the new queue
     // order client-side; the user's first queued prompt is what runs next.
-    vec![Effect::CancelTurn {
+    // `rewinding` mirrors the local rewind on the wire so the shell trims
+    // its stored copy too.
+    vec![emit_cancel_turn(
+        agent,
         session_id,
         cancel_subagents,
-        // Consume the gesture hint set by the key/mouse handler (persists
-        // through the subagent picker until this final build). `None` for
-        // non-gesture callers (login/reauth flows).
-        trigger: agent.cancel_trigger_hint.take(),
-        // Mirror the local rewind on the wire: when we restored the prompt to
-        // the composer above, ask the shell to trim its pristine copy too so a
-        // resend can't pair the kept copy with the new send.
-        rewind_if_pristine: rewinding,
-    }]
+        rewinding,
+    )]
+}
+
+/// Build `Effect::CancelTurn`, consuming the gesture hint and arming the
+/// resend reconcile (skipped for a rewind, which leaves no cancelling state).
+pub(super) fn emit_cancel_turn(
+    agent: &mut crate::app::agent_view::AgentView,
+    session_id: agent_client_protocol::SessionId,
+    cancel_subagents: bool,
+    rewind_if_no_output: bool,
+) -> Effect {
+    let target_prompt_id = if agent.session.state.is_compact_running()
+        || matches!(
+            agent.session.state,
+            crate::app::agent::AgentState::CommandCancelling {
+                command: crate::app::agent::AgentCommand::Compact,
+            }
+        ) {
+        agent.session.current_prompt_id.clone()
+    } else {
+        agent
+            .running_wake_turn
+            .as_ref()
+            .map(|wake| wake.prompt_id.clone())
+            .or_else(|| agent.session.current_prompt_id.clone())
+    };
+    // Prefer the live hint; a hint-less retry (palette) replays the
+    // recorded gesture so the shell still arms the wake barrier.
+    let trigger = agent
+        .cancel_trigger_hint
+        .take()
+        .or_else(|| agent.pending_cancel_resend.as_ref().map(|p| p.trigger));
+    // A local send during a wake adopts the user prompt while the shell
+    // front is still the wake. Auto-resend has no prompt id on the wire, so
+    // arming it here would cancel the promoted user turn after the grace.
+    let desynced_from_wake = agent.running_wake_turn.as_ref().is_some_and(|wake| {
+        agent
+            .session
+            .current_prompt_id
+            .as_ref()
+            .is_some_and(|pid| pid != &wake.prompt_id)
+    });
+    // Resend recovery is for user gestures; programmatic cancels (no
+    // trigger, e.g. login flows) own their retries. A rewind leaves no
+    // cancelling state to key recovery on, so it never arms one either.
+    if let Some(trigger) = trigger
+        && !rewind_if_no_output
+        && !desynced_from_wake
+    {
+        // Keep `confirmed` across a manual retry: `[stop]` stays clickable
+        // while cancelling, and resetting the flag would re-arm auto-resend
+        // against a queued prompt the shell may already have promoted.
+        let existing = agent
+            .pending_cancel_resend
+            .as_ref()
+            .filter(|p| p.prompt_id == target_prompt_id);
+        let confirmed = existing.is_some_and(|p| p.confirmed);
+        let attempts = existing.map(|p| p.attempts.max(1)).unwrap_or(1);
+        agent.pending_cancel_resend = Some(crate::app::agent_view::PendingCancelResend {
+            prompt_id: target_prompt_id,
+            sent_at: Instant::now(),
+            attempts,
+            confirmed,
+            cancel_subagents,
+            trigger,
+        });
+    }
+    Effect::CancelTurn {
+        session_id,
+        cancel_subagents,
+        trigger,
+        rewind_if_no_output,
+    }
+}
+
+/// Grace before a still-cancelling pane re-sends its (fire-and-forget,
+/// loss-prone) `session/cancel`.
+pub(crate) const CANCEL_RESEND_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Resend cap; past it a fresh gesture owns recovery.
+pub(crate) const CANCEL_RESEND_MAX_ATTEMPTS: u8 = 3;
+
+/// Re-send the (shell-idempotent) cancel for panes still in a cancelling
+/// state past [`CANCEL_RESEND_GRACE`]. Returns `None` when nothing fired.
+pub(crate) fn reconcile_overdue_cancels(app: &mut AppView) -> Option<Vec<Effect>> {
+    let mut effects = Vec::new();
+    for agent in app.agents.values_mut() {
+        // A cancelled wake turn keeps the pane Idle (never adopted), so its
+        // cancelling phase lives on `running_wake_turn` instead of the state.
+        if !agent.any_cancel_pending() {
+            // The turn resolved (or a new one adopted); the marker is stale.
+            agent.pending_cancel_resend = None;
+            continue;
+        }
+        let Some(session_id) = agent.session.session_id.clone() else {
+            continue;
+        };
+        // A received `prompt_complete` broadcast proves the cancel landed;
+        // the turn-end reconcile owns the exit from here. Resending would
+        // race it and could cancel a queued prompt the shell has already
+        // promoted.
+        if agent.pending_turn_end_reconcile.is_some() {
+            if let Some(pending) = agent.pending_cancel_resend.as_mut() {
+                pending.confirmed = true;
+            }
+            continue;
+        }
+        let Some(pending) = agent.pending_cancel_resend.as_mut() else {
+            continue;
+        };
+        if pending.confirmed
+            || pending.attempts >= CANCEL_RESEND_MAX_ATTEMPTS
+            || pending.sent_at.elapsed() < CANCEL_RESEND_GRACE
+        {
+            continue;
+        }
+        pending.attempts += 1;
+        pending.sent_at = Instant::now();
+        crate::unified_log::warn(
+            "cancel.resend",
+            Some(&session_id.0),
+            Some(serde_json::json!({
+                "attempts": pending.attempts,
+                "target_prompt_id": pending.prompt_id,
+            })),
+        );
+        effects.push(Effect::CancelTurn {
+            session_id,
+            cancel_subagents: pending.cancel_subagents,
+            trigger: Some(pending.trigger),
+            rewind_if_no_output: false,
+        });
+    }
+    (!effects.is_empty()).then_some(effects)
 }
 
 /// Grace window between a driver-side `x.ai/session/prompt_complete`

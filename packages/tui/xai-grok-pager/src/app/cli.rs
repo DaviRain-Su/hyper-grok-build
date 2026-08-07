@@ -209,6 +209,9 @@ See ~/.grok/README.md for more information.
     },
     /// Manage git worktrees
     Worktree(crate::worktree_cmd::WorktreeArgs),
+    /// Show what the grok home (~/.grok) uses on disk
+    #[command(name = "du", visible_alias = "disk-usage")]
+    DiskUsage(crate::disk_usage_cmd::DiskUsageArgs),
     /// Expose this workspace to the Computer Hub (via the leader).
     ///
     /// Disabled by default and enabled server-side per account; set

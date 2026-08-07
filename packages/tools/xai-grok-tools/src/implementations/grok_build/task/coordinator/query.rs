@@ -7,12 +7,29 @@ use tokio::sync::oneshot;
 use super::super::coordinator_state::{
     BlockingWaiter, CompletedChild, ListRequest, OUTPUT_UNAVAILABLE_PLACEHOLDER, ProgressFuture,
     ProgressTarget, RunningSeed, completed_inspection, completed_snapshot, pending_inspection,
-    pending_snapshot, running_inspection, running_seed,
+    pending_snapshot, queued_inspection, queued_snapshot, running_inspection, running_seed,
 };
 use super::super::types::{SubagentInspection, SubagentSnapshot};
 use super::{ChildControl, ChildRunner, SubagentCoordinator, SubagentProgress, belongs_to_session};
 
+const DEFAULT_QUERY_BLOCK_TIMEOUT_MS: u64 = 30_000;
+
 impl<R: ChildRunner> SubagentCoordinator<R> {
+    fn push_blocking_waiter(
+        &mut self,
+        id: String,
+        timeout_ms: Option<u64>,
+        respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
+    ) {
+        self.waiters.entry(id).or_default().push(BlockingWaiter {
+            deadline: tokio::time::Instant::now()
+                + std::time::Duration::from_millis(
+                    timeout_ms.unwrap_or(DEFAULT_QUERY_BLOCK_TIMEOUT_MS),
+                ),
+            respond_to,
+        });
+    }
+
     pub(super) fn handle_query(
         &mut self,
         id: String,
@@ -41,11 +58,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 return;
             }
             if block {
-                self.waiters.entry(id).or_default().push(BlockingWaiter {
-                    deadline: tokio::time::Instant::now()
-                        + std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000)),
-                    respond_to,
-                });
+                self.push_blocking_waiter(id, timeout_ms, respond_to);
             } else {
                 self.queue_active_progress(&id, ProgressTarget::Query(respond_to));
             }
@@ -61,13 +74,23 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 return;
             }
             if block {
-                self.waiters.entry(id).or_default().push(BlockingWaiter {
-                    deadline: tokio::time::Instant::now()
-                        + std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000)),
-                    respond_to,
-                });
+                self.push_blocking_waiter(id, timeout_ms, respond_to);
             } else {
                 let _ = respond_to.send(Some(pending_snapshot(child)));
+            }
+            return;
+        }
+        if let Some(queued) = self.queued.iter().find(|queued| {
+            queued.request.id == id
+                && belongs_to_session(&queued.request, parent_session_id.as_deref())
+        }) {
+            if block {
+                self.push_blocking_waiter(id, timeout_ms, respond_to);
+            } else {
+                let _ = respond_to.send(Some(queued_snapshot(
+                    &queued.request,
+                    queued.queued_at.into_std(),
+                )));
             }
             return;
         }
@@ -98,6 +121,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             .is_some_and(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
         {
             self.queue_active_progress(&id, ProgressTarget::Inspect(respond_to));
+        } else if let Some(queued) = self.queued.iter().find(|queued| {
+            queued.request.id == id
+                && belongs_to_session(&queued.request, parent_session_id.as_deref())
+        }) {
+            let _ = respond_to.send(Some(queued_inspection(
+                &queued.request,
+                queued.queued_at.into_std(),
+            )));
         } else {
             let _ = respond_to.send(None);
         }
@@ -131,6 +162,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .get(id)
                     .filter(|child| !child.request.owner.is_workflow())
                     .map(pending_snapshot)
+            })
+            .or_else(|| {
+                self.queued
+                    .iter()
+                    // Workflow spawns never queue; the filter matches the
+                    // completed/pending arms above should that ever bend.
+                    .find(|queued| queued.request.id == id && !queued.request.owner.is_workflow())
+                    .map(|queued| queued_snapshot(&queued.request, queued.queued_at.into_std()))
             })
     }
 

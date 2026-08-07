@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use xai_grok_test_support::env::env_parse;
 use xai_grok_test_support::resources::{ResourceGrowth, ResourceSnapshot};
+use xai_grok_tools::implementations::grok_build::task::admission::SubagentLimits;
 use xai_grok_tools::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
 use xai_grok_tools::implementations::grok_build::task::coordinator::{
     ChildCompletion, ChildControl, ChildRunOutput, ChildRunRequest, ChildRunner, CoordinatorConfig,
@@ -229,11 +230,13 @@ fn serialize_counts<S: Serializer>(
         pending,
         active,
         completed,
+        queued,
     } = counts;
     let entries = [
         ("pending", pending),
         ("active", active),
         ("completed", completed),
+        ("queued", queued),
     ];
     let mut map = serializer.serialize_map(Some(entries.len()))?;
     for (key, value) in entries {
@@ -318,6 +321,8 @@ impl ChildRunner for SoakRunner {
                 request,
                 cancellation,
                 reporter,
+                queued_for: _,
+                session_running: _,
             } = run;
             let promoted = reporter
                 .started(StartedChild {
@@ -613,8 +618,14 @@ async fn subagent_lifecycle_soak_bounds_threads_open_files_and_heap() {
     local
         .run_until(async move {
             let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+            // The soak measures registry churn, not admission: keep every
+            // spawn unthrottled so cycle counts stay resource-bound.
             let config = CoordinatorConfig {
                 foreground_budget: Duration::from_secs(600),
+                limits: SubagentLimits {
+                    max_concurrent: usize::MAX,
+                    ..SubagentLimits::default()
+                },
                 ..CoordinatorConfig::default()
             };
             let gate = Arc::new(tokio::sync::Semaphore::new(0));
@@ -762,6 +773,7 @@ mod tests {
                 pending: 0,
                 active: 0,
                 completed: 0,
+                queued: 0,
             },
             heap,
             quiesced: true,

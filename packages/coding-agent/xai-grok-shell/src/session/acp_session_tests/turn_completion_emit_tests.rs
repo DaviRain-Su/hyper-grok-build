@@ -260,7 +260,7 @@ async fn cancellation_persists_turn_completed_cancelled() {
                 state.pending_inputs.push_back(item);
             }
 
-            actor
+            let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
                     cancel_subagents: true,
                     trigger: Some(crate::session::CancelTrigger::CtrlC),
@@ -433,7 +433,7 @@ async fn send_now_cancel_stamps_cancel_trigger_on_turn_end() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn pristine_rewind_cancel_emits_no_turn_completed() {
+async fn no_output_rewind_cancel_emits_no_turn_completed() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -442,7 +442,7 @@ async fn pristine_rewind_cancel_emits_no_turn_completed() {
             let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
-            // A pristine, rewindable in-flight turn at the front of the queue.
+            // An in-flight turn with no output yet at the front of the queue.
             *actor
                 .current_prompt_id
                 .lock()
@@ -465,12 +465,12 @@ async fn pristine_rewind_cancel_emits_no_turn_completed() {
             // path: the turn is treated as UNSENT, so — in lock-step with the
             // legacy emit_turn_ended — NO durable terminal is emitted (else
             // replay would finalize a turn that was rewound, not completed).
-            actor.cancel_running_task(crate::session::CancelOptions { rewind_if_no_output: true, user_initiated: true, ..Default::default() }).await;
+            let _ = actor.cancel_running_task(crate::session::CancelOptions { rewind_if_no_output: true, user_initiated: true, ..Default::default() }).await;
 
             let msgs = drain_persistence(&mut persistence_rx);
             assert!(
                 turn_completed_fields(&msgs).is_none(),
-                "a pristine rewind cancel treats the turn as unsent and must persist no TurnCompleted"
+                "a rewind cancel before any output treats the turn as unsent and must persist no TurnCompleted"
             );
         })
         .await;

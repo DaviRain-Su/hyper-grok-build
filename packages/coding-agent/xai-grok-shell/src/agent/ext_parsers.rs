@@ -5,12 +5,13 @@
 
 use crate::session::SessionCommand;
 
-/// Parse a `x.ai/queue/{remove,reorder,clear,edit,interject}` ext-notification's
-/// params into the corresponding [`SessionCommand`].
+/// Parse a `x.ai/queue/{remove,reorder,clear,edit,interject,hold_edit,release_edit}`
+/// ext-notification's params into the corresponding [`SessionCommand`].
 /// `owner` is the resolved attribution (params `owner`/`clientIdentifier`) used
 /// to scope remove/clear to the requesting client's own items, and recorded as
 /// `last_editor` for in-place text edits. Returns `None` for unrecognized
-/// methods or for `edit` when `newText` is missing.
+/// methods, for `edit` when `newText` is missing, or when a required `id` is
+/// missing.
 pub(super) fn parse_queue_edit_command(
     method: &str,
     params: &serde_json::Value,
@@ -255,9 +256,48 @@ mod tests {
                 .is_none()
         );
 
-        // unknown method → None.
+        // hold_edit / release_edit: id only (combine-hold while the client edits).
+        let p = serde_json::json!({ "sessionId": "s1", "id": "p12" });
+        match parse_queue_edit_command("x.ai/queue/hold_edit", &p, None) {
+            Some(SessionCommand::HoldCombineEdit { id }) => assert_eq!(id, "p12"),
+            _ => panic!("expected HoldCombineEdit"),
+        }
+        match parse_queue_edit_command("x.ai/queue/release_edit", &p, None) {
+            Some(SessionCommand::ReleaseCombineEdit { id }) => assert_eq!(id, "p12"),
+            _ => panic!("expected ReleaseCombineEdit"),
+        }
+
+        // hold_edit / release_edit without id → None (can't target an entry).
+        assert!(
+            parse_queue_edit_command("x.ai/queue/hold_edit", &serde_json::json!({}), None)
+                .is_none()
+        );
+        assert!(
+            parse_queue_edit_command("x.ai/queue/release_edit", &serde_json::json!({}), None)
+                .is_none()
+        );
+
+        // unknown method → None. Outbound `changed` is the other production
+        // `x.ai/queue/*` method and must not parse as an edit command.
         assert!(
             parse_queue_edit_command("x.ai/queue/bogus", &serde_json::json!({}), None).is_none()
+        );
+        assert!(
+            parse_queue_edit_command(
+                "x.ai/queue/changed",
+                &serde_json::json!({
+                    "sessionId": "s1",
+                    "entries": [{
+                        "id": "p1",
+                        "version": 0,
+                        "kind": "prompt",
+                        "text": "hello",
+                        "position": 0,
+                    }],
+                }),
+                None,
+            )
+            .is_none()
         );
         // remove without id → None (can't target an entry).
         assert!(

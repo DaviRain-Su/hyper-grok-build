@@ -1,29 +1,10 @@
+//! Session-level telemetry helpers: permission analytics, hook/skill labels, harness snapshot.
+
+mod permission;
+
+pub(crate) use permission::*;
+
 use xai_grok_telemetry::events::SessionHarness;
-use xai_grok_workspace::permission::Decision;
-
-/// Permission-mode label for the `session.permission_mode_changed` span.
-pub(crate) fn permission_mode_label(is_yolo: bool) -> &'static str {
-    if is_yolo {
-        "bypassPermissions"
-    } else {
-        "default"
-    }
-}
-
-/// Telemetry `source` label for a permission [`Decision`] on the `tool.decision`
-/// span. `is_yolo` collapses auto-approvals to `config`. `Decision::Allow`/`Ask`
-/// carry no provenance, so a config/policy allow is indistinguishable from a
-/// user click — report neutral `allowed` rather than guessing `user_temporary`.
-pub(crate) fn permission_decision_source(decision: &Decision, is_yolo: bool) -> &'static str {
-    match decision {
-        Decision::PolicyDeny(_) => "config",
-        Decision::Reject(_) => "user_reject",
-        Decision::Cancelled => "user_abort",
-        Decision::FollowupMessage(_) => "user_followup",
-        Decision::Allow | Decision::Ask if is_yolo => "config",
-        Decision::Allow | Decision::Ask => "allowed",
-    }
-}
 
 /// Emit an `mcp.server_connection` span. `duration_ms` / `tool_count` /
 /// `error_type` are status-specific; pass `None` when not applicable.

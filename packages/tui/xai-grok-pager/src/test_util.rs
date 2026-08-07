@@ -47,6 +47,53 @@ pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent
         crate::scrollback::state::ScrollbackState::new(),
     )
 }
+pub fn make_worktree_record(
+    id: &str,
+    path: &std::path::Path,
+    label: &str,
+) -> xai_fast_worktree::WorktreeRecord {
+    use xai_fast_worktree::{WorktreeKind, WorktreeRecord, WorktreeStatus};
+    WorktreeRecord {
+        id: id.to_owned(),
+        path: path.to_path_buf(),
+        source_repo: "/repo".into(),
+        repo_name: "repo".into(),
+        kind: WorktreeKind::Session,
+        creation_mode: "linked".into(),
+        git_ref: None,
+        head_commit: None,
+        session_id: None,
+        creator_pid: None,
+        created_at: 0,
+        last_accessed_at: None,
+        status: WorktreeStatus::Alive,
+        metadata: Some(serde_json::json!({ "label": label })),
+    }
+}
+/// Every row containing `row_marker` starts its PATH cell at the header's
+/// PATH column, measured in display width so CJK regressions fail.
+pub fn assert_path_column_aligned(text: &str, row_marker: &str) {
+    use unicode_width::UnicodeWidthStr;
+    let lines: Vec<&str> = text.lines().collect();
+    let header = lines
+        .iter()
+        .find(|l| l.ends_with("PATH"))
+        .unwrap_or_else(|| panic!("no PATH header in: {text}"));
+    let path_col = header.width() - "PATH".width();
+    let mut rows = 0;
+    for line in lines.iter().filter(|l| l.contains(row_marker)) {
+        let (_, path) = line
+            .rsplit_once(' ')
+            .expect("rows end in a space-free test path (PATH is the last cell)");
+        assert_eq!(
+            line.width() - path.width(),
+            path_col,
+            "path column must stay width-aligned: {line:?}"
+        );
+        rows += 1;
+    }
+    assert!(rows > 0, "no table rows matched {row_marker:?} in: {text}");
+}
 /// RAII guard for temporarily overriding an environment variable.
 ///
 /// Captures the original value on construction and restores it on drop.

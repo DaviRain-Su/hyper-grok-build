@@ -14,6 +14,7 @@
 //! - `SubagentForegroundWait` — host wait-window guard factory (optional)
 //! - `TaskModelValidator` — validates explicit model slugs before spawn
 
+pub mod admission;
 pub mod backend;
 pub mod coordinator;
 mod coordinator_state;

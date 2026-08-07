@@ -45,18 +45,18 @@ steps:
   - action: keys
     keys: "<Enter>"
   - action: wait_for_text
-    text: "Resubmit from here"
+    text: "Rewind conversation to"
     timeout_ms: 15000
   - action: screenshot
     name: popup-over-editor
-    note: Inline resubmit popup raised over the open editor.
-  # Esc dismisses the popup and drops back into the editor, edit intact ...
+    note: Confirm dialog raised over the open editor.
+  # Esc dismisses the confirm and drops back into the editor, edit intact ...
   - action: keys
     keys: "<Esc>"
   - action: wait
     millis: 500
   - action: assert_not_contains
-    text: "Resubmit from here"
+    text: "Rewind conversation to"
   - action: assert_contains
     text: "DISMISS_BASE DISMISS_EDIT"
   # ... and the editor is still LIVE: another typed char lands in it.

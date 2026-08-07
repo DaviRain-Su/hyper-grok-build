@@ -14,6 +14,10 @@
 //!
 //! Set `GROK_PTY_CAST_DIR` to also dump asciinema casts of both pager runs
 //! (written before the final asserts so a failing run still produces them).
+//!
+//! The scenario body is shared with the Esc and [stop]-click mirrors (see
+//! `auto_wake_cancel_via_esc_…` / `auto_wake_cancel_via_stop_click_…`) via
+//! [`run_wake_cancel_scenario`].
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -41,10 +45,30 @@ const BG_SLEEP_SECS: &str = "6";
 #[cfg(unix)]
 const HOLD_SLEEP_SECS: &str = "15";
 
+/// Which cancel gesture the scenario drives. All three ride the same
+/// `session/cancel` wire; only the input path differs. Esc and StopClick
+/// also gate on the wake stop affordance ([stop] while the pane is idle),
+/// which only exists with the wake-turn cancel support.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum WakeCancelGesture {
+    CtrlC,
+    Esc,
+    StopClick,
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn auto_wake_cancel_preserves_queued_user_prompt() {
+    run_wake_cancel_scenario(WakeCancelGesture::CtrlC, "auto_wake_repro").await;
+}
+
+/// Shared body for the three gesture tests (Ctrl+C here, Esc and a [stop]
+/// click in their mirror files). `cast_prefix` keeps the optional asciinema
+/// dumps distinct per gesture.
+#[cfg(unix)]
+pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_prefix: &str) {
     let content = ContentController::start().await.expect("start content");
 
     // Turn 1: the model backgrounds a sleep via run_terminal_command, then the
@@ -149,6 +173,20 @@ async fn auto_wake_cancel_preserves_queued_user_prompt() {
     );
     harness.update(Duration::from_millis(500));
 
+    // Esc / StopClick gate on the wake stop affordance first: the pane is
+    // still idle here (nothing typed), so a rendered [stop] is the wake
+    // turn's, and it does not exist without the wake-turn cancel support.
+    if !matches!(gesture, WakeCancelGesture::CtrlC) {
+        harness
+            .wait_for_text("[stop]", Duration::from_secs(10))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "no [stop] affordance during the idle wake turn; screen:\n{}",
+                    harness.screen_contents()
+                )
+            });
+    }
+
     // The pager does not adopt synthetic turns, so it believes it is idle and
     // dispatches the typed message immediately — it queues server-side behind
     // the running auto-wake turn. Text and Enter go separately so a bulk
@@ -162,9 +200,30 @@ async fn auto_wake_cancel_preserves_queued_user_prompt() {
         .expect("submit clarifying message");
     harness.update(Duration::from_millis(500));
 
-    // One Ctrl+C: must cancel the auto-wake turn (killing the held sleep),
-    // not the queued user prompt.
-    harness.inject_keys(keys::CTRL_C).expect("press ctrl+c");
+    // One cancel gesture: must cancel the auto-wake turn (killing the held
+    // sleep), not the queued user prompt.
+    match gesture {
+        WakeCancelGesture::CtrlC => {
+            harness.inject_keys(keys::CTRL_C).expect("press ctrl+c");
+        }
+        WakeCancelGesture::Esc => {
+            harness.inject_keys(keys::ESC).expect("press esc");
+        }
+        WakeCancelGesture::StopClick => {
+            harness
+                .wait_for_text("[stop]", Duration::from_secs(10))
+                .expect("[stop] visible before the click");
+            let (row, col) = locate_screen_text(&harness.screen_contents(), "[stop]")
+                .expect("locate [stop] on screen");
+            // SGR press + release inside the button's hit area.
+            let click = format!(
+                "{}{}",
+                sgr_mouse(0, row, col + 1, 'M'),
+                sgr_mouse(0, row, col + 1, 'm')
+            );
+            harness.inject_keys(click.as_bytes()).expect("click [stop]");
+        }
+    }
     harness.update(Duration::from_secs(2));
 
     // The surviving prompt is promoted after the cancel and reaches the model.
@@ -182,7 +241,7 @@ async fn auto_wake_cancel_preserves_queued_user_prompt() {
         let _ = harness.wait_for_full_text("AUTO_WAKE_SETTLED", Duration::from_secs(15));
     }
 
-    write_cast_if_requested(&harness, "auto_wake_repro_main.cast");
+    write_cast_if_requested(&harness, &format!("{cast_prefix}_main.cast"));
 
     // Graceful quit (Ctrl+Q double-press: focus is in the prompt, 'q' would type).
     harness.update(Duration::from_millis(500));
@@ -212,12 +271,12 @@ async fn auto_wake_cancel_preserves_queued_user_prompt() {
     let resumed_full_text = resumed.full_text();
     let marker_in_replay = resumed.contains_full_text(CLARIFY_MARKER);
 
-    write_cast_if_requested(&resumed, "auto_wake_repro_continue.cast");
+    write_cast_if_requested(&resumed, &format!("{cast_prefix}_continue.cast"));
     resumed.quit().expect("quit resumed pager");
 
     assert!(
         marker_on_wire,
-        "Ctrl+C during the auto-wake turn destroyed the queued user prompt: \
+        "{gesture:?} during the auto-wake turn destroyed the queued user prompt: \
          {CLARIFY_MARKER} never reached the model\nrequests: {}\n--- non-system messages ---\n{}",
         content.request_count(),
         dump_non_system_messages(&content.request_bodies())

@@ -1012,6 +1012,13 @@ pub struct RemoteSettings {
     /// Max subagent nesting depth (`grok_build_settings.subagents_max_depth`).
     #[serde(default)]
     pub subagents_max_depth: Option<u32>,
+    #[serde(default)]
+    pub subagents_max_concurrent: Option<u32>,
+    /// `"queue"` or `"fail"`.
+    #[serde(default)]
+    pub subagents_limit_behavior: Option<String>,
+    #[serde(default)]
+    pub workflow_max_concurrent_agents: Option<u32>,
     /// Global system-prompt identity label. Per-model override wins; see
     /// `resolve_system_prompt_label`.
     #[serde(default)]

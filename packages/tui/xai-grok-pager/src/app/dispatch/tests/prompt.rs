@@ -3478,7 +3478,7 @@ fn plain_cancel_still_pushes_cancelled_marker() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     dispatch(Action::SendPrompt("first".into()), &mut app);
-    // Turn already produced output → Ctrl+C takes the standard cancel path, not the pristine rewind.
+    // Turn already produced output → Ctrl+C takes the standard cancel path, not the rewind.
     app.agents.get_mut(&id).unwrap().session.in_flight_prompt = None;
     let _ = dispatch(Action::CancelTurn, &mut app);
     assert!(app.agents[&id].session.state.is_cancelling());

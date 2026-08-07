@@ -71,7 +71,6 @@ fn external_prompt_editor_arms_typed_request_and_preserves_composer_modes() {
     for mode in [
         PromptInputMode::Normal,
         PromptInputMode::Bash,
-        PromptInputMode::Feedback,
         PromptInputMode::Remember,
     ] {
         let mut app = test_app_with_agent();

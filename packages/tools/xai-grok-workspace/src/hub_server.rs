@@ -60,7 +60,9 @@ static WORKSPACE_RPC_REQUESTS_TOTAL: std::sync::LazyLock<IntCounterVec> =
     std::sync::LazyLock::new(|| {
         register_int_counter_vec!(
             "grok_workspace_rpc_requests_total",
-            "Workspace RPC dispatches, by method and result",
+            "Workspace RPC dispatches, by method and result. Donated per-sandbox \
+             series inflate absolute volume — SLOs must use ratios \
+             (error/total), not increase() counts.",
             &["method", "result"]
         )
         .unwrap()
@@ -71,7 +73,9 @@ static WORKSPACE_RPC_ERRORS_TOTAL: std::sync::LazyLock<IntCounterVec> =
     std::sync::LazyLock::new(|| {
         register_int_counter_vec!(
             "grok_workspace_rpc_errors_total",
-            "Failed workspace RPC dispatches, by method and error kind",
+            "Failed workspace RPC dispatches, by method and error kind. \
+             Donated per-sandbox series inflate absolute volume — compare \
+             error_kind shares or error/total ratios, not raw counts.",
             &["method", "error_kind"]
         )
         .unwrap()
@@ -727,6 +731,9 @@ impl WorkspaceRpcHandler {
                 let result = crate::worktree::create_worktree_streaming(&req, &NoOpNotifier).await;
                 serde_json::to_value(result).map_err(|e| WorkspaceError::HubError(e.to_string()))
             }
+            <ReposListReq as WorkspaceRpc>::METHOD => {
+                dispatch_op::<ReposListReq>(params, &self.workspace, None).await
+            }
             <GitStatusExtReq as WorkspaceRpc>::METHOD => {
                 dispatch_op::<GitStatusExtReq>(params, &self.workspace, None).await
             }
@@ -975,14 +982,10 @@ impl ToolServerHandler for WorkspaceRpcHandler {
             .cloned()
             .unwrap_or(Value::Object(Default::default()));
         let bound_session = ctx.extensions.get::<xai_tool_runtime::SessionContext>();
+        let session_id = bound_session.as_deref().map(|s| s.0.as_str());
         let start = std::time::Instant::now();
-        let result = self
-            .dispatch(
-                method,
-                params,
-                bound_session.as_deref().map(|s| s.0.as_str()),
-            )
-            .await;
+        let result = self.dispatch(method, params, session_id).await;
+        let error_kind = result.as_ref().err().map(WorkspaceError::metric_kind);
         let is_unknown_method = matches!(&result, Err(WorkspaceError::UnknownMethod(_)));
         let method_label = if is_unknown_method {
             UNKNOWN_METHOD_LABEL
@@ -992,9 +995,9 @@ impl ToolServerHandler for WorkspaceRpcHandler {
         WORKSPACE_RPC_REQUESTS_TOTAL
             .with_label_values(&[method_label, if result.is_ok() { "ok" } else { "error" }])
             .inc();
-        if let Err(e) = &result {
+        if let Some(error_kind) = error_kind {
             WORKSPACE_RPC_ERRORS_TOTAL
-                .with_label_values(&[method_label, e.metric_kind()])
+                .with_label_values(&[method_label, error_kind])
                 .inc();
         }
         WORKSPACE_RPC_DURATION_SECONDS
@@ -3172,6 +3175,7 @@ mod tests {
         let handler = WorkspaceRpcHandler::new(make_handle());
         let methods = [
             <WorkspaceInfoReq as WorkspaceRpc>::METHOD,
+            <ReposListReq as WorkspaceRpc>::METHOD,
             <GitStatusReq as WorkspaceRpc>::METHOD,
             <DiscoverSkillsReq as WorkspaceRpc>::METHOD,
             <DiscoverAgentsMdReq as WorkspaceRpc>::METHOD,

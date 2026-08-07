@@ -23,16 +23,39 @@ mod security_findings;
 
 pub use security_findings::{BashSecurityAssessment, ClassifierSecurityFinding};
 
-/// Classifier outcome for a single tool authorization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClassifierVerdict {
-    /// Safe to run without user prompt.
-    Allow,
-    Block,
-    Unavailable,
+use crate::permission::wire_enum;
+
+wire_enum! {
+    /// Classifier outcome for a single tool authorization. The single owner of the
+    /// `classifier_verdict` wire vocabulary — the enum, its `ALL` inventory, and
+    /// `wire_str` are generated together, so the cross-crate telemetry drift test
+    /// cannot go stale when a verdict is added.
+    pub enum ClassifierVerdict {
+        Allow => "allow",
+        Block => "block",
+        Unavailable => "unavailable",
+    }
 }
 
-/// Stable source categories written to classifier telemetry.
+wire_enum! {
+    /// The full `classifier_source` wire vocabulary: the classifier-produced
+    /// provenances ([`ClassifierSource`]) plus the manager-only `fast_path`
+    /// (allowlist / no side query) and `not_wired` (no classifier installed)
+    /// states. This is the single owner projection that the manager emits and the
+    /// shell drift test iterates; there are no loose string constants.
+    pub enum ClassifierSourceKind {
+        Llm => "llm",
+        Heuristic => "heuristic",
+        Timeout => "timeout",
+        TransportError => "transport_error",
+        FastPath => "fast_path",
+        NotWired => "not_wired",
+    }
+}
+
+/// Stable source categories a classifier can report. A strict subset of
+/// [`ClassifierSourceKind`]; [`ClassifierSource::kind`] is the exhaustive bridge
+/// (a new provenance here fails to compile until it is mapped).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassifierSource {
     Llm,
@@ -42,13 +65,20 @@ pub enum ClassifierSource {
 }
 
 impl ClassifierSource {
-    pub const fn as_str(self) -> &'static str {
+    /// Owner kind for this provenance (exhaustive bridge to the full vocabulary).
+    pub const fn kind(self) -> ClassifierSourceKind {
         match self {
-            Self::Llm => "llm",
-            Self::Heuristic => "heuristic",
-            Self::Timeout => "timeout",
-            Self::TransportError => "transport_error",
+            Self::Llm => ClassifierSourceKind::Llm,
+            Self::Heuristic => ClassifierSourceKind::Heuristic,
+            Self::Timeout => ClassifierSourceKind::Timeout,
+            Self::TransportError => ClassifierSourceKind::TransportError,
         }
+    }
+
+    /// Wire string, derived from the owner [`ClassifierSourceKind`] projection so
+    /// classifier-provenance wire values have a single source of truth.
+    pub const fn as_str(self) -> &'static str {
+        self.kind().wire_str()
     }
 }
 

@@ -30,6 +30,9 @@ impl WorkspaceRpc for ReposListReq {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReposListResponse {
+    /// On-disk manifest version (`REPOS_MANIFEST_VERSION` for a missing file).
+    #[serde(default)]
+    pub version: u32,
     pub repos: Vec<ProvisionedRepo>,
 }
 

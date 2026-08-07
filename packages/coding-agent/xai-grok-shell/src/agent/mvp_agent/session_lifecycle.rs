@@ -468,6 +468,7 @@ impl MvpAgent {
             subagent_pending: subagents.pending,
             subagent_active: subagents.active,
             subagent_completed: subagents.completed,
+            subagent_queued: subagents.queued,
             workspace_bindings: workspace.map(|h| h.session_count()),
             workspace_activity_sessions: workspace.map(|h| h.activity_tracker().session_count()),
         }
@@ -495,6 +496,8 @@ pub(crate) struct RegistrySnapshot {
     pub subagent_pending: usize,
     pub subagent_active: usize,
     pub subagent_completed: usize,
+    /// Spawns parked at the session concurrent limit.
+    pub subagent_queued: usize,
     pub workspace_bindings: Option<usize>,
     pub workspace_activity_sessions: Option<usize>,
 }

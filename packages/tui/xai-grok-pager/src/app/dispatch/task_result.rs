@@ -21,7 +21,6 @@ use super::prompt::{
 };
 use super::rewind::{
     dispatch_rewind_success, handle_rewind_execute_failed, handle_rewind_points_loaded,
-    handle_rewind_preview_complete, handle_rewind_preview_failed,
 };
 use super::router::{dispatch, dispatch_action_result};
 use super::session::foreign::{
@@ -1430,15 +1429,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent.rewind_state = None;
             app.show_toast(&format!("Undo failed: {error}"));
             vec![]
-        }
-        TaskResult::RewindPreviewComplete {
-            agent_id,
-            response,
-            target_prompt_index,
-            mode,
-        } => handle_rewind_preview_complete(app, agent_id, response, target_prompt_index, mode),
-        TaskResult::RewindPreviewFailed { agent_id, error } => {
-            handle_rewind_preview_failed(app, agent_id, error)
         }
         TaskResult::RewindExecuteComplete { agent_id, response } => {
             dispatch_rewind_success(app, agent_id, response)

@@ -2,9 +2,10 @@
 
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 pub use super::tool_paths::{path_basename, path_for_tool_header, shorten_path};
+pub use crate::util::byte_offset_at_width;
 
 /// Clone a borrowed ratatui `Line` into an owned `'static` line.
 pub fn line_to_static(line: &Line<'_>) -> Line<'static> {
@@ -59,48 +60,9 @@ pub fn floor_char_boundary(s: &str, index: usize) -> usize {
     i
 }
 
-/// Byte offset at which cumulative display width exceeds `max_width`.
-/// Returns `s.len()` when the entire string fits.
-pub fn byte_offset_at_width(s: &str, max_width: usize) -> usize {
-    let mut width = 0;
-    for (i, ch) in s.char_indices() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + cw > max_width {
-            return i;
-        }
-        width += cw;
-    }
-    s.len()
-}
-
-/// Truncate a string to fit within `max_width` display columns.
-///
-/// Uses Unicode-aware width measurement (handles CJK wide chars,
-/// multi-byte UTF-8 like em-dash, etc.). If truncated, the last character
-/// is replaced with `…` so the result fits within `max_width`.
-///
-/// Returns the original string (owned) if it already fits.
+/// `String`-owning delegate of [`crate::util::truncate_to_width`].
 pub fn truncate_str(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-
-    let end = byte_offset_at_width(s, max_width);
-    let needs_ellipsis = end < s.len();
-
-    if needs_ellipsis && max_width > 1 {
-        // Back up one char to make room for '…' (1 display column).
-        let truncated_end = s[..end]
-            .char_indices()
-            .next_back()
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        format!("{}…", &s[..truncated_end])
-    } else if needs_ellipsis {
-        "…".to_string()
-    } else {
-        s[..end].to_string()
-    }
+    crate::util::truncate_to_width(s, max_width).into_owned()
 }
 
 /// Truncate a styled `Line` (multiple spans) to fit within `max_width` display columns.
@@ -226,17 +188,7 @@ pub fn fit_line_to_width<'a>(line: Line<'a>, width: usize) -> Line<'a> {
 
 /// Take the first `n` display columns from a string.
 fn take_width(s: &str, n: usize) -> String {
-    let mut width = 0;
-    let mut end = s.len();
-    for (i, ch) in s.char_indices() {
-        let cw = ch.width().unwrap_or(0);
-        if width + cw > n {
-            end = i;
-            break;
-        }
-        width += cw;
-    }
-    s[..end].to_string()
+    s[..byte_offset_at_width(s, n)].to_string()
 }
 
 /// Cascade-truncate multiple text elements to fit within `avail` display columns.
@@ -314,39 +266,6 @@ mod tests {
                 c as u32
             );
         }
-    }
-
-    #[test]
-    fn truncate_str_fits() {
-        assert_eq!(truncate_str("hello", 10), "hello");
-        assert_eq!(truncate_str("hello", 5), "hello");
-    }
-
-    #[test]
-    fn truncate_str_truncates() {
-        assert_eq!(truncate_str("hello world!", 5), "hell…");
-        assert_eq!(truncate_str("abcdef", 4), "abc…");
-    }
-
-    #[test]
-    fn truncate_str_empty_and_zero() {
-        assert_eq!(truncate_str("hello", 0), "");
-        assert_eq!(truncate_str("", 5), "");
-    }
-
-    #[test]
-    fn truncate_str_width_1() {
-        assert_eq!(truncate_str("hello", 1), "…");
-        assert_eq!(truncate_str("x", 1), "x");
-    }
-
-    #[test]
-    fn truncate_str_multibyte() {
-        // em-dash is 1 display column but 3 bytes
-        let s = "hello — world";
-        let result = truncate_str(s, 8);
-        assert!(result.ends_with('…'));
-        assert!(result.len() <= 12); // safe byte length
     }
 
     // ── truncate_line tests ─────────────────────────────────────────

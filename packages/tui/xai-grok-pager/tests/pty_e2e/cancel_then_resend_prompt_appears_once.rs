@@ -2,7 +2,7 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// The `cancel_then_send` confounder: submit, Ctrl+C (pristine rewind), then
+/// The `cancel_then_send` confounder: submit, Ctrl+C (no-output rewind), then
 /// Enter to resend the restored text. The prompt must appear EXACTLY ONCE in
 /// scrollback and in each wire request — the rewound turn's copy must not
 /// survive in session history and pair with the resend as 2x.
@@ -13,7 +13,7 @@ async fn cancel_then_resend_prompt_appears_once() {
 
     let content = ContentController::start().await.expect("start content");
     // Turn 1 is rewound pre-first-token (the 30s pacing guarantees the
-    // pristine window); turn 2 is the resend's reply, streamed after the
+    // no-output window); turn 2 is the resend's reply, streamed after the
     // pacing is dropped below.
     let _rewound_turn =
         content.expect_agent_turn("rewound turn before first token", "GONE never streams.");

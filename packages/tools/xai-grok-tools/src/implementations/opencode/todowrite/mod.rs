@@ -318,7 +318,7 @@ impl xai_tool_runtime::Tool for TodoWriteTool {
 
     fn capabilities(&self) -> xai_tool_protocol::ToolCapabilities {
         xai_tool_protocol::ToolCapabilities {
-            is_read_only: true,
+            is_read_only: false,
             tool_scope: Some(xai_tool_protocol::ToolScope::Read),
             ..Default::default()
         }

@@ -11,6 +11,7 @@ use agent_client_protocol::ImageContent;
 use base64::Engine as _;
 use bytes::Bytes;
 use std::borrow::Cow;
+use xai_grok_tools::util::format_bytes;
 use xai_grok_tools::util::image_compress::{FilterType, ReEncodeParams, re_encode_under_limit};
 /// Decoded attachment bytes above this are re-encoded to fit this cap.
 ///
@@ -22,7 +23,10 @@ use xai_grok_tools::util::image_compress::{FilterType, ReEncodeParams, re_encode
 /// rewritten. (Was 5 MB, which let only ~7 images reach the limit and then
 /// forced cache-busting eviction on essentially every subsequent turn.)
 pub(crate) const MAX_IMAGE_BYTES: usize = 1_500_000;
-const LIMIT_LABEL: &str = "1.5 MB";
+/// The attachment cap rendered the way the sizes beside it render.
+fn limit_label() -> String {
+    format_bytes(MAX_IMAGE_BYTES as u64)
+}
 /// Total pixel budget (w*h) before downscaling. Mirrors the v9 tokenizer's
 /// `image_filter_max_pixels = 2_408_448` — larger images are downsampled
 /// server-side anyway, so extra pixels only waste request bytes.
@@ -90,7 +94,7 @@ impl ImageCompressionInfo {
     fn reason_label(&self) -> Cow<'static, str> {
         match (self.exceeded_size, self.exceeded_dimensions) {
             (true, true) => Cow::Borrowed("was over the size and resolution limits"),
-            (true, false) => Cow::Owned(format!("was over the {LIMIT_LABEL} attachment limit")),
+            (true, false) => Cow::Owned(format!("was over the {} attachment limit", limit_label())),
             (false, true) => Cow::Borrowed("was over the max input resolution"),
             (false, false) => Cow::Borrowed("compressed"),
         }
@@ -110,10 +114,10 @@ impl ImageCompressionInfo {
         format!(
             "{verb} Image {}: {} ({}x{}) \u{2192} {} ({}x{})",
             self.index,
-            format_bytes(self.original_bytes),
+            format_bytes(self.original_bytes as u64),
             self.original_width,
             self.original_height,
-            format_bytes(self.compressed_bytes),
+            format_bytes(self.compressed_bytes as u64),
             self.compressed_width,
             self.compressed_height,
         )
@@ -153,7 +157,8 @@ pub(crate) async fn normalize_images_in(
                 re_encode_fallbacks
                     .push(
                         format!(
-                    "Image {one_based} could not be re-encoded under the {LIMIT_LABEL} limit; the original attachment was kept."
+                    "Image {one_based} could not be re-encoded under the {} limit; the original attachment was kept.",
+                    limit_label()
                 ),
                     );
                 out.push(c);
@@ -238,10 +243,10 @@ pub(crate) fn render_compression_notice(
                 c.reason_label(),
                 c.original_width,
                 c.original_height,
-                format_bytes(c.original_bytes),
+                format_bytes(c.original_bytes as u64),
                 c.compressed_width,
                 c.compressed_height,
-                format_bytes(c.compressed_bytes),
+                format_bytes(c.compressed_bytes as u64),
             )
         })
         .collect();
@@ -501,13 +506,6 @@ fn compute_normalized_blocking(
 }
 fn fail(index: usize, error: String) -> Outcome {
     Outcome::Failed { index, error }
-}
-fn format_bytes(bytes: usize) -> String {
-    if bytes >= 1_000_000 {
-        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
-    } else {
-        format!("{:.0} KB", bytes as f64 / 1_000.0)
-    }
 }
 #[cfg(test)]
 mod tests {
@@ -897,8 +895,8 @@ mod tests {
         assert!(notice.contains("was over the size and resolution limits"));
         assert!(notice.contains("5000x3000"));
         assert!(notice.contains("2000x1200"));
-        assert!(notice.contains("8.2 MB"));
-        assert!(notice.contains("1.4 MB"));
+        assert!(notice.contains("7.8 MB"));
+        assert!(notice.contains("1.3 MB"));
         let size_only = ImageCompressionInfo {
             exceeded_size: true,
             exceeded_dimensions: false,
@@ -906,7 +904,7 @@ mod tests {
         };
         assert!(
             render_compression_notice(&[size_only], false)
-                .contains("was over the 1.5 MB attachment limit")
+                .contains("was over the 1.4 MB attachment limit")
         );
         let dims_only = ImageCompressionInfo {
             exceeded_size: false,
@@ -931,8 +929,8 @@ mod tests {
     fn display_format() {
         let info_both = ImageCompressionInfo {
             index: 2,
-            original_bytes: 5_000_000,
-            compressed_bytes: 800_000,
+            original_bytes: 5 * 1024 * 1024,
+            compressed_bytes: 800 * 1024,
             original_width: 4000,
             original_height: 3000,
             compressed_width: 2000,
@@ -942,7 +940,7 @@ mod tests {
         };
         assert_eq!(
             info_both.display(),
-            "Downscaled Image 2: 5.0 MB (4000x3000) \u{2192} 800 KB (2000x1500)"
+            "Downscaled Image 2: 5.0 MB (4000x3000) \u{2192} 800.0 KB (2000x1500)"
         );
         let info_size = ImageCompressionInfo {
             exceeded_size: true,
@@ -957,15 +955,8 @@ mod tests {
         };
         assert_eq!(
             info_size_same_dims.display(),
-            "Compressed Image 2: 5.0 MB (4000x3000) \u{2192} 800 KB (4000x3000)"
+            "Compressed Image 2: 5.0 MB (4000x3000) \u{2192} 800.0 KB (4000x3000)"
         );
-    }
-    #[test]
-    fn format_bytes_ranges() {
-        assert_eq!(format_bytes(8_200_000), "8.2 MB");
-        assert_eq!(format_bytes(1_000_000), "1.0 MB");
-        assert_eq!(format_bytes(450_000), "450 KB");
-        assert_eq!(format_bytes(1_000), "1 KB");
     }
     /// CRC-corrupt PNG must be rejected by the Unchanged integrity check.
     #[tokio::test]

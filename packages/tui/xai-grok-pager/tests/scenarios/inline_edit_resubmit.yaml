@@ -2,11 +2,10 @@ name: inline-edit-resubmit
 description: >-
   Inline edit-and-resubmit happy path: select a previous user prompt in the
   scrollback (Tab, k), Enter opens the in-place editor, append text, Enter
-  raises the inline rewind popup ("Resubmit from here", files-only row
-  hidden), `b` (conversation only) + `y` (last-prompt confirm) rewinds the
-  conversation and resubmits the EDITED text as a fresh turn. Distinct
-  per-turn mock sentinels prove the old tail was truncated and a new turn
-  streamed; no "Reverted conversation" note is shown.
+  raises the confirm dialog, `y` rewinds the conversation and resubmits the
+  EDITED text as a fresh turn. Distinct per-turn mock sentinels prove the old
+  tail was truncated and a new turn streamed; no "Reverted conversation" note
+  is shown.
 terminal:
   rows: 40
   cols: 110
@@ -54,22 +53,15 @@ steps:
     timeout_ms: 10000
   - action: keys
     keys: "<Enter>"
-  # Inline variant of the rewind mode-select: retitled, files-only hidden.
+  # Confirm-before-rewind (default on) shows Yes / Yes, and don't ask again / No.
   - action: wait_for_text
-    text: "Resubmit from here"
+    text: "Rewind conversation to"
     timeout_ms: 15000
-  - action: assert_not_contains
-    text: "File changes only"
+  - action: assert_contains
+    text: "Yes, and don't ask again"
   - action: screenshot
-    name: inline-mode-select
-    note: Inline resubmit popup with a/b rows and no files-only option.
-  # b = Conversation only; target is the first prompt, so the classic
-  # last-prompt confirm popup follows.
-  - action: keys
-    keys: "b"
-  - action: wait_for_text
-    text: "Confirm rewind"
-    timeout_ms: 15000
+    name: inline-edit-confirm
+    note: Confirm dialog before rewinding the edited prompt and resubmitting.
   - action: keys
     keys: "y"
   # The rewind lands and the EDITED prompt is resubmitted: the second
@@ -83,9 +75,9 @@ steps:
   # ... without the classic rewind's system note ...
   - action: assert_not_contains
     text: "Reverted conversation"
-  # ... and the popup is gone while the edited text stands as the prompt.
+  # ... and the confirm is gone while the edited text stands as the prompt.
   - action: assert_not_contains
-    text: "Resubmit from here"
+    text: "Rewind conversation to"
   - action: assert_contains
     text: "INLINE_BASE EDITED_RESUBMIT"
   # The resubmitted request carried the edited text to the model.

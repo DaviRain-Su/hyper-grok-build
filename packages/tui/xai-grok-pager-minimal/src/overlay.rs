@@ -42,7 +42,8 @@ use xai_grok_pager::appearance::LayoutConfig;
 use xai_grok_pager::minimal_api;
 use xai_grok_pager::render::SafeBuf as _;
 use xai_grok_pager::theme::Theme;
-use xai_grok_pager::views::prompt_widget::{PromptBg, PromptStyle, PromptWidget};
+use xai_grok_pager::views::prompt_widget::{PromptBg, PromptInfo, PromptStyle, PromptWidget};
+use xai_grok_pager::views::question_view::{feedback_input, inline_text_width};
 
 /// Which prompt-anchored dropdown is currently shown.
 ///
@@ -712,6 +713,10 @@ fn render_question(
         );
     }
 
+    if input_mode && is_feedback_pane(agent) {
+        return render_feedback_editor(buf, area, agent, theme, input_h);
+    }
+
     if input_mode {
         let row_y = area.y + area.height.saturating_sub(input_h);
         let is_multi = minimal_api::question_view(agent)
@@ -773,19 +778,108 @@ fn render_question(
     None
 }
 
+/// Whether the open question pane is the bare `/feedback` report box.
+fn is_feedback_pane(agent: &AgentView) -> bool {
+    minimal_api::question_view(agent).is_some_and(|qv| qv.is_feedback())
+}
+
+/// The bare `/feedback` report box, painted over the bottom `input_h` rows of the question card.
+fn render_feedback_editor(
+    buf: &mut Buffer,
+    area: Rect,
+    agent: &mut AgentView,
+    theme: &Theme,
+    input_h: u16,
+) -> Option<(u16, u16)> {
+    // The box lives inside `area`: the inline viewport can be shorter than the height request, and drawing past it indexes outside the frame.
+    let box_h = input_h.min(area.height);
+    if box_h == 0 {
+        return None;
+    }
+    let input_area = Rect {
+        x: area.x + 3,
+        y: area.y + area.height.saturating_sub(box_h),
+        width: feedback_input::width(area.width),
+        height: box_h,
+    };
+
+    // Carry the card's surface and accent bar down the report rows.
+    buf.set_style(
+        Rect {
+            x: area.x,
+            y: input_area.y,
+            width: area.width,
+            height: box_h,
+        },
+        Style::default().bg(theme.bg_light),
+    );
+    for y in input_area.y..input_area.y.saturating_add(box_h) {
+        if let Some(cell) = buf.cell_mut((area.x, y)) {
+            cell.set_symbol(xai_grok_pager::glyphs::accent_bar());
+            cell.set_style(Style::default().fg(theme.accent_user).bg(theme.bg_light));
+        }
+    }
+
+    // Drop the outline when the box is too squeezed for it, so the text stays visible.
+    let outlined = box_h >= feedback_input::MIN_HEIGHT;
+    let style = if outlined {
+        feedback_input::style(theme)
+    } else {
+        feedback_input::flat_style(theme)
+    };
+    agent
+        .prompt
+        .draw(
+            buf,
+            input_area,
+            None,
+            &style,
+            outlined.then_some(&PromptInfo::default()),
+            None,
+        )
+        .cursor_pos
+}
+
 /// Height cap for the inline question editor — the full TUI's policy
 /// (`agent_view/render.rs`, `inline_prompt_max`).
 fn question_editor_cap(screen_h: u16) -> u16 {
     ((screen_h as u32) / 3).clamp(3, 15) as u16
 }
 
-/// Desired height of the inline question editor (InputMode), bounded by
-/// `cap`.
+/// Desired height of the inline question editor (InputMode), bounded by `cap`.
 fn question_editor_h(agent: &AgentView, area_w: u16, cap: u16, theme: &Theme) -> u16 {
-    let text_w = xai_grok_pager::views::question_view::inline_text_width(area_w);
+    if is_feedback_pane(agent) {
+        feedback_editor_h(agent, area_w, cap, theme)
+    } else {
+        freeform_editor_h(agent, area_w, cap, theme)
+    }
+}
+
+/// The bare `/feedback` report box: its rules plus at least one text row, growing with the report.
+/// Unlike the full TUI it reserves no rows up front, because `cap` is all the room the inline viewport has.
+fn feedback_editor_h(agent: &AgentView, area_w: u16, cap: u16, theme: &Theme) -> u16 {
+    let min_h = feedback_input::MIN_HEIGHT.min(cap.max(1));
     agent
         .prompt
-        .desired_height(text_w, &inline_input_style(theme), false, cap.max(1))
+        .desired_height(
+            feedback_input::width(area_w),
+            &feedback_input::style(theme),
+            true,
+            cap.max(min_h),
+        )
+        .max(min_h)
+}
+
+/// The one-line freeform answer row, growing with what the user types.
+fn freeform_editor_h(agent: &AgentView, area_w: u16, cap: u16, theme: &Theme) -> u16 {
+    agent
+        .prompt
+        .desired_height(
+            inline_text_width(area_w),
+            &inline_input_style(theme),
+            false,
+            cap.max(1),
+        )
         .max(1)
 }
 
@@ -804,6 +898,7 @@ fn inline_input_style(theme: &Theme) -> PromptStyle {
         accent_color_override: None,
         border_color_override: None,
         prefix_override: None,
+        placeholder_when_focused: false,
         placeholder_override: None,
         show_accent_line: false,
         show_borders: false,
@@ -1030,7 +1125,7 @@ mod tests {
         assert_eq!(content_target(0, 0, 0, 0, 1, 40), 2); // status + 1-row prompt
         assert_eq!(content_target(0, 3, 0, 0, 1, 40), 5); // + 3 todo rows
         assert_eq!(content_target(0, 3, 0, 5, 2, 40), 11); // + overlay(5) + 2-row prompt
-        // /btw Loading/Error is 3 rows; Done grows with the answer.
+        // /btw Loading is 3 rows; Done/Error grow with the content.
         assert_eq!(content_target(0, 0, 3, 0, 1, 40), 5); // + btw(3)
         // Production idle always reserves ≥1 below the prompt (info bar).
         assert_eq!(content_target(0, 0, 3, 1, 1, 40), 6); // btw+status+info+prompt

@@ -1308,7 +1308,7 @@ impl SessionActor {
                     .get()
                     .map(|cwd| std::path::PathBuf::from(cwd.as_str())),
             });
-            let decision = {
+            let resolution = {
                 let _pending_guard =
                     crate::session::pending_interaction::PendingInteractionGuard::new(
                         self.pending_interactions.clone(),
@@ -1318,7 +1318,7 @@ impl SessionActor {
                         crate::session::pending_interaction::PendingKind::Permission,
                     );
                 self.permissions
-                    .request_with_path_context(
+                    .request_with_path_context_resolved(
                         access_kind.clone(),
                         tool_call_update,
                         path_context,
@@ -1328,6 +1328,8 @@ impl SessionActor {
                     )
                     .await
             };
+            let manager_event = resolution.event;
+            let decision = resolution.decision;
             self.events.permission_resolved(
                 &call.function.name,
                 match &decision {
@@ -1346,53 +1348,33 @@ impl SessionActor {
                 },
                 perm_start,
             );
-            let wait_ms = perm_start.elapsed().as_millis() as u64;
-            let (decision_outcome, _reject_reason) = match &decision {
-                Decision::Allow | Decision::Ask => {
-                    (xai_grok_telemetry::events::PermissionOutcome::Allow, None)
-                }
-                Decision::Reject(reason) | Decision::PolicyDeny(reason) => (
-                    xai_grok_telemetry::events::PermissionOutcome::Deny,
-                    Some(reason.to_string()),
-                ),
-                Decision::Cancelled => (
-                    xai_grok_telemetry::events::PermissionOutcome::Cancelled,
-                    None,
-                ),
-                Decision::FollowupMessage(_) => (
-                    xai_grok_telemetry::events::PermissionOutcome::Followup,
-                    None,
-                ),
-            };
+            let shell_wait_ms = perm_start.elapsed().as_millis() as u64;
+            let decision_outcome = crate::session::telemetry::permission_outcome(&decision);
+            let resolved = crate::session::telemetry::resolved_decision_telemetry(
+                manager_event.as_ref(),
+                &decision,
+                perm_mode,
+                shell_wait_ms,
+                self.permissions.is_yolo_mode(),
+            );
             tracing::info_span!(
                 "tool.decision",
                 tool_name = %call.function.name,
                 tool_use_id = %call.id,
                 decision = decision_outcome.as_str(),
-                source = crate::session::telemetry::permission_decision_source(
-                    &decision,
-                    self.permissions.is_yolo_mode(),
-                ),
-                wait_ms = wait_ms as i64,
+                source = resolved.source.as_deref().unwrap_or(""),
+                wait_ms = resolved.wait_ms as i64,
             )
             .in_scope(|| {});
             xai_grok_telemetry::session_ctx::log_event(
-                xai_grok_telemetry::events::PermissionDecisionPayload {
-                    tool_name: call.function.name.clone(),
-                    access_kind: telemetry_access_kind,
-                    decision: decision_outcome,
-                    wait_ms,
-                    permission_mode: perm_mode,
-                    source: Some(
-                        crate::session::telemetry::permission_decision_source(
-                            &decision,
-                            self.permissions.is_yolo_mode(),
-                        )
-                        .to_owned(),
-                    ),
-                    subagent_session_id: subagent_session_id.clone(),
-                    subagent_type: None,
-                },
+                crate::session::telemetry::permission_decision_payload(
+                    call.function.name.clone(),
+                    telemetry_access_kind,
+                    &decision,
+                    subagent_session_id.clone(),
+                    manager_event.as_ref(),
+                    resolved,
+                ),
             );
             match decision {
                 Decision::PolicyDeny(ref reason) | Decision::Reject(ref reason) => {

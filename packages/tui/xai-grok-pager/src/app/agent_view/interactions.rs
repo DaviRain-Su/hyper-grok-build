@@ -297,7 +297,9 @@ impl AgentView {
         } else if let Some(slot) = qv.per_question_freeform.get_mut(idx) {
             slot.clear();
         }
-        qv.focus = QuestionFocus::Navigation;
+        if !qv.is_feedback() {
+            qv.focus = QuestionFocus::Navigation;
+        }
         self.last_prompt_click_ms = None;
     }
     /// Handle key input when the question view is active.
@@ -326,6 +328,9 @@ impl AgentView {
                     return self.dismiss_question_view();
                 }
                 if key!('c', CONTROL).matches(key) {
+                    if qv.is_feedback() {
+                        return self.clear_feedback_then_dismiss();
+                    }
                     qv.focus = QuestionFocus::Navigation;
                     self.last_prompt_click_ms = None;
                     return InputOutcome::Changed;
@@ -553,6 +558,15 @@ impl AgentView {
             }
         }
     }
+    /// The feedback pane has no navigation to return to, so it follows the composer: clear the report, then dismiss once it is empty.
+    fn clear_feedback_then_dismiss(&mut self) -> InputOutcome {
+        if self.prompt.text().trim().is_empty() {
+            return self.submit_question_answers(true);
+        }
+        self.prompt.set_text("");
+        self.commit_question_freeform();
+        InputOutcome::Changed
+    }
     /// Handle mouse events when the question view is active.
     ///
     /// Scroll wheel scrolls the options list. Clicks on option rows move
@@ -637,7 +651,9 @@ impl AgentView {
                     self.apply_question_scrollbar_click(mouse.row);
                     return InputOutcome::Changed;
                 }
-                if qv.focus == crate::views::question_view::QuestionFocus::InputMode {
+                if self.question_view.as_ref().is_some_and(|q| {
+                    q.focus == crate::views::question_view::QuestionFocus::InputMode
+                }) {
                     if self
                         .prompt
                         .textarea_area()
@@ -651,24 +667,11 @@ impl AgentView {
                         }
                         return InputOutcome::Changed;
                     }
-                    let idx = qv.active_tab;
-                    let text = self.prompt.text().to_string();
-                    let has_text = !text.trim().is_empty();
-                    if let Some(slot) = qv.per_question_freeform.get_mut(idx) {
-                        *slot = text;
-                    }
-                    if has_text && let Some(sel) = qv.per_question_freeform_selected.get_mut(idx) {
-                        *sel = true;
-                    }
-                    if has_text
-                        && let Some(crate::views::question_view::QuestionSelection::Single(sel)) =
-                            qv.selections.get_mut(idx)
-                    {
-                        *sel = None;
-                    }
-                    qv.focus = crate::views::question_view::QuestionFocus::Navigation;
-                    self.last_prompt_click_ms = None;
+                    self.commit_question_freeform();
                 }
+                let Some(qv) = self.question_view.as_mut() else {
+                    return InputOutcome::Changed;
+                };
                 let prompt_area = self.pane_areas.prompt;
                 let footer_h = 3u16;
                 let question_area_bottom =
@@ -1028,7 +1031,7 @@ impl AgentView {
         }
         if let Some(qv) = self.question_view.take() {
             self.record_question_pause(&qv);
-            self.prompt.restore(qv.stashed_prompt);
+            self.restore_card_prompt(qv.stashed_prompt);
         }
         self.cleanup_question_state();
         InputOutcome::Changed
@@ -1098,12 +1101,59 @@ impl AgentView {
     pub(crate) fn handle_question_key_for_test(&mut self, key: &KeyEvent) -> InputOutcome {
         self.handle_question_key(key)
     }
-    fn submit_question_answers(&mut self, skipped: bool) -> InputOutcome {
+    #[cfg(test)]
+    pub(crate) fn handle_question_mouse_for_test(&mut self, mouse: &MouseEvent) -> InputOutcome {
+        self.handle_question_mouse(mouse)
+    }
+    /// Give back the draft a card displaced when it opened.
+    ///
+    /// A permission and a plan approval each stash the composer and blank it, so while one is up the composer is not the live editor
+    /// and their stash is what will be restored from. The draft has to go there instead, or that stash puts back whatever the card was
+    /// holding, which for `/feedback` is a report that must never reach the model's input. Casual commenting is the other way round,
+    /// keeping its draft parked and the composer live, so it takes the ordinary restore.
+    pub(crate) fn restore_card_prompt(
+        &mut self,
+        stashed: crate::views::prompt_widget::StashedPrompt,
+    ) {
+        if self.permission_stashed_prompt.is_some() {
+            self.permission_stashed_prompt = Some(stashed);
+        } else if let Some(pav) = self.plan_approval_view.as_mut() {
+            pav.stashed_prompt = stashed;
+        } else {
+            self.prompt.restore(stashed);
+        }
+    }
+    /// Close out the bare `/feedback` pane: Enter sends the report, Esc drops it.
+    /// It never reaches the option-selection translation, having no options to translate.
+    fn submit_feedback_pane(
+        &mut self,
+        mut qv: crate::views::question_view::QuestionViewState,
+        skipped: bool,
+    ) -> InputOutcome {
+        let report = qv.feedback_report();
+        if !skipped && report.is_empty() {
+            let freeform = qv.activate_freeform_input();
+            self.prompt.set_text_preserving(&freeform);
+            self.question_view = Some(qv);
+            return InputOutcome::Changed;
+        }
+        self.record_question_pause(&qv);
+        self.restore_card_prompt(qv.stashed_prompt);
+        self.cleanup_question_state();
+        if skipped {
+            return InputOutcome::Changed;
+        }
+        InputOutcome::Action(Action::SendFeedback(report))
+    }
+    pub(super) fn submit_question_answers(&mut self, skipped: bool) -> InputOutcome {
         use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse;
         self.swap_question_freeform();
         let Some(mut qv) = self.question_view.take() else {
             return InputOutcome::Changed;
         };
+        if qv.is_feedback() {
+            return self.submit_feedback_pane(qv, skipped);
+        }
         self.record_question_pause(&qv);
         if let Some(kind) = qv.local_kind.take() {
             let is_doctor_fix = matches!(

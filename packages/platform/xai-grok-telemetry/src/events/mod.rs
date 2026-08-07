@@ -4,7 +4,7 @@
 //!
 //! These structs were extracted from `xai-grok-shell` so they can be
 //! reused across binaries (TUI, sampler) without dragging the shell HTTP /
-//! Mixpanel client along. The `CompactionScope` helper that drives paired
+//! product-analytics client along. The `CompactionScope` helper that drives paired
 //! `compaction_triggered`/`compaction_completed` emission stays in shell --
 //! it calls `super::log_event` directly.
 
@@ -12,6 +12,9 @@ use serde::Serialize;
 
 use super::enums::PermissionMode;
 pub use super::enums::PrCreationSource;
+
+mod permission_analytics;
+pub use permission_analytics::*;
 
 /// Binds a product event name to a struct. Implement via `telemetry_event!` below.
 pub trait TelemetryEvent: Serialize + Send + 'static {
@@ -349,7 +352,7 @@ pub struct PlanModeToggled {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// One contextual-hint impression or acceptance: per tip, how often it is
-/// shown vs. acted on (the `action` property drives the Mixpanel funnel).
+/// shown vs. acted on (the `action` property drives the product-analytics funnel).
 #[derive(Serialize)]
 pub struct ContextualTip {
     pub tip: ContextualTipKind,
@@ -394,39 +397,6 @@ pub struct YoloToggled {
 pub struct SlashCommandUsed {
     pub command: String,
     pub args_provided: bool,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Permissions
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[derive(Serialize)]
-pub struct PermissionPrompted {
-    pub tool_name: String,
-    pub access_kind: AccessKind,
-    pub permission_mode: PermissionMode,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subagent_session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subagent_type: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct PermissionDecisionPayload {
-    pub tool_name: String,
-    pub access_kind: AccessKind,
-    pub decision: PermissionOutcome,
-    pub wait_ms: u64,
-    pub permission_mode: PermissionMode,
-    /// Decision provenance (`config`/`user_reject`/`user_abort`/…), from
-    /// shell's `permission_decision_source`. Additive analytics-visible field, added
-    /// for the external `tool_decision` event (design ‡ footnote).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subagent_session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subagent_type: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -540,11 +510,45 @@ pub struct CompactionRetryDegraded {
 // Subagents
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Which spawn path owns a subagent's lifecycle.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentOwnerKind {
+    Task,
+    Workflow,
+    SchedulerLoop,
+}
+
+/// Which admission limit a spawn ran into.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentLimitKind {
+    SessionConcurrent,
+    WorkflowRunConcurrent,
+}
+
+/// What happened to the spawn that hit a limit.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentLimitDisposition {
+    Queued,
+    Failed,
+}
+
 #[derive(Serialize)]
 pub struct SubagentLaunched {
     pub subagent_id: String,
     pub parent_session_id: String,
     pub subagent_type: String,
+    pub owner: SubagentOwnerKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
+    /// Time parked in the admission queue; absent if admitted immediately.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued_ms: Option<u64>,
+    /// The session's running non-workflow subagents at launch, including
+    /// this one; max per session is the session's peak concurrency.
+    pub session_running: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persona: Option<String>,
     pub fork_context: bool,
@@ -560,11 +564,139 @@ pub struct SubagentLaunched {
 pub struct SubagentCompleted {
     pub subagent_id: String,
     pub parent_session_id: String,
+    pub owner: SubagentOwnerKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
     pub outcome: Outcome,
     pub duration_ms: u64,
     pub tool_calls: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_used: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct SubagentLimitHit {
+    pub parent_session_id: String,
+    pub limit_kind: SubagentLimitKind,
+    pub disposition: SubagentLimitDisposition,
+    pub limit: u64,
+    pub running: u32,
+    /// A queued spawn counts itself; absent for the workflow pool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued: Option<u32>,
+    pub owner: SubagentOwnerKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
+}
+
+impl SubagentLimitHit {
+    /// The session pool's producer.
+    pub fn session_concurrent(
+        parent_session_id: String,
+        disposition: SubagentLimitDisposition,
+        limit: u64,
+        running: u32,
+        queue_depth: u32,
+        owner: SubagentOwnerKind,
+    ) -> Self {
+        Self {
+            parent_session_id,
+            limit_kind: SubagentLimitKind::SessionConcurrent,
+            disposition,
+            limit,
+            running,
+            queued: Some(queue_depth),
+            owner,
+            workflow_run_id: None,
+        }
+    }
+
+    /// The workflow pool's producer: waiters block on the run's semaphore,
+    /// so there is no queue depth to report.
+    pub fn workflow_run_concurrent(
+        parent_session_id: String,
+        workflow_run_id: String,
+        limit: u64,
+        slots_in_use: u32,
+    ) -> Self {
+        Self {
+            parent_session_id,
+            limit_kind: SubagentLimitKind::WorkflowRunConcurrent,
+            disposition: SubagentLimitDisposition::Queued,
+            limit,
+            running: slots_in_use,
+            queued: None,
+            owner: SubagentOwnerKind::Workflow,
+            workflow_run_id: Some(workflow_run_id),
+        }
+    }
+}
+
+/// Where a workflow script came from.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowSourceKind {
+    Builtin,
+    File,
+    Inline,
+}
+
+/// One workflow execution episode began (fresh launch or resume).
+#[derive(Serialize)]
+pub struct WorkflowRunStarted {
+    pub run_id: String,
+    pub parent_session_id: String,
+    pub source: WorkflowSourceKind,
+    /// Built-in workflow names only; user script names stay local.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_budget: Option<u64>,
+    /// Effective cap, after the CPU clamp.
+    pub max_concurrent_agents: u32,
+    pub resumed: bool,
+}
+
+/// The run tracker's status labels, plus `superseded` for an episode whose
+/// run a quick resume took over.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowRunEndStatus {
+    Active,
+    UserPaused,
+    BackOffPaused,
+    NoProgressPaused,
+    InfraPaused,
+    Blocked,
+    BudgetLimited,
+    Interrupted,
+    Complete,
+    Failed,
+    Cancelled,
+    Superseded,
+}
+
+#[derive(Serialize)]
+pub struct WorkflowRunEnded {
+    pub run_id: String,
+    pub parent_session_id: String,
+    pub status: WorkflowRunEndStatus,
+    /// Cumulative across the run's episodes.
+    pub duration_ms: u64,
+    /// Cumulative across the run's episodes.
+    pub agents_used: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_budget: Option<u64>,
+    /// This episode only.
+    pub agents_failed: u32,
+    /// This episode only.
+    pub peak_concurrent_agents: u32,
+    /// This episode only.
+    pub slot_waits: u32,
+    /// This episode only.
+    pub slot_wait_ms_total: u64,
+    /// This episode only.
+    pub slot_wait_ms_max: u64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -741,7 +873,7 @@ pub struct HookBlocked {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WASM extensions (bootstrap runtime ops)
+// WASM extensions (Hyper bootstrap runtime ops)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Lifecycle snapshot of one session's [`xai_grok_extension_runtime`] counters.
@@ -929,7 +1061,7 @@ pub struct PromptSubmitted {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screen_mode: Option<String>,
     /// Raw prompt text for the external stream's `OTEL_LOG_USER_PROMPTS`
-    /// gate **only**. `#[serde(skip)]`: never serialized to product events/Mixpanel;
+    /// gate **only**. `#[serde(skip)]`: never serialized to product events/analytics;
     /// dropped at external emit time unless the gate is on (then capped at
     /// 60 KB and secret-scrubbed).
     #[serde(skip)]
@@ -1153,7 +1285,7 @@ pub struct ToolCallCompleted {
     pub outcome: xai_file_utils::events::types::ToolOutcome,
     pub duration_ms: u64,
     /// Primary file path of the call, for the external stream only
-    /// (`#[serde(skip)]`: never serialized to product events/Mixpanel). Always reduced to
+    /// (`#[serde(skip)]`: never serialized to product events/analytics). Always reduced to
     /// `file_extension`; the full path rides the `OTEL_LOG_TOOL_DETAILS` gate.
     #[serde(skip)]
     pub file_path: Option<String>,
@@ -1223,6 +1355,32 @@ pub struct SessionEnded {
 // ---------------------------------------------------------------------------
 // Pager events (called from xai-grok-pager via log_event)
 // ---------------------------------------------------------------------------
+
+/// Connect outcome: the `agent_connect` product event, plus OTEL metrics.
+#[derive(Serialize)]
+pub struct AgentConnect {
+    pub connect_target: crate::startup::AgentKind,
+    pub outcome: crate::startup::StartupOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stuck_in: Option<String>,
+    pub phases: String,
+    pub phase_durations_ms: std::collections::BTreeMap<String, u64>,
+    pub elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    pub embedded_fallback: bool,
+    pub auth_mode: crate::startup::AuthMode,
+}
+
+/// End to end startup: process start to a usable session, with the phase
+/// breakdown that accounts for it.
+#[derive(Serialize)]
+pub struct StartupComplete {
+    pub total_ms: u64,
+    pub outcome: crate::startup::StartupOutcome,
+    pub phases: String,
+    pub auth_mode: crate::startup::AuthMode,
+}
 
 #[derive(Serialize)]
 pub struct PagerSlashCommand {
@@ -1798,6 +1956,9 @@ telemetry_event!(
     "subagent_completed",
     external = crate::external::schema::map_subagent_completed
 );
+telemetry_event!(SubagentLimitHit, "subagent_limit_hit");
+telemetry_event!(WorkflowRunStarted, "workflow_run_started");
+telemetry_event!(WorkflowRunEnded, "workflow_run_ended");
 telemetry_event!(
     ModelSwitched,
     "model_switched",
@@ -1902,6 +2063,16 @@ telemetry_event!(
     SessionEnded,
     "session_ended",
     external = crate::external::schema::map_session_end
+);
+telemetry_event!(
+    AgentConnect,
+    "agent_connect",
+    external = crate::external::schema::map_agent_connect
+);
+telemetry_event!(
+    StartupComplete,
+    "startup_complete",
+    external = crate::external::schema::map_startup_complete
 );
 telemetry_event!(PagerSlashCommand, "pager_slash_command");
 telemetry_event!(PlanSubmit, "plan_submit");

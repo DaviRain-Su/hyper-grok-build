@@ -88,7 +88,6 @@ impl Theme {
             accent_plan: rgb(168, 120, 10), // #A8780A — deep golden
 
             accent_verify: rgb(120, 80, 160), // deep violet (readable on light bg)
-
             accent_feedback: GREEN1,
 
             accent_remember: rgb(76, 175, 80), // #4CAF50 — Material Design green (readable on light bg)

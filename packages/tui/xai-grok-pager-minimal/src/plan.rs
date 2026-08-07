@@ -245,6 +245,7 @@ fn input_style(theme: &Theme) -> PromptStyle {
         accent_color_override: None,
         border_color_override: None,
         prefix_override: None,
+        placeholder_when_focused: false,
         placeholder_override: None,
         show_accent_line: false,
         show_borders: false,

@@ -239,14 +239,21 @@ pub fn estimate_chars(s: u64) -> u64 {
     xai_token_estimation::estimate_chars(s)
 }
 
-pub fn format_bytes(bytes: usize) -> String {
-    if bytes >= 1_000_000 {
-        format!("{:.1}MB", bytes as f64 / 1_000_000.0)
-    } else if bytes >= 1_000 {
-        format!("{:.1}KB", bytes as f64 / 1_000.0)
-    } else {
-        format!("{}B", bytes)
+/// Human-readable size in powers of 1024: integral bytes (`512 B`), one
+/// decimal above (`1.5 MB`). Every output fits nine columns.
+pub fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} B");
     }
+    const UNITS: &[&str] = &["KB", "MB", "GB", "TB", "PB"];
+    let mut val = bytes as f64 / 1024.0;
+    for unit in UNITS {
+        if val < 1023.95 {
+            return format!("{val:.1} {unit}");
+        }
+        val /= 1024.0;
+    }
+    format!("{val:.1} EB")
 }
 
 /// Apply soft-wrapping to every line in a multi-line string.
@@ -380,6 +387,22 @@ pub fn truncate_lines_to_char_budget(content: &str, budget: usize) -> (String, b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_bytes_scales_units() {
+        let cases = [
+            (0, "0 B"),
+            (512, "512 B"),
+            (1024, "1.0 KB"),
+            (1536, "1.5 KB"),
+            (1_048_575, "1.0 MB"),
+            (1 << 50, "1.0 PB"),
+            (u64::MAX, "16.0 EB"),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(format_bytes(bytes), expected, "bytes = {bytes}");
+        }
+    }
 
     // ---- estimate_tokens ----
 

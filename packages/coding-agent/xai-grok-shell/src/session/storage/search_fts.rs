@@ -5,9 +5,9 @@
 //!
 //! ## Schema
 //!
-//! - `meta`              — key-value metadata (schema version)
-//! - `session_docs`      — one row per session (title, content, content_hash)
-//! - `session_docs_fts`  — content-synced FTS5 over title + content (not cwd)
+//! - `meta`: key-value metadata (schema version, bootstrap marker/claim)
+//! - `session_docs`: one row per session (title, content, content_hash)
+//! - `session_docs_fts`: content-synced FTS5 over title + content (not cwd)
 //!
 //! FTS is kept in sync with `session_docs` via `AFTER INSERT/UPDATE/DELETE`
 //! triggers so callers never need to touch the FTS table directly.
@@ -18,6 +18,7 @@
 //! recreated once (see [`super::search_recovery`] and [`with_index`]).
 
 use std::path::Path;
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use xai_sqlite_journal::JournalMode;
@@ -28,6 +29,26 @@ use super::search_recovery;
 /// recreating tables, or to force a rebuild of stale index content
 /// (v3 → v4: messages with JSON escapes were silently dropped at indexing).
 const SCHEMA_VERSION: &str = "4";
+
+/// Lease stamp for the in-flight bootstrap claim, stored as
+/// `"{unix_secs}:{owner_token}"`; `CAST` reads the numeric prefix, and the
+/// token fences refresh/release to the owner.
+pub(super) const META_KEY_BOOTSTRAP_CLAIM: &str = "bootstrap_claimed_at";
+
+/// Unix seconds of the last completed full reindex; its presence is the
+/// completed-bootstrap marker.
+pub(super) const META_KEY_LAST_BOOTSTRAP: &str = "last_bootstrap_at";
+
+/// On-disk schema version row; bump [`SCHEMA_VERSION`] to force a rebuild.
+pub(super) const META_KEY_SCHEMA_VERSION: &str = "session_search_schema_version";
+
+/// SQL that extracts the owner token from a claim stamp; the single source
+/// for every fenced statement, paired with [`claim_stamp`].
+const CLAIM_TOKEN_SQL: &str = "substr(value, instr(value, ':') + 1)";
+
+fn claim_stamp(now_unix: i64, token: &str) -> String {
+    format!("{now_unix}:{token}")
+}
 
 /// A document to be indexed for session search.
 #[derive(Debug, Clone)]
@@ -118,15 +139,6 @@ impl SessionSearchIndex {
         }
     }
 
-    /// Open an existing index without the corruption self-heal; returns the
-    /// unusable-DB error instead of quarantining.
-    pub fn open_existing(db_path: &Path) -> Result<Self, rusqlite::Error> {
-        if let Some(parent) = db_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        Self::open_with_journal_mode(db_path, JournalMode::for_db_path(db_path))
-    }
-
     fn probe_usable(db_path: &Path) -> Result<bool, rusqlite::Error> {
         let conn = JournalMode::for_db_path(db_path).open_readonly(db_path)?;
         let mut stmt = conn.prepare("PRAGMA integrity_check")?;
@@ -143,12 +155,12 @@ impl SessionSearchIndex {
         journal_mode: JournalMode,
     ) -> Result<Self, rusqlite::Error> {
         // busy_timeout + journal pragma live in the helper (see JournalMode::open).
-        let db = journal_mode.open(db_path)?;
+        let mut db = journal_mode.open(db_path)?;
 
         let stored_version: Option<String> = db
             .query_row(
-                "SELECT value FROM meta WHERE key = 'session_search_schema_version'",
-                [],
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_KEY_SCHEMA_VERSION],
                 |row| row.get(0),
             )
             .optional()
@@ -167,30 +179,26 @@ impl SessionSearchIndex {
         let stored: Option<u64> = stored_version.as_deref().map(|v| v.parse().unwrap_or(0));
         let owned_by_newer = stored.is_some_and(|s| s > current);
         if stored.is_some_and(|s| s < current) {
-            // Discard the stale index AND its completed-bootstrap marker in
-            // one transaction. Binaries that predate the one-way ratchet
-            // (schema ≤ 3) still wipe a newer index on open, re-stamp their
-            // own version, and rewrite `last_bootstrap_at` when their
-            // bootstrap finishes. If that marker survived this upgrade drop,
-            // a "did a bootstrap complete?" check would trust it and never
-            // repopulate the now-empty tables — leaving content search
-            // permanently empty (the query path itself performs this drop).
-            // Deleting the marker makes the wipe observable: the search
-            // manager re-runs a full bootstrap and remote sync correctly
-            // treats the local index as stale. All other `meta` keys are
-            // preserved.
-            db.execute_batch(
+            // The marker and claim die with the tables: a surviving marker
+            // reads as "bootstrap complete" over an empty index, and a
+            // surviving claim blocks its rebuild until the lease expires.
+            // Other `meta` keys are preserved. Immediate: a deferred begin
+            // can fail with SQLITE_BUSY_SNAPSHOT, which skips the handler.
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute_batch(
                 "
-                BEGIN;
                 DROP TRIGGER IF EXISTS session_docs_ai;
                 DROP TRIGGER IF EXISTS session_docs_ad;
                 DROP TRIGGER IF EXISTS session_docs_au;
                 DROP TABLE IF EXISTS session_docs_fts;
                 DROP TABLE IF EXISTS session_docs;
-                DELETE FROM meta WHERE key = 'last_bootstrap_at';
-                COMMIT;
                 ",
             )?;
+            tx.execute(
+                "DELETE FROM meta WHERE key IN (?1, ?2)",
+                params![META_KEY_LAST_BOOTSTRAP, META_KEY_BOOTSTRAP_CLAIM],
+            )?;
+            tx.commit()?;
         } else if owned_by_newer {
             tracing::debug!(
                 stored = stored.unwrap_or_default(),
@@ -249,9 +257,8 @@ impl SessionSearchIndex {
         // generation owns (it would re-trigger that binary's upgrade drop).
         if stored != Some(current) && !owned_by_newer {
             db.execute(
-                "INSERT OR REPLACE INTO meta(key, value) \
-                 VALUES ('session_search_schema_version', ?1)",
-                params![SCHEMA_VERSION],
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+                params![META_KEY_SCHEMA_VERSION, SCHEMA_VERSION],
             )?;
         }
 
@@ -353,6 +360,108 @@ impl SessionSearchIndex {
         self.db
             .execute("DELETE FROM meta WHERE key = ?1", params![key])?;
         Ok(())
+    }
+
+    /// Returns `true` when this process claimed the bootstrap under `token`.
+    /// An expired (older than `lease`), future-dated (clock rollback), or
+    /// unparsable claim is taken over; a live peer claim is not.
+    pub(super) fn try_claim_bootstrap(
+        &self,
+        now_unix: i64,
+        lease: Duration,
+        token: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let lease_secs = lease.as_secs() as i64;
+        // One upsert keeps the check-and-claim atomic across processes.
+        let changed = self.db.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value
+             WHERE CAST(meta.value AS INTEGER) <= ?3
+                OR CAST(meta.value AS INTEGER) > ?4",
+            params![
+                META_KEY_BOOTSTRAP_CLAIM,
+                claim_stamp(now_unix, token),
+                now_unix.saturating_sub(lease_secs),
+                now_unix.saturating_add(lease_secs),
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Re-stamp the lease. Fenced on `token`: returns `false` without
+    /// writing when the claim is no longer ours (expired and taken over, or
+    /// already released), so a stale claimant can never clobber a successor.
+    pub(super) fn refresh_bootstrap_claim(
+        &self,
+        now_unix: i64,
+        token: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let changed = self.db.execute(
+            &format!("UPDATE meta SET value = ?2 WHERE key = ?1 AND {CLAIM_TOKEN_SQL} = ?3"),
+            params![
+                META_KEY_BOOTSTRAP_CLAIM,
+                claim_stamp(now_unix, token),
+                token
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Write `key = value` only while the bootstrap claim is still held
+    /// under `token`; returns `false` (no write) otherwise.
+    pub(super) fn set_meta_if_claim_owner(
+        &self,
+        key: &str,
+        value: &str,
+        token: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let changed = self.db.execute(
+            &format!(
+                "INSERT INTO meta(key, value)
+                 SELECT ?1, ?2
+                 WHERE EXISTS (
+                     SELECT 1 FROM meta WHERE key = ?3 AND {CLAIM_TOKEN_SQL} = ?4
+                 )
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            ),
+            params![key, value, META_KEY_BOOTSTRAP_CLAIM, token],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Delete the claim, fenced on `token` so only the current owner frees
+    /// it. Returns `false` when the claim was already released or taken over.
+    pub(super) fn release_bootstrap_claim(&self, token: &str) -> Result<bool, rusqlite::Error> {
+        let changed = self.db.execute(
+            &format!("DELETE FROM meta WHERE key = ?1 AND {CLAIM_TOKEN_SQL} = ?2"),
+            params![META_KEY_BOOTSTRAP_CLAIM, token],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Refresh the claim under `token` and delete indexed session ids not in
+    /// `keep`, in one Immediate transaction. Returns `false` without deleting
+    /// when this process is not the claim owner.
+    pub(super) fn prune_missing_if_claim_owner(
+        &self,
+        now_unix: i64,
+        token: &str,
+        keep: &std::collections::HashSet<String>,
+    ) -> Result<bool, rusqlite::Error> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        if !self.refresh_bootstrap_claim(now_unix, token)? {
+            return Ok(false);
+        }
+        for id in self.all_indexed_session_ids()? {
+            if !keep.contains(&id) {
+                self.delete_doc(&id)?;
+            }
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Return all session IDs currently in the index.
@@ -653,6 +762,101 @@ mod tests {
         SessionSearchIndex::open_or_create(&tmp.path().join("session_search.sqlite")).unwrap()
     }
 
+    const LEASE: Duration = Duration::from_secs(300);
+
+    #[test]
+    fn test_bootstrap_claim_is_single_flight_until_lease_expires() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+        let peer = open(&tmp);
+        let claim = |idx: &SessionSearchIndex, now: i64, token: &str| {
+            idx.try_claim_bootstrap(now, LEASE, token).unwrap()
+        };
+
+        assert!(claim(&index, 1_000, "a"));
+        assert!(!claim(&index, 1_010, "a"), "live claim is not re-claimable");
+        assert!(
+            !claim(&peer, 1_299, "b"),
+            "live claim is not claimable by a peer"
+        );
+        assert!(claim(&peer, 1_301, "b"), "expired lease is claimable");
+    }
+
+    #[test]
+    fn test_bootstrap_claim_release_and_refresh_are_owner_fenced() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+        let claim = |now: i64, token: &str| index.try_claim_bootstrap(now, LEASE, token).unwrap();
+
+        assert!(claim(1_000, "a"));
+        assert!(index.refresh_bootstrap_claim(1_200, "a").unwrap());
+        assert!(!claim(1_400, "b"), "refresh extends the lease");
+
+        // A stale claimant (expired, taken over) can neither refresh nor
+        // release the successor's claim.
+        assert!(claim(1_501, "b"), "lease from 1_200 expires at 1_500");
+        assert!(!index.refresh_bootstrap_claim(1_502, "a").unwrap());
+        assert!(!index.release_bootstrap_claim("a").unwrap());
+        assert!(!claim(1_503, "c"), "b's claim survives a's stale release");
+
+        assert!(index.release_bootstrap_claim("b").unwrap());
+        assert!(claim(1_504, "c"), "owner release frees the claim");
+    }
+
+    #[test]
+    fn test_upgrade_drop_clears_bootstrap_claim() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+        assert!(index.try_claim_bootstrap(1_000, LEASE, "a").unwrap());
+        index.set_meta(META_KEY_SCHEMA_VERSION, "3").unwrap();
+        drop(index);
+
+        let reopened = open(&tmp);
+        assert!(
+            reopened.try_claim_bootstrap(1_001, LEASE, "b").unwrap(),
+            "the upgrade wipe must clear the claim so the rebuild is not blocked"
+        );
+    }
+
+    #[test]
+    fn test_set_meta_if_claim_owner_is_fenced() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+
+        assert!(!index.set_meta_if_claim_owner("k", "v", "a").unwrap());
+        assert_eq!(index.get_meta("k").unwrap(), None, "no claim: no write");
+
+        assert!(index.try_claim_bootstrap(1_000, LEASE, "a").unwrap());
+        assert!(!index.set_meta_if_claim_owner("k", "v", "b").unwrap());
+        assert_eq!(index.get_meta("k").unwrap(), None, "non-owner: no write");
+
+        assert!(index.set_meta_if_claim_owner("k", "v1", "a").unwrap());
+        assert_eq!(index.get_meta("k").unwrap().as_deref(), Some("v1"));
+        assert!(index.set_meta_if_claim_owner("k", "v2", "a").unwrap());
+        assert_eq!(
+            index.get_meta("k").unwrap().as_deref(),
+            Some("v2"),
+            "owner writes take the update arm on conflict"
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_claim_takes_over_garbage_and_future_stamps() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+
+        index
+            .set_meta(META_KEY_BOOTSTRAP_CLAIM, "not-a-number")
+            .unwrap();
+        assert!(index.try_claim_bootstrap(1_000, LEASE, "a").unwrap());
+
+        // A future-dated stamp (clock rollback) must not hold forever.
+        index
+            .set_meta(META_KEY_BOOTSTRAP_CLAIM, &claim_stamp(9_999_999, "x"))
+            .unwrap();
+        assert!(index.try_claim_bootstrap(1_000, LEASE, "a").unwrap());
+    }
+
     #[test]
     fn test_open_or_create_is_idempotent() {
         let tmp = TempDir::new().unwrap();
@@ -725,12 +929,10 @@ mod tests {
                 "docs must survive a same-version reopen"
             );
             // Simulate a database written by an older schema version.
-            same_version
-                .set_meta("session_search_schema_version", "3")
-                .unwrap();
+            same_version.set_meta(META_KEY_SCHEMA_VERSION, "3").unwrap();
             assert_eq!(
                 same_version
-                    .get_meta("session_search_schema_version")
+                    .get_meta(META_KEY_SCHEMA_VERSION)
                     .unwrap()
                     .as_deref(),
                 Some("3"),
@@ -745,7 +947,7 @@ mod tests {
         );
         assert_eq!(
             reopened
-                .get_meta("session_search_schema_version")
+                .get_meta(META_KEY_SCHEMA_VERSION)
                 .unwrap()
                 .as_deref(),
             Some(SCHEMA_VERSION),
@@ -783,9 +985,7 @@ mod tests {
                 .unwrap();
             // Simulate an index owned by a newer grok generation that has
             // completed a bootstrap.
-            index
-                .set_meta("session_search_schema_version", "5")
-                .unwrap();
+            index.set_meta(META_KEY_SCHEMA_VERSION, "5").unwrap();
             index.set_meta("last_bootstrap_at", "1700000000").unwrap();
         }
 
@@ -797,7 +997,7 @@ mod tests {
         );
         assert_eq!(
             reopened
-                .get_meta("session_search_schema_version")
+                .get_meta(META_KEY_SCHEMA_VERSION)
                 .unwrap()
                 .as_deref(),
             Some("5"),
@@ -821,9 +1021,7 @@ mod tests {
             index
                 .upsert_doc(&test_doc("s1", "Rust debugging", "borrow checker"))
                 .unwrap();
-            index
-                .set_meta("session_search_schema_version", "garbage")
-                .unwrap();
+            index.set_meta(META_KEY_SCHEMA_VERSION, "garbage").unwrap();
         }
 
         let reopened = open(&tmp);
@@ -833,7 +1031,7 @@ mod tests {
         );
         assert_eq!(
             reopened
-                .get_meta("session_search_schema_version")
+                .get_meta(META_KEY_SCHEMA_VERSION)
                 .unwrap()
                 .as_deref(),
             Some(SCHEMA_VERSION),
@@ -922,9 +1120,7 @@ mod tests {
             index
                 .upsert_doc(&test_doc("s1", "old-binary doc", "indexed by v3"))
                 .unwrap();
-            index
-                .set_meta("session_search_schema_version", "3")
-                .unwrap();
+            index.set_meta(META_KEY_SCHEMA_VERSION, "3").unwrap();
             index.set_meta("last_bootstrap_at", "1783393389").unwrap();
         }
 
@@ -935,7 +1131,7 @@ mod tests {
         );
         assert_eq!(
             reopened
-                .get_meta("session_search_schema_version")
+                .get_meta(META_KEY_SCHEMA_VERSION)
                 .unwrap()
                 .as_deref(),
             Some(SCHEMA_VERSION),

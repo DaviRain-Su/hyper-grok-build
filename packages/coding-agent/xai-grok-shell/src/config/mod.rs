@@ -227,6 +227,13 @@ pub struct SubagentsConfig {
     /// Raw `[subagents] max_depth` (i64 so out-of-range parses; clamped ≥1 at resolve).
     #[serde(default)]
     pub max_depth: Option<i64>,
+    #[serde(default)]
+    pub max_concurrent: Option<i64>,
+    /// `"queue"` or `"fail"`.
+    #[serde(default)]
+    pub limit_behavior: Option<String>,
+    #[serde(default)]
+    pub workflow_max_concurrent: Option<i64>,
     /// Per-subagent model ID overrides.
     /// Keys are agent names, values are model IDs that must exist in the
     /// available models registry. Parsed from `[subagents.models]` in config.toml.
@@ -498,6 +505,94 @@ impl SubagentsConfig {
             return Self::clamp_max_depth(i64::from(v), "remote");
         }
         Self::DEFAULT_MAX_DEPTH
+    }
+    pub const ENV_MAX_CONCURRENT: &'static str = "GROK_MAX_CONCURRENT_SUBAGENTS";
+    pub const ENV_LIMIT_BEHAVIOR: &'static str = "GROK_SUBAGENT_LIMIT_BEHAVIOR";
+    pub const ENV_WORKFLOW_MAX_CONCURRENT: &'static str = "GROK_WORKFLOW_MAX_CONCURRENT_AGENTS";
+    /// Clamp to `1..`; a limit can be adjusted but never disabled.
+    fn clamp_count(value: i64, source: &str, name: &str) -> usize {
+        if value < 1 {
+            tracing::warn!(source, name, value, "subagent limit < 1; clamping to 1");
+            1
+        } else {
+            usize::try_from(value).unwrap_or(usize::MAX)
+        }
+    }
+    /// Precedence: env > TOML > remote > default; invalid layers warn and fall through.
+    fn resolve_count(
+        env_name: &str,
+        env: Option<&str>,
+        config: Option<i64>,
+        remote: Option<u32>,
+        default: usize,
+    ) -> usize {
+        if let Some(value) = env {
+            match xai_grok_tools::util::env::parse_positive(value.trim()) {
+                Some(parsed) => return usize::try_from(parsed).unwrap_or(usize::MAX),
+                None => {
+                    tracing::warn!(
+                        name = env_name,
+                        %value,
+                        "invalid env value (expected a positive whole number); ignoring"
+                    );
+                }
+            }
+        }
+        if let Some(v) = config {
+            return Self::clamp_count(v, "config", env_name);
+        }
+        if let Some(v) = remote {
+            return Self::clamp_count(i64::from(v), "remote", env_name);
+        }
+        default
+    }
+    pub(crate) fn resolve_max_concurrent(
+        env: Option<&str>,
+        config: Option<i64>,
+        remote: Option<u32>,
+    ) -> usize {
+        Self::resolve_count(
+            Self::ENV_MAX_CONCURRENT,
+            env,
+            config,
+            remote,
+            xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_CONCURRENT,
+        )
+    }
+    pub(crate) fn resolve_workflow_max_concurrent(
+        env: Option<&str>,
+        config: Option<i64>,
+        remote: Option<u32>,
+    ) -> usize {
+        Self::resolve_count(
+            Self::ENV_WORKFLOW_MAX_CONCURRENT,
+            env,
+            config,
+            remote,
+            crate::session::workflow::host_service::DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS,
+        )
+    }
+    pub(crate) fn resolve_limit_behavior(
+        env: Option<&str>,
+        config: Option<&str>,
+        remote: Option<&str>,
+    ) -> xai_grok_tools::implementations::grok_build::task::admission::LimitBehavior {
+        use xai_grok_tools::implementations::grok_build::task::admission::LimitBehavior;
+        for (source, value) in [("env", env), ("config", config), ("remote", remote)] {
+            let Some(value) = value else { continue };
+            if value.eq_ignore_ascii_case("fail") {
+                return LimitBehavior::Fail;
+            }
+            if value.eq_ignore_ascii_case("queue") {
+                return LimitBehavior::Queue;
+            }
+            tracing::warn!(
+                source,
+                %value,
+                "subagent limit_behavior is neither `queue` nor `fail`; ignoring"
+            );
+        }
+        LimitBehavior::Queue
     }
     /// Resolve the final subagents config from all sources (in priority order):
     /// 1. CLI flag `--subagents` (absolute highest — always enables)

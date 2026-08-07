@@ -469,15 +469,15 @@ pub const VALIDATE_TYPE_TIMEOUT_ENV_VAR: &str = "XAI_VALIDATE_TYPE_TIMEOUT_MS";
 
 /// Validation timeout, honoring the env-var override.
 pub fn validate_type_timeout() -> std::time::Duration {
-    let raw = std::env::var(VALIDATE_TYPE_TIMEOUT_ENV_VAR).ok();
-    parse_timeout_ms(raw.as_deref())
+    let value = std::env::var(VALIDATE_TYPE_TIMEOUT_ENV_VAR).ok();
+    parse_timeout_ms(value.as_deref())
         .map(std::time::Duration::from_millis)
         .unwrap_or(VALIDATE_TYPE_TIMEOUT)
 }
 
 /// Parse a positive `u64` millisecond value; `None` for unset, invalid, or zero.
 pub(crate) fn parse_timeout_ms(value: Option<&str>) -> Option<u64> {
-    value?.parse::<u64>().ok().filter(|&ms| ms > 0)
+    value.and_then(crate::util::env::parse_positive)
 }
 
 /// Resolve a `Duration` from a positive-millisecond env override, falling back

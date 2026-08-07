@@ -38,8 +38,7 @@ use xai_grok_sampling_types::conversation::ConversationItem;
 use xai_grok_subagent_resolution::ResumeSourceData;
 use xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer;
 use xai_grok_tools::implementations::grok_build::task::coordinator::{
-    ChildCompletion, ChildControl, ChildReporter, ChildRunOutput, LocalBoxFuture, StartedChild,
-    SubagentProgress,
+    ChildCompletion, ChildControl, ChildRunOutput, LocalBoxFuture, StartedChild, SubagentProgress,
 };
 use xai_grok_tools::implementations::grok_build::task::types::*;
 use xai_grok_tools::types::tool::ToolKind;
@@ -131,6 +130,7 @@ pub(crate) struct SubagentSpawnContext {
     pub subagent_event_tx: mpsc::UnboundedSender<SubagentEvent>,
     pub parent_depth: u32,
     pub subagents_max_depth: u32,
+    pub workflow_max_concurrent_agents: usize,
     /// Inference idle timeout (secs), resolved from the parent's model config at spawn-context creation time.
     pub inference_idle_timeout_secs: u64,
     /// Tier inputs for resolving `auto_compact_threshold_percent` at
@@ -3170,6 +3170,17 @@ fn inject_subagent_completed_prompt(
             before_session_copy_rx: before_rx
                 .expect("before_rx set when synthetic_trace_tx is Some"),
         });
+    }
+}
+fn telemetry_owner_kind(
+    request: &SubagentRequest,
+) -> xai_grok_telemetry::events::SubagentOwnerKind {
+    if request.owner.is_workflow() {
+        xai_grok_telemetry::events::SubagentOwnerKind::Workflow
+    } else if request.from_scheduler_loop() {
+        xai_grok_telemetry::events::SubagentOwnerKind::SchedulerLoop
+    } else {
+        xai_grok_telemetry::events::SubagentOwnerKind::Task
     }
 }
 fn failure_result(request: &SubagentRequest, error: &str) -> SubagentResult {

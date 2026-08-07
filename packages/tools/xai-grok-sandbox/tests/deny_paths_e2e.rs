@@ -1026,9 +1026,7 @@ fn hook_write_deny_refuses_marker_spoof() {
     // Always runnable on Linux unit path via soft-skip only when not requiring
     // kernel enforcement — marker spoof only needs the verify API.
     #[cfg(not(target_os = "linux"))]
-    {
-        return;
-    }
+    {}
     #[cfg(target_os = "linux")]
     {
         let (home, grok, workspace, _ch, _cg, _cw) = fixture_homes("hook-spoof");

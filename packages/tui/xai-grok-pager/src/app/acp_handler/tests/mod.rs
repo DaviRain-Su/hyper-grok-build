@@ -2150,3 +2150,4 @@ mod mcp;
 mod git_head;
 #[cfg(feature = "codex-live")]
 mod live;
+mod version_mismatch;

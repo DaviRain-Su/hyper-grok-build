@@ -107,6 +107,8 @@ impl AgentView {
             unexpected_replay_drops: 0,
             replayed_terminal_prompts: HashSet::new(),
             failed_wake_marker_for: None,
+            running_wake_turn: None,
+            finished_wake_prompts: HashSet::new(),
             active_pane: ActivePane::Prompt,
             prompt_mode: PromptMode::Normal,
             prompt_input_mode: PromptInputMode::Normal,
@@ -334,6 +336,7 @@ impl AgentView {
             paste_probe_in_flight: 0,
             deferred_send: None,
             pending_turn_end_reconcile: None,
+            pending_cancel_resend: None,
             expect_send_now_cancel: None,
             front_message_committed: true,
             optimistic_queue_ids: std::collections::HashSet::new(),
@@ -415,6 +418,9 @@ impl AgentView {
         self.session.loading_replay = true;
         self.replayed_terminal_prompts.clear();
         self.unexpected_replay_drops = 0;
+        self.running_wake_turn = None;
+        self.finished_wake_prompts.clear();
+        self.pending_cancel_resend = None;
         self.pending_stop_hooks = None;
         self.clear_send_now_expectation();
         self.front_message_committed = true;
@@ -506,6 +512,7 @@ impl AgentView {
             self.expect_send_now_cancel = None;
         }
         self.front_message_committed = false;
+        self.pending_cancel_resend = None;
         self.session.start_turn(&mut self.scrollback);
     }
     /// Adopt the in-flight turn another client is driving, conveyed by the
@@ -572,6 +579,77 @@ impl AgentView {
         crate::app::acp_handler::should_adopt_running_prompt(prompt_id)
             && !self.replayed_terminal_prompts.contains(prompt_id)
             && !self.is_rewound_prompt(prompt_id)
+    }
+    /// Wake turn in flight (streaming or cancelling) while the pane is idle.
+    pub(crate) fn wake_turn_active(&self) -> bool {
+        self.session.state.is_idle() && self.running_wake_turn.is_some()
+    }
+    /// Wake cancel sent and still waiting on its terminal. Pane stays idle.
+    pub(crate) fn wake_turn_cancelling(&self) -> bool {
+        self.session.state.is_idle()
+            && self
+                .running_wake_turn
+                .as_ref()
+                .is_some_and(|wake| wake.cancel_sent)
+    }
+    /// Single setter for [`RunningWakeTurn`]. No-op unless the pane is idle
+    /// and not replaying; keeps an in-flight cancel marker for the same id.
+    pub(crate) fn note_streaming_wake_turn(&mut self, prompt_id: &str) {
+        if !self.session.state.is_idle() || self.session.loading_replay {
+            return;
+        }
+        if self.finished_wake_prompts.contains(prompt_id) {
+            return;
+        }
+        if self
+            .running_wake_turn
+            .as_ref()
+            .is_some_and(|wake| wake.prompt_id == prompt_id)
+        {
+            return;
+        }
+        self.running_wake_turn = Some(super::RunningWakeTurn {
+            prompt_id: prompt_id.to_string(),
+            cancel_sent: false,
+        });
+    }
+    /// Local turn, running `/compact`, or streaming wake not yet asked to stop.
+    pub(crate) fn stoppable_activity_running(&self) -> bool {
+        self.session.state.is_turn_running()
+            || self.session.state.is_compact_running()
+            || (self.wake_turn_active() && !self.wake_turn_cancelling())
+    }
+    /// Local or wake cancel still in flight.
+    pub(crate) fn any_cancel_pending(&self) -> bool {
+        self.session.state.is_cancelling() || self.wake_turn_cancelling()
+    }
+    /// Mark the wake cancel sent. No-op without a wake turn.
+    pub(crate) fn mark_wake_cancel_sent(&mut self) {
+        if let Some(wake) = self.running_wake_turn.as_mut() {
+            wake.cancel_sent = true;
+        }
+    }
+    /// Overlay stop: stamp the dashboard trigger if something stoppable is running.
+    pub(crate) fn arm_dashboard_stop(&mut self) -> bool {
+        if self.stoppable_activity_running() {
+            self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::DashboardStop);
+            true
+        } else {
+            false
+        }
+    }
+    /// Status-row chrome for a wake turn, or `None` when a local turn owns it.
+    pub(crate) fn wake_display_state(&self) -> Option<&'static crate::app::agent::AgentState> {
+        if !self.session.state.is_idle() {
+            return None;
+        }
+        self.running_wake_turn.as_ref().map(|wake| {
+            if wake.cancel_sent {
+                &crate::app::agent::AgentState::TurnCancelling
+            } else {
+                &crate::app::agent::AgentState::TurnRunning
+            }
+        })
     }
     /// Finalize a reconnect-reload window and, iff the running prompt is
     /// adoptable, adopt it. Returns whether the window finalized.
@@ -1652,8 +1730,17 @@ mod status_window_tests {
     #[test]
     fn start_turn_boundary_enters_turn_running() {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent.pending_cancel_resend = Some(crate::app::agent_view::PendingCancelResend {
+            prompt_id: Some("old".into()),
+            sent_at: std::time::Instant::now(),
+            attempts: 1,
+            confirmed: false,
+            cancel_subagents: true,
+            trigger: crate::app::actions::CancelTrigger::Esc,
+        });
         agent.start_turn_boundary(None);
         assert!(agent.session.state.is_turn_running());
+        assert!(agent.pending_cancel_resend.is_none());
     }
     #[test]
     fn adopt_running_prompt_marks_front_committed() {

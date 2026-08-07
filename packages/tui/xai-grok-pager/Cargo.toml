@@ -122,6 +122,7 @@ xai-grok-extension-runtime = { path = "../../extensions/xai-grok-extension-runti
 xai-grok-plugin-marketplace = { path = "../../extensions/xai-grok-plugin-marketplace" }
 xai-hooks-plugins-types = { path = "../../coding-agent/xai-hooks-plugins-types" }
 wait-timeout = { workspace = true }
+walkdir = { workspace = true }
 xai-grok-sandbox = { path = "../../tools/xai-grok-sandbox", default-features = false }
 
 # Base64 encoding for image data

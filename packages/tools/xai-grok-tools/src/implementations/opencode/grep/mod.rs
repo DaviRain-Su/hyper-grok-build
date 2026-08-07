@@ -280,7 +280,7 @@ impl xai_tool_runtime::Tool for GrepTool {
         }
 
         // Sort by mtime (most recent first).
-        matches.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+        matches.sort_by_key(|b| std::cmp::Reverse(b.mtime_ms));
 
         let total_matches = matches.len();
         let truncated = total_matches > RESULT_LIMIT;

@@ -895,4 +895,46 @@ mod tests {
         reg.set_voice_visible(false);
         assert!(reg.get("voice").is_none());
     }
+    /// Every pager builtin trigger key must appear in the shell's
+    /// `PAGER_COMMAND_KEYS`. Add new names there when adding a pager builtin.
+    #[test]
+    fn pager_builtin_triggers_are_reserved_in_shell() {
+        let reserved: std::collections::HashSet<&str> = xai_grok_shell::session::PAGER_COMMAND_KEYS
+            .iter()
+            .copied()
+            .collect();
+        let missing: Vec<String> = builtin_commands()
+            .iter()
+            .flat_map(|cmd| {
+                std::iter::once(cmd.name().to_string())
+                    .chain(cmd.aliases().iter().map(|a| a.to_string()))
+            })
+            .filter(|key| !reserved.contains(key.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "pager builtin trigger keys missing from the shell's \
+             PAGER_COMMAND_KEYS (xai-grok-shell/src/session/slash_commands.rs); \
+             a skill with one of these names would shadow or be shadowed by \
+             the pager builtin: {missing:?}"
+        );
+    }
+    #[test]
+    fn pager_blocked_acp_names_are_reserved_in_shell() {
+        let reserved: std::collections::HashSet<&str> = xai_grok_shell::session::PAGER_COMMAND_KEYS
+            .iter()
+            .copied()
+            .collect();
+        let missing: Vec<&str> = crate::slash::registry::BLOCKED_ACP_NAMES
+            .iter()
+            .copied()
+            .filter(|name| !reserved.contains(name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "pager BLOCKED_ACP_NAMES missing from PAGER_COMMAND_KEYS; \
+             a skill with one of these names is advertised bare and then \
+             dropped: {missing:?}"
+        );
+    }
 }

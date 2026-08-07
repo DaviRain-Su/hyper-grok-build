@@ -19,9 +19,11 @@ pub mod jsonl;
 #[allow(dead_code)] // Transaction APIs remain deferred until later protocol wiring.
 pub(crate) mod relocation;
 pub mod search;
+mod search_bootstrap;
+mod search_content;
+mod search_db;
 pub mod search_fts;
 mod search_recovery;
-pub mod search_remote_sync;
 pub(crate) mod summary_write;
 
 /// On-disk file names, relative to a session directory. Single source of truth for

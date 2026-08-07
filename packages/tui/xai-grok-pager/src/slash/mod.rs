@@ -27,7 +27,9 @@ use crate::acp::model_state::ModelState;
 use matcher::FuzzyMatcher;
 use registry::{CommandRegistry, CommandSource, CommandTrigger};
 
-pub use command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+pub use command::{
+    AppCtx, ArgItem, CommandExecCtx, CommandProvenance, CommandResult, SlashCommand,
+};
 pub use mode_support::{ModeSupport, Remedy};
 
 /// Maximum number of visible rows in the dropdown (scroll beyond this).
@@ -51,10 +53,16 @@ pub struct SuggestionRow {
     /// Free-form bracketed tag (e.g. "new") from the resolved tag map. `None`
     /// for untagged command rows and always `None` for arg rows.
     pub tag: Option<String>,
+    /// Provenance badge; `Some` only on rows in a builtin/skill name collision.
+    pub provenance: Option<CommandProvenance>,
 }
 
 impl SuggestionRow {
-    fn from_command(trigger: &CommandTrigger, takes_args: bool) -> Self {
+    fn from_command(
+        trigger: &CommandTrigger,
+        takes_args: bool,
+        collides_with_builtin_or_skill: bool,
+    ) -> Self {
         let mut insert_text = trigger.display.clone();
         if takes_args {
             insert_text.push(' ');
@@ -69,6 +77,7 @@ impl SuggestionRow {
             insert_text,
             indices: Vec::new(),
             tag: None,
+            provenance: collides_with_builtin_or_skill.then(|| trigger.provenance.clone()),
         }
     }
 
@@ -79,6 +88,7 @@ impl SuggestionRow {
             insert_text: item.insert_text.clone(),
             indices: Vec::new(),
             tag: None,
+            provenance: None,
         }
     }
 
@@ -110,6 +120,29 @@ fn command_prefix_matches_smart(full_name: &str, query: &str) -> bool {
 
 fn chars_eq_ignore_case(a: char, b: char) -> bool {
     a == b || a.eq_ignore_ascii_case(&b)
+}
+
+/// Bare trigger key: suffix after `:` for a qualified skill, else the key.
+fn trigger_bare_name(trigger: &CommandTrigger) -> &str {
+    let key = trigger
+        .alias
+        .as_deref()
+        .unwrap_or(trigger.canonical.as_str());
+    match key.rsplit_once(':') {
+        Some((_, bare)) if !bare.is_empty() => bare,
+        _ => key,
+    }
+}
+
+fn trigger_exact_query(trigger: &CommandTrigger, query: &str) -> bool {
+    trigger.match_text == query
+}
+
+/// True when the trigger's displayed identity (not a bare-suffix sibling)
+/// is exactly `query`. Owns the cross-command exactness tiebreak so MRU
+/// cannot rank a colliding skill above a fully-typed builtin.
+fn trigger_owns_typed_name(trigger: &CommandTrigger, query: &str) -> bool {
+    trigger.alias.as_deref().unwrap_or(&trigger.canonical) == query
 }
 
 /// Ghost suffix from the selected dropdown row (same ranker as Tab).
@@ -874,6 +907,36 @@ impl SlashController {
             })
             .collect();
         let triggers = self.registry.triggers();
+        // Badge only visible skill ↔ non-skill collisions on the same bare name.
+        let mut skill_bares: HashSet<String> = HashSet::new();
+        let mut other_bares: HashSet<String> = HashSet::new();
+        for (_, trigger) in triggers
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| visible_indices.contains(i))
+        {
+            let bare = trigger_bare_name(trigger).to_lowercase();
+            if matches!(trigger.provenance, CommandProvenance::Skill { .. }) {
+                skill_bares.insert(bare);
+            } else {
+                other_bares.insert(bare);
+            }
+        }
+        let colliding_bares: HashSet<&str> = skill_bares
+            .intersection(&other_bares)
+            .map(String::as_str)
+            .collect();
+        // Badge every visible trigger of a command that participates, including
+        // the canonical row when only an alias (e.g. `clear` → `/compact`) collides.
+        let colliding_command_indices: HashSet<usize> = triggers
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| {
+                visible_indices.contains(i)
+                    && colliding_bares.contains(trigger_bare_name(t).to_lowercase().as_str())
+            })
+            .map(|(_, t)| t.command_index)
+            .collect();
         let trimmed = query.trim();
         if trimmed.is_empty() {
             // Show all unique commands (deduplicate by command_index).
@@ -893,7 +956,11 @@ impl SlashController {
                         .commands_by_index(trigger.command_index)
                         .map(|cmd| cmd.takes_args_now(&ctx))
                         .unwrap_or(false);
-                    rows.push(SuggestionRow::from_command(trigger, takes));
+                    rows.push(SuggestionRow::from_command(
+                        trigger,
+                        takes,
+                        colliding_command_indices.contains(&trigger.command_index),
+                    ));
                     canonicals.push(trigger.canonical.as_str());
                 }
             }
@@ -931,11 +998,7 @@ impl SlashController {
             |trigger| trigger.match_text.as_str(),
         );
 
-        // Deduplicate: keep the best-scoring trigger per command.
-        // At equal fuzzy scores the tiebreaker is:
-        //   1. Exact match on match_text wins (e.g. alias "/m" for query "m")
-        //   2. Canonical name beats aliases
-        //   3. Lexicographic display order as final fallback
+        // Dedup per command: higher score, else exact query, else canonical, else display.
         let mut best_per_command: HashMap<usize, (u32, usize)> = HashMap::new();
         for (visible_idx, score) in hits {
             let trigger = visible_triggers[visible_idx];
@@ -945,8 +1008,8 @@ impl SlashController {
                     let dominated = if score != current.0 {
                         score > current.0
                     } else {
-                        let new_exact = trigger.match_text == trimmed;
-                        let cur_exact = visible_triggers[current.1].match_text == trimmed;
+                        let new_exact = trigger_exact_query(trigger, trimmed);
+                        let cur_exact = trigger_exact_query(visible_triggers[current.1], trimmed);
                         if new_exact != cur_exact {
                             new_exact
                         } else {
@@ -979,7 +1042,11 @@ impl SlashController {
                         .commands_by_index(t.command_index)
                         .map(|cmd| cmd.takes_args_now(&ctx))
                         .unwrap_or(false);
-                    SuggestionRow::from_command(t, takes)
+                    SuggestionRow::from_command(
+                        t,
+                        takes,
+                        colliding_command_indices.contains(&t.command_index),
+                    )
                 })
                 .collect()
         };
@@ -1004,8 +1071,13 @@ impl SlashController {
                 .map(|(canonical, _)| m.rank_score(trimmed, canonical))
                 .collect()
         };
+        let owns_typed_name: Vec<bool> = visible_triggers
+            .iter()
+            .map(|t| trigger_owns_typed_name(t, trimmed))
+            .collect();
         deduped.sort_by(|a, b| {
             b.0.cmp(&a.0)
+                .then_with(|| owns_typed_name[b.1].cmp(&owns_typed_name[a.1]))
                 .then_with(|| mru_scores[b.1].cmp(&mru_scores[a.1]))
                 .then_with(|| {
                     let a_builtin = sort_meta[a.1].1 == CommandSource::Builtin;
@@ -1014,12 +1086,13 @@ impl SlashController {
                 })
                 .then_with(|| rows[a.1].display.cmp(&rows[b.1].display))
         });
-        for row in &mut rows {
-            row.indices = self.matcher.indices(row.display.as_str());
-        }
         deduped
             .into_iter()
-            .map(|(_, idx)| rows[idx].clone())
+            .map(|(_, idx)| {
+                let mut row = rows[idx].clone();
+                row.indices = self.matcher.indices(row.display.as_str());
+                row
+            })
             .collect()
     }
 
@@ -1692,6 +1765,64 @@ mod tests {
     }
 
     #[test]
+    fn shell_prequalified_skill_appears_beside_builtin() {
+        let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
+        let meta = serde_json::json!({
+            "scope": "plugin",
+            "path": "/plugins/acme/skills/login/SKILL.md",
+            "bareName": "login",
+            "pluginName": "acme",
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        ctrl.registry_mut()
+            .set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+                "acme:login".to_string(),
+                "Acme account login".to_string(),
+            )
+            .meta(meta)]);
+
+        let state = SlashState::default();
+        let models = ModelState::default();
+        ctrl.refresh(&state, "/login", 6, &models);
+        let snapshot = state.snapshot();
+        let login = snapshot
+            .matches
+            .iter()
+            .find(|row| row.display == "/login")
+            .expect("builtin /login");
+        assert_eq!(login.provenance, Some(CommandProvenance::Builtin));
+        assert!(!login.description.contains("built-in"));
+        let skill = snapshot
+            .matches
+            .iter()
+            .find(|row| row.display == "/acme:login")
+            .expect("qualified skill");
+        assert_eq!(
+            skill.provenance,
+            Some(CommandProvenance::Skill {
+                source: "acme".to_string()
+            })
+        );
+        assert_eq!(skill.description, "Acme account login");
+        assert!(ctrl.registry().get("login").is_some_and(|c| !c.is_skill()));
+        assert!(
+            ctrl.registry()
+                .get("acme:login")
+                .is_some_and(|c| c.is_skill())
+        );
+
+        ctrl.refresh(&state, "/acme:login", 11, &models);
+        let snapshot = state.snapshot();
+        assert_eq!(
+            snapshot.selection().map(|row| row.display.as_str()),
+            Some("/acme:login"),
+            "exact qualified query should select the skill"
+        );
+    }
+
+    #[test]
     fn controller_silences_double_slash() {
         let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
         let state = SlashState::default();
@@ -2275,6 +2406,7 @@ mod tests {
             insert_text: "/Privacy ".to_string(),
             indices: Vec::new(),
             tag: None,
+            provenance: None,
         };
         // Without smart-case, starts_with("p") fails on "Privacy" and ghost disappears
         // while the dropdown still highlights the row via CaseMatching::Smart.
@@ -2503,6 +2635,139 @@ mod tests {
         assert_eq!(
             selected, "pager-headless",
             "MRU should make the recently-used skill win the /p tie"
+        );
+    }
+
+    #[test]
+    fn colliding_plugin_skill_appears_beside_builtin() {
+        let mut ctrl = SlashController::new(
+            CommandRegistry::new(vec![Arc::new(TieCmd("login"))]),
+            std::path::PathBuf::from("."),
+        );
+        let meta = serde_json::json!({
+            "scope": "plugin",
+            "path": "/plugins/acme/skills/login/SKILL.md",
+            "pluginName": "acme",
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        ctrl.registry_mut()
+            .set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+                "acme:login".to_string(),
+                "Acme SSO helper".to_string(),
+            )
+            .meta(meta)]);
+
+        let state = SlashState::default();
+        let models = ModelState::default();
+        ctrl.refresh(&state, "/login", 6, &models);
+        let snap = state.snapshot();
+
+        let builtin = snap
+            .matches
+            .iter()
+            .find(|r| r.display == "/login")
+            .expect("builtin /login stays listed");
+        assert_eq!(builtin.provenance, Some(CommandProvenance::Builtin));
+
+        let skill = snap
+            .matches
+            .iter()
+            .find(|r| r.display == "/acme:login")
+            .expect("colliding plugin skill listed as /acme:login");
+        assert_eq!(
+            skill.provenance,
+            Some(CommandProvenance::Skill {
+                source: "acme".to_string()
+            })
+        );
+        assert_eq!(skill.description, "Acme SSO helper");
+
+        assert_eq!(snap.matches[0].display, "/login");
+
+        assert!(
+            !skill.indices.is_empty(),
+            "bare-suffix match must still highlight the row"
+        );
+        assert!(
+            skill
+                .indices
+                .iter()
+                .all(|i| (*i as usize) < "/acme:login".len()),
+            "indices must land within the display text: {:?}",
+            skill.indices
+        );
+
+        ctrl.record_command_use("acme:login", "acme:login");
+        ctrl.refresh(&state, "/login", 6, &models);
+        assert_eq!(
+            state.snapshot().matches[0].display,
+            "/login",
+            "recently-used colliding skill must not hijack the typed builtin name"
+        );
+    }
+
+    struct AliasCmd;
+    impl SlashCommand for AliasCmd {
+        fn name(&self) -> &str {
+            "compact"
+        }
+        fn aliases(&self) -> &[&str] {
+            &["clear"]
+        }
+        fn description(&self) -> &str {
+            "compact desc"
+        }
+        fn usage(&self) -> &str {
+            "/compact"
+        }
+        fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
+            CommandResult::Handled
+        }
+    }
+
+    #[test]
+    fn alias_collision_badges_canonical_builtin_row() {
+        let mut ctrl = SlashController::new(
+            CommandRegistry::new(vec![Arc::new(AliasCmd)]),
+            std::path::PathBuf::from("."),
+        );
+        let meta = serde_json::json!({
+            "scope": "plugin",
+            "path": "/plugins/acme/skills/clear/SKILL.md",
+            "pluginName": "acme",
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        ctrl.registry_mut()
+            .set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+                "acme:clear".to_string(),
+                "Acme clear".to_string(),
+            )
+            .meta(meta)]);
+
+        let state = SlashState::default();
+        let models = ModelState::default();
+        ctrl.refresh(&state, "/", 1, &models);
+        let snap = state.snapshot();
+        let builtin = snap
+            .matches
+            .iter()
+            .find(|row| row.display == "/compact")
+            .expect("empty menu keeps the canonical builtin row");
+        assert_eq!(builtin.provenance, Some(CommandProvenance::Builtin));
+        let skill = snap
+            .matches
+            .iter()
+            .find(|row| row.display == "/acme:clear")
+            .expect("qualified skill listed");
+        assert_eq!(
+            skill.provenance,
+            Some(CommandProvenance::Skill {
+                source: "acme".to_string()
+            })
         );
     }
 

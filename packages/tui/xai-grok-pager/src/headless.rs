@@ -834,9 +834,20 @@ pub async fn run_single_turn(
 
     let cancel = CancellationToken::new();
     let memory_config = agent_config.memory_config.clone();
+    let timer = xai_grok_telemetry::startup::begin(crate::acp::Owner::Client);
+    let report_startup_failure = |timer: &crate::acp::StartupTimer| {
+        timer.emit_telemetry(
+            crate::acp::AgentKind::Embedded,
+            crate::acp::StartupOutcome::Error,
+            None,
+            false,
+        );
+        xai_grok_telemetry::startup::report_total(crate::acp::StartupOutcome::Error);
+    };
     let spawned = match spawn_grok_shell(agent_config, &cancel, memory_config).await {
         Ok(s) => s,
         Err(e) => {
+            report_startup_failure(&timer);
             let msg = format!("Couldn't start session: {e}");
             emitter.on_error(&msg, None);
             anyhow::bail!("{msg}");
@@ -856,9 +867,11 @@ pub async fn run_single_turn(
         options.rules.as_deref(),
         options.system_prompt_override.as_deref(),
     );
+    xai_grok_telemetry::startup::enter(crate::acp::StartupPhase::AcpInitialize);
     let init_resp: acp::InitializeResponse = match acp_send(init_req, &acp_tx).await {
         Ok(r) => r,
         Err(e) => {
+            report_startup_failure(&timer);
             let msg = format!("Couldn't initialize: {e}");
             emitter.on_error(&msg, None);
             anyhow::bail!("{msg}");
@@ -870,6 +883,7 @@ pub async fn run_single_turn(
     );
 
     let t_auth = Instant::now();
+    xai_grok_telemetry::startup::enter(crate::acp::StartupPhase::EagerAuth);
     let default_auth_method_id = crate::acp::parse_default_auth_method_id(init_resp.meta.as_ref());
     let is_api_key_auth = match authenticate(
         &acp_tx,
@@ -880,6 +894,7 @@ pub async fn run_single_turn(
     {
         Ok(is_api_key) => is_api_key,
         Err(e) => {
+            report_startup_failure(&timer);
             emitter.on_error(&e.to_string(), None);
             return Err(e);
         }
@@ -887,6 +902,13 @@ pub async fn run_single_turn(
     tracing::debug!(
         elapsed_ms = t_auth.elapsed().as_millis() as u64,
         "headless: authenticate complete"
+    );
+    // Connect ends here; session phases stay out of the phase histogram.
+    timer.emit_telemetry(
+        crate::acp::AgentKind::Embedded,
+        crate::acp::StartupOutcome::Ok,
+        None,
+        false,
     );
 
     use crate::app::session_startup::{self, MaterializedStartup, SessionStartupFlags};
@@ -909,7 +931,10 @@ pub async fn run_single_turn(
         intent,
         &cwd_str,
     )
-    .await?;
+    .await
+    .inspect_err(|_| {
+        xai_grok_telemetry::startup::report_total(crate::acp::StartupOutcome::Error)
+    })?;
 
     let restore_code = match &materialized {
         MaterializedStartup::Resume {
@@ -923,6 +948,7 @@ pub async fn run_single_turn(
         _ => options.restore_code.then_some(true),
     };
     let t_session = Instant::now();
+    xai_grok_telemetry::startup::enter(crate::acp::StartupPhase::SessionCreate);
     let opened = match materialized {
         MaterializedStartup::NewAuto => open_session(&acp_tx, &cwd, None, None).await,
         MaterializedStartup::NewWithId { session_id } => {
@@ -960,11 +986,13 @@ pub async fn run_single_turn(
     } = match opened {
         Ok(v) => v,
         Err(e) => {
+            xai_grok_telemetry::startup::report_total(crate::acp::StartupOutcome::Error);
             let msg = format!("Couldn't create session: {e}");
             emitter.on_error(&msg, None);
             anyhow::bail!("{msg}");
         }
     };
+    xai_grok_telemetry::startup::report_total(crate::acp::StartupOutcome::Ok);
     tracing::debug!(
         elapsed_ms = t_session.elapsed().as_millis() as u64,
         session_id = %session_id.0,

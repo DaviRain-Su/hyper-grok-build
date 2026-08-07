@@ -1,7 +1,5 @@
 use crate::sampling::{ConversationItem, ConversationRequest};
 
-pub(crate) const GOAL_EVALUATOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 const TRANSCRIPT_MAX_BYTES: usize = 32 * 1024;
 const ITEM_MAX_BYTES: usize = 4 * 1024;
 

@@ -675,7 +675,9 @@ impl SchedulerActor {
             await_to_completion: false,
             fork_context: false,
             owner: SubagentOwner::Task,
-            cancel_token: CancellationToken::new(),
+            // A child of the actor's token, so shutdown cancels a fire the
+            // coordinator still has queued at the concurrent limit.
+            cancel_token: self.cancel_token.child_token(),
         };
 
         if events

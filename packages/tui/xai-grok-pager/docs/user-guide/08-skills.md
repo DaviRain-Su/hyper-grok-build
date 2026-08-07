@@ -167,12 +167,17 @@ To browse your skills, type `/` to open the slash-command menu. Grok lists every
 
 ### Qualified Names
 
-When a skill's name collides with another skill or a built-in command, Grok advertises a qualified name prefixed by the skill's scope -- `local:`, `repo:`, `user:`, or the plugin name. Use the qualified form to choose a specific skill:
+When a skill's name collides with another skill or a built-in command, Grok keeps **both** invocable. The built-in keeps the bare name (`/login`, `/compact`, …). The skill is advertised under a qualified name prefixed by its scope -- `local:`, `repo:`, `user:`, or the plugin name:
 
 ```
 /local:commit        # The "commit" skill from ./.grok/skills/
 /user:commit         # The "commit" skill from ~/.grok/skills/
+/acme:login          # A plugin skill named "login" (built-in /login is unchanged)
 ```
+
+Typing `/login` in the slash menu shows both rows, with a right-aligned **built-in** or **skill · plugin-name** badge so you can tell them apart. Rename the skill (or its directory) if you want the bare `/name` for the skill instead.
+
+`grok inspect` tags colliding skills with `[collides with /login → /acme:login]`.
 
 ### Automatic Invocation
 
@@ -195,7 +200,7 @@ In the human-readable output, the Skills section lists each skill's name and its
 
 The report honors your `[skills]` config the same way a live session does: skills from `paths` are listed, skills under an `ignore` prefix are hidden, and skills named in `disabled` stay listed but tagged `[disabled]`.
 
-The `--json` report includes the full detail for each skill: its `name`, `description`, `source` (with the path to the SKILL.md file), and `userInvocable` flag.
+The `--json` report includes the full detail for each skill: its `name`, `description`, `source` (with the path to the SKILL.md file), and `userInvocable` flag. Skills whose bare slash name is contested — by a built-in command or by another skill — also include `collidesWith` (the contested name) and `invocableAs` (the qualified command to type).
 
 ---
 

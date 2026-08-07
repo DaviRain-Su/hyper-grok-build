@@ -421,6 +421,17 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             // the turn is current.
                             agent.flush_pending_follow_ups(notif_pid);
                         }
+                        // A live delta for a wake prompt id: record the
+                        // streaming wake turn so the stop affordance can offer
+                        // a cancel for it. Lifecycle on
+                        // `note_streaming_wake_turn`.
+                        if !meta.is_replay
+                            && let Some(notif_pid) = meta.prompt_id.as_deref()
+                            && is_wake_prompt(notif_pid)
+                        {
+                            agent.note_streaming_wake_turn(notif_pid);
+                        }
+
                         // Detect plan mode transitions from tool call completions.
                         plan_mode_modal_refresh_needed |=
                             detect_plan_mode_change(&notif.request.update, agent);
@@ -747,6 +758,7 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         "x.ai/scheduled_task_inject_prompt" => handle_scheduled_task_inject_prompt(notif, app),
         "x.ai/announcements/update" => handle_announcements_update(notif, app),
         "x.ai/git_head_changed" => handle_git_head_changed(notif, app),
+        "x.ai/leader/version_mismatch" => handle_version_mismatch(notif, app),
         "x.ai/mcp/init_progress" => handle_mcp_init_progress(notif, app),
         "x.ai/mcp/tools_changed" | "x.ai/mcp_initialized" => handle_mcp_tools_changed(notif, app),
         "x.ai/mcp/server_status" if push_server_status_enabled() => {
@@ -755,6 +767,15 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         "x.ai/mcp/servers_updated" => handle_mcp_servers_updated(notif, app),
         _ => false,
     }
+}
+
+fn handle_version_mismatch(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(banner) = crate::acp::version_mismatch_banner(notif.params.get()) else {
+        tracing::warn!("ignoring x.ai/leader/version_mismatch without usable versions");
+        return false;
+    };
+    app.show_toast(&banner);
+    true
 }
 
 /// Handle `x.ai/session/interjection` — the leader broadcasts this

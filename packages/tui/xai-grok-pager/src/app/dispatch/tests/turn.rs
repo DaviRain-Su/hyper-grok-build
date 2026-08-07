@@ -260,6 +260,459 @@ fn cancel_turn_without_trigger_hint_sends_none() {
 }
 
 #[test]
+fn lost_cancel_is_resent_while_still_cancelling() {
+    use crate::app::actions::CancelTrigger;
+    use crate::app::dispatch::CANCEL_RESEND_GRACE;
+    use crate::app::dispatch::reconcile_overdue_cancels;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.cancel_trigger_hint = Some(CancelTrigger::Mouse);
+    }
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(matches!(effects.as_slice(), [Effect::CancelTurn { .. }]));
+    assert!(app.agents[&id].session.state.is_cancelling());
+
+    // Inside the grace: nothing fires.
+    assert!(reconcile_overdue_cancels(&mut app).is_none());
+
+    // The cancel is lost in transit (no response ever arrives); age it out.
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .pending_cancel_resend
+        .as_mut()
+        .unwrap()
+        .sent_at = std::time::Instant::now() - CANCEL_RESEND_GRACE;
+    let resent = reconcile_overdue_cancels(&mut app).expect("overdue cancel must re-send");
+    assert!(
+        matches!(
+            resent.as_slice(),
+            [Effect::CancelTurn {
+                trigger: Some(CancelTrigger::Mouse),
+                rewind_if_no_output: false,
+                ..
+            }]
+        ),
+        "the resend replays the gesture trigger, got {resent:?}"
+    );
+    assert_eq!(
+        app.agents[&id]
+            .pending_cancel_resend
+            .as_ref()
+            .unwrap()
+            .attempts,
+        2
+    );
+
+    // A received `prompt_complete` broadcast proves the cancel landed: the
+    // resend stops even though the pane is still cancelling, so it can
+    // never race the turn-end reconcile and cancel a promoted queued prompt.
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.pending_cancel_resend.as_mut().unwrap().sent_at =
+            std::time::Instant::now() - CANCEL_RESEND_GRACE;
+        agent.pending_turn_end_reconcile = Some(crate::app::agent_view::PendingTurnEnd {
+            prompt_id: "p1".into(),
+            stop_reason: Some("cancelled".into()),
+            agent_result: None,
+            cancel_trigger: None,
+            received_at: std::time::Instant::now(),
+        });
+    }
+    assert!(reconcile_overdue_cancels(&mut app).is_none());
+    // The record survives, confirmed: the auto-resend is dead, but a manual
+    // retry can still read the recorded subagent choice.
+    assert!(
+        app.agents[&id]
+            .pending_cancel_resend
+            .as_ref()
+            .unwrap()
+            .confirmed
+    );
+    app.agents.get_mut(&id).unwrap().pending_turn_end_reconcile = None;
+    assert!(
+        reconcile_overdue_cancels(&mut app).is_none(),
+        "a confirmed record keeps the auto-resend off after the window closes"
+    );
+
+    // Turn resolved: the marker clears and nothing more fires.
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::Idle;
+    assert!(reconcile_overdue_cancels(&mut app).is_none());
+    assert!(app.agents[&id].pending_cancel_resend.is_none());
+}
+
+#[test]
+fn cancel_retry_reuses_recorded_subagent_choice() {
+    use crate::app::actions::CancelTrigger;
+    use crate::app::dispatch::reconcile_overdue_cancels;
+    use crate::views::modal::CancelTurnChoice;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.cancel_trigger_hint = Some(CancelTrigger::CtrlC);
+    }
+
+    let effects = dispatch(
+        Action::CancelTurnChoice(CancelTurnChoice::ContinueToRun),
+        &mut app,
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CancelTurn {
+            cancel_subagents: false,
+            ..
+        }]
+    ));
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::CancelTurn {
+                cancel_subagents: false,
+                ..
+            }]
+        ),
+        "the retry must not escalate past the one-shot choice, got {effects:?}"
+    );
+
+    // The turn-end broadcast stands the auto-resend down; a retry after it
+    // must still reuse the recorded choice instead of escalating.
+    app.agents.get_mut(&id).unwrap().pending_turn_end_reconcile =
+        Some(crate::app::agent_view::PendingTurnEnd {
+            prompt_id: "p1".into(),
+            stop_reason: Some("cancelled".into()),
+            agent_result: None,
+            cancel_trigger: None,
+            received_at: std::time::Instant::now(),
+        });
+    assert!(reconcile_overdue_cancels(&mut app).is_none());
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::CancelTurn {
+                cancel_subagents: false,
+                ..
+            }]
+        ),
+        "a confirmed cancel must not discard the recorded choice, got {effects:?}"
+    );
+}
+
+#[test]
+fn confirmed_stop_retry_does_not_rearm_auto_resend() {
+    use crate::app::actions::CancelTrigger;
+    use crate::app::dispatch::CANCEL_RESEND_GRACE;
+    use crate::app::dispatch::reconcile_overdue_cancels;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.cancel_trigger_hint = Some(CancelTrigger::Mouse);
+    }
+    assert!(matches!(
+        dispatch(Action::CancelTurn, &mut app).as_slice(),
+        [Effect::CancelTurn {
+            trigger: Some(CancelTrigger::Mouse),
+            ..
+        }]
+    ));
+
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.pending_turn_end_reconcile = Some(crate::app::agent_view::PendingTurnEnd {
+            prompt_id: "p1".into(),
+            stop_reason: Some("cancelled".into()),
+            agent_result: None,
+            cancel_trigger: None,
+            received_at: std::time::Instant::now(),
+        });
+    }
+    assert!(reconcile_overdue_cancels(&mut app).is_none());
+    assert!(
+        app.agents[&id]
+            .pending_cancel_resend
+            .as_ref()
+            .is_some_and(|p| p.confirmed)
+    );
+
+    // Gesture retry (hint set, as `[stop]` / Esc do).
+    app.agents.get_mut(&id).unwrap().cancel_trigger_hint = Some(CancelTrigger::Mouse);
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::CancelTurn {
+                trigger: Some(CancelTrigger::Mouse),
+                ..
+            }]
+        ),
+        "a manual retry still re-sends, got {effects:?}"
+    );
+    let pending = app.agents[&id]
+        .pending_cancel_resend
+        .as_ref()
+        .expect("resend record must survive");
+    assert!(
+        pending.confirmed,
+        "a confirmed record must stay confirmed across a gesture retry"
+    );
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .pending_cancel_resend
+        .as_mut()
+        .unwrap()
+        .sent_at = std::time::Instant::now() - CANCEL_RESEND_GRACE;
+    assert!(
+        reconcile_overdue_cancels(&mut app).is_none(),
+        "auto-resend must stay off after a confirmed gesture retry"
+    );
+}
+
+#[test]
+fn hintless_retry_replays_recorded_trigger() {
+    use crate::app::actions::CancelTrigger;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.cancel_trigger_hint = Some(CancelTrigger::Esc);
+    }
+    assert!(matches!(
+        dispatch(Action::CancelTurn, &mut app).as_slice(),
+        [Effect::CancelTurn {
+            trigger: Some(CancelTrigger::Esc),
+            ..
+        }]
+    ));
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::CancelTurn {
+                trigger: Some(CancelTrigger::Esc),
+                ..
+            }]
+        ),
+        "a hint-less retry must replay the recorded trigger, got {effects:?}"
+    );
+}
+
+#[test]
+fn cancel_turn_stops_compact_even_with_stale_wake_marker() {
+    use crate::app::actions::CancelTrigger;
+    use crate::app::agent::AgentCommand;
+    use crate::app::agent_view::RunningWakeTurn;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.start_command(AgentCommand::Compact);
+        agent.running_wake_turn = Some(RunningWakeTurn {
+            prompt_id: "task-completed-bg1".into(),
+            cancel_sent: false,
+        });
+        agent.cancel_trigger_hint = Some(CancelTrigger::Esc);
+    }
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(effects.as_slice(), [Effect::CancelTurn { .. }]),
+        "compact cancel must emit, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        matches!(
+            agent.session.state,
+            AgentState::CommandCancelling {
+                command: AgentCommand::Compact,
+            }
+        ),
+        "Esc during /compact must cancel compact, not only the stale wake, got {:?}",
+        agent.session.state
+    );
+}
+
+#[test]
+fn cancel_after_local_send_during_wake_does_not_arm_resend() {
+    use crate::app::actions::CancelTrigger;
+    use crate::app::agent_view::RunningWakeTurn;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.running_wake_turn = Some(RunningWakeTurn {
+            prompt_id: "task-completed-bg1".into(),
+            cancel_sent: false,
+        });
+        agent.start_turn_boundary(Some("user-1"));
+        agent.session.current_prompt_id = Some("user-1".into());
+        agent.cancel_trigger_hint = Some(CancelTrigger::Esc);
+    }
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::CancelTurn {
+                trigger: Some(CancelTrigger::Esc),
+                rewind_if_no_output: false,
+                ..
+            }]
+        ),
+        "must still cancel the shell-front wake, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.session.state.is_turn_running(),
+        "the local user turn is queued on the shell, not cancelled"
+    );
+    assert!(
+        agent.pending_cancel_resend.is_none(),
+        "auto-resend would cancel the promoted user turn"
+    );
+    assert!(
+        agent
+            .running_wake_turn
+            .as_ref()
+            .is_some_and(|w| w.cancel_sent),
+        "the wake marker must record the cancel"
+    );
+}
+
+#[test]
+fn stale_cancel_resend_clears_once_pane_is_idle() {
+    use crate::app::actions::CancelTrigger;
+    use crate::app::dispatch::reconcile_overdue_cancels;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::Idle;
+        agent.pending_cancel_resend = Some(crate::app::agent_view::PendingCancelResend {
+            prompt_id: None,
+            sent_at: std::time::Instant::now(),
+            attempts: 3,
+            confirmed: true,
+            cancel_subagents: false,
+            trigger: CancelTrigger::Esc,
+        });
+    }
+    assert!(reconcile_overdue_cancels(&mut app).is_none());
+    assert!(
+        app.agents[&id].pending_cancel_resend.is_none(),
+        "reconcile must drop a stale record once nothing is cancelling"
+    );
+}
+
+#[test]
+fn do_cancel_turn_cancels_running_wake_turn() {
+    use crate::app::agent_view::RunningWakeTurn;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.running_wake_turn = Some(RunningWakeTurn {
+            prompt_id: "task-completed-bg1".into(),
+            cancel_sent: false,
+        });
+    }
+
+    let effects = super::super::turn::do_cancel_turn(&mut app, true);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::CancelTurn {
+                cancel_subagents: true,
+                rewind_if_no_output: false,
+                trigger: None,
+                ..
+            }]
+        ),
+        "programmatic cancel must stop a wake turn, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(agent.session.state.is_idle());
+    assert!(agent.wake_turn_cancelling());
+}
+
+#[test]
+fn stop_click_cancels_running_wake_turn() {
+    use crate::app::actions::CancelTrigger;
+    use crate::app::agent_view::RunningWakeTurn;
+    use crate::app::dispatch::CANCEL_RESEND_GRACE;
+    use crate::app::dispatch::reconcile_overdue_cancels;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.running_wake_turn = Some(RunningWakeTurn {
+            prompt_id: "task-completed-bg1".into(),
+            cancel_sent: false,
+        });
+        assert!(
+            matches!(agent.wake_display_state(), Some(AgentState::TurnRunning)),
+            "a streaming wake turn must offer the running chrome (and [stop])"
+        );
+        // The mouse handler sets the hint before dispatching CancelTurn.
+        agent.cancel_trigger_hint = Some(CancelTrigger::Mouse);
+    }
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::CancelTurn {
+                trigger: Some(CancelTrigger::Mouse),
+                rewind_if_no_output: false,
+                ..
+            }]
+        ),
+        "the wake cancel must ride the normal cancel wire, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.session.state.is_idle(),
+        "a wake cancel must not fabricate a local turn"
+    );
+    assert!(matches!(
+        agent.wake_display_state(),
+        Some(AgentState::TurnCancelling)
+    ));
+
+    // The fire-and-forget cancel is loss-prone: the resend reconcile must
+    // stay armed even though the pane never left Idle.
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .pending_cancel_resend
+        .as_mut()
+        .unwrap()
+        .sent_at = std::time::Instant::now() - CANCEL_RESEND_GRACE;
+    assert!(reconcile_overdue_cancels(&mut app).is_some());
+}
+
+#[test]
 fn cancel_turn_leaves_shared_queue_for_agent_to_drain() {
     use crate::app::prompt_queue::QueueEntryWire;
     // Prompts typed while a turn runs live on the server-authoritative
@@ -1046,10 +1499,10 @@ fn cancel_rewind_removes_all_combined_segment_blocks() {
 /// A cancel landing before first server activity must NOT rewind the stashed
 /// in-flight prompt over a NEWER composer draft. Esc (and the mouse stop /
 /// palette cancel) fire with the draft intact — unlike keyboard Ctrl+C,
-/// which only cancels on an empty prompt — so the pristine rewind falls back
+/// which only cancels on an empty prompt — so the no-output rewind falls back
 /// to the standard cancel and the draft survives.
 #[test]
-fn cancel_with_newer_draft_skips_pristine_rewind_and_keeps_draft() {
+fn cancel_with_newer_draft_skips_no_output_rewind_and_keeps_draft() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let sent_id = {

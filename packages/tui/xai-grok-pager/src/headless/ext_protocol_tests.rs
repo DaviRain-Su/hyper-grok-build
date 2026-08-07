@@ -46,11 +46,20 @@ fn make_ext_notif(
     method: &str,
     update: serde_json::Value,
 ) -> xai_acp_lib::AcpArgsBox<acp::ExtNotification> {
-    let payload = serde_json::json!({
-        "sessionId": "sess-1",
-        "update": update,
-    });
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
+    make_raw_ext_notif(
+        method,
+        serde_json::json!({
+            "sessionId": "sess-1",
+            "update": update,
+        }),
+    )
+}
+
+fn make_raw_ext_notif(
+    method: &str,
+    params: serde_json::Value,
+) -> xai_acp_lib::AcpArgsBox<acp::ExtNotification> {
+    let raw = serde_json::value::to_raw_value(&params).unwrap();
     let (tx, _rx) = tokio::sync::oneshot::channel();
     xai_acp_lib::AcpArgs {
         request: acp::ExtNotification::new(method, raw.into()),
@@ -385,6 +394,106 @@ fn headless_session_notification_task_tag_errors_not_silent() {
             "logged at error level ({tag}): {logs}"
         );
     }
+}
+
+#[test]
+fn headless_version_mismatch_logs_warn_with_both_versions() {
+    let notif = make_raw_ext_notif(
+        "x.ai/leader/version_mismatch",
+        serde_json::json!({
+            "clientVersion": "0.1.157",
+            "leaderVersion": "0.1.150",
+            "message": "Client version 0.1.157 differs from leader version 0.1.150.",
+        }),
+    );
+    let mut is_none = false;
+    let logs = capture_logs(|| {
+        is_none = matches!(handle_ext_notification(&notif), ExtEvent::None);
+    });
+    assert!(is_none, "version mismatch is log-only in headless");
+    assert!(logs.contains("WARN"), "logged at warn level: {logs}");
+    assert!(
+        logs.contains("version_mismatch"),
+        "log names the method: {logs}"
+    );
+    let banner = crate::glyphs::sanitize_toast_message(
+        "⚠ Version mismatch: client 0.1.157, leader 0.1.150 — restart grok to match",
+    );
+    assert!(
+        logs.contains(banner.as_ref()),
+        "log carries the exact banner: {logs}"
+    );
+}
+
+#[test]
+fn headless_version_mismatch_without_message_still_warns() {
+    let notif = make_raw_ext_notif(
+        "x.ai/leader/version_mismatch",
+        serde_json::json!({
+            "clientVersion": "0.1.157",
+            "leaderVersion": "0.1.150",
+        }),
+    );
+    let mut is_none = false;
+    let logs = capture_logs(|| {
+        is_none = matches!(handle_ext_notification(&notif), ExtEvent::None);
+    });
+    assert!(is_none);
+    assert!(logs.contains("WARN"), "logged at warn level: {logs}");
+    let banner = crate::glyphs::sanitize_toast_message(
+        "⚠ Version mismatch: client 0.1.157, leader 0.1.150 — restart grok to match",
+    );
+    assert!(
+        logs.contains(banner.as_ref()),
+        "missing message must still log both versions: {logs}"
+    );
+}
+
+#[test]
+fn headless_version_mismatch_malformed_warns_distinctly() {
+    for params in [
+        serde_json::json!({}),
+        serde_json::json!({ "message": "only a message" }),
+        serde_json::Value::String("not-an-object".into()),
+    ] {
+        let desc = params.to_string();
+        let notif = make_raw_ext_notif("x.ai/leader/version_mismatch", params);
+        let logs = capture_logs(|| {
+            assert!(
+                matches!(handle_ext_notification(&notif), ExtEvent::None),
+                "malformed params must not crash: {desc}"
+            );
+        });
+        assert!(logs.contains("WARN"), "parse failure must warn: {logs}");
+        assert!(
+            logs.contains("version_mismatch"),
+            "parse failure must name the method: {logs}"
+        );
+        assert!(
+            !logs.contains("⚠ Version mismatch: client"),
+            "malformed payload must not emit the success banner: {logs}"
+        );
+    }
+}
+
+#[test]
+fn headless_unknown_leader_method_is_silent_none() {
+    let notif = make_raw_ext_notif(
+        "x.ai/leader/not_a_method",
+        serde_json::json!({
+            "clientVersion": "0.1.157",
+            "leaderVersion": "0.1.150",
+        }),
+    );
+    let mut is_none = false;
+    let logs = capture_logs(|| {
+        is_none = matches!(handle_ext_notification(&notif), ExtEvent::None);
+    });
+    assert!(is_none);
+    assert!(
+        !logs.contains("WARN"),
+        "unknown method must stay a clean ignore: {logs}"
+    );
 }
 
 #[test]

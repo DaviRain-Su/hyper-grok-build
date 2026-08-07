@@ -22,6 +22,9 @@ impl AgentView {
         self.prompt.prompt_suggestion_active = self.prompt_input_mode
             == super::PromptInputMode::Normal
             && matches!(self.prompt_mode, super::PromptMode::Normal)
+            // A card's inline editor borrows the composer to answer a question, and a guess at the next prompt to the model is not an
+            // answer. In the `/feedback` box it would also paint over the detail placeholder.
+            && self.question_view.is_none()
             && !self.session.state.is_busy();
     }
 
@@ -610,6 +613,43 @@ impl AgentView {
                     .to_string(),
                 plugin_relative_path,
             });
+    }
+}
+
+#[cfg(test)]
+mod prompt_suggestion_gate_tests {
+    use super::test_fixtures::make_agent;
+
+    /// A card's inline editor borrows the composer, so the next-prompt ghost must not paint into it. The `/feedback` box relies on this
+    /// for its placeholder; the old `~` mode got it from `PromptInputMode::Feedback`, which no longer exists.
+    #[test]
+    fn an_open_question_card_closes_the_suggestion_gate() {
+        use crate::views::prompt_widget::StashedPrompt;
+        use crate::views::question_view::QuestionViewState;
+        use xai_grok_tools::implementations::grok_build::ask_user_question::Question;
+
+        let mut agent = make_agent();
+        agent.refresh_prompt_suggestion_gate();
+        assert!(
+            agent.prompt.prompt_suggestion_active,
+            "an idle normal composer is the ghost's home"
+        );
+
+        agent.question_view = Some(QuestionViewState::new(
+            "gate-test".into(),
+            vec![Question {
+                question: "which one?".into(),
+                options: vec![],
+                multi_select: Some(false),
+                id: None,
+            }],
+            StashedPrompt::default(),
+        ));
+        agent.refresh_prompt_suggestion_gate();
+        assert!(
+            !agent.prompt.prompt_suggestion_active,
+            "a card owns the composer, so the ghost stays out of it"
+        );
     }
 }
 

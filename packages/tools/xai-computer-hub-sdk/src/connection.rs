@@ -20,7 +20,7 @@
 //! 1. Drains every parked response waiter with
 //!    [`crate::ClientError::NetworkError`] so callers can fast-fail
 //!    instead of deadlocking.
-//! 2. Reconnects with exponential backoff (capped).
+//! 2. Reconnects with exponential backoff, full jitter, capped at the last slot.
 //! 3. Re-runs the `hello` handshake.
 //! 4. The ToolServer replays `serve{session_id, tools}` per active
 //!    session via the on_reconnect callback. The server auto-registers
@@ -37,6 +37,7 @@ use futures::{SinkExt, Stream, StreamExt};
 use http::HeaderName;
 use http::header::HeaderValue;
 use serde_json::Value;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::net::TcpStream;
@@ -66,8 +67,26 @@ const PRIORITY_OUTBOUND_CAPACITY: usize = 16;
 /// peer with a full TCP send buffer must not block Pause/Resume forever.
 const WRITER_CLOSE_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 /// Backoff schedule (in ms) for reconnect attempts. The last value is
-/// reused for any further attempts so the cap is `10s`.
+/// reused for any further attempts and is the documented cap (`10s`).
+/// Each wait is `Uniform(0, min(cap, max(slot, SPREAD_FLOOR)))`.
 const RECONNECT_BACKOFF_MS: &[u64] = &[100, 200, 500, 1_000, 2_000, 5_000, 10_000];
+/// Lower bound on the full-jitter window. ±25 % of the 100 ms first slot
+/// is only a 50 ms spread — phase-locked reconnects from a large client
+/// fleet can overwhelm a recovering server once handshake+replay exceeds
+/// that window (peak concurrent handshakes approaches N). Uniform over
+/// ≥1 s spreads the same herd across roughly one slot. Capped by the
+/// schedule's last slot so a short test/override table stays fast. Keep
+/// the floor well below typical client disconnect-grace timers so a
+/// delayed reconnect is not mistaken for a permanent drop.
+const RECONNECT_SPREAD_FLOOR: Duration = Duration::from_secs(1);
+/// Prior connection must have lived this long before a new outage resets
+/// `attempt`. Shorter flaps keep climbing so a crash-loop server or a
+/// drain followed immediately by another drop cannot pin the fleet on
+/// slot 1.
+const RECONNECT_ATTEMPT_RESET_AFTER: Duration = Duration::from_secs(10);
+/// Per-process counter mixed into each connection's jitter seed so two
+/// clients constructed in the same instant still de-phase on attempt 1.
+static NEXT_RECONNECT_JITTER_SEED: AtomicU64 = AtomicU64::new(1);
 /// Floor for the per-attempt reconnect budget: a small liveness override
 /// must not shrink it below what a WAN handshake + session replay needs,
 /// or the retry loop would livelock aborting every attempt at the bound.
@@ -294,6 +313,10 @@ fn resolve_reconnect_backoff(configured: Option<Arc<[Duration]>>) -> Arc<[Durati
         _ => default_reconnect_backoff(),
     }
 }
+/// `None` → the 10 s production dwell. `Some`, including zero, is verbatim.
+pub(crate) fn resolve_attempt_reset_after(configured: Option<Duration>) -> Duration {
+    configured.unwrap_or(RECONNECT_ATTEMPT_RESET_AFTER)
+}
 /// Resolve the keepalive ping cadence, clamping an unset *or zero* value to
 /// [`DEFAULT_WS_PING_INTERVAL`]. `tokio::time::interval` panics on a zero
 /// period, so a configured `Duration::ZERO` (e.g. via
@@ -339,9 +362,15 @@ pub struct ConnectionTuning {
     /// (see [`resolve_ws_liveness_deadline`]).
     pub ws_liveness_deadline: Option<Duration>,
     /// Override for the reconnect backoff schedule. `None` (or empty) ⇒
-    /// the built-in [`RECONNECT_BACKOFF_MS`] table. Stored as
-    /// `Arc<[Duration]>` so it is shared (not deep-copied) per reconnect.
+    /// the built-in [`RECONNECT_BACKOFF_MS`] table. Each wait is
+    /// `Uniform(0, min(last_slot, max(slot, 1s)))` — not the literal slot.
+    /// Stored as `Arc<[Duration]>` so it is shared per reconnect.
     pub reconnect_backoff: Option<Arc<[Duration]>>,
+    /// How long the previous connection must have stayed up before a new
+    /// outage resets the reconnect attempt counter. `None` ⇒ 10 s (one
+    /// default cap period). `Some`, including zero, is honored verbatim
+    /// (`Some(ZERO)` resets on every outage; tests use this).
+    pub reconnect_attempt_reset_after: Option<Duration>,
 }
 /// Pool dedup key. Two connections are pooled together iff their
 /// `(url, principal)` match.
@@ -369,7 +398,11 @@ pub struct ReconnectEvent {
     pub connection_id: ConnectionId,
     /// Number of session bindings replayed.
     pub sessions_replayed: usize,
-    /// Reconnect attempt index (1 for the first reconnect).
+    /// Reconnect attempt index since the last *stable* connection (1-based).
+    /// Rapid flaps do not reset this, so a crash-loop climbs the ladder.
+    /// After the prior socket stayed up for
+    /// [`ConnectionTuning::reconnect_attempt_reset_after`] (default 10 s)
+    /// the next outage starts at 1 again.
     pub attempt: u32,
 }
 /// Boxed reconnect callback.
@@ -490,6 +523,15 @@ struct HubConnectionInner {
     /// Resolved reconnect backoff schedule (configured override or the
     /// built-in table). Resolved once at connect; shared per reconnect.
     reconnect_backoff: Arc<[Duration]>,
+    /// Per-connection seed for reconnect backoff jitter. Distinct across
+    /// clients in the same process so a simultaneous disconnect does not
+    /// lock-step the first (or any) attempt.
+    reconnect_jitter_seed: u64,
+    /// Resolved stability dwell before `attempt` resets on a new outage.
+    attempt_reset_after: Duration,
+    /// Incremented at the start of each reconnect episode so jitter
+    /// re-phases across outages of the same connection.
+    outage_seq: AtomicU32,
     /// Outbound frames waiting to be written. Filled by `send_*`
     /// helpers; drained by the writer half of the actor.
     outbound_tx: mpsc::Sender<String>,
@@ -543,6 +585,8 @@ impl HubConnection {
             );
         }
         let reconnect_backoff = resolve_reconnect_backoff(config.tuning.reconnect_backoff);
+        let attempt_reset_after =
+            resolve_attempt_reset_after(config.tuning.reconnect_attempt_reset_after);
         let buffer = config.outbound_buffer.unwrap_or(OUTBOUND_BUFFER);
         let (outbound_tx, outbound_rx) = mpsc::channel::<String>(buffer);
         let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
@@ -593,6 +637,9 @@ impl HubConnection {
             allow_insecure_ws: config.allow_insecure_ws,
             on_fatal: config.on_fatal,
             reconnect_backoff,
+            reconnect_jitter_seed: new_reconnect_jitter_seed(),
+            attempt_reset_after,
+            outage_seq: AtomicU32::new(0),
             outbound_tx,
             demux: demux.clone(),
             bound_sessions: bound_sessions.clone(),
@@ -1430,13 +1477,12 @@ async fn run_reader_actor(
             }
             ConnectedExit::SocketClosed(cause) => {
                 let detected_at = Instant::now();
+                let prev_conn_age = detected_at.duration_since(connected_at);
                 let health = inner.health.snapshot();
                 let prev_connection_id = inner.connection_id.lock().await.clone();
                 let outage = OutageInfo {
                     prev_connection_id,
-                    prev_connection_duration_ms: detected_at
-                        .duration_since(connected_at)
-                        .as_millis() as u64,
+                    prev_connection_duration_ms: prev_conn_age.as_millis() as u64,
                     last_inbound: health.last_inbound,
                     detect_ms: detected_at.duration_since(health.last_inbound).as_millis() as u64,
                     since_last_probe_monotonic_ms: health.since_last_probe_monotonic_ms,
@@ -1476,10 +1522,14 @@ async fn run_reader_actor(
                     ClientError::NetworkError("socket dropped during in-flight call".to_owned())
                 });
                 inner.demux.drain_progress();
+                if prev_conn_age >= inner.attempt_reset_after {
+                    attempt = 0;
+                }
+                inner.begin_reconnect_outage();
                 let mut backoff_total = Duration::ZERO;
                 loop {
                     attempt = attempt.saturating_add(1);
-                    let backoff = backoff_for(attempt, &inner.reconnect_backoff);
+                    let backoff = inner.reconnect_delay(attempt);
                     info!(?backoff, attempt, url = %url, "reconnecting server connection");
                     tokio::select! {
                         _ = stop_rx.recv() => break 'actor,
@@ -1759,43 +1809,147 @@ async fn reconnect_and_replay(
     }
     Ok((sink, stream))
 }
-/// Look up the backoff for `attempt` in `schedule`, clamping past the end
-/// to the final (cap) slot. Call sites pass a non-empty schedule (resolved
-/// via [`resolve_reconnect_backoff`]); the lookup is nonetheless
-/// self-contained — an empty slice yields `Duration::ZERO` rather than
-/// panicking.
-fn backoff_for(attempt: u32, schedule: &[Duration]) -> Duration {
+impl HubConnectionInner {
+    fn begin_reconnect_outage(&self) {
+        self.outage_seq.fetch_add(1, Ordering::Relaxed);
+    }
+    fn reconnect_delay(&self, attempt: u32) -> Duration {
+        backoff_for(
+            attempt,
+            &self.reconnect_backoff,
+            self.reconnect_jitter_seed,
+            self.outage_seq.load(Ordering::Relaxed),
+        )
+    }
+}
+/// Look up the slot for `attempt`, take
+/// `window = min(cap, max(slot, SPREAD_FLOOR))`, then `Uniform(0, window)`.
+/// Empty schedule → `Duration::ZERO`.
+fn backoff_for(attempt: u32, schedule: &[Duration], jitter_seed: u64, outage: u32) -> Duration {
+    let Some(&cap) = schedule.last() else {
+        return Duration::ZERO;
+    };
     let idx = (attempt as usize)
         .saturating_sub(1)
         .min(schedule.len().saturating_sub(1));
-    schedule.get(idx).copied().unwrap_or_default()
+    let base = schedule.get(idx).copied().unwrap_or_default();
+    apply_reconnect_jitter(
+        backoff_window(base, cap),
+        jitter_roll(jitter_seed, attempt, outage),
+    )
+}
+fn duration_nanos_u64(d: Duration) -> u64 {
+    u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+}
+/// SplitMix64. Avalanches so nearby seeds / attempts produce uncorrelated rolls.
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+fn jitter_roll(seed: u64, attempt: u32, outage: u32) -> u64 {
+    splitmix64(
+        seed ^ u64::from(attempt).wrapping_mul(0xD1B5_4A32_D192_ED03)
+            ^ u64::from(outage).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+    )
+}
+fn derive_jitter_seed(counter: u64, pid: u64, nanos: u64) -> u64 {
+    splitmix64(
+        nanos
+            .wrapping_add(pid.wrapping_shl(32))
+            .wrapping_add(counter.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+    )
+}
+fn new_reconnect_jitter_seed() -> u64 {
+    let n = NEXT_RECONNECT_JITTER_SEED.fetch_add(1, Ordering::Relaxed);
+    let pid = u64::from(std::process::id());
+    let nanos = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    derive_jitter_seed(n, pid, nanos)
+}
+/// `min(cap, max(base, RECONNECT_SPREAD_FLOOR))`. Production and tests
+/// share [`RECONNECT_SPREAD_FLOOR`]; tests also assert that value equals 1s.
+fn backoff_window(base: Duration, cap: Duration) -> Duration {
+    base.max(RECONNECT_SPREAD_FLOOR).min(cap)
+}
+/// Uniform in `[0, window)`. `window == 0` → zero. Never returns `window`
+/// itself, so the documented cap is a hard exclusive ceiling when
+/// `window == cap` — no Dirac pile-up at 10 s.
+fn apply_reconnect_jitter(window: Duration, roll: u64) -> Duration {
+    let window_ns = duration_nanos_u64(window);
+    if window_ns == 0 {
+        return Duration::ZERO;
+    }
+    Duration::from_nanos(roll % window_ns)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Window expected for the default table, using *literal* 1 s / 10 s
+    /// so a change to [`RECONNECT_SPREAD_FLOOR`] or the cap is a
+    /// deliberate test edit, not a tautology on the constant.
+    fn expected_default_window(attempt: u32) -> Duration {
+        let slots_ms = [100_u64, 200, 500, 1_000, 2_000, 5_000, 10_000];
+        let idx = (attempt as usize).saturating_sub(1).min(slots_ms.len() - 1);
+        let base = Duration::from_millis(slots_ms[idx]);
+        let floor = Duration::from_secs(1);
+        let cap = Duration::from_secs(10);
+        Duration::from_nanos(
+            duration_nanos_u64(base)
+                .max(duration_nanos_u64(floor))
+                .min(duration_nanos_u64(cap)),
+        )
+    }
+    fn assert_window_is(attempt: u32, schedule: &[Duration], expected: Duration) {
+        let mut max = Duration::ZERO;
+        for seed in 0..256_u64 {
+            let d = backoff_for(attempt, schedule, seed, 1);
+            assert!(
+                d < expected || expected.is_zero(),
+                "attempt {attempt}: {d:?} escapes Uniform[0, {expected:?})"
+            );
+            if d > max {
+                max = d;
+            }
+        }
+        if !expected.is_zero() {
+            assert!(
+                max >= expected * 4 / 5,
+                "attempt {attempt}: max {max:?} never approaches the {expected:?} window"
+            );
+        }
+    }
+    #[test]
+    fn spread_floor_and_reset_dwell_are_the_documented_literals() {
+        assert_eq!(RECONNECT_SPREAD_FLOOR, Duration::from_secs(1));
+        assert_eq!(RECONNECT_ATTEMPT_RESET_AFTER, Duration::from_secs(10));
+        assert_eq!(
+            RECONNECT_BACKOFF_MS,
+            &[100, 200, 500, 1_000, 2_000, 5_000, 10_000]
+        );
+    }
     #[test]
     fn backoff_for_follows_exponential_schedule() {
         let schedule = default_reconnect_backoff();
-        assert_eq!(backoff_for(1, &schedule), Duration::from_millis(100));
-        assert_eq!(backoff_for(2, &schedule), Duration::from_millis(200));
-        assert_eq!(backoff_for(3, &schedule), Duration::from_millis(500));
-        assert_eq!(backoff_for(4, &schedule), Duration::from_millis(1_000));
-        assert_eq!(backoff_for(5, &schedule), Duration::from_millis(2_000));
-        assert_eq!(backoff_for(6, &schedule), Duration::from_millis(5_000));
-        assert_eq!(backoff_for(7, &schedule), Duration::from_millis(10_000));
+        for attempt in 1_u32..=7 {
+            assert_window_is(attempt, &schedule, expected_default_window(attempt));
+        }
     }
     #[test]
     fn backoff_for_caps_at_last_slot() {
         let schedule = default_reconnect_backoff();
-        let cap = Duration::from_millis(10_000);
-        assert_eq!(backoff_for(8, &schedule), cap);
-        assert_eq!(backoff_for(50, &schedule), cap);
-        assert_eq!(backoff_for(u32::MAX, &schedule), cap);
+        let cap = Duration::from_secs(10);
+        for attempt in [8_u32, 50, u32::MAX] {
+            assert_window_is(attempt, &schedule, cap);
+        }
     }
     #[test]
-    fn backoff_for_zero_attempt_uses_first_slot() {
+    fn backoff_for_zero_attempt_uses_first_slot_window() {
         let schedule = default_reconnect_backoff();
-        assert_eq!(backoff_for(0, &schedule), Duration::from_millis(100));
+        assert_window_is(0, &schedule, expected_default_window(1));
     }
     #[test]
     fn backoff_for_honors_configured_schedule() {
@@ -1803,26 +1957,195 @@ mod tests {
             Duration::from_millis(5),
             Duration::from_millis(15),
         ])));
-        assert_eq!(backoff_for(1, &schedule), Duration::from_millis(5));
-        assert_eq!(backoff_for(2, &schedule), Duration::from_millis(15));
-        assert_eq!(backoff_for(3, &schedule), Duration::from_millis(15));
-        assert_eq!(backoff_for(99, &schedule), Duration::from_millis(15));
+        let cap = Duration::from_millis(15);
+        for attempt in [1_u32, 2, 3, 99] {
+            assert_window_is(attempt, &schedule, cap);
+        }
+    }
+    #[test]
+    fn resolve_attempt_reset_after_none_is_ten_seconds() {
+        assert_eq!(
+            resolve_attempt_reset_after(None),
+            Duration::from_secs(10),
+            "unconfigured (production) path must be the 10s dwell, not ZERO"
+        );
+        assert_eq!(
+            resolve_attempt_reset_after(Some(Duration::ZERO)),
+            Duration::ZERO,
+            "Some(ZERO) is honored verbatim"
+        );
+        assert_eq!(
+            resolve_attempt_reset_after(Some(Duration::from_secs(3))),
+            Duration::from_secs(3)
+        );
     }
     #[test]
     fn backoff_for_empty_schedule_is_zero_not_panic() {
-        assert_eq!(backoff_for(1, &[]), Duration::ZERO);
-        assert_eq!(backoff_for(0, &[]), Duration::ZERO);
-        assert_eq!(backoff_for(u32::MAX, &[]), Duration::ZERO);
+        assert_eq!(backoff_for(1, &[], 1, 1), Duration::ZERO);
+        assert_eq!(backoff_for(0, &[], 1, 1), Duration::ZERO);
+        assert_eq!(backoff_for(u32::MAX, &[], 1, 1), Duration::ZERO);
     }
     #[test]
     fn resolve_reconnect_backoff_falls_back_when_unset_or_empty() {
         let from_none = resolve_reconnect_backoff(None);
         let from_empty = resolve_reconnect_backoff(Some(Arc::from([])));
-        for schedule in [from_none, from_empty] {
-            assert_eq!(backoff_for(1, &schedule), Duration::from_millis(100));
-            assert_eq!(backoff_for(7, &schedule), Duration::from_millis(10_000));
-            assert_eq!(backoff_for(99, &schedule), Duration::from_millis(10_000));
+        let expected: &[Duration] = &[
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+            Duration::from_millis(500),
+            Duration::from_millis(1_000),
+            Duration::from_millis(2_000),
+            Duration::from_millis(5_000),
+            Duration::from_millis(10_000),
+        ];
+        assert_eq!(&*from_none, expected);
+        assert_eq!(&*from_empty, expected);
+    }
+    #[test]
+    fn apply_reconnect_jitter_is_uniform_half_open() {
+        let one_sec_ns = 1_000_000_000_u64;
+        let one_sec = Duration::from_nanos(one_sec_ns);
+        assert_eq!(apply_reconnect_jitter(one_sec, 0), Duration::ZERO);
+        assert_eq!(
+            apply_reconnect_jitter(one_sec, one_sec_ns - 1),
+            Duration::from_nanos(one_sec_ns - 1)
+        );
+        assert_eq!(apply_reconnect_jitter(one_sec, one_sec_ns), Duration::ZERO);
+        assert_eq!(apply_reconnect_jitter(Duration::ZERO, 99), Duration::ZERO);
+    }
+    #[test]
+    fn first_slot_window_is_one_second_not_relative_dither() {
+        let schedule = default_reconnect_backoff();
+        let mut max = Duration::ZERO;
+        let mut min = Duration::from_secs(10);
+        for seed in 0..256_u64 {
+            let d = backoff_for(1, &schedule, seed, 1);
+            assert!(d < Duration::from_secs(1), "{d:?} escapes the 1s window");
+            if d > max {
+                max = d;
+            }
+            if d < min {
+                min = d;
+            }
         }
+        assert!(
+            max > Duration::from_millis(125),
+            "max {max:?} fits inside ±25% of 100 ms; spread floor is missing"
+        );
+        assert!(
+            max >= Duration::from_millis(800),
+            "max {max:?} does not reach the top of a 1s window"
+        );
+        assert!(
+            min < Duration::from_millis(200),
+            "min {min:?} should be near 0"
+        );
+    }
+    #[test]
+    fn backoff_jitter_dephases_clients_including_first_attempt() {
+        let schedule = default_reconnect_backoff();
+        for attempt in [0_u32, 1, 7, 8] {
+            let window = expected_default_window(attempt.max(1));
+            let mut seen = std::collections::HashSet::new();
+            for seed in 0..64_u64 {
+                let d = backoff_for(attempt, &schedule, seed, 1);
+                assert!(
+                    d < window || window.is_zero(),
+                    "{d:?} not in Uniform[0, {window:?})"
+                );
+                seen.insert(d.as_nanos());
+            }
+            assert!(
+                seen.len() >= 60,
+                "attempt {attempt}: only {} distinct delays over 64 seeds",
+                seen.len()
+            );
+        }
+    }
+    #[test]
+    fn backoff_jitter_sequences_differ_across_clients_and_attempts() {
+        let schedule = default_reconnect_backoff();
+        let seq = |seed: u64, outage: u32| -> Vec<u128> {
+            (0..=8)
+                .map(|attempt| backoff_for(attempt, &schedule, seed, outage).as_nanos())
+                .collect()
+        };
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..32_u64 {
+            seen.insert(seq(seed, 1));
+        }
+        assert_eq!(seen.len(), 32, "each seed must produce a unique sequence");
+        assert_eq!(seq(42, 1), seq(42, 1), "same seed+outage is deterministic");
+        let fracs: std::collections::HashSet<u128> = (1..=4)
+            .map(|a| backoff_for(a, &schedule, 42, 1).as_nanos())
+            .collect();
+        assert!(
+            fracs.len() >= 3,
+            "jitter must re-roll per attempt, not once per client (got {})",
+            fracs.len()
+        );
+        let rephased = (0..32_u64)
+            .filter(|&seed| {
+                backoff_for(1, &schedule, seed, 1) != backoff_for(1, &schedule, seed, 2)
+            })
+            .count();
+        assert!(
+            rephased >= 30,
+            "outage index must re-phase delays (only {rephased}/32 moved)"
+        );
+    }
+    #[test]
+    fn backoff_jitter_last_slot_has_no_cap_pileup() {
+        let schedule = default_reconnect_backoff();
+        let cap = Duration::from_secs(10);
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..128_u64 {
+            let d = backoff_for(7, &schedule, seed, 1);
+            assert!(
+                d < cap,
+                "{d:?} must be in Uniform[0, cap), not piled on cap"
+            );
+            seen.insert(d.as_nanos());
+        }
+        assert!(
+            seen.len() >= 120,
+            "last-slot full jitter collapsed to {} values",
+            seen.len()
+        );
+    }
+    #[test]
+    fn derive_jitter_seed_mixes_counter_pid_and_clock() {
+        assert_ne!(
+            derive_jitter_seed(1, 42, 1_000),
+            derive_jitter_seed(2, 42, 1_000),
+            "counter must de-phase same-instant same-pid constructors"
+        );
+        assert_ne!(
+            derive_jitter_seed(1, 42, 1_000),
+            derive_jitter_seed(1, 43, 1_000),
+            "pid must de-phase counter=1 across processes"
+        );
+        assert_ne!(
+            derive_jitter_seed(1, 42, 1_000),
+            derive_jitter_seed(1, 42, 2_000),
+            "clock nanos must enter the mix"
+        );
+    }
+    #[test]
+    fn new_seed_mixes_in_pid_and_clock_not_just_the_counter() {
+        let before = NEXT_RECONNECT_JITTER_SEED.load(Ordering::Relaxed);
+        let pid = u64::from(std::process::id());
+        let s = new_reconnect_jitter_seed();
+        let after = NEXT_RECONNECT_JITTER_SEED.load(Ordering::Relaxed);
+        let ns = before..after.max(before + 1);
+        assert!(
+            !ns.clone().any(|n| s == derive_jitter_seed(n, 0, 0)),
+            "new_reconnect_jitter_seed must mix pid+clock, not derive(n, 0, 0)"
+        );
+        assert!(
+            !ns.clone().any(|n| s == derive_jitter_seed(n, pid, 0)),
+            "clock nanos must enter the seed; pid alone lock-steps a shared PID namespace"
+        );
     }
     /// A zero or unset ping interval must resolve to the default. A zero
     /// period would otherwise reach `tokio::time::interval`, which panics on
@@ -2953,6 +3276,9 @@ mod tests {
             allow_insecure_ws: false,
             on_fatal: None,
             reconnect_backoff: resolve_reconnect_backoff(None),
+            reconnect_jitter_seed: 1,
+            attempt_reset_after: resolve_attempt_reset_after(None),
+            outage_seq: AtomicU32::new(0),
             outbound_tx,
             demux: demux.clone(),
             bound_sessions: Arc::new(RefCountedSet::new()),
@@ -3342,6 +3668,547 @@ mod tests {
         }
         conn.request_shutdown();
         conn.await_shutdown().await;
+    }
+    /// After a *stable* connection a new outage starts at attempt 1. A
+    /// failed attempt in the first episode still increments so
+    /// `on_reconnect` reports 2; `reset_after = 0` treats even a brief
+    /// socket as stable so the next episode is 1 again.
+    #[tokio::test]
+    async fn successful_reconnect_resets_attempt_after_stable_dwell() {
+        use futures::{SinkExt as _, StreamExt as _};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock hub");
+        let addr = listener.local_addr().expect("mock addr");
+        let upgrades = Arc::new(AtomicUsize::new(0));
+        let upgrades_srv = upgrades.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = upgrades_srv.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                        return;
+                    };
+                    if n == 1 {
+                        return;
+                    }
+                    let _ = ws.next().await;
+                    let ack = serde_json::json!({
+                        "connection_id": format!("mock-conn-{n}"),
+                        "user_id": "test",
+                        "computer_hub_version": "test",
+                        "supported_protocol_versions": ["1.0.0"],
+                    });
+                    if ws
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            ack.to_string().into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    while let Some(msg) = ws.next().await {
+                        if msg.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let (attempt_tx, mut attempt_rx) = mpsc::unbounded_channel();
+        let on_reconnect: Arc<ReconnectCallback> =
+            Arc::new(Box::new(move |event: ReconnectEvent| {
+                let _ = attempt_tx.send(event.attempt);
+            }));
+        let credential: Arc<dyn AuthProvider> = Arc::new(AuthCredential::bearer("test-token"));
+        let conn = HubConnection::connect(ConnectionConfig {
+            url: url::Url::parse(&format!("ws://{addr}/v1/tools")).expect("mock url"),
+            credential,
+            kind: ConnectionKind::ToolServer,
+            on_reconnect: Some(on_reconnect),
+            on_disconnect: None,
+            on_connect: None,
+            server_id: None,
+            server_description: None,
+            server_metadata: None,
+            outbound_buffer: None,
+            tuning: ConnectionTuning {
+                reconnect_backoff: Some(Arc::from([Duration::from_millis(10)])),
+                reconnect_attempt_reset_after: Some(Duration::ZERO),
+                ..Default::default()
+            },
+            alpha_test_key: None,
+            allow_insecure_ws: false,
+            on_fatal: None,
+        })
+        .await
+        .expect("initial connect");
+        conn.force_reconnect();
+        let first = tokio::time::timeout(Duration::from_secs(5), attempt_rx.recv())
+            .await
+            .expect("first episode reconnect event")
+            .expect("reconnect channel open");
+        assert_eq!(
+            first, 2,
+            "failed attempt then success must report attempt 2 (increment still lives)"
+        );
+        conn.force_reconnect();
+        let second = tokio::time::timeout(Duration::from_secs(5), attempt_rx.recv())
+            .await
+            .expect("second episode reconnect event")
+            .expect("reconnect channel open");
+        assert_eq!(
+            second, 1,
+            "stable (reset_after=0) prior connection must reset so the next outage starts at 1"
+        );
+        conn.request_shutdown();
+        conn.await_shutdown().await;
+    }
+    /// A flap shorter than the dwell must keep climbing: resetting on every
+    /// handshake is the crash-loop / drain-then-immediate-redrop regression.
+    #[tokio::test]
+    async fn flapping_reconnect_does_not_reset_attempt() {
+        use futures::{SinkExt as _, StreamExt as _};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock hub");
+        let addr = listener.local_addr().expect("mock addr");
+        let upgrades = Arc::new(AtomicUsize::new(0));
+        let upgrades_srv = upgrades.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = upgrades_srv.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                        return;
+                    };
+                    if n == 1 {
+                        return;
+                    }
+                    let _ = ws.next().await;
+                    let ack = serde_json::json!({
+                        "connection_id": format!("mock-conn-{n}"),
+                        "user_id": "test",
+                        "computer_hub_version": "test",
+                        "supported_protocol_versions": ["1.0.0"],
+                    });
+                    if ws
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            ack.to_string().into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    while let Some(msg) = ws.next().await {
+                        if msg.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let (attempt_tx, mut attempt_rx) = mpsc::unbounded_channel();
+        let on_reconnect: Arc<ReconnectCallback> =
+            Arc::new(Box::new(move |event: ReconnectEvent| {
+                let _ = attempt_tx.send(event.attempt);
+            }));
+        let credential: Arc<dyn AuthProvider> = Arc::new(AuthCredential::bearer("test-token"));
+        let conn = HubConnection::connect(ConnectionConfig {
+            url: url::Url::parse(&format!("ws://{addr}/v1/tools")).expect("mock url"),
+            credential,
+            kind: ConnectionKind::ToolServer,
+            on_reconnect: Some(on_reconnect),
+            on_disconnect: None,
+            on_connect: None,
+            server_id: None,
+            server_description: None,
+            server_metadata: None,
+            outbound_buffer: None,
+            tuning: ConnectionTuning {
+                reconnect_backoff: Some(Arc::from([Duration::from_millis(10)])),
+                reconnect_attempt_reset_after: Some(Duration::from_secs(60)),
+                ..Default::default()
+            },
+            alpha_test_key: None,
+            allow_insecure_ws: false,
+            on_fatal: None,
+        })
+        .await
+        .expect("initial connect");
+        conn.force_reconnect();
+        let first = tokio::time::timeout(Duration::from_secs(5), attempt_rx.recv())
+            .await
+            .expect("first episode")
+            .expect("channel open");
+        assert_eq!(first, 2);
+        assert_eq!(
+            conn.inner.outage_seq.load(Ordering::Relaxed),
+            1,
+            "first outage must advance outage_seq"
+        );
+        conn.force_reconnect();
+        let second = tokio::time::timeout(Duration::from_secs(5), attempt_rx.recv())
+            .await
+            .expect("second episode")
+            .expect("channel open");
+        assert_eq!(
+            second, 3,
+            "flap inside the dwell must climb, not restart at 1"
+        );
+        assert_eq!(
+            conn.inner.outage_seq.load(Ordering::Relaxed),
+            2,
+            "each outage must advance the jitter phase fed to reconnect_delay"
+        );
+        conn.request_shutdown();
+        conn.await_shutdown().await;
+    }
+    async fn spawn_ack_only_hub() -> std::net::SocketAddr {
+        use futures::{SinkExt as _, StreamExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock hub");
+        let addr = listener.local_addr().expect("mock addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                        return;
+                    };
+                    let _ = ws.next().await;
+                    let ack = serde_json::json!({
+                        "connection_id": "mock",
+                        "user_id": "test",
+                        "computer_hub_version": "test",
+                        "supported_protocol_versions": ["1.0.0"],
+                    });
+                    if ws
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            ack.to_string().into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    while let Some(msg) = ws.next().await {
+                        if msg.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+    async fn connect_tracking_attempts(
+        addr: std::net::SocketAddr,
+        reset_after: Duration,
+        on_disconnect: Option<Arc<DisconnectCallback>>,
+    ) -> (Arc<HubConnection>, mpsc::UnboundedReceiver<u32>) {
+        let (attempt_tx, attempt_rx) = mpsc::unbounded_channel();
+        let on_reconnect: Arc<ReconnectCallback> =
+            Arc::new(Box::new(move |event: ReconnectEvent| {
+                let _ = attempt_tx.send(event.attempt);
+            }));
+        let credential: Arc<dyn AuthProvider> = Arc::new(AuthCredential::bearer("test-token"));
+        let conn = HubConnection::connect(ConnectionConfig {
+            url: url::Url::parse(&format!("ws://{addr}/v1/tools")).expect("mock url"),
+            credential,
+            kind: ConnectionKind::ToolServer,
+            on_reconnect: Some(on_reconnect),
+            on_disconnect,
+            on_connect: None,
+            server_id: None,
+            server_description: None,
+            server_metadata: None,
+            outbound_buffer: None,
+            tuning: ConnectionTuning {
+                reconnect_backoff: Some(Arc::from([Duration::from_millis(10)])),
+                reconnect_attempt_reset_after: Some(reset_after),
+                ..Default::default()
+            },
+            alpha_test_key: None,
+            allow_insecure_ws: false,
+            on_fatal: None,
+        })
+        .await
+        .expect("initial connect");
+        (conn, attempt_rx)
+    }
+    async fn recv_attempt(rx: &mut mpsc::UnboundedReceiver<u32>) -> u32 {
+        tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("reconnect event")
+            .expect("channel open")
+    }
+    /// 1s dwell so a stalled worker between reconnect-complete and the next
+    /// forced outage cannot look stable.
+    #[tokio::test]
+    async fn attempt_reset_dwell_crosses_a_real_threshold() {
+        let addr = spawn_ack_only_hub().await;
+        let (conn, mut attempt_rx) =
+            connect_tracking_attempts(addr, Duration::from_secs(1), None).await;
+        conn.force_reconnect();
+        assert_eq!(
+            recv_attempt(&mut attempt_rx).await,
+            1,
+            "fresh connect is not yet stable"
+        );
+        conn.force_reconnect();
+        assert_eq!(
+            recv_attempt(&mut attempt_rx).await,
+            2,
+            "immediate flap must climb"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        conn.force_reconnect();
+        assert_eq!(
+            recv_attempt(&mut attempt_rx).await,
+            1,
+            "after the dying socket outlived the dwell, attempt must reset"
+        );
+        conn.force_reconnect();
+        assert_eq!(
+            recv_attempt(&mut attempt_rx).await,
+            2,
+            "dwell must use the dying connection's age, not the actor lifetime"
+        );
+        conn.request_shutdown();
+        conn.await_shutdown().await;
+    }
+    /// `on_disconnect` runs after detect-time capture and before the gate.
+    /// Sleeping past the dwell there must not reset.
+    #[tokio::test]
+    async fn attempt_reset_ignores_latency_between_detect_and_gate() {
+        let addr = spawn_ack_only_hub().await;
+        let on_disconnect: Arc<DisconnectCallback> = Arc::new(Box::new(|| {
+            std::thread::sleep(Duration::from_secs(2));
+        }));
+        let (conn, mut attempt_rx) =
+            connect_tracking_attempts(addr, Duration::from_secs(1), Some(on_disconnect)).await;
+        conn.force_reconnect();
+        assert_eq!(
+            recv_attempt(&mut attempt_rx).await,
+            1,
+            "fresh connect is not yet stable"
+        );
+        conn.force_reconnect();
+        assert_eq!(
+            recv_attempt(&mut attempt_rx).await,
+            2,
+            "on_disconnect sleep past the dwell must not reset; detect-time age is still short"
+        );
+        conn.request_shutdown();
+        conn.await_shutdown().await;
+    }
+    /// 4409 is reconnectable (not 41xx terminal). A drain followed by an
+    /// immediate redrop must climb the ladder, not reset to slot 1.
+    #[tokio::test]
+    async fn drain_4409_then_quick_redrop_climbs_attempt() {
+        use futures::{SinkExt as _, StreamExt as _};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock hub");
+        let addr = listener.local_addr().expect("mock addr");
+        let upgrades = Arc::new(AtomicUsize::new(0));
+        let upgrades_srv = upgrades.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = upgrades_srv.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                        return;
+                    };
+                    let _ = ws.next().await;
+                    let ack = serde_json::json!({
+                        "connection_id": format!("mock-conn-{n}"),
+                        "user_id": "test",
+                        "computer_hub_version": "test",
+                        "supported_protocol_versions": ["1.0.0"],
+                    });
+                    if ws
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            ack.to_string().into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if n < 2 {
+                        let _ = ws
+                            .send(tokio_tungstenite::tungstenite::Message::Close(Some(
+                                CloseFrame {
+                                    code: CloseCode::from(4409),
+                                    reason: "drain".into(),
+                                },
+                            )))
+                            .await;
+                        return;
+                    }
+                    while let Some(msg) = ws.next().await {
+                        if msg.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let (attempt_tx, mut attempt_rx) = mpsc::unbounded_channel();
+        let on_reconnect: Arc<ReconnectCallback> =
+            Arc::new(Box::new(move |event: ReconnectEvent| {
+                let _ = attempt_tx.send(event.attempt);
+            }));
+        let credential: Arc<dyn AuthProvider> = Arc::new(AuthCredential::bearer("test-token"));
+        let conn = HubConnection::connect(ConnectionConfig {
+            url: url::Url::parse(&format!("ws://{addr}/v1/tools")).expect("mock url"),
+            credential,
+            kind: ConnectionKind::ToolServer,
+            on_reconnect: Some(on_reconnect),
+            on_disconnect: None,
+            on_connect: None,
+            server_id: None,
+            server_description: None,
+            server_metadata: None,
+            outbound_buffer: None,
+            tuning: ConnectionTuning {
+                reconnect_backoff: Some(Arc::from([Duration::from_millis(10)])),
+                reconnect_attempt_reset_after: Some(Duration::from_secs(60)),
+                ..Default::default()
+            },
+            alpha_test_key: None,
+            allow_insecure_ws: false,
+            on_fatal: None,
+        })
+        .await
+        .expect("initial connect");
+        let first = tokio::time::timeout(Duration::from_secs(5), attempt_rx.recv())
+            .await
+            .expect("first 4409 reconnect")
+            .expect("channel open");
+        assert_eq!(first, 1, "4409 must reconnect, not terminate");
+        let second = tokio::time::timeout(Duration::from_secs(5), attempt_rx.recv())
+            .await
+            .expect("second 4409 reconnect")
+            .expect("channel open");
+        assert_eq!(
+            second, 2,
+            "immediate 4409 redrop must climb; a per-success reset would report 1"
+        );
+        conn.request_shutdown();
+        conn.await_shutdown().await;
+    }
+    #[tokio::test]
+    async fn distinct_connections_use_distinct_jitter_seeds() {
+        use futures::{SinkExt as _, StreamExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock hub");
+        let addr = listener.local_addr().expect("mock addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                        return;
+                    };
+                    let _ = ws.next().await;
+                    let ack = serde_json::json!({
+                        "connection_id": "mock",
+                        "user_id": "test",
+                        "computer_hub_version": "test",
+                        "supported_protocol_versions": ["1.0.0"],
+                    });
+                    if ws
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            ack.to_string().into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    while let Some(msg) = ws.next().await {
+                        if msg.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let mk = || async {
+            let credential: Arc<dyn AuthProvider> = Arc::new(AuthCredential::bearer("test-token"));
+            HubConnection::connect(ConnectionConfig {
+                url: url::Url::parse(&format!("ws://{addr}/v1/tools")).expect("mock url"),
+                credential,
+                kind: ConnectionKind::ToolServer,
+                on_reconnect: None,
+                on_disconnect: None,
+                on_connect: None,
+                server_id: None,
+                server_description: None,
+                server_metadata: None,
+                outbound_buffer: None,
+                tuning: ConnectionTuning::default(),
+                alpha_test_key: None,
+                allow_insecure_ws: false,
+                on_fatal: None,
+            })
+            .await
+            .expect("connect")
+        };
+        let a = mk().await;
+        let b = mk().await;
+        let sa = a.inner.reconnect_jitter_seed;
+        let sb = b.inner.reconnect_jitter_seed;
+        assert_ne!(sa, sb, "connect() must call new_reconnect_jitter_seed()");
+        assert_eq!(
+            a.inner.outage_seq.load(Ordering::Relaxed),
+            0,
+            "fresh connection has no reconnect outage yet"
+        );
+        assert_eq!(
+            a.inner.attempt_reset_after,
+            Duration::from_secs(10),
+            "ConnectionTuning::default() must resolve None to the 10s production dwell"
+        );
+        assert_ne!(
+            a.inner.reconnect_delay(1),
+            b.inner.reconnect_delay(1),
+            "seed must reach the delay used by the reader actor"
+        );
+        assert_eq!(
+            a.inner.reconnect_delay(1),
+            backoff_for(1, &a.inner.reconnect_backoff, sa, 0),
+            "actor helper must use the stored seed and outage_seq, not literals"
+        );
+        a.request_shutdown();
+        b.request_shutdown();
+        a.await_shutdown().await;
+        b.await_shutdown().await;
     }
     #[tokio::test]
     async fn call_request_serialization_failure_registers_no_waiter() {

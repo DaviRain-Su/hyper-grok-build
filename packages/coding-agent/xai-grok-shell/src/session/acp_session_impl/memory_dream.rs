@@ -93,6 +93,79 @@ impl SessionActor {
         );
     }
 
+    /// Session-end memory save, empty-session-gated dream, and memory summary
+    /// telemetry. Shared by Shutdown and channel-closed so the dream gate cannot
+    /// drift between exit arms.
+    ///
+    /// `log_suffix` is appended to the `MEMORY_SESSION_END:` log line so each
+    /// arm keeps a distinct reason string in logs.
+    pub(super) async fn run_session_end_memory_pipeline(&self, log_suffix: &str) {
+        let mut session_end_result = "disabled";
+        let mut total_chunks_at_end = 0usize;
+        // Dream consolidates *prior* logs. Run after Written/Failed, or when
+        // save was Skipped for config (`save_on_end=false`) but the session
+        // still meets the size threshold. Empty/brief sessions stay off.
+        let mut run_exit_dream = false;
+        if !self.startup_hints.is_subagent {
+            if let Some(storage) = self.memory.storage() {
+                let conversation = self.chat_state_handle.get_conversation().await;
+                let result = crate::session::memory::hooks::on_session_end(
+                    &storage,
+                    &conversation,
+                    &self.session_info.id.0,
+                    self.memory.save_on_end,
+                );
+                match &result {
+                    crate::session::memory::hooks::SessionEndResult::Written(path_str) => {
+                        session_end_result = "written";
+                        run_exit_dream = true;
+                        self.reindex_and_embed(std::path::Path::new(path_str), "session")
+                            .await;
+                        self.send_xai_notification(XaiSessionUpdate::MemorySessionSaved {
+                            path: path_str.clone(),
+                        })
+                        .await;
+                    }
+                    crate::session::memory::hooks::SessionEndResult::Skipped => {
+                        session_end_result = "skipped";
+                        // `Skipped` also means save_on_end=false — still dream
+                        // when the conversation is substantial.
+                        run_exit_dream =
+                            crate::session::memory::hooks::queries_meeting_session_end_threshold(
+                                &conversation,
+                            )
+                            .is_some();
+                    }
+                    crate::session::memory::hooks::SessionEndResult::Failed(_) => {
+                        session_end_result = "failed";
+                        run_exit_dream = true;
+                    }
+                }
+                total_chunks_at_end = storage.total_chunk_count();
+                let telem = self.memory.telemetry_snapshot();
+                let msg = format!("MEMORY_SESSION_END: {log_suffix}");
+                tracing::info!(
+                    target: xai_grok_telemetry::memory_log::TARGET,
+                    result = ?result,
+                    tool_searches = telem.tool_search_count,
+                    injection_searches = telem.injection_count,
+                    recovery_searches = telem.compaction_recovery_count,
+                    "{msg}"
+                );
+            }
+        } else {
+            tracing::debug!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
+            );
+        }
+        if run_exit_dream {
+            self.maybe_run_dream().await;
+        }
+        let telem = self.memory.telemetry_snapshot();
+        self.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
+    }
+
     /// Reindex a single file and embed any new chunks.
     ///
     /// Used after flush writes and session-end writes to keep the index

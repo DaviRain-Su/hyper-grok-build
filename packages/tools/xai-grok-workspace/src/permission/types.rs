@@ -86,6 +86,39 @@ pub struct PermissionEvent {
     /// `user_prompted=true` events in the turn, not this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_depth: Option<u32>,
+    /// Ordered, deduplicated classifier finding tokens for this request. Three
+    /// distinct states (do not conflate `None` with `Some([])`):
+    /// - `None`: legacy trace, or the request never entered the Auto classifier
+    ///   route (fast-path allow, policy/gate decision, non-Bash access).
+    /// - `Some([])`: the classifier route was selected and the exact attempted
+    ///   assessment was empty. This is *not* a proven-clean classification.
+    /// - `Some(tokens)`: the classifier route was selected with these findings.
+    /// Projected once from the exact `BashSecurityAssessment` handed to the
+    /// classifier (`BashSecurityAssessment::tokens`); telemetry/traces never
+    /// recompute findings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_findings: Option<Vec<String>>,
+    /// Classifier verdict when the Auto classifier route produced one:
+    /// `"allow" | "block" | "unavailable"`. `None` when the request never
+    /// reached a classifier verdict (legacy, fast path, non-classified route, or
+    /// requester gone mid-classify).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier_verdict: Option<String>,
+}
+/// A permission decision plus the authoritative manager [`PermissionEvent`] that
+/// produced it. The manager builds exactly one event per decision, sends one
+/// clone to the trace `event_tx`, and returns the identical event here so the
+/// shell can source content-free analytics fields (permission mode, wait time,
+/// classifier verdict/findings) from the manager rather than re-deriving them.
+///
+/// `event` is `None` for event-less paths (`AllowAll`, or a manager channel
+/// send/receive failure). Callers must omit manager-only analytics fields in
+/// that case instead of fabricating them. The shell never re-enqueues the
+/// returned event — the manager already emitted the sole trace copy.
+#[derive(Debug, Clone)]
+pub struct PermissionResolution {
+    pub decision: Decision,
+    pub event: Option<PermissionEvent>,
 }
 /// Identifies the type of client connecting to the agent.
 /// Used to determine which permission UI features to enable
@@ -244,7 +277,7 @@ pub enum PermissionCommand {
         access: AccessKind,
         tool_call_update: acp::ToolCallUpdate,
         path_context: Option<RequestPathContext>,
-        respond_to: oneshot::Sender<Decision>,
+        respond_to: oneshot::Sender<PermissionResolution>,
         /// Session ID originating this request. Used to attribute
         /// permission events to child subagents.
         session_id: Option<String>,
@@ -458,6 +491,35 @@ mod tests {
         assert!(event.auto_denials_total.is_none());
         assert!(event.wait_ms.is_none());
         assert!(event.queue_depth.is_none());
+        assert!(event.security_findings.is_none());
+        assert!(event.classifier_verdict.is_none());
+    }
+    #[test]
+    fn permission_event_findings_none_vs_some_empty_are_distinct() {
+        let base = r#"{
+            "tool_id": "tc1",
+            "tool_name": "bash",
+            "access_kind": "bash",
+            "yolo_mode": false,
+            "auto_approved": false,
+            "user_prompted": true,
+            "decision": "allow",
+            "timestamp": "2026-03-24T00:00:00Z",
+            "security_findings": [],
+            "classifier_verdict": "block"
+        }"#;
+        let event: PermissionEvent = serde_json::from_str(base).unwrap();
+        assert_eq!(event.security_findings.as_deref(), Some(&[][..]));
+        assert_eq!(event.classifier_verdict.as_deref(), Some("block"));
+        let with_tokens: PermissionEvent = serde_json::from_str(&base.replace(
+            "\"security_findings\": []",
+            "\"security_findings\": [\"opaque_shell\"]",
+        ))
+        .unwrap();
+        assert_eq!(
+            with_tokens.security_findings.as_deref(),
+            Some(&["opaque_shell".to_owned()][..])
+        );
     }
     #[test]
     fn permission_event_with_subagent_attribution() {
@@ -484,6 +546,8 @@ mod tests {
             auto_denials_total: Some(5),
             wait_ms: Some(1234),
             queue_depth: Some(3),
+            security_findings: Some(vec!["opaque_shell".into()]),
+            classifier_verdict: Some("block".into()),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["subagent_session_id"], "child-1");
@@ -497,6 +561,8 @@ mod tests {
         assert_eq!(json["auto_denials_total"], 5);
         assert_eq!(json["wait_ms"], 1234);
         assert_eq!(json["queue_depth"], 3);
+        assert_eq!(json["security_findings"][0], "opaque_shell");
+        assert_eq!(json["classifier_verdict"], "block");
     }
     #[test]
     fn permission_event_skips_none_optional_fields() {
@@ -523,6 +589,8 @@ mod tests {
             auto_denials_total: None,
             wait_ms: None,
             queue_depth: None,
+            security_findings: None,
+            classifier_verdict: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(!json.contains("subagent_session_id"));
@@ -535,6 +603,8 @@ mod tests {
         assert!(!json.contains("auto_denials_total"));
         assert!(!json.contains("wait_ms"));
         assert!(!json.contains("queue_depth"));
+        assert!(!json.contains("security_findings"));
+        assert!(!json.contains("classifier_verdict"));
     }
     #[test]
     fn hashline_edit_maps_to_edit_access() {

@@ -100,8 +100,7 @@ impl Theme {
             accent_plan: rgb(255, 219, 141), // #FFDB8D — golden
 
             accent_verify: rgb(187, 154, 247), // #bb9af7 — violet
-
-            accent_feedback: GREEN1, // #73daca
+            accent_feedback: GREEN1,
 
             accent_remember: Color::Rgb(139, 195, 74), // #8BC34A — Material Design light green
 

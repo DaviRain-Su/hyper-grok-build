@@ -4,23 +4,33 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 pub use xai_grok_config::grok_home;
+pub use xai_grok_tools::util::format_bytes;
+
+/// A closed stdout (`grok du | head`) is a clean stop, not a failure.
+pub fn ignore_broken_pipe(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
 
 /// Path to `$GROK_HOME/pager.toml`.
 pub fn pager_toml_path() -> PathBuf {
     grok_home().join("pager.toml")
 }
 
-/// User-facing label for the user grok directory (``~/.grok`` or ``$GROK_HOME``).
-///
-/// Derived from resolved [`grok_home()`] vs `xai_grok_config::default_grok_home()`,
-/// not from whether `GROK_HOME` is set in the environment.
+/// `~/.grok` or `$GROK_HOME`, decided by the resolved home rather than by
+/// whether `GROK_HOME` is set in the environment.
 pub fn display_grok_home_prefix() -> String {
     display_grok_home_prefix_for(&grok_home())
 }
 
-fn display_grok_home_prefix_for(home: &Path) -> String {
-    if home == xai_grok_config::default_grok_home() {
+pub fn display_grok_home_prefix_for(home: &Path) -> String {
+    let default = xai_grok_config::default_grok_home();
+    if home == default || home == dunce::canonicalize(&default).unwrap_or(default) {
         "~/.grok".to_string()
     } else {
         "$GROK_HOME".to_string()
@@ -71,13 +81,7 @@ pub fn is_under_user_grok_home(path: &Path) -> bool {
     path.starts_with(grok_home())
 }
 
-/// Format a duration as a compact human-friendly string.
-///
-/// Uses consistent rounding for visual stability:
-/// - Under 10s: `"5.2s"` (one decimal for granularity)
-/// - 10-59s: `"32s"` (no decimal)
-/// - 1m-59m: `"2m5s"`
-/// - 1h+: `"1h2m"`
+/// Compact duration: `5.2s`, `32s`, `2m5s`, `1h2m`.
 pub fn format_duration(d: Duration) -> String {
     let total_secs = d.as_secs();
     if total_secs < 10 {
@@ -96,17 +100,8 @@ pub fn format_duration(d: Duration) -> String {
     format!("{hours}h{remaining_mins}m")
 }
 
-/// Format a duration as a coarse recency string for "time ago" / age
-/// displays (e.g. dashboard row age column and peek panel prefix).
-///
-/// Buckets chosen for the agent dashboard so the column stays compact
-/// and doesn't distract with second-level churn:
-/// - < 1 minute: `"just now"`
-/// - minutes: `"1m"` … `"59m"`
-/// - hours: `"1h"` … `"23h"`
-/// - days: `"1d"` … `"29d"`
-/// - months (≈30d+): `"1mo"` … `"11mo"`
-/// - years (≈365d+): `"1y"` …
+/// Coarse recency for age columns: `just now`, `5m`, `3h`, `2d`, `1mo`, `1y`.
+/// Buckets stay wide so the column does not churn at second granularity.
 pub fn format_time_ago(d: Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
@@ -132,12 +127,8 @@ pub fn format_time_ago(d: Duration) -> String {
     format!("{years}y")
 }
 
-/// Convert unix-epoch millis into a wall-clock [`SystemTime`].
-///
-/// Used for dashboard recency that originates as a wall-clock timestamp (the
-/// leader roster's `last_change_unix_ms`). A non-positive value — the
-/// `#[serde(default)]` `0` sentinel for a missing roster timestamp — falls
-/// back to "now".
+/// Wall-clock [`SystemTime`] from unix-epoch millis. A non-positive value is
+/// the `#[serde(default)]` sentinel for a missing timestamp and reads as now.
 pub fn system_time_from_unix_ms(unix_ms: i64) -> SystemTime {
     if unix_ms <= 0 {
         return SystemTime::now();
@@ -147,24 +138,17 @@ pub fn system_time_from_unix_ms(unix_ms: i64) -> SystemTime {
         .unwrap_or_else(SystemTime::now)
 }
 
-/// Project a monotonic [`Instant`] onto the wall clock as the [`SystemTime`]
-/// it corresponds to (`SystemTime::now() - instant.elapsed()`).
-///
-/// The dashboard stores row recency as a wall-clock `SystemTime` so on-disk
-/// roster timestamps (which can predate this process — even the machine's
-/// boot — and so are unrepresentable as a monotonic `Instant`) sit in the same
-/// comparable space as local rows. Local rows hold live `Instant` anchors;
-/// this maps them across. A fixed anchor ages correctly because only `now`
-/// advances, and the sub-millisecond skew between the two `now()` samples is
-/// invisible to the minute-granularity [`format_time_ago`] buckets.
+/// Project a monotonic [`Instant`] onto the wall clock, so live local anchors
+/// and on-disk timestamps (which can predate boot, and so have no `Instant`)
+/// compare in one space. The skew between the two `now()` samples is below
+/// [`format_time_ago`]'s minute granularity.
 pub fn system_time_from_instant(instant: Instant) -> SystemTime {
     SystemTime::now()
         .checked_sub(instant.elapsed())
         .unwrap_or_else(SystemTime::now)
 }
 
-/// Decode common HTML entities (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&#39;`)
-/// that may appear in LLM-generated session summaries.
+/// Decode the HTML entities that appear in generated session summaries.
 pub fn decode_html_entities(s: &str) -> std::borrow::Cow<'_, str> {
     if !s.contains('&') {
         return std::borrow::Cow::Borrowed(s);
@@ -206,6 +190,64 @@ pub fn parse_schedule_interval_secs(human: &str) -> Option<u64> {
     Some(n * secs_per)
 }
 
+pub fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+/// Compact `N ago` age relative to `now`; future timestamps saturate to
+/// `0s ago`. [`format_time_ago`] buckets coarser and drops the `ago`.
+pub fn format_age(created_at: i64, now: i64) -> String {
+    let delta = now.saturating_sub(created_at).max(0);
+    if delta < 60 {
+        format!("{delta}s ago")
+    } else if delta < 3600 {
+        format!("{}m ago", delta / 60)
+    } else if delta < 86400 {
+        format!("{}h ago", delta / 3600)
+    } else {
+        format!("{}d ago", delta / 86400)
+    }
+}
+
+/// Truncate to at most `max_width` display columns (CJK counts 2), ending
+/// with `…` when cut; a zero budget yields an empty string.
+pub fn truncate_to_width(s: &str, max_width: usize) -> Cow<'_, str> {
+    if byte_offset_at_width(s, max_width) == s.len() {
+        return Cow::Borrowed(s);
+    }
+    if max_width == 0 {
+        return Cow::Borrowed("");
+    }
+    let end = byte_offset_at_width(s, max_width - 1);
+    Cow::Owned(format!("{}…", &s[..end]))
+}
+
+/// Byte offset at which display width would exceed `max_width`, or `s.len()`.
+pub fn byte_offset_at_width(s: &str, max_width: usize) -> usize {
+    let mut width = 0;
+    for (i, ch) in s.char_indices() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + cw > max_width {
+            return i;
+        }
+        width += cw;
+    }
+    s.len()
+}
+
+/// Left-align `s` in `width` display columns. `format!`'s `{:<width$}` pads
+/// by char count, which shears columns after wide (e.g. CJK) glyphs.
+pub fn pad_to_width(s: &str, width: usize) -> String {
+    let pad = width.saturating_sub(s.width());
+    let mut out = String::with_capacity(s.len() + pad);
+    out.push_str(s);
+    out.extend(std::iter::repeat_n(' ', pad));
+    out
+}
+
 /// Group a count's digits with commas for display: `1234567` → `"1,234,567"`.
 pub fn group_thousands(n: u64) -> String {
     let digits = n.to_string();
@@ -224,6 +266,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn format_age_buckets_relative_to_now() {
+        let now = 1_000_000;
+        assert_eq!(format_age(now - 30, now), "30s ago");
+        assert_eq!(format_age(now - 120, now), "2m ago");
+        assert_eq!(format_age(now - 7200, now), "2h ago");
+        assert_eq!(format_age(now - 172_800, now), "2d ago");
+        assert_eq!(format_age(now + 60, now), "0s ago");
+    }
+
+    #[test]
+    fn truncate_to_width_keeps_marker_within_budget() {
+        assert_eq!(truncate_to_width("hello", 10).as_ref(), "hello");
+        assert_eq!(truncate_to_width("hello world", 5).as_ref(), "hell…");
+        assert_eq!(truncate_to_width("héllo wörld", 5).as_ref(), "héll…");
+        assert_eq!(truncate_to_width("日本語ラベル", 5).as_ref(), "日本…");
+        assert_eq!(truncate_to_width("hello", 1).as_ref(), "…");
+        assert_eq!(truncate_to_width("hello", 0).as_ref(), "");
+    }
+
+    #[test]
+    fn pad_to_width_pads_by_display_width() {
+        assert_eq!(pad_to_width("ab", 4), "ab  ");
+        assert_eq!(pad_to_width("日本", 6), "日本  ");
+        assert_eq!(pad_to_width("toolong", 3), "toolong");
+    }
+
+    #[test]
     fn group_thousands_inserts_separators() {
         assert_eq!(group_thousands(0), "0");
         assert_eq!(group_thousands(999), "999");
@@ -232,80 +301,43 @@ mod tests {
     }
 
     #[test]
-    fn subsecond() {
-        assert_eq!(format_duration(Duration::from_millis(500)), "0.5s");
+    fn format_duration_buckets() {
+        let cases = [
+            (Duration::from_millis(500), "0.5s"),
+            (Duration::from_secs_f64(5.23), "5.2s"),
+            (Duration::from_secs(10), "10s"),
+            (Duration::from_secs_f64(12.3), "12s"),
+            (Duration::from_secs(125), "2m5s"),
+            (Duration::from_secs(3725), "1h2m"),
+        ];
+        for (d, expected) in cases {
+            assert_eq!(format_duration(d), expected, "{d:?}");
+        }
     }
 
     #[test]
-    fn under_ten_seconds() {
-        assert_eq!(format_duration(Duration::from_secs_f64(5.23)), "5.2s");
-    }
-
-    #[test]
-    fn ten_seconds_no_decimal() {
-        assert_eq!(format_duration(Duration::from_secs(10)), "10s");
-    }
-
-    #[test]
-    fn seconds_no_decimal() {
-        assert_eq!(format_duration(Duration::from_secs_f64(12.3)), "12s");
-    }
-
-    #[test]
-    fn thirty_seconds() {
-        assert_eq!(format_duration(Duration::from_secs(30)), "30s");
-    }
-
-    #[test]
-    fn minutes() {
-        assert_eq!(format_duration(Duration::from_secs(125)), "2m5s");
-    }
-
-    #[test]
-    fn hours() {
-        assert_eq!(format_duration(Duration::from_secs(3725)), "1h2m");
-    }
-
-    #[test]
-    fn time_ago_just_now() {
-        assert_eq!(format_time_ago(Duration::from_secs(0)), "just now");
-        assert_eq!(format_time_ago(Duration::from_secs(30)), "just now");
-        assert_eq!(format_time_ago(Duration::from_secs(59)), "just now");
-    }
-
-    #[test]
-    fn time_ago_minutes() {
-        assert_eq!(format_time_ago(Duration::from_secs(60)), "1m");
-        assert_eq!(format_time_ago(Duration::from_secs(125)), "2m");
-        assert_eq!(format_time_ago(Duration::from_secs(3599)), "59m");
-    }
-
-    #[test]
-    fn time_ago_hours() {
-        assert_eq!(format_time_ago(Duration::from_secs(3600)), "1h");
-        assert_eq!(format_time_ago(Duration::from_secs(7200)), "2h");
-        assert_eq!(format_time_ago(Duration::from_secs(86399)), "23h");
-    }
-
-    #[test]
-    fn time_ago_days() {
-        assert_eq!(format_time_ago(Duration::from_secs(86400)), "1d");
-        assert_eq!(format_time_ago(Duration::from_secs(172800)), "2d");
-        assert_eq!(format_time_ago(Duration::from_secs(2_592_000 - 1)), "29d"); // just under 30d
-    }
-
-    #[test]
-    fn time_ago_months() {
-        assert_eq!(format_time_ago(Duration::from_secs(2_592_000)), "1mo"); // 30d
-        assert_eq!(format_time_ago(Duration::from_secs(5_184_000)), "2mo");
-        // 359d is still 11mo (359/30=11); 360d would be 12mo.
-        assert_eq!(format_time_ago(Duration::from_secs(359 * 86400)), "11mo");
-    }
-
-    #[test]
-    fn time_ago_years() {
-        assert_eq!(format_time_ago(Duration::from_secs(31_536_000)), "1y"); // 365d
-        assert_eq!(format_time_ago(Duration::from_secs(63_072_000)), "2y");
+    fn format_time_ago_buckets() {
+        let cases = [
+            (0, "just now"),
+            (59, "just now"),
+            (60, "1m"),
+            (3599, "59m"),
+            (3600, "1h"),
+            (86_399, "23h"),
+            (86_400, "1d"),
+            (2_592_000 - 1, "29d"),
+            (2_592_000, "1mo"),
+            // 359d is still 11mo (359/30 = 11); 360d would be 12mo.
+            (359 * 86_400, "11mo"),
+            (31_536_000, "1y"),
+        ];
+        for (secs, expected) in cases {
+            assert_eq!(
+                format_time_ago(Duration::from_secs(secs)),
+                expected,
+                "{secs}s"
+            );
+        }
     }
 
     fn now_unix_ms() -> i64 {
@@ -315,9 +347,7 @@ mod tests {
             .as_millis() as i64
     }
 
-    /// A real past timestamp survives the round-trip and renders its true age —
-    /// including ages beyond the machine's uptime, which a monotonic `Instant`
-    /// could not represent (its floor is system boot).
+    // Ages beyond the machine's uptime have no monotonic `Instant`.
     #[test]
     fn system_time_from_unix_ms_renders_real_age() {
         let two_hours_ago = now_unix_ms() - 2 * 3_600_000;
@@ -333,16 +363,13 @@ mod tests {
         assert_eq!(format_time_ago(elapsed), "1mo");
     }
 
-    /// A zero / missing timestamp (the `#[serde(default)]` sentinel) falls back
-    /// to "now" rather than the unix epoch (1970).
     #[test]
     fn system_time_from_unix_ms_zero_falls_back_to_now() {
         let elapsed = system_time_from_unix_ms(0).elapsed().unwrap_or_default();
         assert!(elapsed.as_secs() < 5, "zero sentinel must fall back to now");
     }
 
-    /// A future timestamp (clock skew) renders as "just now": `elapsed()` errors
-    /// on a future `SystemTime`, and callers default that to a zero duration.
+    // `elapsed()` errors on a future `SystemTime`; callers default to zero.
     #[test]
     fn system_time_from_unix_ms_future_renders_just_now() {
         let future = now_unix_ms() + 10_000_000;
@@ -352,8 +379,6 @@ mod tests {
         assert_eq!(format_time_ago(elapsed), "just now");
     }
 
-    /// A fixed `Instant` projects to a stable wall-clock moment, so its age
-    /// reflects time-since-anchor (here ~10m) rather than re-anchoring to now.
     #[test]
     fn system_time_from_instant_reflects_elapsed() {
         let ten_min_ago = Instant::now() - Duration::from_secs(600);
@@ -364,64 +389,39 @@ mod tests {
     }
 
     #[test]
-    fn parses_every_5_minutes() {
-        assert_eq!(parse_schedule_interval_secs("every 5 minutes"), Some(300));
+    fn parse_schedule_interval_secs_reads_units() {
+        let cases = [
+            ("every 5 minutes", Some(300)),
+            ("every 5m", Some(300)),
+            ("every 10s", Some(10)),
+            ("every 1 hour", Some(3600)),
+            ("every 1 day", Some(86400)),
+            ("foo bar", None),
+            ("every foo", None),
+            ("every 5x", None),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_schedule_interval_secs(input), expected, "{input:?}");
+        }
     }
 
     #[test]
-    fn parses_every_5m_short() {
-        assert_eq!(parse_schedule_interval_secs("every 5m"), Some(300));
-    }
+    fn decode_html_entities_decodes_and_borrows() {
+        let untouched = decode_html_entities("hello world");
+        assert!(matches!(untouched, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(untouched.as_ref(), "hello world");
 
-    #[test]
-    fn parses_every_10s() {
-        assert_eq!(parse_schedule_interval_secs("every 10s"), Some(10));
-    }
-
-    #[test]
-    fn parses_every_1_hour() {
-        assert_eq!(parse_schedule_interval_secs("every 1 hour"), Some(3600));
-    }
-
-    #[test]
-    fn parses_every_1_day() {
-        assert_eq!(parse_schedule_interval_secs("every 1 day"), Some(86400));
-    }
-
-    #[test]
-    fn decode_html_entities_no_entities() {
-        let s = "hello world";
-        let out = decode_html_entities(s);
-        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
-        assert_eq!(out.as_ref(), s);
-    }
-
-    #[test]
-    fn decode_html_entities_amp() {
-        assert_eq!(decode_html_entities("foo &amp; bar").as_ref(), "foo & bar");
-    }
-
-    #[test]
-    fn decode_html_entities_multiple() {
-        assert_eq!(
-            decode_html_entities("1 &lt; 2 &amp;&amp; 3 &gt; 2").as_ref(),
-            "1 < 2 && 3 > 2"
-        );
-    }
-
-    #[test]
-    fn decode_html_entities_quotes() {
-        assert_eq!(
-            decode_html_entities("&quot;hello&quot; &amp; &#39;world&#39;").as_ref(),
-            "\"hello\" & 'world'"
-        );
-    }
-
-    #[test]
-    fn unknown_schedule_returns_none() {
-        assert_eq!(parse_schedule_interval_secs("foo bar"), None);
-        assert_eq!(parse_schedule_interval_secs("every foo"), None);
-        assert_eq!(parse_schedule_interval_secs("every 5x"), None);
+        let cases = [
+            ("foo &amp; bar", "foo & bar"),
+            ("1 &lt; 2 &amp;&amp; 3 &gt; 2", "1 < 2 && 3 > 2"),
+            (
+                "&quot;hello&quot; &amp; &#39;world&#39;",
+                "\"hello\" & 'world'",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(decode_html_entities(input).as_ref(), expected, "{input:?}");
+        }
     }
 
     #[test]

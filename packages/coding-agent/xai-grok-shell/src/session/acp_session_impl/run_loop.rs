@@ -30,6 +30,70 @@ mod yolo_toggle_report_tests {
 /// Best-effort removal of this session's per-session scratch staging on
 /// teardown. A no-op in builds without a scratch producer.
 fn cleanup_session_scratch(_session: &SessionActor) {}
+/// SessionEnd hooks + stop dispatch. Shared so channel-closed and Shutdown
+/// cannot drift on hook ordering (memory save still runs after this).
+async fn fire_session_end_hooks(session: &SessionActor, reason: &str) {
+    let envelope = session.fire_hook(
+        xai_grok_hooks::event::HookEventName::SessionEnd,
+        None,
+        xai_grok_hooks::event::HookPayload::SessionEnd {
+            reason: reason.to_string(),
+            turn_count: None,
+            tool_call_count: None,
+        },
+    );
+    if let Some(registry) = session.hook_registry.borrow().clone() {
+        let ctx = session.hook_run_ctx();
+        let results = xai_grok_hooks::dispatcher::dispatch_non_blocking(
+            &registry,
+            xai_grok_hooks::event::HookEventName::SessionEnd,
+            &envelope,
+            &ctx,
+        )
+        .await;
+        session
+            .send_hook_execution("session_end", None, None, &results)
+            .await;
+    }
+    {
+        let ext_rt = session.extension_runtime.borrow().clone();
+        let _ = ext_rt.dispatch_session_end().await;
+        crate::session::wasm_tools::emit_runtime_metrics(
+            session.telemetry_enabled,
+            &format!("session_end_{reason}"),
+            &ext_rt,
+        );
+    }
+    {
+        let bridge = session.agent.borrow().tool_bridge().clone();
+        let mut owned = session.wasm_registered_tools.borrow_mut();
+        let n = crate::session::wasm_tools::unregister_session_wasm_tools(&bridge, &mut owned);
+        session.wasm_registered_commands.borrow_mut().clear();
+        if n > 0 {
+            tracing::info!(wasm_tools = n, %reason, "unregistered session wasm tools");
+        }
+    }
+    session.dispatch_session_end_stop(reason).await;
+}
+/// Cancel the feedback sync loop, drain/sync under exit budgets, persist
+/// background-task state, and drop scratch. Owns the single final signal sync
+/// via [`FeedbackManager::shutdown`] — the sync loop cancel arm does not sync.
+///
+/// `FeedbackManager::shutdown` short-circuits force_sync/drain when telemetry
+/// is off or the session is empty with nothing pending (empty open→exit).
+async fn finish_session_exit_feedback(session: &SessionActor) {
+    if let Some(cancel) = &session.sync_loop_cancel {
+        cancel.cancel();
+    }
+    session
+        .feedback_manager
+        .shutdown(session.upload_queue.get())
+        .await;
+    if !session.startup_hints.is_subagent {
+        session.persist_background_task_manifest().await;
+    }
+    cleanup_session_scratch(session);
+}
 impl SessionActor {
     /// Serialize terminal task-wake admission with interactive cancellation.
     pub(super) async fn admit_task_completion_wake(
@@ -397,12 +461,11 @@ pub(super) async fn run_session(
                 }
                 maybe_completion = completion_rx.recv() => {
                     let Some((prompt_id, result)) = maybe_completion else {
-                        // Channel closed - shutdown feedback sync loop
+                        // Completion channel closed: full feedback teardown so
+                        // final signal sync + upload drain still run (cancel
+                        // alone no longer force-syncs — shutdown owns that).
                         shutdown_workflows(&session).await;
-                        if let Some(cancel) = &session.sync_loop_cancel {
-                            cancel.cancel();
-                        }
-                        cleanup_session_scratch(&session);
+                        finish_session_exit_feedback(&session).await;
                         return;
                     };
                     // Flush any buffered turn deltas before `handle_completion`
@@ -483,98 +546,15 @@ pub(super) async fn run_session(
                 }
                 maybe_cmd = cmd_rx.recv() => {
                     let Some(cmd) = maybe_cmd else {
-                        // ── session_end hook (channel-closed path) ────
-                        // Fires BEFORE memory auto-save per plan contract.
-                        let envelope = session.fire_hook(
-                            xai_grok_hooks::event::HookEventName::SessionEnd,
-                            None,
-                            xai_grok_hooks::event::HookPayload::SessionEnd {
-                                reason: "channel_closed".to_string(),
-                                turn_count: None,
-                                tool_call_count: None,
-                            },
-                        );
-                        if let Some(registry) = session.hook_registry.borrow().clone() {
-                            let ctx = session.hook_run_ctx();
-                            let results = xai_grok_hooks::dispatcher::dispatch_non_blocking(
-                                &registry,
-                                xai_grok_hooks::event::HookEventName::SessionEnd,
-                                &envelope,
-                                &ctx,
+                        // ── session_end (channel-closed path) ────────
+                        // Hooks fire BEFORE memory auto-save per plan contract.
+                        fire_session_end_hooks(&session, "channel_closed").await;
+                        session
+                            .run_session_end_memory_pipeline(
+                                "channel closed, session summary saved",
                             )
                             .await;
-                            session.send_hook_execution("session_end", None, None, &results).await;
-                        }
-                        {
-                            let ext_rt = session.extension_runtime.borrow().clone();
-                            let _ = ext_rt.dispatch_session_end().await;
-                            crate::session::wasm_tools::emit_runtime_metrics(
-                                session.telemetry_enabled,
-                                "session_end_channel_closed",
-                                &ext_rt,
-                            );
-                        }
-                        // Drop session-scoped wasm_* tools from the shared bridge.
-                        {
-                            let bridge = session.agent.borrow().tool_bridge().clone();
-                            let mut owned = session.wasm_registered_tools.borrow_mut();
-                            let n = crate::session::wasm_tools::unregister_session_wasm_tools(
-                                &bridge, &mut owned,
-                            );
-                            session.wasm_registered_commands.borrow_mut().clear();
-                            if n > 0 {
-                                tracing::info!(
-                                    wasm_tools = n,
-                                    "unregistered session wasm tools on channel_closed"
-                                );
-                            }
-                        }
-                        session.dispatch_session_end_stop("channel_closed").await;
-                        // Channel closed -- run memory session-end hook.
-                        let mut session_end_result = "disabled";
-                        let mut total_chunks_at_end = 0usize;
-                        if !session.startup_hints.is_subagent {
-                            if let Some(storage) = session.memory.storage() {
-                                let conversation = session.chat_state_handle.get_conversation().await;
-                                let result = crate::session::memory::hooks::on_session_end(
-                                    &storage,
-                                    &conversation,
-                                    &session.session_info.id.0,
-                                    session.memory.save_on_end,
-                                );
-                                session_end_result = match &result {
-                                    crate::session::memory::hooks::SessionEndResult::Written(_) => "written",
-                                    crate::session::memory::hooks::SessionEndResult::Skipped => "skipped",
-                                    crate::session::memory::hooks::SessionEndResult::Failed(_) => "failed",
-                                };
-                                total_chunks_at_end = storage.total_chunk_count();
-                                let telem = session.memory.telemetry_snapshot();
-                                tracing::info!(
-                                    target: xai_grok_telemetry::memory_log::TARGET,
-                                    result = ?result,
-                                    tool_searches = telem.tool_search_count,
-                                    injection_searches = telem.injection_count,
-                                    recovery_searches = telem.compaction_recovery_count,
-                                    "MEMORY_SESSION_END: channel closed, session summary saved"
-                                );
-                                if let crate::session::memory::hooks::SessionEndResult::Written(ref path_str) = result {
-                                    session.reindex_and_embed(std::path::Path::new(path_str), "session").await;
-                                    session.send_xai_notification(XaiSessionUpdate::MemorySessionSaved {
-                                        path: path_str.clone(),
-                                    }).await;
-                                }
-                            }
-                        } else {
-                            tracing::debug!(
-                                target: xai_grok_telemetry::memory_log::TARGET,
-                                "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
-                            );
-                        }
-                        // Dream: attempt consolidation at session end
-                        session.maybe_run_dream().await;
-                        // Structured telemetry after dream so counters are populated
-                        let telem = session.memory.telemetry_snapshot();
-                        session.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
+                        finish_session_exit_feedback(&session).await;
                         if let Some(notification) = replay_buffer.flush() {
                             session.emit_buffered(notification).await;
                         }
@@ -593,14 +573,7 @@ pub(super) async fn run_session(
                             }
                         }
                         shutdown_workflows(&session).await;
-                        if let Some(cancel) = &session.sync_loop_cancel {
-                            cancel.cancel();
-                        }
-                        session.feedback_manager.shutdown(session.upload_queue.get()).await;
-                        if !session.startup_hints.is_subagent {
-                            session.persist_background_task_manifest().await;
-                        }
-                        cleanup_session_scratch(&session);
+                        finish_session_exit_feedback(&session).await;
                         return;
                     };
 
@@ -1039,11 +1012,9 @@ pub(super) async fn run_session(
                             // that prior success. Cancel targets the current turn;
                             // under show-until-replaced the prior line should still
                             // finish. New real prompts and rewind abort separately.
-                            let suppress_task_wakes =
-                                matches!(options.trigger, Some(crate::session::CancelTrigger::CtrlC));
-                            session.cancel_running_task(options).await;
+                            let barrier = session.cancel_running_task(options).await;
 
-                            // Auto-pause active goal on Ctrl+C so timers stop
+                            // Auto-pause the active goal on any cancel so timers stop
                             // and the pager shows "paused" instead of "active".
                             // Shared with the doom-loop and back-off paths via
                             // `auto_pause_goal_if_active`.
@@ -1057,9 +1028,9 @@ pub(super) async fn run_session(
                             // waiting for a completion message that will never
                             // arrive (the aborted task can't send one).
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
-                            // Ctrl+C leaves pending notifications suppressed. Other
-                            // cancel triggers leave the actor eligible for its normal idle drain.
-                            if !suppress_task_wakes {
+                            // An armed barrier must outlive the cancel; only
+                            // a clear one lets queued notifications drain.
+                            if barrier == super::tasks_cancel::WakeBarrier::Clear {
                                 SessionActor::maybe_drain_notifications(
                                     session.clone(),
                                     completion_tx.clone(),
@@ -2213,7 +2184,9 @@ pub(super) async fn run_session(
                             // This arm returns; an unanswered turn would race
                             // teardown and report `EndTurn` for unfinished work.
                             if kind == crate::session::ShutdownKind::CancelRunningTurn {
-                                session
+                                // Shutdown is not a stop gesture; the barrier
+                                // stays clear.
+                                let _ = session
                                     .cancel_running_task(crate::session::CancelOptions {
                                         cancel_subagents: true,
                                         kill_background_tasks: true,
@@ -2233,110 +2206,13 @@ pub(super) async fn run_session(
                             // abort.
                             session.drop_pending_synthetic_items().await;
 
-                            // ── session_end hook (shutdown path) ────────
-                            // Fires BEFORE memory auto-save per plan contract.
-                            let envelope = session.fire_hook(
-                                xai_grok_hooks::event::HookEventName::SessionEnd,
-                                None,
-                                xai_grok_hooks::event::HookPayload::SessionEnd {
-                                    reason: "shutdown".to_string(),
-                                    turn_count: None,
-                                    tool_call_count: None,
-                                },
-                            );
-                            if let Some(registry) = session.hook_registry.borrow().clone() {
-                                let ctx = session.hook_run_ctx();
-                                let results = xai_grok_hooks::dispatcher::dispatch_non_blocking(
-                                    &registry,
-                                    xai_grok_hooks::event::HookEventName::SessionEnd,
-                                    &envelope,
-                                    &ctx,
-                                )
+                            // ── session_end (shutdown path) ────────────
+                            // Hooks fire BEFORE memory auto-save per plan contract.
+                            fire_session_end_hooks(&session, "shutdown").await;
+                            session
+                                .run_session_end_memory_pipeline("session summary saved")
                                 .await;
-                                session.send_hook_execution("session_end", None, None, &results).await;
-                            }
-                            {
-                                let ext_rt = session.extension_runtime.borrow().clone();
-                                let _ = ext_rt.dispatch_session_end().await;
-                                crate::session::wasm_tools::emit_runtime_metrics(
-                                    session.telemetry_enabled,
-                                    "session_end_shutdown",
-                                    &ext_rt,
-                                );
-                            }
-                            // Drop session-scoped wasm_* tools from the shared bridge.
-                            {
-                                let bridge = session.agent.borrow().tool_bridge().clone();
-                                let mut owned = session.wasm_registered_tools.borrow_mut();
-                                let n = crate::session::wasm_tools::unregister_session_wasm_tools(
-                                    &bridge, &mut owned,
-                                );
-                                session.wasm_registered_commands.borrow_mut().clear();
-                                if n > 0 {
-                                    tracing::info!(
-                                        wasm_tools = n,
-                                        "unregistered session wasm tools on shutdown"
-                                    );
-                                }
-                            }
-                            session.dispatch_session_end_stop("shutdown").await;
-                            // Memory: save session summary before shutdown
-                            let mut session_end_result = "disabled";
-                            let mut total_chunks_at_end = 0usize;
-                            if !session.startup_hints.is_subagent {
-                                if let Some(storage) = session.memory.storage() {
-                                    let conversation = session.chat_state_handle.get_conversation().await;
-                                    let result = crate::session::memory::hooks::on_session_end(
-                                        &storage,
-                                        &conversation,
-                                        &session.session_info.id.0,
-                                        session.memory.save_on_end,
-                                    );
-                                    session_end_result = match &result {
-                                        crate::session::memory::hooks::SessionEndResult::Written(_) => "written",
-                                        crate::session::memory::hooks::SessionEndResult::Skipped => "skipped",
-                                        crate::session::memory::hooks::SessionEndResult::Failed(_) => "failed",
-                                    };
-                                    total_chunks_at_end = storage.total_chunk_count();
-                                    let telem = session.memory.telemetry_snapshot();
-                                    tracing::info!(
-                                        target: xai_grok_telemetry::memory_log::TARGET,
-                                        result = ?result,
-                                        tool_searches = telem.tool_search_count,
-                                        injection_searches = telem.injection_count,
-                                        recovery_searches = telem.compaction_recovery_count,
-                                        "MEMORY_SESSION_END: session summary saved"
-                                    );
-                                    // Reindex + embed the written file so it's searchable next session
-                                    if let crate::session::memory::hooks::SessionEndResult::Written(ref path_str) = result {
-                                        session.reindex_and_embed(std::path::Path::new(path_str), "session").await;
-                                        session.send_xai_notification(XaiSessionUpdate::MemorySessionSaved {
-                                            path: path_str.clone(),
-                                        }).await;
-                                    }
-                                }
-                            } else {
-                                tracing::debug!(
-                                    target: xai_grok_telemetry::memory_log::TARGET,
-                                    "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
-                                );
-                            }
-                            // Dream: attempt consolidation at session end
-                            session.maybe_run_dream().await;
-                            // Structured telemetry after dream so counters are populated
-                            let telem = session.memory.telemetry_snapshot();
-                            session.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
-                            // Shutdown feedback sync loop and do final sync
-                            if let Some(cancel) = &session.sync_loop_cancel {
-                                cancel.cancel();
-                            }
-                            // Shutdown feedback manager (syncs signals, drains upload queue)
-                            session.feedback_manager.shutdown(session.upload_queue.get()).await;
-                            if !session.startup_hints.is_subagent {
-                                session.persist_background_task_manifest().await;
-                            }
-                            // Clean up scratch directory (pre-edit file copies).
-                            cleanup_session_scratch(&session);
+                            finish_session_exit_feedback(&session).await;
                             return;
                         }
                     }

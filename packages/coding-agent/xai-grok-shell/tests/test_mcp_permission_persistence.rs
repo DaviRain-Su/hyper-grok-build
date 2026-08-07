@@ -167,7 +167,7 @@ async fn request(handle: &PermissionHandle, access: AccessKind, id: &str) -> Dec
         panic!("expected actor handle");
     };
     cmd_tx.send(cmd).unwrap();
-    rx.await.unwrap()
+    rx.await.unwrap().decision
 }
 
 /// Build an MCP access kind from a tool name; these persistence tests only

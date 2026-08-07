@@ -27,6 +27,10 @@ pub async fn set_page_flip_on_send(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.page_flip_on_send = Some(value)).await
 }
 
+pub async fn set_confirm_before_rewind(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.confirm_before_rewind = Some(value)).await
+}
+
 /// Persist `[ui].combine_queued_prompts` via `update_config`.
 pub async fn set_combine_queued_prompts(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.combine_queued_prompts = Some(value)).await

@@ -58,11 +58,9 @@ pub fn usage_percentage_u8(used: u64, total: u64) -> u8 {
 /// overflow via `saturating_mul`.
 #[inline]
 pub fn usage_percentage_truncated_u8(used: u64, total: u64) -> u8 {
-    if total == 0 {
-        0
-    } else {
-        ((used.saturating_mul(100) / total).min(100)) as u8
-    }
+    used.saturating_mul(100)
+        .checked_div(total)
+        .map_or(0, |pct| pct.min(100) as u8)
 }
 
 /// `total - used`, saturating at zero. The "free" portion of the context

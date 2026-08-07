@@ -52,11 +52,11 @@ steps:
     keys: "<Enter>"
   - action: wait
     millis: 800
-  # No rewind popup of either flavor ever appears.
+  # Unchanged submit closes the editor; no confirm dialog appears.
   - action: assert_not_contains
-    text: "Resubmit from here"
+    text: "Rewind conversation to"
   - action: assert_not_contains
-    text: "What do you want to rewind"
+    text: "Yes, and don't ask again"
   # Editor closed: j navigates the scrollback instead of inserting.
   - action: keys
     keys: "j"

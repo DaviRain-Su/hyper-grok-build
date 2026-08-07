@@ -1317,7 +1317,7 @@ impl ScopeGraphIndex {
                     .map(|name| (name.to_string(), locs.len()))
             })
             .collect();
-        ref_counts.sort_by(|a, b| b.1.cmp(&a.1));
+        ref_counts.sort_by_key(|b| std::cmp::Reverse(b.1));
         ref_counts.truncate(limit);
         ref_counts
     }

@@ -22,7 +22,7 @@ pub(crate) fn is_scheduler_fired_prompt(prompt_id: &str) -> bool {
 }
 
 /// Returns true for the auto-wake turn families (`task-completed-…`,
-/// `subagent-completed-…`, `notifications-…`). These run non-adopted — no
+/// `subagent-completed-…`, `workflow-completed-…`, `notifications-…`). These run non-adopted — no
 /// `PromptResponse`, no viewer finalize — so their durable `TurnCompleted` is
 /// the only signal marking the back-to-idle point (see [`finish_wake_turn`];
 /// a chatty wake closes with a marker, a silent one stays markerless).

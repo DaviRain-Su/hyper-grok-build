@@ -310,8 +310,7 @@ impl AgentView {
                             .map(str::to_owned)
                     {
                         self.prompt.history_search.deactivate();
-                        if self.prompt_input_mode != PromptInputMode::Feedback
-                            && self.prompt_input_mode != PromptInputMode::Remember
+                        if self.prompt_input_mode != PromptInputMode::Remember
                             && let Some(cmd) = text.strip_prefix("! ")
                         {
                             self.prompt_input_mode = PromptInputMode::Bash;

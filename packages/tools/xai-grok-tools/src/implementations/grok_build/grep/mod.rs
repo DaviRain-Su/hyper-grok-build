@@ -186,6 +186,20 @@ fn grep_timeout() -> Duration {
     Duration::from_secs(grep_timeout_secs(xai_tty_utils::is_wsl()))
 }
 
+/// Reap an already-killed `rg`, waiting at most
+/// [`xai_tty_utils::KILL_REAP_TIMEOUT`]; on expiry the corpse is abandoned to
+/// tokio's orphan reaper (see the constant's docs for the D-state rationale).
+async fn reap_killed_rg(child: &mut Child) -> Option<std::process::ExitStatus> {
+    let status = xai_tty_utils::reap_killed_bounded(child, xai_tty_utils::KILL_REAP_TIMEOUT).await;
+    if status.is_none() {
+        tracing::warn!(
+            reap_timeout_secs = xai_tty_utils::KILL_REAP_TIMEOUT.as_secs(),
+            "killed rg not reaped (bound expired — likely uninterruptible kernel I/O — or wait failed); abandoning"
+        );
+    }
+    status
+}
+
 /// Resolve the effective line/entry budget for this call.
 ///
 /// Always returns a finite limit so we can stop reading (and kill `rg`) once
@@ -391,18 +405,19 @@ impl xai_tool_runtime::Tool for GrepTool {
                 tracing::Span::current().record("wall_ms", started.elapsed().as_millis() as u64);
                 tracing::warn!(timeout_secs = timeout.as_secs(), "grep timed out");
                 let _ = child.start_kill();
-                let _ = child.wait().await;
+                reap_killed_rg(&mut child).await;
                 return Ok(grep_timeout_output(timeout.as_secs()));
             }
         };
 
-        // `rg` was already killed inside the timeout block when `stdout_truncated`
-        // (before the stderr drain); just reap it here.
-        let status = child.wait().await.ok();
+        // Truncated output means `rg` was already killed above — bounded reap,
+        // and the exit code is defined as 0. A natural EOF means rg is exiting,
+        // so the plain wait is prompt.
         let exit_code = if stdout_truncated {
+            reap_killed_rg(&mut child).await;
             0
         } else {
-            status.and_then(|s| s.code()).unwrap_or(-1)
+            child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1)
         };
 
         tracing::Span::current().record("early_kill", stdout_truncated);
@@ -570,7 +585,7 @@ fn grep_progress_stream(
                 tracing::warn!(timeout_secs = secs, "grep timed out");
             });
             let _ = child.start_kill();
-            let _ = child.wait().await;
+            reap_killed_rg(&mut child).await;
             // Timeout: finalize what was read (marked truncated) plus an
             // explicit notice, so the stream isn't contradicted; with
             // nothing streamed, fall back to the timeout-only card.
@@ -621,11 +636,14 @@ fn grep_progress_stream(
             .await;
         }
 
-        let status = child.wait().await.ok();
+        // Truncated output means `rg` was already killed above — bounded reap,
+        // and the exit code is defined as 0. A natural EOF means rg is exiting,
+        // so the plain wait is prompt.
         let exit_code = if stdout_truncated {
+            reap_killed_rg(&mut child).await;
             0
         } else {
-            status.and_then(|s| s.code()).unwrap_or(-1)
+            child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1)
         };
 
         let wall_ms = stream_started.elapsed().as_millis() as u64;
@@ -904,7 +922,9 @@ async fn prepare_grep(
     crate::util::detach_command(&mut cmd);
     cmd.stdin(Stdio::null());
 
-    #[allow(clippy::disallowed_methods)] // search helper, waited on below
+    #[allow(clippy::disallowed_methods)]
+    // search helper; killed and reaped with a bound on timeout/truncation,
+    // abandoned to the orphan reaper if unreapable (D-state)
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {

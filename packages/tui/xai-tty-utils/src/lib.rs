@@ -287,6 +287,36 @@ pub fn kill_current_process_on_parent_death() -> io::Result<()> {
 // Process group lifecycle
 // ---------------------------------------------------------------------------
 
+/// Bound on waiting for an already-killed child (or its pipe readers) before
+/// abandoning it.
+///
+/// A kill normally makes `child.wait()` resolve in milliseconds, but a child
+/// wedged in an uninterruptible kernel syscall (D-state — e.g. a read on a
+/// hard NFS mount whose server stopped responding) only observes the signal
+/// when that syscall returns, which can be effectively never. Callers that
+/// must not block (tool futures, turn loops) wait at most this long, then
+/// abandon the corpse to the runtime's orphan reaper.
+pub const KILL_REAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Reap an already-killed child, waiting at most `bound` (usually
+/// [`KILL_REAP_TIMEOUT`]).
+///
+/// Returns the exit status when the child was reaped in time. `None` covers
+/// both failure shapes — the bound expired (see [`KILL_REAP_TIMEOUT`]) and
+/// `wait()` itself erred (e.g. the child was already reaped elsewhere) — the
+/// caller's obligation is identical in either case: the kill signal is
+/// already delivered, there is no status to report, and the corpse is left
+/// to tokio's orphan reaper. Callers should log the `None` case.
+pub async fn reap_killed_bounded(
+    child: &mut tokio::process::Child,
+    bound: std::time::Duration,
+) -> Option<std::process::ExitStatus> {
+    match tokio::time::timeout(bound, child.wait()).await {
+        Ok(res) => res.ok(),
+        Err(_elapsed) => None,
+    }
+}
+
 /// Configure a command so the spawned child becomes the leader of a new
 /// process group.
 pub fn new_process_group(cmd: &mut tokio::process::Command) {

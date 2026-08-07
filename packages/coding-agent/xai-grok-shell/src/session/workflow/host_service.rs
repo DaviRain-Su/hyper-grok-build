@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use xai_grok_tools::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
 use xai_grok_tools::implementations::grok_build::task::types::{
@@ -20,7 +20,33 @@ use super::tracker::WorkflowTracker;
 
 pub(crate) const WORKFLOW_MAX_AGENT_RUNS: u32 =
     (xai_workflow::MAX_AGENT_BUDGET as u32) * (SCHEMA_CONTRACT_RETRIES + 1);
-pub(crate) const WORKFLOW_MAX_CONCURRENT_AGENTS: usize = 16;
+pub(crate) const DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS: usize = 32;
+
+/// The configured cap clamped to the machine's parallelism, so small hosts
+/// run fewer agents at once.
+pub(crate) fn workflow_max_concurrent_agents(configured: usize) -> usize {
+    workflow_max_concurrent_agents_from(
+        configured,
+        std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS),
+    )
+}
+
+fn workflow_max_concurrent_agents_from(configured: usize, parallelism: usize) -> usize {
+    let clamp = parallelism.max(2);
+    let requested = configured.max(1);
+    // Logged for the default too: a small host silently running fewer than
+    // the default agents per run would otherwise be invisible to operators.
+    if requested > clamp {
+        tracing::info!(
+            requested,
+            clamped_to = clamp,
+            "workflow agent concurrency clamped to machine parallelism"
+        );
+    }
+    requested.min(clamp)
+}
 pub(crate) const WORKFLOW_MAX_SCRIPT_TELEMETRY_EVENTS: u32 = 64;
 pub(crate) const WORKFLOW_MAX_SCRATCH_FILES: usize = 64;
 pub(crate) const WORKFLOW_MAX_SCRATCH_FILE_BYTES: usize = 10 * 1024 * 1024;
@@ -35,8 +61,20 @@ const SCRATCH_ARTIFACT_ROOT: &str = "scratch";
 
 pub(crate) type TelemetryHook = Arc<dyn Fn(&str, &serde_json::Value, bool) + Send + Sync>;
 
+/// Per-episode agent counters, reported on `WorkflowRunEnded`.
+#[derive(Debug, Default)]
+pub(crate) struct WorkflowAgentStats {
+    pub peak_concurrent: AtomicU32,
+    pub agents_failed: AtomicU32,
+    pub slot_waits: AtomicU32,
+    pub slot_wait_ms_total: AtomicU64,
+    pub slot_wait_ms_max: AtomicU64,
+}
+
 pub(crate) struct WorkflowHostParams {
     pub run_id: String,
+    /// Agents this run keeps live at once; wider fan-outs queue in order.
+    pub max_concurrent_agents: usize,
     pub cwd: PathBuf,
     pub scratch_dir: PathBuf,
     pub tracker: Arc<parking_lot::Mutex<WorkflowTracker>>,
@@ -49,8 +87,8 @@ pub(crate) struct WorkflowHostParams {
     pub allow_fork_context: bool,
     pub templates: std::collections::HashMap<String, String>,
     pub telemetry: TelemetryHook,
+    pub stats: Arc<WorkflowAgentStats>,
     pub cancel: CancellationToken,
-    pub concurrency: Arc<Semaphore>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +111,7 @@ pub(crate) fn spawn_workflow_host_service(
             agent_runs: AtomicU32::new(0),
             script_telemetry_events: AtomicU32::new(0),
             scratch_io: tokio::sync::Mutex::new(()),
+            agent_slots: tokio::sync::Semaphore::new(params.max_concurrent_agents.max(1)),
             params,
         });
         loop {
@@ -123,6 +162,7 @@ struct HostService {
     agent_runs: AtomicU32,
     script_telemetry_events: AtomicU32,
     scratch_io: tokio::sync::Mutex<()>,
+    agent_slots: tokio::sync::Semaphore,
     params: WorkflowHostParams,
 }
 
@@ -137,6 +177,14 @@ impl FinishOnce<'_> {
         debug_assert!(!self.finished, "agent roster row finished twice");
         if std::mem::replace(&mut self.finished, true) {
             return;
+        }
+        if state == "failed" {
+            // The roster is capped and survives resume; count here instead.
+            self.host
+                .params
+                .stats
+                .agents_failed
+                .fetch_add(1, Ordering::Relaxed);
         }
         self.host.params.tracker.lock().agent_finished(
             &self.host.params.run_id,
@@ -325,6 +373,65 @@ impl HostService {
         self.params.tracker.lock().elapsed_ms(&self.params.run_id)
     }
 
+    /// Take a run concurrency slot, reporting queue pressure and wait time.
+    async fn acquire_agent_slot(&self) -> Result<tokio::sync::SemaphorePermit<'_>, HostError> {
+        match self.agent_slots.try_acquire() {
+            Ok(permit) if self.params.cancel.is_cancelled() => {
+                drop(permit);
+                Err(HostError::Cancelled)
+            }
+            Ok(permit) => Ok(permit),
+            Err(tokio::sync::TryAcquireError::Closed) => {
+                debug_assert!(false, "agent slot semaphore is never closed");
+                Err(HostError::Cancelled)
+            }
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                // Do not count teardown storms as queue pressure.
+                if self.params.cancel.is_cancelled() {
+                    return Err(HostError::Cancelled);
+                }
+                xai_grok_telemetry::session_ctx::log_event(
+                    xai_grok_telemetry::events::SubagentLimitHit::workflow_run_concurrent(
+                        self.params.parent_session_id.clone(),
+                        self.params.run_id.clone(),
+                        self.params.max_concurrent_agents as u64,
+                        // Slots in use, not the racy post-setup running count.
+                        (self
+                            .params
+                            .max_concurrent_agents
+                            .saturating_sub(self.agent_slots.available_permits()))
+                            as u32,
+                    ),
+                );
+                let wait_started_at = std::time::Instant::now();
+                let permit = tokio::select! {
+                    biased;
+                    _ = self.params.cancel.cancelled() => return Err(HostError::Cancelled),
+                    permit = self.agent_slots.acquire() => {
+                        match permit {
+                            Ok(permit) => permit,
+                            Err(_closed) => {
+                                debug_assert!(false, "agent slot semaphore is never closed");
+                                return Err(HostError::Cancelled);
+                            }
+                        }
+                    }
+                };
+                let waited_ms =
+                    u64::try_from(wait_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let stats = &self.params.stats;
+                stats.slot_waits.fetch_add(1, Ordering::Relaxed);
+                stats
+                    .slot_wait_ms_total
+                    .fetch_add(waited_ms, Ordering::Relaxed);
+                stats
+                    .slot_wait_ms_max
+                    .fetch_max(waited_ms, Ordering::Relaxed);
+                Ok(permit)
+            }
+        }
+    }
+
     async fn spawn_agent(&self, mut opts: AgentOpts) -> Result<AgentResult, HostError> {
         if self.params.cancel.is_cancelled() {
             return Err(HostError::Cancelled);
@@ -364,6 +471,7 @@ impl HostService {
             );
         }
 
+        let id = uuid::Uuid::now_v7().to_string();
         let explicit_label = opts.label.clone();
         let capability_mode = match opts.capability_mode.as_deref() {
             None => None,
@@ -393,20 +501,10 @@ impl HostService {
             Some(schema) => contract_prompt(&opts.prompt, schema),
         };
 
-        let _permit = tokio::select! {
-            biased;
-            () = self.params.cancel.cancelled() => {
-                return Err(HostError::Cancelled);
-            }
-            permit = self.params.concurrency.acquire() => {
-                permit.map_err(|_| HostError::Cancelled)?
-            }
-        };
-        if self.params.cancel.is_cancelled() {
-            return Err(HostError::Cancelled);
-        }
+        // Acquire before the roster row so a waiting agent is not shown as
+        // running.
+        let _agent_slot = self.acquire_agent_slot().await?;
 
-        let id = uuid::Uuid::now_v7().to_string();
         let description = self.params.tracker.lock().agent_started(
             &self.params.run_id,
             crate::session::workflow::tracker::WorkflowAgentRow {
@@ -486,7 +584,11 @@ impl HostService {
                 fork_context,
             );
 
-            self.active_agents.fetch_add(1, Ordering::Relaxed);
+            let now_running = self.active_agents.fetch_add(1, Ordering::Relaxed) + 1;
+            self.params
+                .stats
+                .peak_concurrent
+                .fetch_max(now_running, Ordering::Relaxed);
             self.tick();
 
             let backend = ChannelBackend::new(self.params.subagent_event_tx.clone());
@@ -861,6 +963,56 @@ mod tests {
     use crate::session::workflow::store::WorkflowRunStore;
     use crate::session::workflow::tracker::WorkflowTracker;
 
+    /// Everything but the per-test tracker and subagent channel; the returned
+    /// receiver keeps the persistence channel open for the test's lifetime.
+    fn test_host_params(
+        run_id: &str,
+        max_concurrent_agents: usize,
+        scratch_suffix: &str,
+        tracker: Arc<parking_lot::Mutex<WorkflowTracker>>,
+        subagent_event_tx: mpsc::UnboundedSender<
+            xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
+        >,
+    ) -> (WorkflowHostParams, mpsc::UnboundedReceiver<PersistenceMsg>) {
+        let (persist_tx, persist_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+        let store = WorkflowRunStore::new(None, persist_tx.clone());
+        let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+        let notify = WorkflowNotifySender::new(
+            agent_client_protocol::SessionId::new("test-session"),
+            xai_acp_lib::AcpAgentGatewaySender::new(gateway_tx),
+            persist_tx,
+            store.clone(),
+        );
+        (
+            WorkflowHostParams {
+                run_id: run_id.to_owned(),
+                max_concurrent_agents,
+                cwd: std::env::temp_dir(),
+                scratch_dir: std::env::temp_dir().join(scratch_suffix),
+                tracker,
+                store,
+                notify,
+                subagent_event_tx,
+                parent_session_id: "parent".into(),
+                allow_fork_context: false,
+                templates: Default::default(),
+                telemetry: Arc::new(|_, _, _| {}),
+                stats: Arc::new(WorkflowAgentStats::default()),
+                cancel: CancellationToken::new(),
+            },
+            persist_rx,
+        )
+    }
+
+    #[test]
+    fn concurrent_agents_clamps_to_parallelism() {
+        let from = workflow_max_concurrent_agents_from;
+        assert_eq!(from(8, 64), 8);
+        assert_eq!(from(64, 8), 8);
+        assert_eq!(from(64, 1), 2);
+        assert_eq!(from(0, 64), 1);
+    }
+
     #[tokio::test]
     async fn reserve_agent_calls_rolls_back_on_persist_failure() {
         let run_id = "wf_reserve_rollback".to_string();
@@ -877,32 +1029,15 @@ mod tests {
         assert_eq!(tracker.get(&run_id).unwrap().agents_used, 10);
 
         let tracker = Arc::new(parking_lot::Mutex::new(tracker));
-        let (persist_tx, _persist_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
-        let store = WorkflowRunStore::new(None, persist_tx.clone());
-        let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
-        let notify = WorkflowNotifySender::new(
-            agent_client_protocol::SessionId::new("test-session"),
-            xai_acp_lib::AcpAgentGatewaySender::new(gateway_tx),
-            persist_tx,
-            store.clone(),
-        );
         let (subagent_tx, _subagent_rx) = mpsc::unbounded_channel();
-        let cancel = CancellationToken::new();
-        let params = WorkflowHostParams {
-            run_id: run_id.clone(),
-            cwd: std::env::temp_dir(),
-            scratch_dir: std::env::temp_dir().join("wf-scratch-reserve-rollback"),
-            tracker: tracker.clone(),
-            store,
-            notify,
-            subagent_event_tx: subagent_tx,
-            parent_session_id: "parent".into(),
-            allow_fork_context: false,
-            templates: Default::default(),
-            telemetry: Arc::new(|_, _, _| {}),
-            cancel: cancel.clone(),
-            concurrency: Arc::new(Semaphore::new(WORKFLOW_MAX_CONCURRENT_AGENTS)),
-        };
+        let (params, _persist_rx) = test_host_params(
+            &run_id,
+            2,
+            "wf-scratch-reserve-rollback",
+            tracker.clone(),
+            subagent_tx,
+        );
+        let cancel = params.cancel.clone();
 
         let (host_tx, host_rx) = mpsc::unbounded_channel();
         let (handle, _drained) = spawn_workflow_host_service(params, host_rx);
@@ -950,32 +1085,15 @@ mod tests {
         assert_eq!(tracker.get(&run_id).unwrap().agents_used, 50);
 
         let tracker = Arc::new(parking_lot::Mutex::new(tracker));
-        let (persist_tx, _persist_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
-        let store = WorkflowRunStore::new(None, persist_tx.clone());
-        let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
-        let notify = WorkflowNotifySender::new(
-            agent_client_protocol::SessionId::new("test-session"),
-            xai_acp_lib::AcpAgentGatewaySender::new(gateway_tx),
-            persist_tx,
-            store.clone(),
-        );
         let (subagent_tx, _subagent_rx) = mpsc::unbounded_channel();
-        let cancel = CancellationToken::new();
-        let params = WorkflowHostParams {
-            run_id: run_id.clone(),
-            cwd: std::env::temp_dir(),
-            scratch_dir: std::env::temp_dir().join("wf-scratch-release-persist"),
-            tracker: tracker.clone(),
-            store,
-            notify,
-            subagent_event_tx: subagent_tx,
-            parent_session_id: "parent".into(),
-            allow_fork_context: false,
-            templates: Default::default(),
-            telemetry: Arc::new(|_, _, _| {}),
-            cancel: cancel.clone(),
-            concurrency: Arc::new(Semaphore::new(WORKFLOW_MAX_CONCURRENT_AGENTS)),
-        };
+        let (params, _persist_rx) = test_host_params(
+            &run_id,
+            2,
+            "wf-scratch-release-persist",
+            tracker.clone(),
+            subagent_tx,
+        );
+        let cancel = params.cancel.clone();
 
         let (host_tx, host_rx) = mpsc::unbounded_channel();
         let (handle, _drained) = spawn_workflow_host_service(params, host_rx);
@@ -997,6 +1115,109 @@ mod tests {
             tracker.lock().get(&run_id).unwrap().agents_used,
             0,
             "in-memory release must stick so resume does not double-charge"
+        );
+
+        drop(host_tx);
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn a_run_keeps_at_most_max_concurrent_agents_live() {
+        let run_id = "wf_agent_slots".to_string();
+        let mut tracker = WorkflowTracker::default();
+        tracker.start_run(
+            run_id.clone(),
+            "demo".into(),
+            "objective".into(),
+            vec![],
+            Some(1000),
+            None,
+        );
+        let tracker = Arc::new(parking_lot::Mutex::new(tracker));
+        let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
+        let (params, _persist_rx) = test_host_params(
+            &run_id,
+            1,
+            "wf-scratch-agent-slots",
+            tracker.clone(),
+            subagent_tx,
+        );
+        let cancel = params.cancel.clone();
+        let (host_tx, host_rx) = mpsc::unbounded_channel();
+        let (handle, _drained) = spawn_workflow_host_service(params, host_rx);
+
+        let spawn_agent = |prompt: &str| {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            host_tx
+                .send(WorkflowHostRequest::SpawnAgent {
+                    opts: AgentOpts {
+                        prompt: prompt.to_owned(),
+                        ..Default::default()
+                    },
+                    reply: reply_tx,
+                })
+                .unwrap();
+            reply_rx
+        };
+        let succeed = |spawn: xai_grok_tools::implementations::grok_build::task::types::SubagentSpawnRequest| {
+            spawn
+                .respond_with(|request| {
+                    xai_grok_tools::implementations::grok_build::task::types::SubagentResult {
+                        success: true,
+                        output: Arc::from("done"),
+                        subagent_id: request.id.clone(),
+                        child_session_id: request.id.clone(),
+                        ..Default::default()
+                    }
+                })
+                .expect("agent result delivered");
+        };
+
+        let first = spawn_agent("first");
+        let second = spawn_agent("second");
+
+        let running = tokio::time::timeout(Duration::from_secs(5), subagent_rx.recv())
+            .await
+            .expect("an agent reaches the coordinator")
+            .expect("subagent channel open");
+        let SubagentEvent::Spawn(running) = running else {
+            panic!("expected a spawn event");
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), subagent_rx.recv())
+                .await
+                .is_err(),
+            "the second agent must wait for the run's only slot"
+        );
+
+        succeed(running);
+        let queued = tokio::time::timeout(Duration::from_secs(5), subagent_rx.recv())
+            .await
+            .expect("the queued agent starts once the slot frees")
+            .expect("subagent channel open");
+        let SubagentEvent::Spawn(queued) = queued else {
+            panic!("expected a spawn event");
+        };
+        succeed(queued);
+
+        // Slot acquisition order between the two dispatched requests is
+        // unspecified, so assert both replies only after both agents ran.
+        assert!(
+            first
+                .await
+                .expect("first reply")
+                .expect("first result")
+                .success,
+            "first agent completes"
+        );
+        assert!(
+            second
+                .await
+                .expect("second reply")
+                .expect("second result")
+                .success,
+            "second agent completes"
         );
 
         drop(host_tx);

@@ -5,28 +5,29 @@
 //! - `String` keys throughout (not `&'static str`) for ACP command support.
 //! - `CommandSource` tracks provenance (Builtin vs Acp) for replacement logic.
 //! - `set_acp_commands()` replaces ACP-sourced entries without touching builtins.
+//! - ACP names that collide with a builtin trigger or blocked name are skipped.
 //! - `rebuild_triggers()` regenerates the trigger list after mutations.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use xai_grok_tools::implementations::skills::types::SkillScope;
-
 use super::acp_command::AcpSlashCommand;
-use super::command::SlashCommand;
+use super::command::{CommandProvenance, SlashCommand};
 use super::mode_support::ModeSupport;
 
-fn client_collision_qualified_name(
-    cmd: &agent_client_protocol::AvailableCommand,
-) -> Option<String> {
-    let meta = cmd.meta.as_ref()?;
-    meta.get("path").and_then(|v| v.as_str())?;
-    let scope: SkillScope = serde_json::from_value(meta.get("scope")?.clone()).ok()?;
-    if scope == SkillScope::Plugin {
-        return None;
-    }
-    Some(format!("{}:{}", scope.as_ref(), cmd.name))
-}
+/// Shell ACP names the pager never offers (unified `/hooks` / `/plugins` UI,
+/// plus `/help`). Must stay covered by [`xai_grok_shell::session::PAGER_COMMAND_KEYS`]
+/// so a skill of the same name is advertised already qualified instead of
+/// being dropped here when the matching shell gate is off.
+pub(crate) const BLOCKED_ACP_NAMES: &[&str] = &[
+    "help",
+    "hooks-add",
+    "hooks-list",
+    "hooks-remove",
+    "hooks-trust",
+    "hooks-untrust",
+    "reload-plugins",
+];
 
 /// Source of a command in the registry. Used for precedence and replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +50,6 @@ pub struct CommandTrigger {
     pub alias: Option<String>,
     /// Display text for the dropdown (e.g., "/exit").
     pub display: String,
-    /// Text used for fuzzy matching (alias text or canonical name).
     pub match_text: String,
     /// Command description.
     pub description: String,
@@ -63,6 +63,7 @@ pub struct CommandTrigger {
     pub command_index: usize,
     /// Source of this command.
     pub source: CommandSource,
+    pub provenance: CommandProvenance,
 }
 
 impl CommandTrigger {
@@ -73,20 +74,36 @@ impl CommandTrigger {
         command_index: usize,
         source: CommandSource,
     ) -> Self {
-        let display = format!("/{}", alias.unwrap_or(canonical));
-        let match_text = alias.unwrap_or(canonical).to_string();
+        let key = alias.unwrap_or(canonical);
         Self {
             canonical: canonical.to_string(),
             alias: alias.map(|s| s.to_string()),
-            display,
-            match_text,
+            display: format!("/{key}"),
+            match_text: key.to_string(),
             description: command.description().to_string(),
             usage: command.usage().to_string(),
             takes_args: command.takes_args(),
             args_required: command.args_required(),
             command_index,
             source,
+            provenance: command.provenance(),
         }
+    }
+
+    /// Sibling that fuzzy-matches the bare suffix of a qualified skill so
+    /// `/login` surfaces `/acme:login` beside the builtin. A real trigger
+    /// (not a concatenated haystack) keeps scores and highlight indices honest.
+    fn bare_suffix_sibling(&self) -> Option<Self> {
+        if !matches!(self.provenance, CommandProvenance::Skill { .. }) {
+            return None;
+        }
+        let (_, bare) = self.match_text.rsplit_once(':')?;
+        if bare.is_empty() {
+            return None;
+        }
+        let mut sibling = self.clone();
+        sibling.match_text = bare.to_string();
+        Some(sibling)
     }
 }
 
@@ -470,9 +487,9 @@ impl CommandRegistry {
 
     /// Replace all ACP-sourced commands with a new set.
     ///
-    /// Builtin commands are preserved. ACP commands whose name collides
-    /// with any builtin trigger key (canonical name or alias) are silently
-    /// skipped.
+    /// Builtin commands are preserved. ACP names that collide with a
+    /// builtin trigger or blocked name are skipped — the shell advertises
+    /// colliding skills already qualified (`acme:login`).
     ///
     /// Triggers a full `rebuild_triggers()`. Prefer `set_acp_state`
     /// when also updating the agent's tool list so both mutations
@@ -494,46 +511,26 @@ impl CommandRegistry {
             }
         }
 
-        // Build the set of all reserved builtin keys (canonical names + aliases).
         let builtin_keys: HashSet<String> = self
             .commands
             .iter()
-            .enumerate()
-            .filter(|(j, _)| self.sources[*j] == CommandSource::Builtin)
-            .flat_map(|(_, c)| {
+            .flat_map(|c| {
                 std::iter::once(c.name().to_lowercase())
                     .chain(c.aliases().iter().map(|a| a.to_lowercase()))
             })
             .collect();
 
-        // Names that should never appear as slash commands in pager,
-        // even if the shell advertises them.
-        const BLOCKED_NAMES: &[&str] = &[
-            "help",
-            // Block individual hook/plugin shell commands — the pager's
-            // /hooks and /plugins builtins provide a unified modal instead.
-            "hooks-list",
-            "hooks-trust",
-            "hooks-untrust",
-            "hooks-add",
-            "hooks-remove",
-            "reload-plugins",
-        ];
-
-        for acp_cmd in commands {
-            let name_lower = acp_cmd.name.to_lowercase();
-            let name_reserved = builtin_keys.contains(&name_lower)
-                || BLOCKED_NAMES
+        let is_reserved = |name: &str| {
+            builtin_keys.contains(name)
+                || BLOCKED_ACP_NAMES
                     .iter()
-                    .any(|b| b.eq_ignore_ascii_case(&name_lower));
-            if name_reserved {
-                if let Some(qualified) = client_collision_qualified_name(acp_cmd) {
-                    let mut renamed = acp_cmd.clone();
-                    renamed.name = qualified;
-                    self.commands
-                        .push(Arc::new(AcpSlashCommand::from(&renamed)));
-                    self.sources.push(CommandSource::Acp);
-                }
+                    .any(|b| b.eq_ignore_ascii_case(name))
+        };
+
+        let mut claimed: HashSet<String> = HashSet::new();
+        for acp_cmd in commands {
+            let name = acp_cmd.name.to_lowercase();
+            if is_reserved(&name) || !claimed.insert(name) {
                 continue;
             }
             self.commands.push(Arc::new(AcpSlashCommand::from(acp_cmd)));
@@ -582,8 +579,9 @@ impl CommandRegistry {
             // Insert canonical key.
             self.key_to_index.insert(canonical.to_string(), idx);
             if !menu_only {
-                self.triggers
-                    .push(CommandTrigger::new(command, None, canonical, idx, source));
+                let trigger = CommandTrigger::new(command, None, canonical, idx, source);
+                self.triggers.extend(trigger.bare_suffix_sibling());
+                self.triggers.push(trigger);
             }
 
             // Insert alias keys.
@@ -596,13 +594,9 @@ impl CommandRegistry {
                 }
                 self.key_to_index.insert(alias.to_string(), idx);
                 if !menu_only {
-                    self.triggers.push(CommandTrigger::new(
-                        command,
-                        Some(alias),
-                        canonical,
-                        idx,
-                        source,
-                    ));
+                    let trigger = CommandTrigger::new(command, Some(alias), canonical, idx, source);
+                    self.triggers.extend(trigger.bare_suffix_sibling());
+                    self.triggers.push(trigger);
                 }
             }
         }
@@ -941,124 +935,161 @@ mod tests {
         assert!(registry.get("dashboard").is_none());
     }
 
+    // ── Builtin/skill name collisions ───────────────────────────────
+    //
+    fn login_builtin() -> Arc<dyn SlashCommand> {
+        Arc::new(DummyCommand {
+            name: "login",
+            aliases: &[],
+        })
+    }
+
+    fn acp_skill(name: &str, meta: serde_json::Value) -> agent_client_protocol::AvailableCommand {
+        agent_client_protocol::AvailableCommand::new(name.to_string(), format!("{name} skill"))
+            .meta(meta.as_object().cloned().unwrap())
+    }
+
     #[test]
-    fn acp_command_colliding_with_builtin_alias_is_skipped() {
+    fn advertised_qualified_skill_sits_beside_builtin() {
+        let mut registry = CommandRegistry::new(vec![login_builtin()]);
+        registry.set_acp_commands(&[acp_skill(
+            "acme:login",
+            serde_json::json!({
+                "scope": "plugin",
+                "path": "/x/SKILL.md",
+                "pluginName": "acme",
+            }),
+        )]);
+
+        assert!(registry.is_builtin("login"));
+        assert_eq!(
+            registry.get("login").unwrap().provenance(),
+            CommandProvenance::Builtin
+        );
+        let skill = registry.get("acme:login").expect("qualified skill");
+        assert!(!registry.is_builtin("acme:login"));
+        assert_eq!(
+            skill.provenance(),
+            CommandProvenance::Skill {
+                source: "acme".to_string()
+            }
+        );
+        assert_eq!(registry.command_count(), 2);
+
+        let skill_match_texts: HashSet<&str> = registry
+            .triggers()
+            .iter()
+            .filter(|t| t.canonical == "acme:login")
+            .inspect(|t| assert_eq!(t.display, "/acme:login"))
+            .map(|t| t.match_text.as_str())
+            .collect();
+        assert_eq!(skill_match_texts, HashSet::from(["login", "acme:login"]));
+    }
+
+    #[test]
+    fn colliding_mixed_case_acp_name_is_skipped() {
+        let mut registry = CommandRegistry::new(vec![login_builtin()]);
+        registry.set_acp_commands(&[acp_skill(
+            "Login",
+            serde_json::json!({
+                "scope": "local",
+                "path": "/x/SKILL.md",
+            }),
+        )]);
+        assert_eq!(registry.command_count(), 1);
+        assert!(registry.is_builtin("login"));
+        assert!(registry.get("Login").is_none());
+        assert!(registry.get("local:login").is_none());
+    }
+
+    #[test]
+    fn colliding_bare_acp_name_is_skipped() {
+        let mut registry = CommandRegistry::new(vec![login_builtin()]);
+        registry.set_acp_commands(&[acp_skill(
+            "login",
+            serde_json::json!({
+                "scope": "plugin",
+                "path": "/x/SKILL.md",
+                "pluginName": "acme",
+            }),
+        )]);
+        assert_eq!(registry.command_count(), 1);
+        assert!(registry.is_builtin("login"));
+        assert!(registry.get("acme:login").is_none());
+    }
+
+    #[test]
+    fn first_claimant_wins_duplicate_acp_name() {
+        let mut registry = CommandRegistry::new(vec![login_builtin()]);
+        let first = agent_client_protocol::AvailableCommand::new(
+            "acme:login".to_string(),
+            "first".to_string(),
+        )
+        .meta(
+            serde_json::json!({"scope": "plugin", "path": "/a/SKILL.md", "pluginName": "acme"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+        let second = agent_client_protocol::AvailableCommand::new(
+            "acme:login".to_string(),
+            "second".to_string(),
+        )
+        .meta(
+            serde_json::json!({"scope": "plugin", "path": "/b/SKILL.md", "pluginName": "other"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+        registry.set_acp_commands(&[first, second]);
+        assert_eq!(registry.command_count(), 2, "builtin + first acme:login");
+        assert_eq!(registry.get("acme:login").unwrap().description(), "first");
+    }
+
+    #[test]
+    fn colliding_non_skill_or_malformed_command_is_dropped() {
+        let non_skill = agent_client_protocol::AvailableCommand::new(
+            "login".to_string(),
+            "shell login".to_string(),
+        );
+        let malformed = acp_skill("login", serde_json::json!({"scope": "local"}));
+        for cmd in [non_skill, malformed] {
+            let mut registry = CommandRegistry::new(vec![login_builtin()]);
+            registry.set_acp_commands(&[cmd]);
+            assert_eq!(registry.command_count(), 1, "only the builtin remains");
+            assert!(registry.is_builtin("login"));
+        }
+    }
+
+    #[test]
+    fn collision_detection_covers_builtin_aliases() {
         let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
             name: "exit",
             aliases: &["quit"],
         });
         let mut registry = CommandRegistry::new(vec![builtin]);
-
-        // "quit" collides with the builtin alias.
-        let acp_cmds = vec![agent_client_protocol::AvailableCommand::new(
-            "quit".to_string(),
-            "Should be skipped".to_string(),
-        )];
-        registry.set_acp_commands(&acp_cmds);
-        // Still only the builtin.
-        assert_eq!(registry.command_count(), 1);
-    }
-
-    fn acp_skill(name: &str, scope: &str) -> agent_client_protocol::AvailableCommand {
-        let meta = serde_json::json!({ "scope": scope, "path": "/x/SKILL.md" })
-            .as_object()
-            .cloned()
-            .unwrap();
-        agent_client_protocol::AvailableCommand::new(name.to_string(), format!("{name} skill"))
-            .meta(meta)
-    }
-
-    #[test]
-    fn acp_nonplugin_skill_colliding_with_builtin_is_requalified() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "login",
-            aliases: &[],
-        });
-        let mut registry = CommandRegistry::new(vec![builtin]);
-        registry.set_acp_commands(&[acp_skill("login", "local")]);
-
-        assert!(registry.get("login").is_some());
-        assert!(registry.is_builtin("login"));
-        assert!(registry.get("local:login").is_some());
-        assert!(!registry.is_builtin("local:login"));
-        assert_eq!(registry.command_count(), 2, "builtin + re-homed skill");
-        assert!(
-            registry
-                .triggers()
-                .iter()
-                .any(|t| t.canonical == "local:login"),
-            "re-homed skill should have a dropdown trigger"
-        );
-    }
-
-    #[test]
-    fn acp_malformed_skill_meta_colliding_with_builtin_is_dropped() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "login",
-            aliases: &[],
-        });
-        let mut registry = CommandRegistry::new(vec![builtin]);
-        let meta = serde_json::json!({ "scope": "local" })
-            .as_object()
-            .cloned()
-            .unwrap();
-        let cmd = agent_client_protocol::AvailableCommand::new(
-            "login".to_string(),
-            "malformed".to_string(),
-        )
-        .meta(meta);
-        registry.set_acp_commands(&[cmd]);
-        assert_eq!(
-            registry.command_count(),
-            1,
-            "malformed-meta collision drops"
-        );
-        assert!(registry.get("local:login").is_none());
-    }
-
-    #[test]
-    fn acp_skill_named_after_blocked_name_is_requalified() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &[],
-        });
-        let mut registry = CommandRegistry::new(vec![builtin]);
-        registry.set_acp_commands(&[acp_skill("hooks-add", "local")]);
-        assert!(registry.get("local:hooks-add").is_some());
-        assert!(registry.get("hooks-add").is_none());
-    }
-
-    #[test]
-    fn acp_plugin_skill_colliding_with_builtin_is_dropped_not_requalified() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "login",
-            aliases: &[],
-        });
-        let mut registry = CommandRegistry::new(vec![builtin]);
-        registry.set_acp_commands(&[acp_skill("login", "plugin")]);
-
-        assert!(registry.get("login").is_some());
-        assert!(registry.is_builtin("login"));
-        assert!(
-            registry.get("plugin:login").is_none(),
-            "pager must not fabricate a plugin-qualified name"
-        );
-        assert_eq!(registry.command_count(), 1, "only the builtin remains");
-    }
-
-    #[test]
-    fn acp_nonskill_colliding_with_builtin_is_dropped() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "login",
-            aliases: &[],
-        });
-        let mut registry = CommandRegistry::new(vec![builtin]);
         registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
-            "login".to_string(),
-            "shell login".to_string(),
+            "quit".to_string(),
+            "Should be dropped".to_string(),
         )]);
         assert_eq!(registry.command_count(), 1);
-        assert!(registry.is_builtin("login"));
+    }
+
+    #[test]
+    fn skill_named_after_blocked_name_is_skipped() {
+        let mut registry = CommandRegistry::new(vec![login_builtin()]);
+        registry.set_acp_commands(&[acp_skill(
+            "hooks-add",
+            serde_json::json!({"scope": "local", "path": "/x/SKILL.md"}),
+        )]);
+        assert!(registry.get("hooks-add").is_none());
+        assert!(registry.get("local:hooks-add").is_none());
+
+        registry.set_acp_commands(&[acp_skill(
+            "local:hooks-add",
+            serde_json::json!({"scope": "local", "path": "/x/SKILL.md"}),
+        )]);
+        assert!(registry.get("local:hooks-add").is_some());
     }
 
     #[test]

@@ -1,42 +1,232 @@
 [
   {
     "category": "features",
-    "description": "**Background spawn** can keep unfinished parent work going instead of only polling the child.",
+    "description": "Dashboard rows now show a short summary of what the agent did in the previous turn.",
     "breaking_change": false
   },
   {
     "category": "features",
-    "description": "**Disk-full** is surfaced during live sessions instead of failing opaquely.",
+    "description": "The Extensions modal now shows items grouped and sorted alphabetically with collapsible sections for Skills.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "MCP tools that return images no longer drop or corrupt screenshots when output is large.",
     "breaking_change": false
   },
   {
     "category": "features",
-    "description": "**Queue reorder** lets any queued item move up or down; send-now never drops earlier queued text.",
+    "description": "When a subagent runs in the background the parent agent is now reminded to keep working on the original task.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "Resuming a restored child session after a remote parent restore no longer fails with 404.",
     "breaking_change": false
   },
   {
     "category": "features",
-    "description": "**Disabled MCP stubs** appear only when they can be re-enabled.",
+    "description": "Clients can now reattach to a running session without replaying the transcript and explicitly close sessions.",
+    "breaking_change": false
+  },
+  {
+    "category": "performance",
+    "description": "Forking very large sessions no longer uses many times the session file size in memory.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**`/resume` search** finds sessions that load via `--resume`.",
+    "description": "The default branch is now correctly detected for hand-initialized repos that lack origin/HEAD.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**Restored child sessions** are registered so `--resume` does not 404.",
+    "description": "Disabled MCP servers that can still be re-enabled now remain visible in the list instead of disappearing.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "Grok no longer asks which project directory to use when launched from your home folder or other non-project directories.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**API errors** show clean TUI banners; Cloudflare 52x and other 5xx sampling errors retry.",
+    "description": "Rapid send-now presses or messages sent while waiting on subagents no longer lose earlier queued messages.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**First-party API key** is probed before login is skipped.",
+    "description": "Pressing Esc or the stop button now reliably prevents background tasks from restarting the model after a cancel.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Login** no longer skips when an invalid first-party API key is present in the environment.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Model picker** and command palette now work while reviewing a plan before approving.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Workflow parallel()** panels no longer launch hundreds of children at once and stall.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Dashboard overlay** no longer shows useless prev/next shortcuts when only one agent is present.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**/feedback** now opens a dedicated report box instead of entering prompt mode.",
+    "breaking_change": false
+  },
+  {
+    "category": "performance",
+    "description": "**Exiting** an empty session is now instant even on slow networks.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Pinned prompt headers** can now be selected and copied with the mouse.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Tab** and **Esc** now behave consistently on every blocking card (question, permission, cancel-turn).",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Dashboard navigation** after /new now correctly exits back to the dashboard from an empty prompt.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Codebase restore** no longer hangs on large or shallow git repositories.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Auto theme detection** now works over SSH and inside tmux sessions.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Voice and Finance tool cards** are now rendered with icons and localized labels.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Remote session resume** restores conversation only unless --restore-code is explicitly used.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Copying CJK text** with the mouse now includes every character at the selection edges.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Markdown tables** now reflow inside cells on narrow panes instead of clipping the right border.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Resume search** now finds sessions by UUID even when they live in other directories.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Permission prompts** now show the complete script clearly instead of dimmed fragments.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**API errors** now appear as clean banners instead of raw JSON dumps in the TUI.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Typing exit or quit** in the dashboard now exits the CLI instead of starting a new session.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Mode indicator** (plan/agent/ask) now correctly reflects the session's actual mode after resume and transitions.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**`/delete`** now returns to the dashboard when you delete a session you opened from it.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Enter in the slash command menu** now runs the highlighted command.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Grok** now retries more server errors during outages for better reliability.",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**Dashboard row summaries** now show the agent's answer or finding instead of activity descriptions.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Syntax highlighting** in long diff lines now stays correct when wrapped.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Slash commands** that require a session now show a helpful message when used from the dashboard.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Exiting the CLI** now properly resets terminal modes even in minimal mode.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Queued prompts** now stay visible and reachable while waiting on subagents.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Auto recaps** no longer appear in the middle of new turns or while busy.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Long bash commands** in permission prompts can now be expanded with Ctrl-F.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Error messages** in /btw side questions now show fully wrapped.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Queued slash commands** and images can now be reordered in the queue pane.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Error messages** in /btw side questions now show fully wrapped.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**/feedback** no longer resets the composer input mode after the pane closes.",
     "breaking_change": false
   }
 ]

@@ -54,6 +54,15 @@ pub(crate) fn handle_ext_notification(
         "x.ai/session_notification" | "x.ai/session/update" => {
             decode_session_notification(method, params)
         }
+        "x.ai/leader/version_mismatch" => {
+            match crate::acp::version_mismatch_banner(params) {
+                Some(banner) => tracing::warn!(%banner, "x.ai/leader/version_mismatch"),
+                None => {
+                    tracing::warn!("ignoring x.ai/leader/version_mismatch without usable versions")
+                }
+            }
+            ExtEvent::None
+        }
         _ => ExtEvent::None,
     }
 }

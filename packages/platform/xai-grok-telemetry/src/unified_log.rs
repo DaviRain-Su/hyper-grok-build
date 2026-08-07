@@ -521,6 +521,11 @@ pub fn debug(msg: &str, sid: Option<&str>, ctx: Option<serde_json::Value>) {
     emit(LogLevel::Debug, msg, sid, ctx);
 }
 
+/// The resolved log path, for error messages that point the user here.
+pub fn path() -> PathBuf {
+    log_path()
+}
+
 /// Read the current unified log file and return its contents.
 ///
 /// Returns `None` if the log file doesn't exist or can't be read.

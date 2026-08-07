@@ -81,6 +81,8 @@ pub(crate) enum EscStep {
     /// Leave the card's text input for its rows (question free-text answer,
     /// permission followup message).
     LeaveTextInput,
+    /// Close the bare `/feedback` pane, which has no rows to leave the input for.
+    DismissFeedbackPane,
     /// Throw away an in-progress always-allow pattern edit.
     DiscardPatternEdit,
     /// Unmark this question's answer.
@@ -99,6 +101,7 @@ impl EscStep {
         match self {
             Self::DismissFileSearch => "dismiss",
             Self::LeaveTextInput => "back",
+            Self::DismissFeedbackPane => "dismiss",
             Self::DiscardPatternEdit => "cancel",
             Self::ClearSelection => "unselect",
             Self::BackOutOverlay => "dashboard",
@@ -202,6 +205,8 @@ impl AgentView {
                 if qv.focus == QuestionFocus::InputMode {
                     if self.prompt.file_search_visible() {
                         EscStep::DismissFileSearch
+                    } else if qv.is_feedback() {
+                        EscStep::DismissFeedbackPane
                     } else {
                         EscStep::LeaveTextInput
                     }
@@ -232,6 +237,7 @@ impl AgentView {
                     self.commit_question_freeform();
                 }
             }
+            EscStep::DismissFeedbackPane => return self.submit_question_answers(true),
             EscStep::DiscardPatternEdit => {
                 self.permission_pattern_edit = None;
                 self.permission_back_to_options();

@@ -499,11 +499,12 @@ fn clear_pending_overlay_stop(app: &mut AppView) {
 /// `app_view::handle_input` and the `DashboardOverlayStop` def both
 /// point here):
 ///
-/// - First press, turn RUNNING → `Action::CancelTurn` (the agent
-///   view's Ctrl+C behaviour: keep-subagents prompt, prompt rewind).
-///   Never arms, so mashing Ctrl+X to stop a turn can't close the
-///   session.
-/// - First press, any other state (idle, command in flight, cancel
+/// - First press, stoppable activity running (turn, `/compact`, or a
+///   streaming wake turn; `arm_dashboard_stop`) → `Action::CancelTurn`
+///   (the agent view's Ctrl+C behaviour: keep-subagents prompt, prompt
+///   rewind). Never arms, so mashing Ctrl+X to stop a turn can't close
+///   the session.
+/// - First press, any other state (idle, cancel
 ///   pending) → arms `AppView::pending_action` with the dashboard's
 ///   2s `CONFIRM_WINDOW`; the shortcuts bar paints "press Ctrl+x
 ///   again to close this session". Cancel can't help in the non-idle
@@ -525,10 +526,8 @@ pub(super) fn dispatch_dashboard_overlay_stop(app: &mut AppView) -> Vec<Effect> 
     let Some(id) = app.dashboard.as_ref().and_then(|d| d.attached_agent) else {
         return vec![];
     };
-    if app
-        .agents
-        .get(&id)
-        .is_some_and(|a| a.session.state.is_turn_running() || a.session.state.is_compact_running())
+    if let Some(agent) = app.agents.get_mut(&id)
+        && agent.arm_dashboard_stop()
     {
         return dispatch_cancel_turn(app);
     }
@@ -1841,13 +1840,35 @@ pub(super) fn dispatch_dashboard_begin_rename(app: &mut AppView) {
         d.set_error_toast("Subagent rows can't be renamed");
         return;
     }
-    // The draft starts EMPTY (not prefilled with the current title):
-    // renames are almost always full rewrites, so prefilling only costs
-    // the user a hold-Backspace. Esc / empty-draft Enter cancel without
-    // touching the existing name.
+    let prefill = match &sel {
+        crate::views::dashboard::DashboardRowId::TopLevel(agent_id) => app
+            .agents
+            .get(agent_id)
+            .map(rename_prefill_title)
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
     if let Some(d) = app.dashboard.as_mut() {
-        d.rename = Some(crate::views::dashboard::state::RenameDraft::new(sel, ""));
+        d.rename = Some(crate::views::dashboard::state::RenameDraft::new(
+            sel, prefill,
+        ));
     }
+}
+
+fn rename_prefill_title(agent: &AgentView) -> String {
+    if let Some(name) = agent.display_name.as_deref() {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            return crate::views::session_title::sanitize_display_text(trimmed).into_owned();
+        }
+    }
+    if let Some(title) = agent.generated_session_title.as_deref() {
+        let trimmed = title.trim();
+        if !trimmed.is_empty() {
+            return crate::views::session_title::sanitize_display_text(trimmed).into_owned();
+        }
+    }
+    String::new()
 }
 
 pub(super) fn dispatch_dashboard_commit_rename(app: &mut AppView) -> Vec<Effect> {
@@ -2054,13 +2075,27 @@ fn stop_top_level_activity(agent: &mut crate::app::agent_view::AgentView) -> Opt
 
     // Turn / background work need a session id to reach the backend.
     if let Some(session_id) = session_id {
-        if !agent.session.state.is_idle() {
-            effects.push(Effect::CancelTurn {
-                session_id: session_id.clone(),
-                cancel_subagents: true,
-                trigger: None,
-                rewind_if_pristine: false,
-            });
+        if !agent.session.state.is_idle() || agent.wake_turn_active() {
+            // Same priority as in-pane cancel: compact, then a live wake
+            // marker (shell front is still the wake even if we locally
+            // start_turn'd a user prompt), then a local turn. Do not
+            // cancel_turn a local user turn that is only queued behind a wake.
+            if agent.session.state.is_compact_running() {
+                agent.session.cancel_compact_command();
+            } else if agent.running_wake_turn.is_some() {
+                agent.mark_wake_cancel_sent();
+            } else if agent.session.state.is_turn_running() {
+                agent.session.cancel_turn(&mut agent.scrollback);
+            }
+            agent.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::DashboardStop);
+            // Stop-everything on purpose: unlike the in-pane retry, the row
+            // stop escalates past a recorded keep-subagents choice.
+            effects.push(super::turn::emit_cancel_turn(
+                agent,
+                session_id.clone(),
+                /* cancel_subagents */ true,
+                /* rewind_if_no_output */ false,
+            ));
         }
         let running: Vec<String> = agent
             .session

@@ -380,6 +380,7 @@ pub fn classify_top_level(agent: &AgentView) -> RowState {
         return RowState::NeedsInput;
     }
     if !agent.session.state.is_idle()
+        || agent.wake_turn_active()
         || agent.session.turn_activity().is_some()
         || !agent.session.pending_prompts.is_empty()
     {

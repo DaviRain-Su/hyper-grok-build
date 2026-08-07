@@ -351,6 +351,7 @@ pub mod restore;
 pub mod result;
 pub mod signals;
 pub(crate) mod slash_commands;
+pub use slash_commands::PAGER_COMMAND_KEYS;
 pub mod storage;
 pub(crate) mod streaming_capture;
 pub(crate) mod ttsr;

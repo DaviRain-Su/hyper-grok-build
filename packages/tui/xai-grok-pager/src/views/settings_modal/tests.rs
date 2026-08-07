@@ -662,6 +662,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // both the pager drain and the shell promote. Registered before
             // multiline_mode, so it renders first).
             "combine_queued_prompts",
+            "confirm_before_rewind",
             // PAGER-owned multiline (Editor category).
             "multiline_mode",
             // SHELL-owned prompt_suggestions (Editor; tab autocomplete

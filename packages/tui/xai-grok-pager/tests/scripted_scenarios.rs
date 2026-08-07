@@ -482,11 +482,10 @@ async fn scripted_small_screen_tip_no_show_tiny() {
 }
 
 /// Inline edit-and-resubmit happy path: Enter on a selected previous prompt
-/// opens the in-place editor; Enter with changed text raises the inline
-/// rewind popup ("Resubmit from here", no files-only row); `b` + `y`
-/// rewinds the conversation and resubmits the edited text as a fresh turn
-/// (distinct per-turn mock sentinels prove the tail was truncated), with no
-/// "Reverted conversation" note.
+/// opens the in-place editor; Enter with changed text raises the confirm
+/// dialog; `y` rewinds the conversation and resubmits the edited text as a
+/// fresh turn (distinct per-turn mock sentinels prove the tail was
+/// truncated), with no "Reverted conversation" note.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "scripted scenario; run with cargo test -- --ignored"]
 async fn scripted_inline_edit_resubmit() {

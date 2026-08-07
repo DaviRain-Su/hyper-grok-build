@@ -65,7 +65,6 @@ impl Theme {
             accent_plan: GOLD,
 
             accent_verify: PINE,
-
             accent_feedback: FOAM,
 
             accent_remember: PINE,

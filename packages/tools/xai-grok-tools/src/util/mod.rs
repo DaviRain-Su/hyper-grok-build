@@ -36,6 +36,7 @@ pub use spawn::{
 };
 pub use truncate::{
     DEFAULT_SOFT_WRAP_WIDTH, ceil_char_boundary, estimate_tokens, floor_char_boundary,
-    soft_wrap_line, soft_wrap_lines, truncate_line, truncate_str, truncate_str_with_marker,
+    format_bytes, soft_wrap_line, soft_wrap_lines, truncate_line, truncate_str,
+    truncate_str_with_marker,
 };
 pub use xai_tty_utils::detach_std_command;

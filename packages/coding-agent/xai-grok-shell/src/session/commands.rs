@@ -15,9 +15,8 @@ pub struct CancellationContext {
     pub tool_name: Option<String>,
     pub reason: Option<String>,
     pub hook_name: Option<String>,
-    /// What triggered the cancel (`"send_now"`, `"esc"`, `"ctrl_c"`); surfaced
-    /// as `cancelTrigger` on the `PromptResponse`/`TurnCompleted` `_meta`.
-    /// `None` for graceful in-turn cancels and older clients.
+    /// What triggered the cancel (e.g. `"send_now"`, `"esc"`, `"mouse"`);
+    /// surfaced as `cancelTrigger` on the turn-end `_meta`.
     pub trigger: Option<String>,
 }
 /// Failure surface of a `/btw` side question. Kept typed until the ACP
@@ -145,7 +144,6 @@ pub enum ShutdownKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CancelTrigger {
     Esc,
-    /// The one trigger with a side effect: suppresses queued task wakes.
     CtrlC,
     SendNow,
     Shutdown,
@@ -164,6 +162,10 @@ impl CancelTrigger {
             other => Self::Client(other.to_string()),
         }
     }
+    /// Stop gesture (Esc/Ctrl+C/`Client`); unrecognized wire names fail closed.
+    pub fn is_stop_gesture(&self) -> bool {
+        matches!(self, Self::Esc | Self::CtrlC | Self::Client(_))
+    }
     pub fn as_str(&self) -> &str {
         match self {
             Self::Esc => "esc",
@@ -181,7 +183,7 @@ pub struct CancelOptions {
     pub cancel_subagents: bool,
     pub kill_background_tasks: bool,
     pub rewind_if_no_output: bool,
-    /// Reporting only, aside from the task-wake suppression `CtrlC` opts into.
+    /// [`CancelTrigger::is_stop_gesture`] arms the task-wake barrier.
     pub trigger: Option<CancelTrigger>,
     /// Drives the cancel-rate metric.
     pub user_initiated: bool,
@@ -828,4 +830,19 @@ pub enum SessionCommand {
         commit: Option<String>,
         branch: Option<String>,
     },
+}
+#[cfg(test)]
+mod cancel_trigger_tests {
+    use super::CancelTrigger;
+    #[test]
+    fn only_stop_gestures_arm_the_wake_barrier() {
+        assert!(!CancelTrigger::SendNow.is_stop_gesture());
+        assert!(!CancelTrigger::SessionDelete.is_stop_gesture());
+        assert!(!CancelTrigger::Shutdown.is_stop_gesture());
+        assert!(!CancelTrigger::SessionClose.is_stop_gesture());
+        assert!(CancelTrigger::Esc.is_stop_gesture());
+        assert!(CancelTrigger::CtrlC.is_stop_gesture());
+        assert!(CancelTrigger::from_client("mouse").is_stop_gesture());
+        assert!(CancelTrigger::from_client("some_future_gesture").is_stop_gesture());
+    }
 }

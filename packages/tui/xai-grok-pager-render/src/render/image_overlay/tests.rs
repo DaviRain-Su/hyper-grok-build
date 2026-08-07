@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-use super::content::{format_bytes, format_mime};
+use super::content::format_mime;
 use super::geometry::{overlay_geometry, plan_image_preview};
 use super::*;
 use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
@@ -189,13 +189,10 @@ fn geometry_honors_plan_specific_minima() {
 }
 
 #[test]
-fn formatting_helpers_cover_known_and_unknown_values() {
+fn format_mime_covers_known_and_unknown_values() {
     assert_eq!(format_mime("image/png"), "PNG");
     assert_eq!(
         format_mime("application/octet-stream"),
         "application/octet-stream"
     );
-    assert_eq!(format_bytes(512), "512 B");
-    assert_eq!(format_bytes(1536), "1.5 KB");
-    assert_eq!(format_bytes(2_500_000), "2.4 MB");
 }

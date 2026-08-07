@@ -437,6 +437,21 @@ pub enum MetricIncrement {
         error_category: String,
         model: String,
     },
+    /// `grok_code.startup.timeout` (`stuck_in` = phase label).
+    StartupTimeout { stuck_in: String, auth_mode: String },
+    /// `grok_code.startup.phase_duration` (ms; `phase` = phase label).
+    StartupPhaseDuration {
+        phase: String,
+        duration_ms: u64,
+        outcome: String,
+        auth_mode: String,
+    },
+    /// `grok_code.startup.total` (ms from process start to a usable session).
+    StartupTotal {
+        duration_ms: u64,
+        outcome: String,
+        auth_mode: String,
+    },
 }
 
 /// Curated external representation of one telemetry event: an optional log
@@ -498,6 +513,9 @@ pub(crate) const METRIC_TURN_COUNT: &str = "grok_code.turn.count";
 pub(crate) const METRIC_TOOL_DECISION: &str = "grok_code.tool.decision";
 pub(crate) const METRIC_TOOL_USAGE: &str = "grok_code.tool.usage";
 pub(crate) const METRIC_ERROR_COUNT: &str = "grok_code.error.count";
+pub(crate) const METRIC_STARTUP_PHASE_DURATION: &str = "grok_code.startup.phase_duration";
+pub(crate) const METRIC_STARTUP_TIMEOUT: &str = "grok_code.startup.timeout";
+pub(crate) const METRIC_STARTUP_TOTAL: &str = "grok_code.startup.total";
 
 /// Every attribute key that may appear on a metric data point: the
 /// instrument-specific keys plus the per-increment identity/cardinality keys.
@@ -513,6 +531,9 @@ pub(crate) const METRIC_ALLOWED_ATTR_KEYS: &[&str] = &[
     "access_kind",
     "permission_mode",
     "error_category",
+    "phase",
+    "stuck_in",
+    "auth_mode",
     "session.id",
     "app.version",
     "user.id",
@@ -1104,6 +1125,38 @@ pub fn map_internal_error(ev: &events::InternalError) -> Option<ExternalRecord> 
     Some(
         ExternalRecord::event(ExternalEventName::InternalError)
             .attr(ExternalKey::ErrorType, ev.error_type.as_str()),
+    )
+}
+
+/// `AgentConnect` → phase histogram + timeout counter (no external log event).
+pub fn map_agent_connect(ev: &events::AgentConnect) -> Option<ExternalRecord> {
+    let mut rec = ExternalRecord::default();
+    for (phase, duration_ms) in &ev.phase_durations_ms {
+        rec = rec.metric(MetricIncrement::StartupPhaseDuration {
+            phase: phase.clone(),
+            duration_ms: *duration_ms,
+            outcome: ev.outcome.label().to_string(),
+            auth_mode: ev.auth_mode.label().to_string(),
+        });
+    }
+    if ev.outcome == crate::startup::StartupOutcome::Timeout {
+        let stuck = ev.stuck_in.clone().unwrap_or_else(|| "unknown".to_owned());
+        rec = rec.metric(MetricIncrement::StartupTimeout {
+            stuck_in: stuck,
+            auth_mode: ev.auth_mode.label().to_string(),
+        });
+    }
+    Some(rec)
+}
+
+/// `StartupComplete` → the total histogram (no external log event).
+pub fn map_startup_complete(ev: &events::StartupComplete) -> Option<ExternalRecord> {
+    Some(
+        ExternalRecord::default().metric(MetricIncrement::StartupTotal {
+            duration_ms: ev.total_ms,
+            outcome: ev.outcome.label().to_string(),
+            auth_mode: ev.auth_mode.label().to_string(),
+        }),
     )
 }
 

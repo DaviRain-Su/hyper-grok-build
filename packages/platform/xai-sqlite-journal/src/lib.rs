@@ -18,6 +18,10 @@ use std::path::{Path, PathBuf};
 /// consumer historically set.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
 
+/// One budget for riding out `SQLITE_BUSY`. Inner retries share the caller's
+/// deadline, so two timers cannot stack into twice the advertised wait.
+pub const BUSY_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Journal mode chosen for a SQLite database based on where it lives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JournalMode {
@@ -130,12 +134,9 @@ impl JournalMode {
 
     /// Open (or create) a read-write connection with this journal mode
     /// applied, at [`Self::effective_db_path`] (per-host on network mounts).
-    /// Sets a 5s `busy_timeout` before the journal pragma (see
-    /// [`Self::apply`] for the conversion-lock semantics).
     pub fn open(self, db_path: &Path) -> rusqlite::Result<rusqlite::Connection> {
         let conn = rusqlite::Connection::open(self.effective_db_path(db_path))?;
-        conn.busy_timeout(BUSY_TIMEOUT)?;
-        self.apply(&conn)?;
+        self.apply_with_retry(&conn)?;
         Ok(conn)
     }
 
@@ -157,6 +158,14 @@ impl JournalMode {
     /// `query_only` is then set so SQL writes are rejected on this arm too —
     /// both arms honor the name.
     pub fn open_readonly(self, db_path: &Path) -> rusqlite::Result<rusqlite::Connection> {
+        self.open_readonly_until(db_path, std::time::Instant::now() + BUSY_RETRY_BUDGET)
+    }
+
+    pub fn open_readonly_until(
+        self,
+        db_path: &Path,
+        deadline: std::time::Instant,
+    ) -> rusqlite::Result<rusqlite::Connection> {
         use rusqlite::OpenFlags;
         let flags = match self {
             Self::Wal => OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -168,7 +177,7 @@ impl JournalMode {
         // exclusive window), and the conversion below requires a busy handler.
         conn.busy_timeout(BUSY_TIMEOUT)?;
         if let Self::Truncate = self {
-            self.apply(&conn)?;
+            self.apply_with_retry_until(&conn, deadline)?;
             // Make the name true: reject SQL writes (statement-level) while
             // the fd stays writable for lock/rollback purposes.
             conn.pragma_update(None, "query_only", true)?;
@@ -183,9 +192,8 @@ impl JournalMode {
     /// acquisition only PARTIALLY honors the busy handler — some lock paths
     /// wait out `busy_timeout`, others (e.g. a peer connection holding a WAL
     /// read-mark) fail fast with `SQLITE_BUSY`. Callers must set
-    /// `busy_timeout` first ([`Self::open`] does), and sites that swallow
-    /// open errors need a bounded retry on busy as well (see
-    /// `set_journal_mode` in `xai-fast-worktree`).
+    /// `busy_timeout` first, or use [`Self::apply_with_retry`] (as
+    /// [`Self::open`] does), which also rides out the fail-fast paths.
     pub fn apply(self, conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         match self {
             Self::Wal => conn.pragma_update(None, "journal_mode", "WAL"),
@@ -198,6 +206,61 @@ impl JournalMode {
                 // Legal only after leaving WAL; the exclusive lock is released
                 // by the caller's next database access (e.g. schema init).
                 conn.pragma_update(None, "locking_mode", "NORMAL")
+            }
+        }
+    }
+
+    /// [`Self::apply`] with a busy retry bounded by [`BUSY_RETRY_BUDGET`] and
+    /// a 1s per-attempt lock wait. Leaves `busy_timeout` at the 5s default.
+    pub fn apply_with_retry(self, conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+        self.apply_with_retry_until(conn, std::time::Instant::now() + BUSY_RETRY_BUDGET)
+    }
+
+    pub fn apply_with_retry_until(
+        self,
+        conn: &rusqlite::Connection,
+        deadline: std::time::Instant,
+    ) -> rusqlite::Result<()> {
+        let result = self.apply_with_retry_inner(conn, deadline);
+        let restore = conn.busy_timeout(BUSY_TIMEOUT);
+        if result.is_err() { result } else { restore }
+    }
+
+    fn apply_with_retry_inner(
+        self,
+        conn: &rusqlite::Connection,
+        deadline: std::time::Instant,
+    ) -> rusqlite::Result<()> {
+        use rusqlite::ErrorCode;
+        use std::time::{Duration, Instant};
+        const RETRY_PAUSE: Duration = Duration::from_millis(20);
+        let start = Instant::now();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            conn.busy_timeout(remaining.clamp(RETRY_PAUSE, Duration::from_millis(1000)))?;
+            match self.apply(conn) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let is_busy = matches!(
+                        &e,
+                        rusqlite::Error::SqliteFailure(f, _)
+                            if matches!(f.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+                    );
+                    if !is_busy || Instant::now() + RETRY_PAUSE >= deadline {
+                        let elapsed_ms = start.elapsed().as_millis();
+                        let message = format!(
+                            "failed to set journal mode {} after {elapsed_ms}ms: {e}",
+                            self.as_str()
+                        );
+                        return Err(match e {
+                            rusqlite::Error::SqliteFailure(f, _) => {
+                                rusqlite::Error::SqliteFailure(f, Some(message))
+                            }
+                            other => other,
+                        });
+                    }
+                    std::thread::sleep(RETRY_PAUSE);
+                }
             }
         }
     }
@@ -525,6 +588,32 @@ mod tests {
         for name in ["apfs", "hfs", "tmpfs", "devfs", ""] {
             assert!(!is_network_fs_name(name), "{name}");
         }
+    }
+
+    #[test]
+    fn apply_with_retry_rides_out_transient_exclusive_lock() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("retry.db");
+
+        // EXCLUSIVE locking holds the lock until the connection closes.
+        let holder = rusqlite::Connection::open(&path).unwrap();
+        holder
+            .pragma_update(None, "locking_mode", "EXCLUSIVE")
+            .unwrap();
+        holder
+            .execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (1);")
+            .unwrap();
+
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(holder);
+        });
+
+        let conn = JournalMode::Wal
+            .open(&path)
+            .expect("open must ride out a transiently held exclusive lock");
+        assert_eq!(journal_mode(&conn), "wal");
+        release.join().unwrap();
     }
 
     #[test]

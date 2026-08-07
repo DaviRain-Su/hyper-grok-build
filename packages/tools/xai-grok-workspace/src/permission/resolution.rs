@@ -1145,24 +1145,20 @@ impl McpServerAllowlist {
             | agent_client_protocol::McpServer::Sse(agent_client_protocol::McpServerSse {
                 url,
                 ..
-            }) => {
-                if !self.url_patterns.is_empty() {
-                    restricted = true;
-                    matched |= self
-                        .url_patterns
-                        .iter()
-                        .any(|pat| url_glob_matches(pat, url));
-                }
+            }) if !self.url_patterns.is_empty() => {
+                restricted = true;
+                matched |= self
+                    .url_patterns
+                    .iter()
+                    .any(|pat| url_glob_matches(pat, url));
             }
             agent_client_protocol::McpServer::Stdio(agent_client_protocol::McpServerStdio {
                 command,
                 ..
-            }) => {
-                if !self.commands.is_empty() {
-                    restricted = true;
-                    let command = command.to_string_lossy();
-                    matched |= self.commands.iter().any(|c| *c == command);
-                }
+            }) if !self.commands.is_empty() => {
+                restricted = true;
+                let command = command.to_string_lossy();
+                matched |= self.commands.iter().any(|c| *c == command);
             }
             // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
             _ => {}
@@ -4201,15 +4197,34 @@ allow = ["Bash(evil *)"]
     }
 
     #[test]
-    fn parse_notebook_read_tool_prefix() {
-        let rule = parse_permission_rule("NotebookRead(*.ipynb)", RuleAction::Allow).unwrap();
-        assert_eq!(rule.tool, ToolFilter::Read);
-    }
+    fn notebook_tools_warn_and_skip_like_enter_worktree() {
+        for rule in [
+            "NotebookEdit",
+            "NotebookEdit(*)",
+            "NotebookRead",
+            "NotebookRead(*)",
+            "EnterWorktree(*)",
+        ] {
+            let err = parse_permission_rule(rule, RuleAction::Deny).unwrap_err();
+            assert!(
+                matches!(err, RuleParseError::UnsupportedToolPrefix { .. }),
+                "{rule}: {err:?}"
+            );
+        }
 
-    #[test]
-    fn parse_notebook_edit_tool_prefix() {
-        let rule = parse_permission_rule("NotebookEdit(*.ipynb)", RuleAction::Allow).unwrap();
-        assert_eq!(rule.tool, ToolFilter::Edit);
+        let perms = ParsedPermissions {
+            deny: vec![
+                "NotebookEdit".to_string(),
+                "NotebookRead".to_string(),
+                "EnterWorktree".to_string(),
+            ],
+            allow: vec!["Bash(git status)".to_string()],
+            ..Default::default()
+        };
+        let (cfg, warnings) = perms.into_permission_config();
+        assert_eq!(cfg.rules.len(), 1, "rules: {:?}", cfg.rules);
+        assert_eq!(cfg.rules[0].tool, ToolFilter::Bash);
+        assert_eq!(warnings.len(), 3, "warnings: {warnings:?}");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -4309,20 +4324,6 @@ allow = ["Bash(evil *)"]
     fn parse_bare_web_search_tool_name() {
         let rule = parse_permission_rule("WebSearch", RuleAction::Allow).unwrap();
         assert_eq!(rule.tool, ToolFilter::WebSearch);
-        assert!(rule.pattern.is_none());
-    }
-
-    #[test]
-    fn parse_bare_notebook_read_tool_name() {
-        let rule = parse_permission_rule("NotebookRead", RuleAction::Allow).unwrap();
-        assert_eq!(rule.tool, ToolFilter::Read);
-        assert!(rule.pattern.is_none());
-    }
-
-    #[test]
-    fn parse_bare_notebook_edit_tool_name() {
-        let rule = parse_permission_rule("NotebookEdit", RuleAction::Allow).unwrap();
-        assert_eq!(rule.tool, ToolFilter::Edit);
         assert!(rule.pattern.is_none());
     }
 

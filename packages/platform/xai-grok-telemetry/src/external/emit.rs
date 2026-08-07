@@ -8,17 +8,24 @@
 
 use opentelemetry::KeyValue;
 use opentelemetry::logs::{AnyValue, LogRecord as _, Logger as _, Severity};
-use opentelemetry::metrics::{Counter, Meter};
+use opentelemetry::metrics::{Counter, Histogram, Meter};
 
 use super::ExternalTelemetry;
 use super::config::ContentGates;
 use super::schema::{
     AttrValue, ExternalKey, ExternalRecord, Gate, METRIC_ERROR_COUNT, METRIC_SESSION_COUNT,
+    METRIC_STARTUP_PHASE_DURATION, METRIC_STARTUP_TIMEOUT, METRIC_STARTUP_TOTAL,
     METRIC_TOKEN_USAGE, METRIC_TOOL_DECISION, METRIC_TOOL_USAGE, METRIC_TURN_COUNT,
     MetricIncrement,
 };
 
-/// Pre-created counters (schema pinned by test: names, units, attr keys).
+/// Default OTel buckets end at 10s; startup's failure regime is 10-30s, so
+/// those samples need real buckets, not +Inf.
+const STARTUP_MS_BOUNDARIES: &[f64] = &[
+    50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0, 15000.0, 30000.0, 60000.0, 120000.0,
+];
+
+/// Pre-created counters/histograms (schema pinned by test: names, units, attr keys).
 pub(crate) struct Instruments {
     session_count: Counter<u64>,
     token_usage: Counter<u64>,
@@ -26,6 +33,9 @@ pub(crate) struct Instruments {
     tool_decision: Counter<u64>,
     tool_usage: Counter<u64>,
     error_count: Counter<u64>,
+    startup_timeout: Counter<u64>,
+    startup_phase_duration: Histogram<u64>,
+    startup_total: Histogram<u64>,
 }
 
 impl Instruments {
@@ -54,6 +64,20 @@ impl Instruments {
             error_count: meter
                 .u64_counter(METRIC_ERROR_COUNT)
                 .with_unit("{error}")
+                .build(),
+            startup_timeout: meter
+                .u64_counter(METRIC_STARTUP_TIMEOUT)
+                .with_unit("{timeout}")
+                .build(),
+            startup_phase_duration: meter
+                .u64_histogram(METRIC_STARTUP_PHASE_DURATION)
+                .with_unit("ms")
+                .with_boundaries(STARTUP_MS_BOUNDARIES.to_vec())
+                .build(),
+            startup_total: meter
+                .u64_histogram(METRIC_STARTUP_TOTAL)
+                .with_unit("ms")
+                .with_boundaries(STARTUP_MS_BOUNDARIES.to_vec())
                 .build(),
         }
     }
@@ -264,6 +288,36 @@ fn add_increment(
             attrs.push(KeyValue::new("error_category", scrub(&error_category)));
             attrs.push(KeyValue::new("model", scrub(&model)));
             instruments.error_count.add(1, &attrs);
+        }
+        MetricIncrement::StartupTimeout {
+            stuck_in,
+            auth_mode,
+        } => {
+            attrs.push(KeyValue::new("stuck_in", scrub(&stuck_in)));
+            attrs.push(KeyValue::new("auth_mode", auth_mode));
+            instruments.startup_timeout.add(1, &attrs);
+        }
+        MetricIncrement::StartupPhaseDuration {
+            phase,
+            duration_ms,
+            outcome,
+            auth_mode,
+        } => {
+            attrs.push(KeyValue::new("phase", scrub(&phase)));
+            attrs.push(KeyValue::new("outcome", outcome));
+            attrs.push(KeyValue::new("auth_mode", auth_mode));
+            instruments
+                .startup_phase_duration
+                .record(duration_ms, &attrs);
+        }
+        MetricIncrement::StartupTotal {
+            duration_ms,
+            outcome,
+            auth_mode,
+        } => {
+            attrs.push(KeyValue::new("outcome", outcome));
+            attrs.push(KeyValue::new("auth_mode", auth_mode));
+            instruments.startup_total.record(duration_ms, &attrs);
         }
     }
 }

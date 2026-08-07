@@ -91,7 +91,6 @@ impl Theme {
             accent_plan: GOLD,
 
             accent_verify: PURPLE,
-
             accent_feedback: TEAL,
 
             accent_remember: rgb(139, 195, 74), // #8BC34A — Material Design light green

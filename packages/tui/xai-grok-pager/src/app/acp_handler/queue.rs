@@ -222,6 +222,31 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
         }
     }
 
+    // Wake-turn marker reconcile: `running_prompt_id` is authoritative. A
+    // broadcast naming a wake prompt offers the stop affordance even before
+    // its first delta; any other value retires a stale marker (recovery for
+    // a lost wake terminal).
+    if let Some(aid) = agent_id
+        && let Some(agent) = app.agents.get_mut(&aid)
+    {
+        let running = running_prompt_id.as_deref();
+        if agent
+            .running_wake_turn
+            .as_ref()
+            .is_some_and(|wake| Some(wake.prompt_id.as_str()) != running)
+        {
+            agent.running_wake_turn = None;
+        }
+        if let Some(pid) = running
+            && is_wake_prompt(pid)
+        {
+            // The broadcast is authoritative: the shell says this wake is
+            // running, so an earlier terminal's record no longer applies.
+            agent.finished_wake_prompts.remove(pid);
+            agent.note_streaming_wake_turn(pid);
+        }
+    }
+
     // Adoption / turn-start correlation.
     //
     // Single-client idle path stays inert: the pager sets `current_prompt_id`

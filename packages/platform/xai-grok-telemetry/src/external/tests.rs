@@ -180,6 +180,9 @@ fn metric_attr_keys_are_pinned() {
         "access_kind",
         "permission_mode",
         "error_category",
+        "phase",
+        "stuck_in",
+        "auth_mode",
         "session.id",
         "app.version",
         "user.id",
@@ -369,6 +372,57 @@ fn session_new_increments_session_count_only() {
     assert!(exported_events(&stream).is_empty(), "metric-only mapping");
     let names = exported_metric_names(&stream);
     assert_eq!(names, vec!["grok_code.session.count".to_owned()]);
+}
+
+#[test]
+fn agent_connect_timeout_emits_phase_histogram_and_timeout_counter() {
+    let stream = build(gates_off());
+    let mut phase_durations_ms = std::collections::BTreeMap::new();
+    phase_durations_ms.insert("load_config".into(), 12);
+    phase_durations_ms.insert("model_catalog".into(), 28_700);
+    emit_event_into(
+        &stream,
+        &events::AgentConnect {
+            connect_target: crate::startup::AgentKind::Embedded,
+            outcome: crate::startup::StartupOutcome::Timeout,
+            stuck_in: Some("model_catalog".into()),
+            phases: "load_config=12ms, model_catalog>=28.7s".into(),
+            phase_durations_ms,
+            elapsed_ms: 30_000,
+            timeout_secs: Some(30),
+            embedded_fallback: false,
+            auth_mode: crate::startup::AuthMode::Deployment,
+        },
+    );
+    assert!(exported_events(&stream).is_empty());
+    let mut names = exported_metric_names(&stream);
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "grok_code.startup.phase_duration".to_owned(),
+            "grok_code.startup.timeout".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn startup_complete_records_the_total_histogram_only() {
+    let stream = build(gates_off());
+    emit_event_into(
+        &stream,
+        &events::StartupComplete {
+            total_ms: 1_234,
+            outcome: crate::startup::StartupOutcome::Ok,
+            phases: "load_config=12ms, session_create=800ms".into(),
+            auth_mode: crate::startup::AuthMode::Team,
+        },
+    );
+    assert!(exported_events(&stream).is_empty());
+    assert_eq!(
+        exported_metric_names(&stream),
+        vec!["grok_code.startup.total".to_owned()]
+    );
 }
 
 #[test]
@@ -670,6 +724,15 @@ fn tool_decision_snapshot() {
             source: Some("user_reject".into()),
             subagent_session_id: None,
             subagent_type: None,
+            manager_prompt_attempted: Some(true),
+            prompt_outcome: Some(events::PermissionPromptOutcome::Reject),
+            decision_reason: Some(events::PermissionDecisionReason::AutoDenialLimit),
+            classifier_source: Some(events::PermissionClassifierSource::Llm),
+            classifier_verdict: Some(events::PermissionClassifierVerdict::Block),
+            security_findings: Some(vec![events::PermissionSecurityFinding::DangerousCommand]),
+            classifier_latency_ms: Some(42),
+            auto_denials_consecutive: Some(3),
+            auto_denials_total: Some(3),
         },
     );
     let events = exported_events(&stream);
@@ -683,6 +746,24 @@ fn tool_decision_snapshot() {
     assert_eq!(
         exported_metric_names(&stream),
         vec!["grok_code.tool.decision"]
+    );
+    for key in [
+        "manager_prompt_attempted",
+        "prompt_outcome",
+        "decision_reason",
+        "classifier_source",
+        "classifier_verdict",
+        "security_findings",
+        "classifier_latency_ms",
+        "auto_denials_consecutive",
+        "auto_denials_total",
+    ] {
+        assert_eq!(attr(ev, key), None, "external record must not export {key}");
+    }
+    let dbg = format!("{events:?}");
+    assert!(
+        !dbg.contains("dangerous_command") && !dbg.contains("auto_denial_limit"),
+        "no manager finding/reason value may appear in the external record"
     );
 }
 

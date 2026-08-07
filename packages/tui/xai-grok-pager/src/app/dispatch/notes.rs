@@ -7,7 +7,9 @@ use crate::app::agent_view::{AgentView, PromptInputMode};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
+use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
 use std::sync::atomic::{AtomicU64, Ordering};
+use xai_grok_tools::implementations::grok_build::ask_user_question::Question;
 
 /// Monotonic counter for correlating async rewrite responses with the modal
 /// that requested them. Prevents stale results from populating a different
@@ -18,13 +20,82 @@ fn next_rewrite_nonce() -> u64 {
     REWRITE_NONCE.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Enter feedback mode: visual change to prompt bar (teal accent, pencil prefix).
-/// No side effects — the user types feedback text and presses Enter to send.
-pub(super) fn dispatch_enter_feedback_mode(app: &mut AppView) -> Vec<Effect> {
-    with_active_agent(app, |agent| {
-        agent.prompt_input_mode = PromptInputMode::Feedback;
-        agent.prompt.set_text("");
-    });
+/// Bare `/feedback` pane label (first paragraph of the question chrome).
+pub(crate) const FEEDBACK_QUESTION_LABEL: &str = "How can we improve Grok Build?";
+
+/// Shared by the pane guard and the send path so both say the same thing.
+const NO_SESSION_NOTICE: &str = "No active session";
+
+/// Minimal mode has no toast surface, so the notice goes to the transcript instead.
+fn feedback_notice(app: &mut AppView, message: &str) {
+    if app.screen_mode.is_minimal() {
+        with_active_agent(app, |agent| {
+            agent
+                .scrollback
+                .push_block(RenderBlock::system(message.to_string()));
+        });
+    } else {
+        app.show_toast(message);
+    }
+}
+
+/// Why the bare `/feedback` pane refuses to open, if anything blocks it.
+fn feedback_pane_blocked(agent: &AgentView) -> Option<&'static str> {
+    if agent.active_subagent.is_some() {
+        // A fullscreen subagent view hides the prompt, so the pane would have nowhere to draw while still swallowing every key.
+        Some("Close the subagent view before sending feedback")
+    } else if agent.question_view.is_some() {
+        Some("Finish answering the current question first")
+    } else if !agent.no_input_overlay_pending()
+        || agent.key_owner() != crate::app::agent_view::KeyOwner::Pane
+    {
+        // Two ways the pane cannot work here. A permission or plan approval holds the composer, even parked in the scrollback, so the
+        // pane would hand it the wrong draft on the way out. A viewer outranks every card for keys, so the box would be untypeable.
+        Some("Close or answer what's open before sending feedback")
+    } else if agent.session.session_id.is_none() {
+        Some(NO_SESSION_NOTICE)
+    } else {
+        None
+    }
+}
+
+/// Open the freeform report pane for bare `/feedback`. Inline text never uses this.
+pub(super) fn dispatch_open_feedback_pane(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+
+    let blocked = {
+        let Some(agent) = app.agents.get(&id) else {
+            return vec![];
+        };
+        feedback_pane_blocked(agent)
+    };
+    if let Some(message) = blocked {
+        feedback_notice(app, message);
+        return vec![];
+    }
+
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let question = Question {
+        question: FEEDBACK_QUESTION_LABEL.to_string(),
+        options: vec![],
+        multi_select: Some(false),
+        id: None,
+    };
+    let stashed = agent.prompt.stash();
+    let mut state = QuestionViewState::new(
+        format!("feedback-{}", uuid::Uuid::new_v4()),
+        vec![question],
+        stashed,
+    )
+    .with_local_kind(LocalQuestionKind::Feedback);
+    // Freeform-only: start typing immediately.
+    let freeform = state.activate_freeform_input();
+    agent.prompt.set_text_preserving(&freeform);
+    agent.question_view = Some(state);
     vec![]
 }
 
@@ -38,8 +109,7 @@ pub(super) fn dispatch_enter_remember_mode(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// Send feedback text to the server. Shows a thank-you message immediately
-/// and fires the HTTP POST as a background effect.
+/// Thank-you is shown immediately; POST is a background effect. The composer is not cleared: the text arrives with the action, not from the prompt.
 pub(super) fn dispatch_send_feedback(app: &mut AppView, text: String) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -48,9 +118,6 @@ pub(super) fn dispatch_send_feedback(app: &mut AppView, text: String) -> Vec<Eff
         return vec![];
     };
 
-    agent.prompt_input_mode = PromptInputMode::Normal;
-    agent.prompt.set_text("");
-    // Submitting feedback retires any edit-contextual ephemeral tip.
     agent.ephemeral_tip.clear_on_submit();
 
     let trimmed = text.trim().to_string();
@@ -64,7 +131,7 @@ pub(super) fn dispatch_send_feedback(app: &mut AppView, text: String) -> Vec<Eff
     let Some(session_id) = agent.session.session_id.clone() else {
         agent
             .scrollback
-            .push_block(RenderBlock::system("No active session.".to_string()));
+            .push_block(RenderBlock::system(NO_SESSION_NOTICE.to_string()));
         return vec![];
     };
 

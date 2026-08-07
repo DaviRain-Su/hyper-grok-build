@@ -1,15 +1,17 @@
 //! Single-writer subagent coordinator actor.
 //!
-//! The actor owns the command receiver, pending/active/completed state,
-//! concrete blocking waiters, foreground deadlines, cancellation, and the
-//! terminal delivery disposition. All hosts drive it through `ChannelBackend`;
-//! only their `ChildRunner` implementations differ.
+//! The actor owns the command receiver, the admission queue, pending/active/
+//! completed state, concrete blocking waiters, foreground deadlines,
+//! cancellation, and the terminal delivery disposition. All hosts drive it
+//! through `ChannelBackend`; only their `ChildRunner` implementations differ.
 //!
 //! There is intentionally no shared mutable state in this module. A runner's
 //! associated futures may be `Send` or non-`Send`; the resulting actor future
 //! inherits that property naturally on stable Rust.
 
 mod query;
+mod queue;
+mod spawn;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -18,6 +20,7 @@ use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{mpsc, oneshot};
 
+use super::admission::Admission;
 use super::coordinator_state::{
     ActiveChild, BlockingWaiter, BufferedCompletion, ChildRecord, CompletedChild, InternalEvent,
     ListRequest, PendingChild, ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture,
@@ -26,16 +29,17 @@ use super::coordinator_state::{
 };
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome,
-    SubagentEvent, SubagentOutstandingReply, SubagentOwner, SubagentRegistryCounts,
-    SubagentRequest, SubagentResult, SubagentResumeLookup, SubagentResumeSource,
-    SubagentValidateTypeOutcome,
+    SubagentEvent, SubagentOutstandingReply, SubagentRegistryCounts, SubagentRequest,
+    SubagentResult, SubagentResumeLookup, SubagentResumeSource, SubagentValidateTypeOutcome,
 };
 
 pub use super::coordinator_state::{
     ChildCompletion, ChildControl, ChildReporter, ChildRunOutput, ChildRunRequest, ChildRunner,
-    CompletionDisposition, CoordinatorConfig, LocalBoxFuture, MAX_COMPLETED_ENTRIES, SendBoxFuture,
-    StartedChild, SubagentProgress,
+    CompletionDisposition, CoordinatorConfig, LimitedSpawnOrigin, LocalBoxFuture,
+    MAX_COMPLETED_ENTRIES, SendBoxFuture, StartedChild, SubagentLimitDecision, SubagentLimitNotice,
+    SubagentLimitSink, SubagentProgress,
 };
+use queue::{QUEUED_REAP_INTERVAL, QueuedCaller, SpawnQueue, StartOrigin};
 
 /// Channel-owned subagent lifecycle actor.
 pub struct SubagentCoordinator<R: ChildRunner> {
@@ -44,6 +48,15 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     internal_rx: mpsc::UnboundedReceiver<InternalEvent<R::Control>>,
     runner: R,
     config: CoordinatorConfig,
+    admission: Admission,
+    queued: SpawnQueue,
+    /// When the queued sweep last ran; bounds how stale an out-of-band
+    /// token cancel of a queued spawn can get (see [`Self::next_deadline`]).
+    last_queued_reap: tokio::time::Instant,
+    /// Re-entry latch: `finish_child` runs the queued sweep, and finishing a
+    /// cancelled queued entry routes back through `finish_child`. The inner
+    /// sweep is a no-op (a cancelled entry frees no running slot).
+    draining_queued: bool,
     pending: HashMap<String, PendingChild>,
     active: HashMap<String, ActiveChild<R::Control>>,
     completed: HashMap<String, CompletedChild>,
@@ -93,6 +106,10 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             internal_tx,
             internal_rx,
             runner,
+            admission: Admission::new(config.limits),
+            queued: SpawnQueue::default(),
+            last_queued_reap: tokio::time::Instant::now(),
+            draining_queued: false,
             config,
             pending: HashMap::new(),
             active: HashMap::new(),
@@ -115,12 +132,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     pub async fn run(mut self) {
         let mut commands_open = true;
         loop {
+            // Queued spawns need no exit check: queued non-empty means some
+            // session is at capacity, so `runs` is non-empty, and the last
+            // `finish_child` drains the queue before `runs` empties.
             if !commands_open
                 && self.runs.is_empty()
                 && self.validations.is_empty()
                 && self.descriptions.is_empty()
                 && self.progress.is_empty()
             {
+                debug_assert!(
+                    self.queued.is_empty(),
+                    "actor exiting with spawns still queued"
+                );
                 break;
             }
 
@@ -167,140 +191,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
 
     fn handle_command(&mut self, command: SubagentEvent) {
         match command {
-            SubagentEvent::Spawn(command) => {
-                let mut request = *command.request;
-                if let Some((root_parent, loop_task_id, spawner_cancelled, spawner_owner)) = self
-                    .active
-                    .values()
-                    .find(|child| child.child_session_id == request.parent_session_id)
-                    .map(|child| {
-                        (
-                            child.request.parent_session_id.clone(),
-                            child.request.runtime_overrides.loop_task_id.clone(),
-                            child.cancellation.is_cancelled(),
-                            child.request.owner.clone(),
-                        )
-                    })
-                {
-                    if spawner_cancelled {
-                        // The parent subagent is being torn down, so its late
-                        // child would be orphaned against the closed scope.
-                        let id = request.id.clone();
-                        let _ = command.result_tx.send(SubagentResult {
-                            success: false,
-                            cancelled: true,
-                            error: Some("parent subagent is being torn down".to_owned()),
-                            subagent_id: id.clone(),
-                            child_session_id: id,
-                            ..Default::default()
-                        });
-                        return;
-                    }
-                    request.parent_session_id = root_parent;
-                    request.surface_completion = false;
-                    // Nested children keep workflow lineage after reparent so
-                    // ParentSession Stop does not kill in-flight workflow work.
-                    if !request.owner.is_workflow()
-                        && let Some(run_id) = spawner_owner.workflow_run_id()
-                    {
-                        request.owner = SubagentOwner::workflow(run_id);
-                    }
-                    if request.runtime_overrides.loop_task_id.is_none() {
-                        request.runtime_overrides.loop_task_id = loop_task_id;
-                    }
-                }
-                // Late Task spawn after user Stop (detached TaskTool background).
-                if !request.owner.is_workflow()
-                    && self
-                        .spawn_blocked_sessions
-                        .contains(&request.parent_session_id)
-                {
-                    let id = request.id.clone();
-                    let _ = command.result_tx.send(SubagentResult {
-                        success: false,
-                        cancelled: true,
-                        error: Some("parent session is stopped".to_owned()),
-                        subagent_id: id.clone(),
-                        child_session_id: id,
-                        ..Default::default()
-                    });
-                    return;
-                }
-                let id = request.id.clone();
-                // Boundary validation: every path-joined id must be a safe segment.
-                if !xai_tool_types::is_safe_task_id(&id) {
-                    let _ = command.result_tx.send(SubagentResult {
-                        success: false,
-                        error: Some(format!(
-                            "Invalid subagent id {id:?}: not a safe path segment"
-                        )),
-                        subagent_id: id.clone(),
-                        child_session_id: id,
-                        ..Default::default()
-                    });
-                    return;
-                }
-                // Atomic insert-if-absent: reject duplicates without replacing.
-                if self.pending.contains_key(&id)
-                    || self.active.contains_key(&id)
-                    || self.completed.contains_key(&id)
-                {
-                    let _ = command.result_tx.send(SubagentResult {
-                        success: false,
-                        error: Some(format!("Subagent id '{id}' already exists")),
-                        subagent_id: id.clone(),
-                        child_session_id: id,
-                        ..Default::default()
-                    });
-                    return;
-                }
-                let cancellation = request.cancel_token.clone();
-                let handle_only = request.run_in_background;
-                let foreground_deadline = (!request.run_in_background
-                    && !request.await_to_completion)
-                    .then(|| tokio::time::Instant::now() + self.config.foreground_budget);
-                // Entry API for insert-if-absent race safety within the single-
-                // threaded actor (duplicate check above is the primary gate).
-                match self.pending.entry(id.clone()) {
-                    std::collections::hash_map::Entry::Occupied(_) => {
-                        let _ = command.result_tx.send(SubagentResult {
-                            success: false,
-                            error: Some(format!("Subagent id '{id}' already exists")),
-                            subagent_id: id.clone(),
-                            child_session_id: id,
-                            ..Default::default()
-                        });
-                        return;
-                    }
-                    std::collections::hash_map::Entry::Vacant(slot) => {
-                        slot.insert(PendingChild {
-                            request: request.clone(),
-                            started_at: std::time::Instant::now(),
-                            cancellation: cancellation.clone(),
-                            spawn_reply: Some(command.result_tx),
-                            foreground_deadline,
-                            handle_only,
-                            explicitly_killed: false,
-                        });
-                    }
-                }
-                self.running_count_changed();
-                let reporter = ChildReporter {
-                    subagent_id: id.clone(),
-                    tx: self.internal_tx.clone(),
-                };
-                self.runs.push(TaggedFuture {
-                    subagent_id: id,
-                    future: Box::pin(
-                        std::panic::AssertUnwindSafe(self.runner.run(ChildRunRequest {
-                            request,
-                            cancellation,
-                            reporter,
-                        }))
-                        .catch_unwind(),
-                    ),
-                });
-            }
+            SubagentEvent::Spawn(command) => self.handle_spawn(command),
             SubagentEvent::Query(query) => {
                 self.handle_query(
                     query.subagent_id,
@@ -381,45 +272,52 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 // Reap again here so turn-freeze / Outstanding polls see
                 // ParentGone even if no other command woke the actor first.
                 self.reap_abandoned_callers();
+                let scoped = |candidate: &SubagentRequest| {
+                    candidate.parent_session_id == request.parent_session_id
+                        && candidate.parent_prompt_id.as_deref() == Some(&request.prompt_id)
+                        && !candidate.owner.is_workflow()
+                };
                 let mut live_ids: Vec<_> = self
                     .pending
                     .values()
-                    .filter(|child| {
-                        child.request.parent_session_id == request.parent_session_id
-                            && child.request.parent_prompt_id.as_deref() == Some(&request.prompt_id)
-                            && !child.request.owner.is_workflow()
-                            && !child.handle_only
-                    })
+                    .filter(|child| scoped(&child.request) && !child.handle_only)
                     .map(|child| child.request.id.clone())
                     .chain(
                         self.active
                             .values()
                             .filter(|child| {
-                                child.request.parent_session_id == request.parent_session_id
-                                    && child.request.parent_prompt_id.as_deref()
-                                        == Some(&request.prompt_id)
-                                    && !child.request.owner.is_workflow()
-                                    // Definition-declared background children are
-                                    // background for accounting even while the
-                                    // spawning tool block-awaits them.
+                                // Definition-declared background children are
+                                // background for accounting even while the
+                                // spawning tool block-awaits them.
+                                scoped(&child.request)
                                     && !child.handle_only
                                     && !child.definition_background
                             })
                             .map(|child| child.request.id.clone()),
                     )
+                    .chain(
+                        self.queued
+                            .iter()
+                            .filter(|queued| {
+                                scoped(&queued.request)
+                                    && !queued.caller.is_backgrounded()
+                                    && !queued.request.run_in_background
+                            })
+                            .map(|queued| queued.request.id.clone()),
+                    )
                     .collect();
                 live_ids.sort();
-                let background_live = self.pending.values().any(|child| {
-                    child.request.parent_session_id == request.parent_session_id
-                        && child.request.parent_prompt_id.as_deref() == Some(&request.prompt_id)
-                        && !child.request.owner.is_workflow()
-                        && child.handle_only
-                }) || self.active.values().any(|child| {
-                    child.request.parent_session_id == request.parent_session_id
-                        && child.request.parent_prompt_id.as_deref() == Some(&request.prompt_id)
-                        && !child.request.owner.is_workflow()
-                        && (child.handle_only || child.definition_background)
-                });
+                let background_live = self
+                    .pending
+                    .values()
+                    .any(|child| scoped(&child.request) && child.handle_only)
+                    || self.active.values().any(|child| {
+                        scoped(&child.request) && (child.handle_only || child.definition_background)
+                    })
+                    || self.queued.iter().any(|queued| {
+                        scoped(&queued.request)
+                            && (queued.request.run_in_background || queued.caller.is_backgrounded())
+                    });
                 let scope =
                     PromptScope::new(request.parent_session_id.clone(), request.prompt_id.clone());
                 let _ = request.respond_to.send(SubagentOutstandingReply {
@@ -446,6 +344,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     pending: self.pending.len(),
                     active: self.active.len(),
                     completed: self.completed.len(),
+                    queued: self.queued.len(),
                 });
             }
             SubagentEvent::Inspect(request) => {
@@ -518,6 +417,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 }) || self.active.values().any(|child| {
                     child.request.runtime_overrides.loop_task_id.as_deref()
                         == Some(&request.task_id)
+                }) || self.queued.iter().any(|queued| {
+                    queued.request.runtime_overrides.loop_task_id.as_deref()
+                        == Some(&request.task_id)
                 });
                 let _ = request.respond_to.send(is_active);
             }
@@ -567,12 +469,17 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 parent_session_id,
                 respond_to,
             } => {
-                let source_is_active =
-                    self.pending
+                let source_is_active = self.pending
                         .get(&source_id)
                         .is_some_and(|child| child.request.parent_session_id == parent_session_id)
                         || self.active.get(&source_id).is_some_and(|child| {
                             child.request.parent_session_id == parent_session_id
+                        })
+                        // Queued spawns resolve as "still running", matching
+                        // the query path's Initializing, not as missing.
+                        || self.queued.iter().any(|queued| {
+                            queued.request.id == source_id
+                                && queued.request.parent_session_id == parent_session_id
                         });
                 let lookup = if source_is_active {
                     SubagentResumeLookup::Active
@@ -595,6 +502,74 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 let _ = respond_to.send(lookup);
             }
         }
+    }
+
+    fn start_child(
+        &mut self,
+        request: SubagentRequest,
+        spawn_reply: Option<oneshot::Sender<SubagentResult>>,
+        origin: StartOrigin,
+    ) {
+        let id = request.id.clone();
+        let cancellation = request.cancel_token.clone();
+        // `spawn_reply: None`: the caller was auto-backgrounded while queued.
+        let handle_only = request.run_in_background || spawn_reply.is_none();
+        let (queued_for, foreground_deadline) = match origin {
+            StartOrigin::Direct => (
+                None,
+                (spawn_reply.is_some() && request.awaits_in_foreground())
+                    .then(|| tokio::time::Instant::now() + self.config.foreground_budget),
+            ),
+            StartOrigin::Dequeued {
+                queued_for,
+                deadline,
+            } => (Some(queued_for), deadline),
+        };
+        self.pending.insert(
+            id.clone(),
+            PendingChild {
+                request: request.clone(),
+                started_at: std::time::Instant::now(),
+                cancellation: cancellation.clone(),
+                spawn_reply,
+                foreground_deadline,
+                handle_only,
+                explicitly_killed: false,
+            },
+        );
+        self.running_count_changed();
+        // Computed after the pending insert, so a non-workflow spawn counts
+        // itself; max over launches gives a session's peak concurrency.
+        let session_running = self.session_running_count(&request.parent_session_id);
+        let reporter = ChildReporter {
+            subagent_id: id.clone(),
+            tx: self.internal_tx.clone(),
+        };
+        self.runs.push(TaggedFuture {
+            subagent_id: id,
+            future: Box::pin(
+                std::panic::AssertUnwindSafe(self.runner.run(ChildRunRequest {
+                    request,
+                    cancellation,
+                    reporter,
+                    queued_for,
+                    session_running,
+                }))
+                .catch_unwind(),
+            ),
+        });
+    }
+
+    /// Workflow agents draw from their run's own pool, not session slots.
+    fn session_running_count(&self, parent_session_id: &str) -> usize {
+        self.pending
+            .values()
+            .map(|child| &child.request)
+            .chain(self.active.values().map(|child| &child.request))
+            .filter(|request| {
+                request.parent_session_id == parent_session_id && !request.owner.is_workflow()
+            })
+            .count()
     }
 
     fn finish_child(&mut self, id: &str, output: ChildRunOutput<R::CompletionData>) {
@@ -724,6 +699,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         if let Some(run_id) = workflow_run_id {
             self.resolve_workflow_cancel_waiters(&run_id);
         }
+        self.start_queued_within_capacity();
     }
 
     fn finish_panicked_child(&mut self, id: &str) {
@@ -773,6 +749,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             child.cancellation.cancel();
             return SubagentCancelOutcome::Cancelled;
         }
+        if self.remove_queued(|request| {
+            request.id == id && belongs_to_session(request, parent_session_id)
+        }) > 0
+        {
+            return SubagentCancelOutcome::Cancelled;
+        }
         if let Some(child) = self.completed.get(id)
             && belongs_to_session(&child.request, parent_session_id)
         {
@@ -799,6 +781,10 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 child.cancellation.cancel();
             }
         }
+        self.remove_queued(|request| {
+            request.parent_prompt_id.as_deref() == Some(parent_prompt_id)
+                && belongs_to_session(request, parent_session_id)
+        });
     }
 
     fn teardown_session_children(&mut self, parent_session_id: &str) {
@@ -820,6 +806,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 cancelled += 1;
             }
         }
+        // Parent is gone here too: a queued spawn's cancelled completion must
+        // not be rebuffered for a later resume of the same session id.
+        for queued in self.queued.iter_mut() {
+            if queued.request.parent_session_id == parent_session_id {
+                queued.request.surface_completion = false;
+            }
+        }
+        cancelled += self.remove_queued(|request| request.parent_session_id == parent_session_id);
         if cancelled > 0 {
             tracing::info!(
                 parent_session_id,
@@ -854,6 +848,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 child.cancellation.cancel();
             }
         }
+        self.remove_queued(|request| {
+            request.parent_session_id == parent_session_id && !request.owner.is_workflow()
+        });
         SubagentCancelOutcome::Cancelled
     }
 
@@ -898,6 +895,16 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .filter_map(|child| child.foreground_deadline),
             )
             .chain(
+                self.queued
+                    .iter()
+                    .filter_map(|queued| queued.caller.deadline()),
+            )
+            .chain(
+                // Anchored to the last sweep, not `now`: a stream of other
+                // wakes must not keep pushing the next sweep further out.
+                (!self.queued.is_empty()).then(|| self.last_queued_reap + QUEUED_REAP_INTERVAL),
+            )
+            .chain(
                 self.waiters
                     .values()
                     .flatten()
@@ -907,12 +914,22 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 
     fn reap_abandoned_callers(&mut self) {
+        self.last_queued_reap = tokio::time::Instant::now();
         for child in self.pending.values_mut() {
             background_if_caller_gone(child);
         }
         for child in self.active.values_mut() {
             background_if_caller_gone(child);
         }
+        // The queued leg of the same sweep.
+        for queued in self.queued.iter_mut() {
+            if let QueuedCaller::Awaiting { result_tx, .. } = &queued.caller
+                && result_tx.is_closed()
+            {
+                queued.caller = QueuedCaller::Backgrounded;
+            }
+        }
+        self.remove_queued(|request| request.cancel_token.is_cancelled());
     }
 
     fn process_deadlines(&mut self) {
@@ -923,6 +940,31 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         for child in self.active.values_mut() {
             background_at_deadline(child, now, self.config.foreground_budget);
+        }
+        // The spawn stays queued; only its caller is handed off.
+        for queued in self.queued.iter_mut() {
+            if queued
+                .caller
+                .deadline()
+                .is_none_or(|deadline| deadline > now)
+            {
+                continue;
+            }
+            let caller = std::mem::replace(&mut queued.caller, QueuedCaller::Backgrounded);
+            let Some(result_tx) = caller.into_spawn_reply() else {
+                continue;
+            };
+            tracing::warn!(
+                subagent_id = %queued.request.id,
+                budget_ms = self.config.foreground_budget.as_millis() as u64,
+                "queued subagent exceeded await budget; auto-backgrounding (spawn stays queued)",
+            );
+            let _ = result_tx.send(SubagentResult {
+                backgrounded: true,
+                subagent_id: queued.request.id.clone(),
+                child_session_id: queued.request.id.clone(),
+                ..Default::default()
+            });
         }
 
         let ids: Vec<_> = self.waiters.keys().cloned().collect();
@@ -969,6 +1011,10 @@ fn belongs_to_session(request: &SubagentRequest, parent_session_id: Option<&str>
 
 impl<R: ChildRunner> Drop for SubagentCoordinator<R> {
     fn drop(&mut self) {
+        // Not `remove_queued`: that routes through `finish_child`, which runs
+        // host completion callbacks — off-limits from a destructor (the
+        // host's storage may already be tearing down).
+        self.resolve_queued_at_drop();
         self.cancel_all_children();
     }
 }
