@@ -22,9 +22,27 @@ fn test_actor_with_remote_sync(
     storage: Arc<dyn StorageAdapter>,
     remote_sync: Option<RemoteSync>,
 ) -> ActorGuard {
+    test_actor_inner(info, storage, remote_sync, false)
+}
+
+fn test_actor_inner(
+    info: Info,
+    storage: Arc<dyn StorageAdapter>,
+    remote_sync: Option<RemoteSync>,
+    mark_summary_done: bool,
+) -> ActorGuard {
     let (tx, rx) = mpsc::unbounded_channel();
     let (disk_full_tx, disk_full_rx) = tokio::sync::watch::channel(false);
     let sampling_client = OaiCompatClient::new(xai_grok_sampler::SamplerConfig::default()).unwrap();
+    let mut summary =
+        crate::session::summary::SummaryGenerator::new(crate::session::summary::SummaryConfig {
+            sampling_client,
+            model: String::new(),
+            persistence_tx: tx.downgrade(),
+        });
+    if mark_summary_done {
+        summary.mark_done();
+    }
     let task = tokio::spawn(
         SessionPersistence {
             info,
@@ -35,13 +53,7 @@ fn test_actor_with_remote_sync(
             // Resumed-style actor for these tests; upgrade backfill is fresh-only.
             created_fresh: false,
             relay_sync: None,
-            summary: crate::session::summary::SummaryGenerator::new(
-                crate::session::summary::SummaryConfig {
-                    sampling_client,
-                    model: String::new(),
-                    persistence_tx: tx.downgrade(),
-                },
-            ),
+            summary,
             registry_title_sync: None,
             gateway: None,
             disk_full_tx,
@@ -365,6 +377,822 @@ async fn probe_writable(handle: &PersistenceHandle) -> io::Result<()> {
         .send(PersistenceMsg::ProbeWritable { respond_to: tx })
         .unwrap();
     rx.await.unwrap()
+}
+
+/// Manual rename → next `RemoteSync` flush must not revert the backend title.
+///
+/// Seeds `RemoteSync` with a pre-rename title (the cache at init), drives
+/// `PersistenceMsg::ManualTitleRenamed`, then queues an update and flushes.
+/// The flush's `save_session_data` payload must carry the manual title.
+#[tokio::test]
+async fn manual_rename_next_flush_does_not_revert_backend_title() {
+    use std::sync::Arc;
+
+    use crate::auth::{AuthManager, GrokAuth};
+    use crate::remote::BackendClient;
+    use crate::session::export::ExportedMetadata;
+    use xai_grok_test_support::MockInferenceServer;
+
+    const OLD_TITLE: &str = "Auto first-prompt summary";
+    const NEW_TITLE: &str = "Manual rename";
+    const SESSION_ID: &str = "rename-writeback";
+
+    let server = MockInferenceServer::start()
+        .await
+        .expect("start MockInferenceServer");
+    let home = tempfile::tempdir().unwrap();
+    let auth = Arc::new(AuthManager::new(
+        home.path(),
+        crate::auth::GrokComConfig::default(),
+    ));
+    auth.hot_swap(GrokAuth {
+        key: "writeback-test-token".into(),
+        ..GrokAuth::test_default()
+    });
+
+    let info = Info {
+        id: acp::SessionId::new(SESSION_ID),
+        cwd: "/test".into(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+
+    let metadata = ExportedMetadata {
+        title: Some(OLD_TITLE.into()),
+        cwd: info.cwd.clone(),
+        model_id: Some("test-model".into()),
+        created_at: None,
+        updated_at: None,
+        total_messages: None,
+        parent_session_id: None,
+        session_kind: None,
+        subagent_type: None,
+        subagent_persona: None,
+        subagent_role: None,
+        fork_context_source: None,
+        subagent_depth: None,
+        title_is_manual: None,
+    };
+    let client = BackendClient::with_base_url(server.origin()).with_auth_manager(auth);
+    let remote_sync = RemoteSync::new(SESSION_ID.to_owned(), metadata, client);
+    let actor = test_actor_with_remote_sync(info.clone(), storage, Some(remote_sync));
+
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::ManualTitleRenamed(NEW_TITLE.into()))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(neutral_update(
+            &info,
+            "turn after rename",
+        )))
+        .unwrap();
+    flush_ack(&actor.handle).await.unwrap();
+
+    let titles = wait_for_save_session_titles(&server, SESSION_ID).await;
+    let last_nonempty = titles
+        .iter()
+        .rev()
+        .find(|t| t.nonempty_messages)
+        .map(|t| t.title.as_str());
+    assert_eq!(
+        last_nonempty,
+        Some(NEW_TITLE),
+        "next RemoteSync flush after ManualTitleRenamed must not revert to {OLD_TITLE:?}"
+    );
+    assert!(
+        titles
+            .iter()
+            .filter(|t| t.nonempty_messages)
+            .all(|t| t.title != OLD_TITLE),
+        "no non-empty save_session_data may carry the pre-rename title"
+    );
+    assert!(
+        titles
+            .iter()
+            .filter(|t| t.title == NEW_TITLE)
+            .all(|t| t.title_is_manual == Some(true)),
+        "every save of the manual title must stamp title_is_manual: {titles:?}"
+    );
+    let upsert_path = format!("/sessions/{SESSION_ID}");
+    let upserted_title = server.requests().into_iter().rev().find_map(|r| {
+        (r.method == "PUT" && r.path == upsert_path)
+            .then(|| {
+                r.body
+                    .as_ref()?
+                    .get("session")?
+                    .get("title")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .flatten()
+    });
+    assert_eq!(
+        upserted_title.as_deref(),
+        Some(NEW_TITLE),
+        "SetTitle must upsert the session-row title, not only the metadata blob; requests={:?}",
+        request_path_summary(&server)
+    );
+    actor.stop().await;
+}
+
+#[derive(Debug)]
+struct SaveTitle {
+    title: String,
+    title_present: bool,
+    nonempty_messages: bool,
+    title_is_manual: Option<bool>,
+}
+
+fn save_session_titles(
+    server: &xai_grok_test_support::MockInferenceServer,
+    session_id: &str,
+) -> Vec<SaveTitle> {
+    let path = format!("/sessions/{session_id}/data");
+    server
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "POST" && r.path == path)
+        .filter_map(|r| {
+            let body = r.body.as_ref()?;
+            let metadata = body.get("metadata");
+            let title_field = metadata.and_then(|m| m.get("title"));
+            let title_present = title_field.is_some();
+            let title = title_field
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let title_is_manual = metadata
+                .and_then(|m| m.get("title_is_manual"))
+                .and_then(|v| v.as_bool());
+            let nonempty_messages = body
+                .get("messages")
+                .and_then(|m| m.as_array())
+                .is_some_and(|msgs| !msgs.is_empty());
+            Some(SaveTitle {
+                title,
+                title_present,
+                nonempty_messages,
+                title_is_manual,
+            })
+        })
+        .collect()
+}
+
+fn request_path_summary(server: &xai_grok_test_support::MockInferenceServer) -> Vec<String> {
+    server
+        .requests()
+        .iter()
+        .map(|r| format!("{} {}", r.method, r.path))
+        .collect()
+}
+
+async fn wait_for_save_session_titles(
+    server: &xai_grok_test_support::MockInferenceServer,
+    session_id: &str,
+) -> Vec<SaveTitle> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let titles = save_session_titles(server, session_id);
+        if titles.iter().any(|t| t.nonempty_messages) {
+            return titles;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for flush save_session_data; requests={:?}",
+                request_path_summary(server)
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn manual_after_auto_last_flush_is_manual() {
+    use std::sync::Arc;
+
+    use crate::auth::{AuthManager, GrokAuth};
+    use crate::remote::BackendClient;
+    use crate::session::export::ExportedMetadata;
+    use xai_grok_test_support::MockInferenceServer;
+
+    const AUTO: &str = "Auto title";
+    const MANUAL: &str = "Manual wins";
+    const SESSION_ID: &str = "rename-fifo-auto-then-manual";
+
+    let server = MockInferenceServer::start()
+        .await
+        .expect("start MockInferenceServer");
+    let home = tempfile::tempdir().unwrap();
+    let auth = Arc::new(AuthManager::new(
+        home.path(),
+        crate::auth::GrokComConfig::default(),
+    ));
+    auth.hot_swap(GrokAuth {
+        key: "writeback-test-token".into(),
+        ..GrokAuth::test_default()
+    });
+
+    let info = Info {
+        id: acp::SessionId::new(SESSION_ID),
+        cwd: "/test".into(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+
+    let metadata = ExportedMetadata {
+        title: Some("pre".into()),
+        cwd: info.cwd.clone(),
+        model_id: Some("test-model".into()),
+        created_at: None,
+        updated_at: None,
+        total_messages: None,
+        parent_session_id: None,
+        session_kind: None,
+        subagent_type: None,
+        subagent_persona: None,
+        subagent_role: None,
+        fork_context_source: None,
+        subagent_depth: None,
+        title_is_manual: None,
+    };
+    let client = BackendClient::with_base_url(server.origin()).with_auth_manager(auth);
+    let remote_sync = RemoteSync::new(SESSION_ID.to_owned(), metadata, client);
+    let actor = test_actor_with_remote_sync(info.clone(), storage, Some(remote_sync));
+
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::GeneratedTitle(AUTO.into()))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::ManualTitleRenamed(MANUAL.into()))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(neutral_update(&info, "after")))
+        .unwrap();
+    flush_ack(&actor.handle).await.unwrap();
+
+    let titles = wait_for_save_session_titles(&server, SESSION_ID).await;
+    let last = titles
+        .iter()
+        .rev()
+        .find(|t| t.nonempty_messages)
+        .map(|t| t.title.as_str());
+    assert_eq!(
+        last,
+        Some(MANUAL),
+        "auto-then-manual last flush must be manual"
+    );
+    assert!(
+        titles
+            .iter()
+            .filter(|t| t.title == AUTO)
+            .all(|t| t.title_is_manual.is_none()),
+        "auto SetTitle must omit title_is_manual: {titles:?}"
+    );
+    assert!(
+        titles
+            .iter()
+            .filter(|t| t.title == MANUAL)
+            .all(|t| t.title_is_manual == Some(true)),
+        "manual SetTitle/flush must stamp title_is_manual: {titles:?}"
+    );
+    actor.stop().await;
+}
+
+#[tokio::test]
+async fn auto_after_committed_manual_emits_no_set_title() {
+    use std::sync::Arc;
+
+    use crate::auth::{AuthManager, GrokAuth};
+    use crate::remote::BackendClient;
+    use crate::session::export::ExportedMetadata;
+    use xai_grok_test_support::MockInferenceServer;
+
+    const AUTO: &str = "Rejected auto";
+    const MANUAL: &str = "Pinned manual";
+    const SESSION_ID: &str = "rename-fifo-manual-then-auto";
+
+    let server = MockInferenceServer::start()
+        .await
+        .expect("start MockInferenceServer");
+    let home = tempfile::tempdir().unwrap();
+    let auth = Arc::new(AuthManager::new(
+        home.path(),
+        crate::auth::GrokComConfig::default(),
+    ));
+    auth.hot_swap(GrokAuth {
+        key: "writeback-test-token".into(),
+        ..GrokAuth::test_default()
+    });
+
+    let info = Info {
+        id: acp::SessionId::new(SESSION_ID),
+        cwd: "/test".into(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    storage
+        .update_session_title(&info, MANUAL.to_owned())
+        .await
+        .unwrap();
+
+    let metadata = ExportedMetadata {
+        title: Some("stale".into()),
+        cwd: info.cwd.clone(),
+        model_id: Some("test-model".into()),
+        created_at: None,
+        updated_at: None,
+        total_messages: None,
+        parent_session_id: None,
+        session_kind: None,
+        subagent_type: None,
+        subagent_persona: None,
+        subagent_role: None,
+        fork_context_source: None,
+        subagent_depth: None,
+        title_is_manual: None,
+    };
+    let client = BackendClient::with_base_url(server.origin()).with_auth_manager(auth);
+    let remote_sync = RemoteSync::new(SESSION_ID.to_owned(), metadata, client);
+    let actor = test_actor_with_remote_sync(info.clone(), storage, Some(remote_sync));
+
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::ManualTitleRenamed(MANUAL.into()))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::GeneratedTitle(AUTO.into()))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(neutral_update(&info, "after")))
+        .unwrap();
+    flush_ack(&actor.handle).await.unwrap();
+
+    let titles = wait_for_save_session_titles(&server, SESSION_ID).await;
+    assert!(
+        titles.iter().all(|t| t.title != AUTO),
+        "rejected auto title must not reach save_session_data"
+    );
+    let last = titles
+        .iter()
+        .rev()
+        .find(|t| t.nonempty_messages)
+        .map(|t| t.title.as_str());
+    assert_eq!(last, Some(MANUAL));
+    assert!(
+        titles
+            .iter()
+            .filter(|t| t.title == MANUAL)
+            .all(|t| t.title_is_manual == Some(true)),
+        "manual stamp must survive rejected auto + flush: {titles:?}"
+    );
+    actor.stop().await;
+}
+
+#[tokio::test]
+async fn manual_title_renamed_is_noop_without_remote_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("rename-local-only"),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let actor = test_actor(info.clone(), storage);
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::ManualTitleRenamed("Local only".into()))
+        .unwrap();
+    flush_ack(&actor.handle)
+        .await
+        .expect("ManualTitleRenamed with remote_sync=None must not fail");
+    actor.stop().await;
+}
+
+/// Auto → manual → unpin: generator starts Done (as production `load` would),
+/// a ContentChunk before reset must not spawn, ResetTitleToAuto must
+/// `reset()` + clear the remote pin, and a later ContentChunk must adopt
+/// via the fallback (empty model, no live LLM).
+#[tokio::test]
+async fn reset_title_to_auto_then_generated_title_is_adopted() {
+    use std::sync::Arc;
+
+    use crate::auth::{AuthManager, GrokAuth};
+    use crate::remote::BackendClient;
+    use crate::session::export::ExportedMetadata;
+    use crate::session::helpers::session_summary::title_fallback_from_user_text;
+    use crate::session::persistence::PersistenceContentChunk;
+    use xai_grok_test_support::MockInferenceServer;
+
+    const AUTO: &str = "Auto first title";
+    const MANUAL: &str = "Pinned manual";
+    const CHUNK: &str = "fresh auto title from next chunk please";
+    const SESSION_ID: &str = "rename-reset-to-auto";
+    let expected_fresh = title_fallback_from_user_text(CHUNK);
+
+    let server = MockInferenceServer::start()
+        .await
+        .expect("start MockInferenceServer");
+    let home = tempfile::tempdir().unwrap();
+    let auth = Arc::new(AuthManager::new(
+        home.path(),
+        crate::auth::GrokComConfig::default(),
+    ));
+    auth.hot_swap(GrokAuth {
+        key: "writeback-test-token".into(),
+        ..GrokAuth::test_default()
+    });
+
+    let info = Info {
+        id: acp::SessionId::new(SESSION_ID),
+        cwd: "/test".into(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .set_generated_title_if_absent(&info, AUTO.to_owned())
+            .await
+            .unwrap()
+    );
+    storage
+        .update_session_title(&info, MANUAL.to_owned())
+        .await
+        .unwrap();
+    assert!(
+        !storage
+            .set_generated_title_if_absent(&info, "Rejected auto".into())
+            .await
+            .unwrap(),
+        "manual pin must reject auto title before reset"
+    );
+
+    let metadata = ExportedMetadata {
+        title: Some(MANUAL.into()),
+        cwd: info.cwd.clone(),
+        model_id: Some("test-model".into()),
+        created_at: None,
+        updated_at: None,
+        total_messages: None,
+        parent_session_id: None,
+        session_kind: None,
+        subagent_type: None,
+        subagent_persona: None,
+        subagent_role: None,
+        fork_context_source: None,
+        subagent_depth: None,
+        title_is_manual: Some(true),
+    };
+    let client = BackendClient::with_base_url(server.origin()).with_auth_manager(auth);
+    let remote_sync = RemoteSync::new(SESSION_ID.to_owned(), metadata, client);
+    let actor = test_actor_inner(
+        info.clone(),
+        storage.clone(),
+        Some(remote_sync),
+        true, /* mark_summary_done: production load after a titled session */
+    );
+
+    let pre_reset_chunk = PersistenceContentChunk::new(vec![acp::ContentBlock::Text(
+        acp::TextContent::new("should not generate while still manual and Done"),
+    )]);
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::ContentChunk(pre_reset_chunk))
+        .unwrap();
+    flush_ack(&actor.handle).await.unwrap();
+    let summary_path = dir.path().join("summary.json");
+    let still_manual: crate::session::persistence::Summary =
+        serde_json::from_slice(&std::fs::read(&summary_path).unwrap()).unwrap();
+    assert_eq!(still_manual.display_title(), MANUAL);
+    assert!(still_manual.title_is_manual);
+    assert!(
+        save_session_titles(&server, SESSION_ID)
+            .iter()
+            .filter(|t| t.title_present)
+            .all(|t| t.title == MANUAL),
+        "Done generator must not adopt an in-flight title before reset"
+    );
+
+    assert!(storage.reset_title_to_auto(&info).await.unwrap());
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::ResetTitleToAuto)
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(neutral_update(&info, "after reset")))
+        .unwrap();
+    flush_ack(&actor.handle).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let titles = save_session_titles(&server, SESSION_ID);
+        if titles
+            .iter()
+            .any(|t| t.title_present && t.title.is_empty() && t.title_is_manual == Some(false))
+        {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "unpin must POST title:\"\" and title_is_manual:false (merge backends keep a prior true if omitted): {titles:?}"
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let upsert_path = format!("/sessions/{SESSION_ID}");
+    let upserted_title = server.requests().into_iter().rev().find_map(|r| {
+        (r.method == "PUT" && r.path == upsert_path)
+            .then(|| {
+                r.body
+                    .as_ref()?
+                    .get("session")?
+                    .get("title")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .flatten()
+    });
+    assert_eq!(
+        upserted_title.as_deref(),
+        Some(""),
+        "ClearTitle must upsert the session-row title empty, not only the metadata blob; requests={:?}",
+        request_path_summary(&server)
+    );
+
+    let post_reset: crate::session::persistence::Summary =
+        serde_json::from_slice(&std::fs::read(&summary_path).unwrap()).unwrap();
+    assert!(
+        post_reset.display_title().trim().is_empty(),
+        "display_title must be blank so if-absent can adopt"
+    );
+
+    let post_reset_chunk =
+        PersistenceContentChunk::new(vec![acp::ContentBlock::Text(acp::TextContent::new(CHUNK))]);
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::ContentChunk(post_reset_chunk))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(neutral_update(&info, "after auto")))
+        .unwrap();
+    flush_ack(&actor.handle).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    let on_disk = loop {
+        let on_disk: crate::session::persistence::Summary =
+            serde_json::from_slice(&std::fs::read(&summary_path).unwrap()).unwrap();
+        if on_disk.display_title() == expected_fresh && !on_disk.title_is_manual {
+            break on_disk;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "ContentChunk after reset never adopted fallback {expected_fresh:?}; display={:?}",
+                on_disk.display_title()
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(on_disk.display_title(), expected_fresh);
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let titles = save_session_titles(&server, SESSION_ID);
+        if titles
+            .iter()
+            .any(|t| t.title == expected_fresh && t.title_is_manual.is_none())
+        {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("adopted auto title after reset never reached save_session_data: {titles:?}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    actor.stop().await;
+}
+
+/// In-flight first-chunk generation overlapping unpin: disk is already blank
+/// when the stale `GeneratedTitle` arrives, so if-absent adopts it as auto
+/// (never re-pins).
+#[tokio::test]
+async fn reset_title_to_auto_adopts_in_flight_generation_as_auto() {
+    use std::sync::Arc;
+
+    use crate::session::persistence::PersistenceContentChunk;
+
+    const MANUAL: &str = "Pinned manual";
+    const CHUNK: &str = "in flight chunk text for title fallback";
+
+    let info = Info {
+        id: acp::SessionId::new("rename-reset-inflight"),
+        cwd: "/test".into(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    storage
+        .update_session_title(&info, MANUAL.to_owned())
+        .await
+        .unwrap();
+
+    let actor = test_actor_inner(info.clone(), storage.clone(), None, false);
+
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::ContentChunk(PersistenceContentChunk::new(
+            vec![acp::ContentBlock::Text(acp::TextContent::new(CHUNK))],
+        )))
+        .unwrap();
+    assert!(storage.reset_title_to_auto(&info).await.unwrap());
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::ResetTitleToAuto)
+        .unwrap();
+    flush_ack(&actor.handle).await.unwrap();
+
+    let summary_path = dir.path().join("summary.json");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    let on_disk = loop {
+        let on_disk: crate::session::persistence::Summary =
+            serde_json::from_slice(&std::fs::read(&summary_path).unwrap()).unwrap();
+        if !on_disk.display_title().trim().is_empty() {
+            break on_disk;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("in-flight GeneratedTitle after unpin never adopted");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_ne!(on_disk.display_title(), MANUAL);
+    assert!(
+        !on_disk.title_is_manual,
+        "in-flight adopt after unpin must stay auto"
+    );
+    actor.stop().await;
+}
+
+/// Non-resident unpin only patches disk. The next load sees a blank
+/// `display_title()` so the generator stays Idle and a ContentChunk adopts.
+#[tokio::test]
+async fn non_resident_reset_then_load_regenerates() {
+    use std::sync::Arc;
+
+    use crate::session::helpers::session_summary::title_fallback_from_user_text;
+    use crate::session::persistence::PersistenceContentChunk;
+
+    const CHUNK: &str = "dormant session next turn title text";
+    let expected = title_fallback_from_user_text(CHUNK);
+
+    let info = Info {
+        id: acp::SessionId::new("rename-reset-dormant-load"),
+        cwd: "/test".into(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .set_generated_title_if_absent(&info, "Auto Title".into())
+            .await
+            .unwrap()
+    );
+    storage
+        .update_session_title(&info, "Manual Title".into())
+        .await
+        .unwrap();
+    assert!(storage.reset_title_to_auto(&info).await.unwrap());
+
+    let summary_path = dir.path().join("summary.json");
+    let after_reset: crate::session::persistence::Summary =
+        serde_json::from_slice(&std::fs::read(&summary_path).unwrap()).unwrap();
+    let has_title = !after_reset.display_title().is_empty();
+    assert!(
+        !has_title,
+        "production load would mark_done() if display_title stayed set"
+    );
+
+    let actor = test_actor_inner(info.clone(), storage, None, has_title);
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::ContentChunk(PersistenceContentChunk::new(
+            vec![acp::ContentBlock::Text(acp::TextContent::new(CHUNK))],
+        )))
+        .unwrap();
+    flush_ack(&actor.handle).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    let on_disk = loop {
+        let on_disk: crate::session::persistence::Summary =
+            serde_json::from_slice(&std::fs::read(&summary_path).unwrap()).unwrap();
+        if on_disk.display_title() == expected && !on_disk.title_is_manual {
+            break on_disk;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "load after non-resident unpin never adopted {expected:?}; display={:?}",
+                on_disk.display_title()
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(on_disk.display_title(), expected);
+    actor.stop().await;
+}
+
+#[tokio::test]
+async fn reset_title_to_auto_is_noop_without_remote_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("reset-local-only"),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    storage
+        .update_session_title(&info, "Manual".into())
+        .await
+        .unwrap();
+    storage.reset_title_to_auto(&info).await.unwrap();
+    let actor = test_actor(info.clone(), storage);
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::ResetTitleToAuto)
+        .unwrap();
+    flush_ack(&actor.handle)
+        .await
+        .expect("ResetTitleToAuto with remote_sync=None must not fail");
+    actor.stop().await;
 }
 
 #[tokio::test]

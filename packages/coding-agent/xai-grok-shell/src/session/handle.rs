@@ -142,6 +142,10 @@ pub struct SessionHandle {
     /// (`_meta.askUserQuestion` / `--no-ask-user` and the remote settings / config /
     /// env gate). Stored per-session so subagents inherit it at spawn.
     pub ask_user_question_enabled: bool,
+    /// Whether this session was spawned non-interactive
+    /// (`startupHints.nonInteractive`, e.g. headless `-p` / SDK). Stored
+    /// per-session so subagents inherit it at spawn.
+    pub non_interactive: bool,
     /// Plan mode tracker — shared with the session actor via Arc.
     /// Exposed so the `x.ai/toggle_plan_mode` handler can toggle plan mode
     /// without going through the session command channel.

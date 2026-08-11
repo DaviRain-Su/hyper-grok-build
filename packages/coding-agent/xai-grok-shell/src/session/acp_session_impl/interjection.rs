@@ -150,12 +150,8 @@ impl SessionActor {
     }
 
     /// Broadcast a mid-turn interjection to every attached client.
-    /// Fan it out (sessionId-routed, fire-and-forget) so every pane viewing the
-    /// session renders the interjection block — not just the originator. The
-    /// originating pager rendered an optimistic block locally and dedups this
-    /// echo by `id`; other panes (which never minted the id) render it. `id` is
-    /// to chat state. Shared by `add_followup_message_as_user_turn` (which
-    /// `None` only for older clients, in which case every pane renders.
+    /// The originator uses `id` to claim its optimistic prompt block; other
+    /// clients render the notification normally.
     pub(super) fn broadcast_interjection(&self, text: &str, id: Option<&str>) {
         let mut payload = serde_json::json!({
             "sessionId": self.session_info.id.0.as_ref(),
@@ -283,7 +279,6 @@ impl SessionActor {
     /// compaction, replay, and analytics see the user's steering text as its
     /// own user turn.
     ///
-    /// Returns `true` if any interjections were drained (caller may want to
     /// Returns `true` if any interjections were drained (caller may want to
     /// `continue` the turn loop so the model sees them on the next iteration).
     pub(super) async fn drain_pending_interjections(&self) -> bool {

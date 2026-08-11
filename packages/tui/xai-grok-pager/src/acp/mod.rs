@@ -13,6 +13,13 @@ mod version_mismatch;
 
 pub(crate) use version_mismatch::{is_version_mismatch_banner, version_mismatch_banner};
 
+/// Ext methods that carry a session-scoped update and may stamp `isReplay`.
+/// Shared by TUI/headless dispatch and the session-load ACP barrier so a new
+/// method cannot be handled in one path and classified `Unrelated` in the other.
+pub(crate) fn is_session_update_ext_method(method: &str) -> bool {
+    matches!(method, "x.ai/session_notification" | "x.ai/session/update")
+}
+
 use xai_grok_telemetry::startup;
 pub use xai_grok_telemetry::startup::{
     AgentKind, Owner, StartupOutcome, StartupPhase, StartupTimer,
@@ -855,6 +862,14 @@ mod tests {
         ANTHROPIC_CLAUDE_METHOD_ID, GITHUB_COPILOT_METHOD_ID, GROK_COM_METHOD_ID,
         KIMI_CODE_METHOD_ID, OIDC_METHOD_ID, OPENAI_CODEX_METHOD_ID,
     };
+
+    #[test]
+    fn is_session_update_ext_method_covers_both_carriers() {
+        assert!(is_session_update_ext_method("x.ai/session_notification"));
+        assert!(is_session_update_ext_method("x.ai/session/update"));
+        assert!(!is_session_update_ext_method("x.ai/task_completed"));
+        assert!(!is_session_update_ext_method("session/update"));
+    }
 
     #[test]
     fn parse_available_commands_from_meta() {

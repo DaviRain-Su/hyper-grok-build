@@ -1,10 +1,47 @@
 //! Decoding of the shell's `x.ai/*` extension notifications into the headless
-//! [`ExtEvent`] the orchestrator dispatches. Owns the wire envelope shapes and
-//! the method to event mapping, kept out of `headless.rs`.
+//! [`ExtEvent`] the orchestrator dispatches, plus the policy replies for
+//! reverse `ext_method` requests. Owns the wire envelope shapes and the
+//! method to event mapping, kept out of `headless.rs`.
 
 use agent_client_protocol as acp;
+use xai_acp_lib::{AcpArgsBox, AcpResult};
 
 use crate::headless::reducer::{Lifecycle, StreamEvent};
+
+/// Serialize a typed ext-method reply; a serialize failure becomes an
+/// explicit ACP error so the oneshot is always answered.
+fn ext_response_from<T: serde::Serialize>(value: &T) -> AcpResult<acp::ExtResponse> {
+    serde_json::value::to_raw_value(value)
+        .map(|raw| acp::ExtResponse::new(raw.into()))
+        .map_err(|e| acp::Error::new(-32603, format!("serialize ext response: {e}")))
+}
+
+/// Answer a reverse `ext_method` request without a UI. Known interaction
+/// methods get a policy reply; dropping `response_tx` instead would fail the
+/// whole turn with a channel `recv_failed` (GB-4969).
+pub(crate) fn reply_headless_ext_method(args: AcpArgsBox<acp::ExtRequest>) {
+    use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse;
+    use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeExtResponse;
+
+    let method = args.request.method.as_ref();
+    // Known methods are answered without parsing params: even a malformed
+    // request gets the policy reply rather than a dropped channel.
+    let response = match method {
+        // Model sees the tool's NO_OPERATOR_TEXT (headless sessions are
+        // non-interactive), not the interactive "user declined" cancel text.
+        "x.ai/ask_user_question" => ext_response_from(&AskUserQuestionExtResponse::Cancelled),
+        // Model sees "Your plan has been approved. You can now start coding.".
+        "x.ai/exit_plan_mode" => ext_response_from(&ExitPlanModeExtResponse {
+            outcome: "approved".to_string(),
+            feedback: None,
+        }),
+        other => Err(acp::Error::new(
+            -32601,
+            format!("Method not found: {other}"),
+        )),
+    };
+    args.response_tx.send(response).ok();
+}
 
 /// Tolerate a numeric `task_id` (version skew) by coercing it to a string, so a
 /// numeric id does not fail the decode and leak an untracked background task.
@@ -47,13 +84,13 @@ pub(crate) fn handle_ext_notification(
 ) -> ExtEvent {
     let method = notif.request.method.as_ref();
     let params = notif.request.params.get();
+    if crate::acp::is_session_update_ext_method(method) {
+        return decode_session_notification(method, params);
+    }
     match method {
         "x.ai/task_backgrounded" => decode_task_backgrounded(method, params),
         "x.ai/task_completed" => decode_task_completed(method, params),
         "x.ai/monitor_event" => ExtEvent::MonitorEvent,
-        "x.ai/session_notification" | "x.ai/session/update" => {
-            decode_session_notification(method, params)
-        }
         "x.ai/leader/version_mismatch" => {
             match crate::acp::version_mismatch_banner(params) {
                 Some(banner) => tracing::warn!(%banner, "x.ai/leader/version_mismatch"),

@@ -1657,6 +1657,33 @@ fn conversation_entry_load_sets_chat_kind_bit() {
     ));
     let agent = app.agents.values().next().expect("agent");
     assert!(agent.chat_kind, "conversation entry → agent chat_kind");
+    assert!(
+        agent.conversation_entry,
+        "conversation entry must stamp conversation_entry for rename kind"
+    );
+    assert_eq!(
+        agent.rename_kind(),
+        xai_grok_shell::session::unified_list::SessionKind::Chat
+    );
+    let rename = dispatch(
+        Action::RenameSession {
+            title: "conv title".into(),
+        },
+        &mut app,
+    );
+    assert!(
+        matches!(
+            &rename[..],
+            [Effect::RenameSession { kind, .. }]
+                if *kind == xai_grok_shell::session::unified_list::SessionKind::Chat
+        ),
+        "conversation-entry rename must send kind=chat, got {rename:?}"
+    );
+    let reset = dispatch(Action::ResetSessionTitleToAuto, &mut app);
+    assert!(
+        reset.is_empty(),
+        "conversation-entry --auto must refuse client-side, got {reset:?}"
+    );
 }
 /// Process-wide `--chat` + non-conversation resume of a non-disk id still
 /// loads (gateway conversation) with agent chat_kind from sticky mode.
@@ -1682,8 +1709,88 @@ fn chat_mode_resume_without_local_disk_loads_as_chat() {
         "sticky --chat must set agent chat_kind even without entry bit"
     );
     assert!(
+        agent.conversation_entry,
+        "sticky --chat gateway resume (no local disk) opens as chat"
+    );
+    assert_eq!(
+        agent.rename_kind(),
+        xai_grok_shell::session::unified_list::SessionKind::Chat
+    );
+    assert!(
         agent.app_chat_mode,
         "app.chat_mode must propagate to AgentView::app_chat_mode"
+    );
+    let rename = dispatch(
+        Action::RenameSession {
+            title: "gw title".into(),
+        },
+        &mut app,
+    );
+    assert!(
+        matches!(
+            &rename[..],
+            [Effect::RenameSession { kind, .. }]
+                if *kind == xai_grok_shell::session::unified_list::SessionKind::Chat
+        ),
+        "sticky --chat gateway resume rename must send kind=chat, got {rename:?}"
+    );
+}
+/// Sticky `--chat` + history-bypass local-disk load stays Build for rename.
+/// Without the bypass flag this same disk row is refused (see
+/// `chat_mode_refuses_local_build_disk_load`).
+#[cfg(feature = "local-workspace")]
+#[test]
+fn load_sticky_chat_history_bypass_rename_kind_is_build() {
+    let cwd = PathBuf::from(format!("/tmp/chat-mode-hist-bypass-{}", std::process::id()));
+    let session_id = format!("local-build-disk-{}", std::process::id());
+    let sess_dir = plant_local_build_session(&cwd, &session_id);
+    let mut app = test_app();
+    app.cwd = cwd;
+    app.chat_mode = true;
+    app.welcome_history_load_as_build = true;
+    let effects = dispatch(
+        Action::LoadSession(session_id.clone(), None, false),
+        &mut app,
+    );
+    let _ = std::fs::remove_dir_all(&sess_dir);
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::LoadSession {
+                session_id: sid,
+                chat_kind: false,
+                ..
+            }] if sid == &session_id
+        ),
+        "history-bypass must load the local disk row, got {effects:?}"
+    );
+    let agent = app.agents.values().next().expect("agent");
+    assert!(
+        agent.chat_kind,
+        "sticky --chat still sets the UI chat_kind bit"
+    );
+    assert!(
+        !agent.conversation_entry,
+        "history-bypass local build must not open as chat"
+    );
+    assert_eq!(
+        agent.rename_kind(),
+        xai_grok_shell::session::unified_list::SessionKind::Build
+    );
+    let rename = dispatch(
+        Action::RenameSession {
+            title: "local title".into(),
+        },
+        &mut app,
+    );
+    assert!(
+        matches!(
+            &rename[..],
+            [Effect::RenameSession { kind, title, .. }]
+                if *kind == xai_grok_shell::session::unified_list::SessionKind::Build
+                    && title == "local title"
+        ),
+        "history-bypass rename must send kind=build, got {rename:?}"
     );
 }
 /// Process-wide `--chat` refuses local Build disk rows (no LoadSession).
@@ -1727,6 +1834,15 @@ fn chat_mode_allows_conversation_entry_even_if_local_path() {
             ..
         }]
     ));
+    let agent = app.agents.values().next().expect("agent");
+    assert!(
+        agent.conversation_entry,
+        "conversation-entry bit must stamp conversation_entry even if a local path exists"
+    );
+    assert_eq!(
+        agent.rename_kind(),
+        xai_grok_shell::session::unified_list::SessionKind::Chat
+    );
 }
 #[test]
 fn view_catalog_entry_emits_fetch_effect() {

@@ -545,12 +545,14 @@ fn surviving_definition(
         })
 }
 
-/// TOML / disabled list / compat JSON / legacy `grok_com_*` (not gateway).
+/// TOML / disabled list / compat JSON / plugin names. Gateway connectors are
+/// rejected earlier (colon names).
 fn mcp_server_is_known(name: &str, cwd: &Path) -> bool {
-    if name.starts_with("grok_com_") {
-        return true;
-    }
     xai_grok_shell::util::config::cli_known_mcp_server_names(cwd).contains(name)
+}
+
+fn is_gateway_cli_toggle_name(name: &str) -> bool {
+    name.starts_with("managed_gateway:") || name.contains(':')
 }
 
 fn available_mcp_server_names(cwd: &Path) -> Vec<String> {
@@ -567,7 +569,7 @@ async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
     if name.is_empty() {
         bail!("Server name cannot be empty.");
     }
-    if name.starts_with("managed_gateway:") || name.contains(':') {
+    if is_gateway_cli_toggle_name(name) {
         eprintln!(
             "Gateway connectors (e.g. managed_gateway:…) cannot be toggled via CLI; use Space in /mcps."
         );
@@ -1149,6 +1151,48 @@ mod tests {
     }
 
     #[test]
+    fn gateway_cli_toggle_names_are_rejected() {
+        assert!(is_gateway_cli_toggle_name("managed_gateway:linear"));
+        assert!(is_gateway_cli_toggle_name("other:colon"));
+        assert!(!is_gateway_cli_toggle_name("grok_com_slack"));
+        assert!(!is_gateway_cli_toggle_name("user-slack"));
+    }
+
+    #[test]
+    fn grok_com_known_only_with_toml_definition() {
+        // Unique name: `grok_home()` is process-wide OnceLock, so GROK_HOME
+        // EnvGuard is a no-op if another test already resolved it. A leftover
+        // `grok_com_*` in the real ~/.grok disabled list would fail an orphan
+        // assertion on a well-known name.
+        let name = format!("grok_com_orphan_{}", uuid::Uuid::new_v4().as_simple());
+
+        let orphan = tempfile::tempdir().unwrap();
+        git2::Repository::init(orphan.path()).unwrap();
+        assert!(
+            !mcp_server_is_known(&name, orphan.path()),
+            "orphan grok_com_* must not be known by prefix"
+        );
+
+        let defined = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(defined.path().join(".grok")).unwrap();
+        std::fs::write(
+            defined.path().join(".grok").join("config.toml"),
+            format!(
+                r#"
+[mcp_servers.{name}]
+url = "https://mcp.example.test/sse"
+"#
+            ),
+        )
+        .unwrap();
+        git2::Repository::init(defined.path()).unwrap();
+        assert!(
+            mcp_server_is_known(&name, defined.path()),
+            "TOML-defined {name} must be known"
+        );
+    }
+
+    #[test]
     fn enable_and_disable_parse_name() {
         let args = PagerArgs::try_parse_from(["grok", "mcp", "enable", "user-grafana"])
             .expect("enable should parse");
@@ -1159,12 +1203,12 @@ mod tests {
             other => panic!("expected mcp enable, got {other:?}"),
         }
 
-        let args = PagerArgs::try_parse_from(["grok", "mcp", "disable", "grok_com_slack"])
+        let args = PagerArgs::try_parse_from(["grok", "mcp", "disable", "user-slack"])
             .expect("disable should parse");
         match args.command {
             Some(Command::Mcp(McpArgs {
                 command: McpCommand::Disable { name },
-            })) => assert_eq!(name, "grok_com_slack"),
+            })) => assert_eq!(name, "user-slack"),
             other => panic!("expected mcp disable, got {other:?}"),
         }
     }

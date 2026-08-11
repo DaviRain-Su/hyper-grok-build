@@ -1146,7 +1146,6 @@ async fn run_agent_command(
     }
     let early_prefetch = xai_grok_shell::agent::models::start_early_prefetch(None);
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
-    tokio::task::spawn_blocking(|| {});
     let is_stdio = matches!(agent_args.mode, Some(AgentCmd::Stdio));
     let is_leader = matches!(agent_args.mode, Some(AgentCmd::Leader(_)));
     if !is_stdio && !is_leader {
@@ -1976,12 +1975,11 @@ fn main() {
         );
     }
     let workers = cli_worker_threads();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(workers.get())
-        .enable_all()
-        .build()
-        .unwrap_or_else(|e| {
-            eprintln!("grok: failed to start tokio runtime with {workers} workers: {e}");
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(workers.get()).enable_all();
+    let runtime =
+        xai_tty_utils::runtime::build_with_blocking_pool(&mut builder).unwrap_or_else(|e| {
+            eprintln!("grok: failed to start tokio runtime: {e}");
             shutdown_and_flush_telemetry(1);
         });
     let result = run_and_shutdown(runtime, async_main(args), RUNTIME_SHUTDOWN_GRACE);

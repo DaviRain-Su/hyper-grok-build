@@ -93,11 +93,10 @@ pub fn section_description_lines(section: &McpSectionId, team_id: Option<&str>) 
 
 /// Classify a server into a UI section.
 ///
-/// Priority: `grok_com_` prefix or managed wire source → Managed; else plugin
-/// label → Plugin; else Local. A managed server with a plugin display label
-/// still lands in Managed.
+/// Priority: gateway / managed wire source → Managed; else plugin label →
+/// Plugin; else Local.
 pub fn section_for(server: &McpServerInfo) -> McpSectionId {
-    if server.name.starts_with("grok_com_") || server.wire_source == McpWireSource::Managed {
+    if server.is_managed_gateway || server.wire_source == McpWireSource::Managed {
         McpSectionId::Managed
     } else if let Some(ref name) = server.plugin_name {
         McpSectionId::Plugin(name.clone())
@@ -108,7 +107,7 @@ pub fn section_for(server: &McpServerInfo) -> McpSectionId {
 
 /// Whether the user may delete this server from local config.
 pub fn is_removable(server: &McpServerInfo) -> bool {
-    server.wire_source == McpWireSource::Local && !server.name.starts_with("grok_com_")
+    server.wire_source == McpWireSource::Local && !server.is_managed_gateway
 }
 
 fn parse_wire_source(raw: Option<&str>) -> McpWireSource {
@@ -512,13 +511,20 @@ mod tests {
     }
 
     #[test]
-    fn section_for_grok_com_with_plugin_label_is_managed() {
-        let server = server_from_wire(
-            "grok_com_linear",
+    fn section_for_gateway_with_plugin_label_is_managed() {
+        let server = server_from_wire_with_type(
+            "managed_gateway:linear",
             Some("managed"),
             Some("plugin: my-plugin"),
+            Some("managedGateway"),
         );
         assert_eq!(section_for(&server), McpSectionId::Managed);
+    }
+
+    #[test]
+    fn section_for_grok_com_local_name_is_local() {
+        let server = server_from_wire("grok_com_linear", Some("local"), None);
+        assert_eq!(section_for(&server), McpSectionId::Local);
     }
 
     #[test]
@@ -543,9 +549,9 @@ mod tests {
     }
 
     #[test]
-    fn is_removable_rejects_grok_com_prefix() {
+    fn is_removable_allows_grok_com_local_name() {
         let server = server_from_wire("grok_com_slack", Some("local"), None);
-        assert!(!is_removable(&server));
+        assert!(is_removable(&server));
     }
 
     #[test]

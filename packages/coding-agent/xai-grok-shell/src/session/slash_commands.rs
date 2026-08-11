@@ -428,11 +428,14 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "agents-dashboard",
     "always-approve",
     "announcements",
+    "anthropic",
     "auto",
     "btw",
     "cd",
     "changelog",
+    "changes",
     "chat",
+    "claude",
     "clear",
     "cloud",
     "compact",
@@ -449,6 +452,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "doctor",
     "edit-prompt",
     "effort",
+    "enabled-models",
     "exit",
     "expand",
     "export",
@@ -473,9 +477,10 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "imagine-video",
     "import-claude",
     "jump",
+    "live",
+    "log",
     "login",
     "logout",
-    "log",
     "loop",
     "m",
     "marketplace",
@@ -485,6 +490,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "model",
     "multiline",
     "new",
+    "nexus",
     "onboarding",
     "personas",
     "plan",
@@ -493,15 +499,23 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "preferences",
     "prefs",
     "privacy",
+    "provider",
+    "providers",
     "queue",
     "quit",
+    "readiness",
     "recap",
     "release-notes",
     "reload-plugins",
     "remember",
     "rename",
+    "repo-check",
     "resume",
+    "review",
     "rewind",
+    "scope-models",
+    "scoped",
+    "scoped-models",
     "scroll-debug",
     "session-info",
     "sessions",
@@ -510,6 +524,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "show-plan",
     "skills",
     "summarize",
+    "t",
     "tasks",
     "terminal-check",
     "terminal-info",
@@ -522,7 +537,6 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "tour",
     "transcript",
     "tutorial",
-    "t",
     "undo",
     "usage",
     "view-plan",
@@ -2436,7 +2450,7 @@ mod tests {
     #[test]
     fn pager_blocked_shell_command_skill_is_advertised_qualified() {
         let skills = vec![make_skill("hooks-add", true)];
-        let commands = available_commands(&skills, CommandAvailability::default(), &[]);
+        let commands = available_commands(&skills, CommandAvailability::default(), &[], &[]);
         assert!(
             !commands.iter().any(|c| c.name == "hooks-add"),
             "pager-blocked name must not be advertised bare"
@@ -2451,7 +2465,7 @@ mod tests {
     fn plugin_skill_colliding_with_pager_builtin_is_advertised_qualified() {
         let mut skill = make_scoped_skill("login", SkillScope::Plugin);
         skill.plugin_name = Some("acme".into());
-        let commands = available_commands(&[skill], all_gated(), &[]);
+        let commands = available_commands(&[skill], all_gated(), &[], &[]);
         assert!(
             !commands.iter().any(|c| c.name == "login"),
             "colliding skill must not take the bare name (pager owns /login)"
@@ -2629,7 +2643,7 @@ mod tests {
     #[test]
     fn resolve_accepts_qualified_form_of_bare_advertised_skill() {
         let skills = vec![make_scoped_skill("deploy", SkillScope::Local)];
-        let names: Vec<String> = available_commands(&skills, all_gated(), &[])
+        let names: Vec<String> = available_commands(&skills, all_gated(), &[], &[])
             .into_iter()
             .map(|c| c.name)
             .collect();
@@ -2758,7 +2772,7 @@ mod tests {
     #[test]
     fn mixed_case_pager_collision_is_advertised_qualified_lowercase() {
         let skills = vec![make_scoped_skill("Login", SkillScope::Local)];
-        let commands = available_commands(&skills, all_gated(), &[]);
+        let commands = available_commands(&skills, all_gated(), &[], &[]);
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
         assert!(
             !names.contains(&"Login") && !names.contains(&"login"),
@@ -2780,6 +2794,7 @@ mod tests {
         let names: Vec<String> = available_commands(
             &[make_scoped_skill("Deploy", SkillScope::Local)],
             all_gated(),
+            &[],
             &[],
         )
         .into_iter()
@@ -2828,7 +2843,7 @@ mod tests {
             make_scoped_skill("Commit", SkillScope::Local),
             make_scoped_skill("commit", SkillScope::User),
         ];
-        let names: Vec<String> = available_commands(&skills, all_gated(), &[])
+        let names: Vec<String> = available_commands(&skills, all_gated(), &[], &[])
             .into_iter()
             .map(|c| c.name)
             .collect();
@@ -2843,7 +2858,7 @@ mod tests {
             make_scoped_skill("Commit", SkillScope::Local),
             make_scoped_skill("commit", SkillScope::Local),
         ];
-        let names: Vec<String> = available_commands(&skills, all_gated(), &[])
+        let names: Vec<String> = available_commands(&skills, all_gated(), &[], &[])
             .into_iter()
             .map(|c| c.name)
             .collect();
@@ -2856,8 +2871,8 @@ mod tests {
     }
     #[test]
     fn mixed_case_workflow_does_not_take_reserved_name() {
-        let workflows = vec![listing("Login"), listing("Review")];
-        let names: Vec<String> = available_commands(&[], all_gated(), &workflows)
+        let workflows = vec![listing("Login"), listing("Audit")];
+        let names: Vec<String> = available_commands(&[], all_gated(), &workflows, &[])
             .into_iter()
             .map(|c| c.name)
             .collect();
@@ -2865,7 +2880,7 @@ mod tests {
             !names.iter().any(|n| n.eq_ignore_ascii_case("login")),
             "{names:?}"
         );
-        assert!(names.iter().any(|n| n == "Review"), "{names:?}");
+        assert!(names.iter().any(|n| n == "Audit"), "{names:?}");
     }
     #[test]
     fn resolve_mixed_case_workflow_launch_keeps_listing_name() {
@@ -3094,11 +3109,11 @@ mod tests {
     }
     #[test]
     fn parse_skill_refs_multi_skill() {
-        let skills = vec![make_skill("review", true), make_skill("lint", true)];
-        let refs = parse_skill_references("/review fix auth /lint --strict", &skills, all_gated())
+        let skills = vec![make_skill("audit", true), make_skill("lint", true)];
+        let refs = parse_skill_references("/audit fix auth /lint --strict", &skills, all_gated())
             .unwrap();
         assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0].name, "review");
+        assert_eq!(refs[0].name, "audit");
         assert_eq!(refs[0].args, "fix auth");
         assert_eq!(refs[1].name, "lint");
         assert_eq!(refs[1].args, "--strict");
@@ -3224,7 +3239,7 @@ mod tests {
             listing("yolo"),
             listing("sessions"),
             listing("commit"),
-            listing("review"),
+            listing("audit"),
         ];
         let names: Vec<_> = available_commands(&skills, all_gated(), &workflows, &[])
             .into_iter()
@@ -3236,7 +3251,7 @@ mod tests {
         assert!(!names.iter().any(|name| name == "commit"));
         assert!(names.iter().any(|name| name == "local:commit"));
         assert!(names.iter().any(|name| name == "user:commit"));
-        assert!(names.iter().any(|name| name == "review"));
+        assert!(names.iter().any(|name| name == "audit"));
         assert!(matches!(
             resolve(
                 vec![text_block("/status")],

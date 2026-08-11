@@ -33,7 +33,13 @@ const DROP_BATCH_SIZE: usize = 64;
 enum SyncMsg {
     Queue(Box<acp::SessionNotification>),
     Flush,
-    SetTitle(String),
+    SetTitle {
+        title: String,
+        is_manual: bool,
+    },
+    /// Drop cached title + manual flag so later flushes cannot re-advertise
+    /// a pin the local summary no longer has.
+    ClearTitle,
     SetModelId(String),
 }
 
@@ -77,7 +83,21 @@ impl RemoteSync {
     }
 
     pub fn set_title(&self, title: String) {
-        let _ = self.tx.send(SyncMsg::SetTitle(title));
+        let _ = self.tx.send(SyncMsg::SetTitle {
+            title,
+            is_manual: false,
+        });
+    }
+
+    pub fn set_manual_title(&self, title: String) {
+        let _ = self.tx.send(SyncMsg::SetTitle {
+            title,
+            is_manual: true,
+        });
+    }
+
+    pub fn clear_title(&self) {
+        let _ = self.tx.send(SyncMsg::ClearTitle);
     }
 
     pub(crate) fn set_model_id(&self, model_id: String) {
@@ -157,14 +177,43 @@ async fn sync_task(
                 metadata.updated_at = Some(chrono::Utc::now().to_rfc3339());
                 do_flush(&client, &session_id, &metadata, &mut pending).await;
             }
-            SyncMsg::SetTitle(title) => {
+            SyncMsg::SetTitle { title, is_manual } => {
                 metadata.title = Some(title);
+                metadata.title_is_manual = is_manual.then_some(true);
                 metadata.updated_at = Some(chrono::Utc::now().to_rfc3339());
                 if let Err(e) = client
                     .save_session_data(&session_id, &[], Some(&metadata))
                     .await
                 {
                     tracing::warn!(?e, "Writeback: failed to sync title to backend");
+                } else if let Err(e) = client
+                    .upsert_session(&session_id, &metadata, &agent_id())
+                    .await
+                {
+                    // save_session_data does not write the session-row title
+                    // (backend upsert title=None). Without this, list/--resume
+                    // keep the pre-rename row until the next message flush.
+                    tracing::warn!(error = %e, "Writeback: failed to upsert session title");
+                }
+            }
+            SyncMsg::ClearTitle => {
+                // Empty string, not `None`: an omitted field leaves the
+                // backend's prior pin in place.
+                metadata.title = Some(String::new());
+                metadata.title_is_manual = Some(false);
+                metadata.updated_at = Some(chrono::Utc::now().to_rfc3339());
+                if let Err(e) = client
+                    .save_session_data(&session_id, &[], Some(&metadata))
+                    .await
+                {
+                    tracing::warn!(?e, "Writeback: failed to clear title on backend");
+                } else if let Err(e) = client
+                    .upsert_session(&session_id, &metadata, &agent_id())
+                    .await
+                {
+                    // Same row-title gap as SetTitle: save_session_data does
+                    // not clear the session-row pin (backend title=None).
+                    tracing::warn!(error = %e, "Writeback: failed to upsert cleared session title");
                 }
             }
             SyncMsg::SetModelId(id) => {

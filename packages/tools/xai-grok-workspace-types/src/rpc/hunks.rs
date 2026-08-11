@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::WorkspaceRpc;
+use super::{RpcActivityClass, WorkspaceRpc};
 
 /// Wire-safe hunk action enum. Maps to `xai_hunk_tracker::types::HunkAction`
 /// but carries `Serialize + Deserialize` for RPC transport.
@@ -32,6 +32,7 @@ pub struct HunkSingleActionReq {
 
 impl WorkspaceRpc for HunkSingleActionReq {
     const METHOD: &'static str = "workspace.hunk_action";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = HunkActionResponse;
 }
 
@@ -43,6 +44,7 @@ pub struct HunkFileActionReq {
 
 impl WorkspaceRpc for HunkFileActionReq {
     const METHOD: &'static str = "workspace.hunk_file_action";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = BulkHunkActionResponse;
 }
 
@@ -54,6 +56,7 @@ pub struct HunkTurnActionReq {
 
 impl WorkspaceRpc for HunkTurnActionReq {
     const METHOD: &'static str = "workspace.hunk_turn_action";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = BulkHunkActionResponse;
 }
 
@@ -64,6 +67,7 @@ pub struct HunkAllActionReq {
 
 impl WorkspaceRpc for HunkAllActionReq {
     const METHOD: &'static str = "workspace.hunk_all_action";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = BulkHunkActionResponse;
 }
 
@@ -73,6 +77,7 @@ pub struct HunkGetStagedFilesReq {}
 
 impl WorkspaceRpc for HunkGetStagedFilesReq {
     const METHOD: &'static str = "workspace.hunk_get_staged_files";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Vec<String>;
 }
 
@@ -82,6 +87,7 @@ pub struct HunkGetFileSummariesReq {}
 
 impl WorkspaceRpc for HunkGetFileSummariesReq {
     const METHOD: &'static str = "workspace.hunk_get_file_summaries";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Vec<FileSummary>;
 }
 
@@ -119,6 +125,7 @@ pub struct HunkGetAllHunksReq {}
 
 impl WorkspaceRpc for HunkGetAllHunksReq {
     const METHOD: &'static str = "workspace.get_all_hunks";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Vec<HunkWire>;
 }
 
@@ -128,6 +135,7 @@ pub struct HunkGetAllFileContentsReq {}
 
 impl WorkspaceRpc for HunkGetAllFileContentsReq {
     const METHOD: &'static str = "workspace.hunk_get_all_file_contents";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Vec<FileContentEntryWire>;
 }
 
@@ -137,6 +145,7 @@ pub struct HunkGetSessionSummaryReq {}
 
 impl WorkspaceRpc for HunkGetSessionSummaryReq {
     const METHOD: &'static str = "workspace.get_session_summary";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = SessionSummaryWire;
 }
 
@@ -151,6 +160,7 @@ pub struct HunkGetFilteredHunksReq {
 
 impl WorkspaceRpc for HunkGetFilteredHunksReq {
     const METHOD: &'static str = "workspace.hunk_get_filtered_hunks";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = FilteredHunksResponse;
 }
 

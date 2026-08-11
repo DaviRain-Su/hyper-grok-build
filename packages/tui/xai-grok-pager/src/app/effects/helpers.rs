@@ -12,6 +12,44 @@ use xai_grok_shell::sampling::error::{
 };
 use xai_grok_shell::session::ExtMethodResult;
 use xai_grok_shell::session::unified_list::ListScope;
+/// Floor for the session create/load RPCs.
+const SESSION_RPC_FLOOR: std::time::Duration = std::time::Duration::from_secs(180);
+/// Headroom over the agent-side `.envrc` budget for the rest of session setup.
+const SESSION_RPC_SLACK: std::time::Duration = std::time::Duration::from_secs(50);
+/// Always covers the agent-side `.envrc` budget so the backstop cannot fire
+/// before the agent's own deadline. Reads `GROK_ENVRC_TIMEOUT_SECS` in this
+/// process; the agent inherits the same environment.
+pub(super) fn session_rpc_timeout() -> std::time::Duration {
+    SESSION_RPC_FLOOR.max(xai_grok_workspace::envrc::loader_budget() + SESSION_RPC_SLACK)
+}
+/// `acp_send` bounded by [`session_rpc_timeout`]; on expiry, an error naming
+/// `action` instead of an eternal spinner.
+pub(super) async fn acp_send_bounded<R, T>(
+    request: T,
+    tx: &tokio::sync::mpsc::UnboundedSender<R>,
+    action: &str,
+) -> Result<T::Response, acp::Error>
+where
+    T: xai_acp_lib::AcpRequest,
+    R: From<xai_acp_lib::AcpArgs<T>> + std::fmt::Debug,
+{
+    let timeout = session_rpc_timeout();
+    match tokio::time::timeout(timeout, acp_send(request, tx)).await {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            Err(
+                acp::Error::new(
+                    acp::ErrorCode::InternalError.into(),
+                    format!(
+                "{action} timed out after {}s. It may still finish in the background; \
+                 retrying right away can run into the same delay.",
+                timeout.as_secs()
+            ),
+                ),
+            )
+        }
+    }
+}
 /// Typed progress message for session restore.
 /// Keeps the progress channel from accepting arbitrary `TaskResult` variants.
 pub(crate) struct RestoreProgressMsg {

@@ -11,13 +11,14 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::WorkspaceRpc;
+use super::{RpcActivityClass, WorkspaceRpc};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiscoverSkillsReq {}
 
 impl WorkspaceRpc for DiscoverSkillsReq {
     const METHOD: &'static str = "workspace.discover_skills";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Vec<SkillInfo>;
 }
 
@@ -28,6 +29,7 @@ pub struct DiscoverPluginsReq {}
 
 impl WorkspaceRpc for DiscoverPluginsReq {
     const METHOD: &'static str = "workspace.discover_plugins";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Vec<Value>;
 }
 

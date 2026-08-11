@@ -124,9 +124,10 @@ Rename the current session's title:
 
 ```
 /rename <title>
+/rename --auto
 ```
 
-Alias: `/title`.
+Alias: `/title`. `/rename --auto` clears a manual title and re-enables auto-titling.
 
 ---
 

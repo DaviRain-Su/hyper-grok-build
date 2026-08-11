@@ -21,6 +21,72 @@ fn test_manager() -> ModelsManager {
     .build()
 }
 
+/// Cold manager (no prefetch, isolated cache and auth) over `endpoint`.
+fn cold_manager(cfg: config::Config, endpoint: Arc<dyn ModelsEndpoint>) -> ModelsManager {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new_test_isolated(
+        tmp.path(),
+        GrokComConfig::default(),
+    ));
+    ModelsManagerBuilder::new(
+        None,
+        IndexMap::new(),
+        acp::ModelId::new("default"),
+        auth_manager,
+        cfg,
+    )
+    .endpoint(endpoint)
+    .cache(test_cache_manager(tmp.path()))
+    .build()
+}
+
+/// Never resolves.
+struct HangingEndpoint;
+impl ModelsEndpoint for HangingEndpoint {
+    fn fetch_models(
+        &self,
+        _endpoints: config::EndpointsConfig,
+        _auth: Option<GrokAuth>,
+        _fetch_auth: ModelFetchAuth,
+    ) -> ModelsFetchFuture {
+        Box::pin(std::future::pending())
+    }
+}
+
+/// Fails every fetch immediately.
+struct FailingEndpoint;
+impl ModelsEndpoint for FailingEndpoint {
+    fn fetch_models(
+        &self,
+        _endpoints: config::EndpointsConfig,
+        _auth: Option<GrokAuth>,
+        _fetch_auth: ModelFetchAuth,
+    ) -> ModelsFetchFuture {
+        Box::pin(async { None })
+    }
+}
+
+/// Serves `catalog` after `delay`.
+struct SlowEndpoint {
+    catalog: IndexMap<String, ModelEntry>,
+    delay: std::time::Duration,
+}
+impl ModelsEndpoint for SlowEndpoint {
+    fn fetch_models(
+        &self,
+        _endpoints: config::EndpointsConfig,
+        _auth: Option<GrokAuth>,
+        _fetch_auth: ModelFetchAuth,
+    ) -> ModelsFetchFuture {
+        let catalog = self.catalog.clone();
+        let delay = self.delay;
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            Some(catalog)
+        })
+    }
+}
+
 #[tokio::test]
 async fn catalog_retry_recovers_after_endpoint_returns() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -66,7 +132,10 @@ async fn catalog_retry_recovers_after_endpoint_returns() {
     .build();
     assert!(!mgr.has_fetched_real_catalog());
 
-    mgr.spawn_catalog_retry_with_backoff(crate::tools::retry::BackoffConfig::new(5, 1, 10));
+    mgr.spawn_catalog_retry_with_backoff(
+        /*remote_fetch_enabled*/ true,
+        crate::tools::retry::BackoffConfig::new(5, 1, 10),
+    );
 
     let mut recovered = false;
     for _ in 0..200 {
@@ -88,7 +157,7 @@ async fn catalog_retry_recovers_after_endpoint_returns() {
 }
 
 #[tokio::test]
-async fn offline_strategy_serves_cache_without_fetching() {
+async fn disk_cache_reload_applies_without_fetching() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct CountingEndpoint {
@@ -134,12 +203,12 @@ async fn offline_strategy_serves_cache_without_fetching() {
         &mgr.cache_origin(),
     );
 
-    mgr.list_models(RefreshStrategy::Offline).await;
+    mgr.reload_from_disk_cache();
 
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
-        "Offline must serve the disk cache, never hit the transport",
+        "the disk cache load must never hit the transport",
     );
     assert!(mgr.models().contains_key("grok-4.5"));
     assert!(mgr.has_fetched_real_catalog());
@@ -210,36 +279,11 @@ async fn auth_refresh_watcher_refetches_on_notify() {
 
 #[tokio::test(start_paused = true)]
 async fn hanging_fetch_does_not_block_refresh() {
-    struct HangingEndpoint;
-    impl ModelsEndpoint for HangingEndpoint {
-        fn fetch_models(
-            &self,
-            _endpoints: config::EndpointsConfig,
-            _auth: Option<GrokAuth>,
-            _fetch_auth: ModelFetchAuth,
-        ) -> ModelsFetchFuture {
-            Box::pin(std::future::pending())
-        }
-    }
-
-    let tmp = std::env::temp_dir().join("grok-test-hanging-fetch");
-    let auth_manager = Arc::new(AuthManager::new_test_isolated(
-        &tmp,
-        GrokComConfig::default(),
-    ));
-    let mgr = ModelsManagerBuilder::new(
-        None,
-        IndexMap::new(),
-        acp::ModelId::new("default"),
-        auth_manager,
-        config::Config::default(),
-    )
-    .endpoint(Arc::new(HangingEndpoint))
-    .build();
+    let mgr = cold_manager(config::Config::default(), Arc::new(HangingEndpoint));
 
     tokio::time::timeout(
         crate::http::STARTUP_FETCH_TIMEOUT * 10,
-        mgr.fetch_and_apply_inner(true),
+        mgr.fetch_and_apply_inner(/*remote_fetch_enabled*/ true),
     )
     .await
     .expect("fetch_and_apply_inner must return despite a hanging endpoint");
@@ -254,45 +298,16 @@ async fn hanging_fetch_does_not_block_refresh() {
 async fn slow_fetch_within_timeout_still_applies() {
     // "Slow but succeeds": a fetch that returns just under STARTUP_FETCH_TIMEOUT
     // must still be applied, not degraded to offline.
-    struct SlowEndpoint {
-        catalog: IndexMap<String, ModelEntry>,
-        delay: std::time::Duration,
-    }
-    impl ModelsEndpoint for SlowEndpoint {
-        fn fetch_models(
-            &self,
-            _endpoints: config::EndpointsConfig,
-            _auth: Option<GrokAuth>,
-            _fetch_auth: ModelFetchAuth,
-        ) -> ModelsFetchFuture {
-            let catalog = self.catalog.clone();
-            let delay = self.delay;
-            Box::pin(async move {
-                tokio::time::sleep(delay).await;
-                Some(catalog)
-            })
-        }
-    }
-
-    let tmp = tempfile::TempDir::new().unwrap();
-    let auth_manager = Arc::new(AuthManager::new_test_isolated(
-        tmp.path(),
-        GrokComConfig::default(),
-    ));
-    let mgr = ModelsManagerBuilder::new(
-        None,
-        IndexMap::new(),
-        acp::ModelId::new("default"),
-        auth_manager,
+    let mgr = cold_manager(
         config::Config::default(),
-    )
-    .endpoint(Arc::new(SlowEndpoint {
-        catalog: make_prefetched(&["grok-4"]),
-        delay: crate::http::STARTUP_FETCH_TIMEOUT / 2,
-    }))
-    .build();
+        Arc::new(SlowEndpoint {
+            catalog: make_prefetched(&["grok-4"]),
+            delay: crate::http::STARTUP_FETCH_TIMEOUT / 2,
+        }),
+    );
 
-    mgr.fetch_and_apply_inner(true).await;
+    mgr.fetch_and_apply_inner(/*remote_fetch_enabled*/ true)
+        .await;
     assert!(
         mgr.has_fetched_real_catalog(),
         "a fetch within the timeout must apply, not degrade",
@@ -338,10 +353,10 @@ async fn etag_refresh_is_bounded_and_single_flighted() {
     .build();
 
     // First etag change spawns a bounded fetch; let the task register in-flight.
-    mgr.spawn_fetch_inner(Some("etag-1".into()), true);
+    mgr.spawn_fetch_inner(Some("etag-1".into()), /*remote_fetch_enabled*/ true);
     tokio::task::yield_now().await;
     // Single-flight: a second spawn while one is in flight must not fetch again.
-    mgr.spawn_fetch_inner(Some("etag-2".into()), true);
+    mgr.spawn_fetch_inner(Some("etag-2".into()), /*remote_fetch_enabled*/ true);
     tokio::task::yield_now().await;
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -354,7 +369,7 @@ async fn etag_refresh_is_bounded_and_single_flighted() {
     tokio::task::yield_now().await;
 
     // Guard released → a later etag change fetches again.
-    mgr.spawn_fetch_inner(Some("etag-3".into()), true);
+    mgr.spawn_fetch_inner(Some("etag-3".into()), /*remote_fetch_enabled*/ true);
     tokio::task::yield_now().await;
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -363,13 +378,184 @@ async fn etag_refresh_is_bounded_and_single_flighted() {
     );
 
     // remote_fetch disabled is a no-op: no additional fetch.
-    mgr.spawn_fetch_inner(Some("etag-4".into()), false);
+    mgr.spawn_fetch_inner(Some("etag-4".into()), /*remote_fetch_enabled*/ false);
     tokio::task::yield_now().await;
     assert_eq!(
         calls.load(Ordering::SeqCst),
         2,
         "disabled gate must not fetch"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn first_catalog_wait_unblocks_on_fetch_and_skips_dead_dwell() {
+    // Deployment auth: a fetch can succeed without a session, so the wait
+    // dwells regardless of ambient API-key env.
+    let mgr = cold_manager(
+        config_from_toml("[endpoints]\ndeployment_key = \"deploy-key\""),
+        Arc::new(SlowEndpoint {
+            catalog: make_prefetched(&["grok-4"]),
+            delay: crate::http::STARTUP_FETCH_TIMEOUT / 2,
+        }),
+    );
+
+    // Cold cache, remote fetch disabled: no fetch is coming, so no dwell.
+    let start = tokio::time::Instant::now();
+    assert!(
+        !mgr.wait_for_first_catalog_inner(/*remote_fetch_enabled*/ false)
+            .await
+    );
+    assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+
+    // Cold cache, no attempt spawned: nothing to wait for, so no dwell.
+    let start = tokio::time::Instant::now();
+    assert!(
+        !mgr.wait_for_first_catalog_inner(/*remote_fetch_enabled*/ true)
+            .await
+    );
+    assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+
+    // Cold cache, fetch in flight: the wait unblocks when the fetch lands.
+    mgr.spawn_fetch_inner(None, /*remote_fetch_enabled*/ true);
+    assert!(
+        mgr.wait_for_first_catalog_inner(/*remote_fetch_enabled*/ true)
+            .await,
+        "the wait must observe the completed fetch",
+    );
+    assert!(mgr.models().contains_key("grok-4"));
+
+    // Warm: an already-loaded catalog returns immediately.
+    let start = tokio::time::Instant::now();
+    assert!(
+        mgr.wait_for_first_catalog_inner(/*remote_fetch_enabled*/ true)
+            .await
+    );
+    assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+}
+
+#[tokio::test(start_paused = true)]
+async fn first_catalog_wait_unblocks_on_failed_fetch() {
+    let mgr = cold_manager(
+        config_from_toml("[endpoints]\ndeployment_key = \"deploy-key\""),
+        Arc::new(FailingEndpoint),
+    );
+    let budget = crate::http::STARTUP_AUTH_REFRESH_TIMEOUT + crate::http::STARTUP_FETCH_TIMEOUT;
+    let start = tokio::time::Instant::now();
+    mgr.spawn_fetch_inner(None, /*remote_fetch_enabled*/ true);
+    assert!(
+        !mgr.wait_for_first_catalog_inner(/*remote_fetch_enabled*/ true)
+            .await
+    );
+    assert!(start.elapsed() < budget, "failure must beat the budget");
+}
+
+#[tokio::test(start_paused = true)]
+async fn first_catalog_wait_is_bounded() {
+    let mgr = cold_manager(
+        config_from_toml("[endpoints]\ndeployment_key = \"deploy-key\""),
+        Arc::new(HangingEndpoint),
+    );
+    let budget = crate::http::STARTUP_AUTH_REFRESH_TIMEOUT + crate::http::STARTUP_FETCH_TIMEOUT;
+    let _attempt = FetchAttemptGuard::begin(&mgr.inner);
+    let start = tokio::time::Instant::now();
+    assert!(
+        !mgr.wait_for_first_catalog_inner(/*remote_fetch_enabled*/ true)
+            .await
+    );
+    assert_eq!(start.elapsed(), budget, "only the budget ends this wait");
+}
+
+#[tokio::test(start_paused = true)]
+#[serial]
+async fn first_catalog_wait_skips_doomed_signed_out_fetch() {
+    let _no_key = EnvGuard::unset("XAI_API_KEY");
+    let _no_legacy_key = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+    let mgr = cold_manager(config::Config::default(), Arc::new(HangingEndpoint));
+    let start = tokio::time::Instant::now();
+    mgr.spawn_fetch_inner(None, /*remote_fetch_enabled*/ true);
+    assert!(
+        !mgr.wait_for_first_catalog_inner(/*remote_fetch_enabled*/ true)
+            .await
+    );
+    assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+}
+
+#[tokio::test(start_paused = true)]
+async fn first_catalog_wait_observes_inline_fetch() {
+    let mgr = cold_manager(
+        config_from_toml("[endpoints]\ndeployment_key = \"deploy-key\""),
+        Arc::new(SlowEndpoint {
+            catalog: make_prefetched(&["grok-4"]),
+            delay: crate::http::STARTUP_FETCH_TIMEOUT / 2,
+        }),
+    );
+    // Fetch first in the join, so its attempt registers on first poll.
+    let ((), ready) = tokio::join!(
+        mgr.fetch_and_apply_inner(/*remote_fetch_enabled*/ true),
+        mgr.wait_for_first_catalog_inner(/*remote_fetch_enabled*/ true),
+    );
+    assert!(ready, "the wait must observe the inline fetch's outcome");
+}
+
+#[tokio::test(start_paused = true)]
+async fn new_fetch_attempt_supersedes_failed_latch() {
+    let mgr = cold_manager(
+        config_from_toml("[endpoints]\ndeployment_key = \"deploy-key\""),
+        Arc::new(FailingEndpoint),
+    );
+    mgr.fetch_and_apply_inner(/*remote_fetch_enabled*/ true)
+        .await;
+    assert_eq!(
+        *mgr.inner.catalog_progress.borrow(),
+        CatalogProgress::Failed
+    );
+
+    let attempt = FetchAttemptGuard::begin(&mgr.inner);
+    assert_eq!(
+        *mgr.inner.catalog_progress.borrow(),
+        CatalogProgress::Pending,
+        "a new attempt must supersede the stale failure",
+    );
+    drop(attempt);
+    assert_eq!(
+        *mgr.inner.catalog_progress.borrow(),
+        CatalogProgress::Failed,
+        "the last attempt out without an outcome must latch",
+    );
+
+    let start = tokio::time::Instant::now();
+    assert!(
+        !mgr.wait_for_first_catalog_inner(/*remote_fetch_enabled*/ true)
+            .await
+    );
+    assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+}
+
+#[test]
+fn stale_fetch_result_is_discarded_after_identity_change() {
+    let mgr = test_manager();
+    let cfg = config::Config::default();
+    let stale_generation = mgr.inner.catalog.read().generation;
+    mgr.clear();
+
+    assert!(!mgr.apply_refresh_result_fenced(
+        &cfg,
+        Some(make_prefetched(&["stale-model"])),
+        None,
+        stale_generation,
+    ));
+    assert!(!mgr.models().contains_key("stale-model"));
+    assert!(!mgr.has_fetched_real_catalog());
+
+    assert!(!mgr.apply_refresh_result_fenced(&cfg, None, None, stale_generation));
+    assert_eq!(
+        *mgr.inner.catalog_progress.borrow(),
+        CatalogProgress::Pending,
+        "a stale failure must not latch",
+    );
+
+    assert!(mgr.apply_refresh_result(&cfg, Some(make_prefetched(&["new-model"])), None));
+    assert!(mgr.models().contains_key("new-model"));
 }
 
 fn config_from_toml(toml: &str) -> config::Config {
@@ -1075,8 +1261,136 @@ fn make_prefetched(ids: &[&str]) -> IndexMap<String, ModelEntry> {
 fn spawn_background_refresh_is_noop_when_real_catalog_present() {
     let mgr = test_manager();
     mgr.inner.catalog.write().has_fetched_real_catalog = true;
-    mgr.spawn_background_refresh(); // must not panic (no tokio::spawn taken)
+    mgr.spawn_background_refresh_inner(/*remote_fetch_enabled*/ true); // must not panic (no tokio::spawn taken)
     assert!(mgr.has_fetched_real_catalog());
+}
+
+// Guards the readiness-never-blocks invariant in CI; the e2e proofs are `#[ignore]`.
+// current_thread: the post-spawn `!polled` check relies on the task not being
+// polled until this test awaits.
+#[tokio::test(flavor = "current_thread")]
+async fn spawn_background_refresh_never_blocks_on_a_hanging_endpoint() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
+
+    // Never resolves; signals the instant the detached task first polls it.
+    struct NeverResolvingEndpoint {
+        polled: Arc<AtomicBool>,
+        dispatched: Arc<Notify>,
+    }
+    impl ModelsEndpoint for NeverResolvingEndpoint {
+        fn fetch_models(
+            &self,
+            _endpoints: config::EndpointsConfig,
+            _auth: Option<GrokAuth>,
+            _fetch_auth: ModelFetchAuth,
+        ) -> ModelsFetchFuture {
+            let polled = self.polled.clone();
+            let dispatched = self.dispatched.clone();
+            Box::pin(async move {
+                polled.store(true, Ordering::SeqCst);
+                dispatched.notify_one();
+                std::future::pending().await
+            })
+        }
+    }
+
+    let polled = Arc::new(AtomicBool::new(false));
+    let dispatched = Arc::new(Notify::new());
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
+    let mgr = ModelsManagerBuilder::new(
+        None,
+        make_prefetched(&["grok-4", "grok-4.5"]),
+        acp::ModelId::new("grok-4.5"),
+        auth_manager,
+        config_from_toml("[models]\ndefault = \"grok-4.5\""),
+    )
+    .endpoint(Arc::new(NeverResolvingEndpoint {
+        polled: polled.clone(),
+        dispatched: dispatched.clone(),
+    }))
+    .cache(test_cache_manager(tmp.path()))
+    .build();
+
+    mgr.spawn_background_refresh_inner(/*remote_fetch_enabled*/ true);
+    assert!(
+        !polled.load(Ordering::SeqCst),
+        "fetch ran inline on the readiness path; it must be spawned",
+    );
+
+    // Generous failure bound: the dispatch may sit behind a full 5s auth dwell.
+    tokio::time::timeout(std::time::Duration::from_secs(30), dispatched.notified())
+        .await
+        .expect("background refresh was never dispatched");
+}
+
+#[tokio::test]
+#[serial]
+async fn sign_out_clears_catalog_rebuilds_bundled_without_fetching() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct BoomEndpoint {
+        calls: Arc<AtomicUsize>,
+    }
+    impl ModelsEndpoint for BoomEndpoint {
+        fn fetch_models(
+            &self,
+            _endpoints: config::EndpointsConfig,
+            _auth: Option<GrokAuth>,
+            _fetch_auth: ModelFetchAuth,
+        ) -> ModelsFetchFuture {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { None })
+        }
+    }
+
+    // Unset keys so fetch_auth resolves to Session (the sign-out branch).
+    let _no_key = EnvGuard::unset("XAI_API_KEY");
+    let _no_legacy_key = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
+    let mgr = ModelsManagerBuilder::new(
+        None,
+        make_prefetched(&["grok-4", "grok-4.5"]),
+        acp::ModelId::new("grok-4.5"),
+        auth_manager,
+        config_from_toml("[models]\ndefault = \"grok-4.5\""),
+    )
+    .endpoint(Arc::new(BoomEndpoint {
+        calls: calls.clone(),
+    }))
+    .cache(test_cache_manager(tmp.path()))
+    .build();
+
+    mgr.inner.catalog.write().has_fetched_real_catalog = true;
+    mgr.inner.user_selected_model.store(true, Ordering::Relaxed);
+
+    mgr.on_auth_changed().await;
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "sign-out must skip the doomed Session-auth fetch",
+    );
+    assert!(
+        !mgr.has_fetched_real_catalog(),
+        "sign-out must drop the prior identity's real catalog",
+    );
+    assert!(
+        !mgr.inner.user_selected_model.load(Ordering::Relaxed),
+        "sign-out must reset the user-pick latch",
+    );
+    assert!(
+        !mgr.models().is_empty(),
+        "sign-out must rebuild the bundled default catalog",
+    );
+    assert_eq!(
+        *mgr.inner.catalog_progress.borrow(),
+        CatalogProgress::Failed,
+        "sign-out publishes an outcome so parked waiters wake",
+    );
 }
 
 #[test]

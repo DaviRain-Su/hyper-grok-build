@@ -39,6 +39,21 @@ pub(crate) static AVAILABLE_COMMANDS_UPDATE: LazyLock<String> = LazyLock::new(||
     ))
 });
 
+/// `acp::SessionUpdate::ToolCallUpdate` discriminant.
+pub(crate) static TOOL_CALL_UPDATE: LazyLock<String> = LazyLock::new(|| {
+    tagged_discriminant(&acp::SessionUpdate::ToolCallUpdate(
+        acp::ToolCallUpdate::new(acp::ToolCallId::new("t"), acp::ToolCallUpdateFields::new()),
+    ))
+});
+
+/// `acp::ToolCallStatus::InProgress` wire string (`in_progress`).
+pub(crate) static TOOL_CALL_STATUS_IN_PROGRESS: LazyLock<String> = LazyLock::new(|| {
+    serde_json::to_value(acp::ToolCallStatus::InProgress)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .expect("ToolCallStatus::InProgress must serialize as a string")
+});
+
 /// xAI `SessionUpdate::RewindMarker` discriminant. Appears verbatim in compact
 /// JSON, so it doubles as a cheap substring pre-filter.
 pub(crate) static REWIND_MARKER: LazyLock<String> = LazyLock::new(|| {
@@ -89,12 +104,6 @@ pub(crate) static TASK_COMPLETED: LazyLock<String> = LazyLock::new(|| {
     })
 });
 
-/// Prefix the structural `params.update` object begins with for a real ACU (the
-/// enum tag serializes first). Built from [`AVAILABLE_COMMANDS_UPDATE`] so the
-/// literal is never hand-maintained.
-pub(crate) static AVAILABLE_COMMANDS_UPDATE_PREFIX: LazyLock<String> =
-    LazyLock::new(|| format!(r#"{{"sessionUpdate":"{}""#, *AVAILABLE_COMMANDS_UPDATE));
-
 /// The `"sessionUpdate":"user_message_chunk"` key/value pair as serialized (no
 /// leading `{`). Built from [`USER_MESSAGE_CHUNK`] so the literal isn't hand-
 /// maintained; the quoted key means it can't false-match the bare discriminant
@@ -115,13 +124,11 @@ mod tests {
             AVAILABLE_COMMANDS_UPDATE.as_str(),
             "available_commands_update"
         );
+        assert_eq!(TOOL_CALL_UPDATE.as_str(), "tool_call_update");
+        assert_eq!(TOOL_CALL_STATUS_IN_PROGRESS.as_str(), "in_progress");
         assert_eq!(REWIND_MARKER.as_str(), "rewind_marker");
         assert_eq!(TASK_BACKGROUNDED.as_str(), "task_backgrounded");
         assert_eq!(TASK_COMPLETED.as_str(), "task_completed");
-        assert_eq!(
-            AVAILABLE_COMMANDS_UPDATE_PREFIX.as_str(),
-            r#"{"sessionUpdate":"available_commands_update""#
-        );
         assert_eq!(
             USER_MESSAGE_CHUNK_PREFIX.as_str(),
             r#""sessionUpdate":"user_message_chunk""#

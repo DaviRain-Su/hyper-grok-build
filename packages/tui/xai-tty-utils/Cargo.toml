@@ -6,7 +6,7 @@ license = "Apache-2.0"
 description = "Lightweight process-spawning utilities for TTY safety — detach from controlling terminal, suppress interactive pagers, process-group lifecycle"
 
 [dependencies]
-tokio = { workspace = true, features = ["process", "time"] }
+tokio = { workspace = true, features = ["process", "rt", "time"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["signal", "process"] }

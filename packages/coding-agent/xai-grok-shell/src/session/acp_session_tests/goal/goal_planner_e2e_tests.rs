@@ -11,11 +11,30 @@ use std::sync::atomic::{AtomicUsize, Ordering as SeqOrd};
 use tempfile::TempDir;
 use xai_grok_tools::implementations::grok_build::task::types::{SubagentEvent, SubagentResult};
 
+/// Pull the planner's plan-file path from the prompt by its backtick-quoted
+/// `.md` token, so rewording the surrounding sentence can't silently break the
+/// fake (which would otherwise write nothing and fail far from the cause).
+fn plan_path_from_prompt(prompt: &str) -> Option<String> {
+    // Backtick-delimited tokens sit at the odd indices of the split.
+    prompt
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .find(|token| token.ends_with(".md"))
+        .map(str::to_owned)
+}
+
 /// Spawn behaviour knobs for the planner-coordinator stub.
 enum SpawnBehaviour {
     /// Parse `{PLAN_FILE}` out of the prompt, write `body` there,
     /// then respond `Done`.
     WritePlanThenDone { body: &'static [u8] },
+    WaitForCancelsThenWrite {
+        cancels: usize,
+        started: tokio::sync::mpsc::UnboundedSender<usize>,
+        objectives: StdArc<std::sync::Mutex<Vec<String>>>,
+        body: &'static [u8],
+    },
     /// Reply success but never write the file.
     NoWriteThenDone,
     /// Reply with subagent runtime failure.
@@ -69,17 +88,7 @@ fn spawn_planner_coordinator_capturing(
                     .lock()
                     .unwrap()
                     .push(req.runtime_overrides.model.clone());
-                // The prompt embeds the path several times; we
-                // just need any one. Walk left from the first
-                // `/plan.md` occurrence to find the absolute path.
-                let plan_path = req.prompt.find("/plan.md").map(|end_idx| {
-                    let end = end_idx + "/plan.md".len();
-                    let start = req.prompt[..end_idx]
-                        .rfind(|c: char| !c.is_ascii_graphic() || c == '`')
-                        .map(|i| i + 1)
-                        .unwrap_or(0);
-                    req.prompt[start..end].to_string()
-                });
+                let plan_path = plan_path_from_prompt(&req.prompt);
                 let result = match &behaviour {
                     SpawnBehaviour::WritePlanThenDone { body } => {
                         if let Some(p) = plan_path.as_deref() {
@@ -93,6 +102,41 @@ fn spawn_planner_coordinator_capturing(
                             subagent_id: req.id.clone(),
                             child_session_id: req.id.clone(),
                             ..Default::default()
+                        }
+                    }
+                    SpawnBehaviour::WaitForCancelsThenWrite {
+                        cancels,
+                        started,
+                        objectives,
+                        body,
+                    } => {
+                        objectives.lock().unwrap().push(req.prompt.clone());
+                        let spawn = count_task.load(SeqOrd::SeqCst);
+                        let _ = started.send(spawn);
+                        if spawn <= *cancels {
+                            req.cancel_token.cancelled().await;
+                            SubagentResult {
+                                success: false,
+                                error: Some("cancelled".into()),
+                                cancelled: true,
+                                subagent_id: req.id.clone(),
+                                child_session_id: req.id.clone(),
+                                ..Default::default()
+                            }
+                        } else {
+                            if let Some(p) = plan_path.as_deref() {
+                                let _ = std::fs::create_dir_all(
+                                    std::path::Path::new(p).parent().unwrap(),
+                                );
+                                let _ = std::fs::write(p, body);
+                            }
+                            SubagentResult {
+                                success: true,
+                                output: StdArc::from("Done"),
+                                subagent_id: req.id.clone(),
+                                child_session_id: req.id.clone(),
+                                ..Default::default()
+                            }
                         }
                     }
                     SpawnBehaviour::NoWriteThenDone => SubagentResult {
@@ -206,6 +250,137 @@ fn create_test_goal(actor: &SessionActor) {
 
 #[tokio::test(flavor = "current_thread")]
 #[serial]
+async fn send_now_restarts_planner_with_all_steering() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+            let objectives = StdArc::new(std::sync::Mutex::new(Vec::new()));
+            let (tx, spawn_count) =
+                spawn_planner_coordinator(SpawnBehaviour::WaitForCancelsThenWrite {
+                    cancels: 2,
+                    started: started_tx,
+                    objectives: StdArc::clone(&objectives),
+                    body: b"# Plan\n",
+                });
+            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
+            {
+                let mut state = actor.state.lock().await;
+                state
+                    .pending_inputs
+                    .push_back(user_item("goal-running", "A"));
+                state.running_task = Some(running_task_stub("goal-running"));
+            }
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("goal-running".into());
+
+            let planner = {
+                let actor = StdArc::clone(&actor);
+                tokio::task::spawn_local(async move { actor.setup_goal("do X", None).await })
+            };
+
+            for (spawn, text) in [(1, "first"), (2, "second")] {
+                assert_eq!(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), started_rx.recv())
+                        .await
+                        .expect("planner spawn"),
+                    Some(spawn),
+                );
+                let (respond_to, response_rx) = tokio::sync::oneshot::channel();
+                assert!(
+                    !actor
+                        .queue_input(QueueInputRequest {
+                            send_now: true,
+                            ..queue_input_request(
+                                vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
+                                &format!("user-steer-{spawn}"),
+                                respond_to,
+                            )
+                        })
+                        .await
+                );
+                assert!(matches!(
+                    response_rx.await.unwrap().unwrap().completion_kind,
+                    PromptCompletionKind::RemovedFromQueue
+                ));
+            }
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), planner)
+                .await
+                .expect("planner completion")
+                .unwrap();
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 3);
+            let prompts = objectives.lock().unwrap();
+            let objectives = prompts
+                .iter()
+                .map(|prompt| {
+                    prompt
+                        .split_once("\n\nOBJECTIVE:\n")
+                        .unwrap()
+                        .1
+                        .split_once("\n\nCONTEXT:\n")
+                        .unwrap()
+                        .0
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                objectives,
+                [
+                    "do X",
+                    "do X\n\nUser steering:\nfirst",
+                    "do X\n\nUser steering:\nfirst\n\nsecond",
+                ]
+            );
+
+            // Staged files (`plan-<uuid>.md`, `plan-baseline-<uuid>.md`) are
+            // `TempPath`s: interrupted attempts drop theirs and the winner
+            // renames onto `plan.md`, so nothing matching `plan-*.md` survives.
+            let goal_dir = actor.goal_tracker.lock().plan_path();
+            let goal_dir = goal_dir.parent().expect("plan path has a parent");
+            let leaked: Vec<String> = std::fs::read_dir(goal_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with("plan-") && name.ends_with(".md"))
+                .collect();
+            assert!(leaked.is_empty(), "staged planner files leaked: {leaked:?}");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn planner_early_exit_clears_planning_latch() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _tmp) = make_planner_actor(None, true).await;
+            create_test_goal(&actor);
+            {
+                let mut tracker = actor.goal_tracker.lock();
+                tracker.snapshot_mut().unwrap().planning_in_flight = true;
+                assert!(tracker.pause(crate::session::goal_tracker::GoalPauseReason::User));
+            }
+
+            actor.maybe_run_goal_planner("do X").await;
+
+            assert!(
+                !actor
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
+                    .unwrap()
+                    .planning_in_flight
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
 async fn planner_success_stamps_plan_file_on_orchestration() {
     let local = tokio::task::LocalSet::new();
     local
@@ -215,12 +390,22 @@ async fn planner_success_stamps_plan_file_on_orchestration() {
             let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
             create_test_goal(&actor);
             let plan_path = actor.goal_tracker.lock().plan_path();
+            let baseline_path = actor.goal_tracker.lock().plan_baseline_path();
+            std::fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+            std::fs::write(&plan_path, "stale plan").unwrap();
+            std::fs::write(&baseline_path, "stale baseline").unwrap();
 
             actor.maybe_run_goal_planner("do X").await;
 
             assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(snap.plan_file.as_deref(), Some(plan_path.as_path()));
+            assert_eq!(
+                snap.plan_baseline_file.as_deref(),
+                Some(baseline_path.as_path())
+            );
+            assert_eq!(std::fs::read_to_string(plan_path).unwrap(), "# Plan\n");
+            assert_eq!(std::fs::read_to_string(baseline_path).unwrap(), "# Plan\n");
             assert_eq!(
                 snap.status,
                 crate::session::goal_tracker::GoalStatus::Active,
@@ -291,9 +476,6 @@ async fn planner_fork_inherits_parent_model() {
             actor.maybe_run_goal_planner("do X").await;
 
             assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
-            // Mirror-child fork shares the parent radix prefix (per-model), so the
-            // planner must inherit the parent session model (override == None) even
-            // though an explicit planner role model was configured above.
             let models = capture.model.lock().unwrap().clone();
             assert_eq!(
                 models,
@@ -446,6 +628,82 @@ async fn planner_success_sets_then_clears_planning_flag() {
                 flags.last(),
                 Some(&None),
                 "success path must clear the planning badge; got {flags:?}",
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn planner_clears_planning_latch_before_publishing_the_plan() {
+    // Regression (Bugbot: "Late steering skips replan"): the "planning…" badge
+    // must be cleared at the commit-to-publish point — the moment the planner
+    // run is taken and we commit to publishing the produced plan — NOT only at
+    // the very end after the plan/baseline I/O. Before the fix the latch stayed
+    // set through the whole publish window, so the pager advertised "planning"
+    // while steering could no longer replan (it no-ops with no active run and
+    // is merged only as an interjection).
+    //
+    // Observed deterministically: the first instant `plan.md` is published on
+    // disk (renamed from the staged attempt file, right before the baseline
+    // copy `.await` yields), latch the goal's `planning_in_flight`. The fix
+    // clears it before that publish; before the fix it was still set.
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (tx, _spawn_count) =
+                spawn_planner_coordinator(SpawnBehaviour::WritePlanThenDone { body: b"# Plan\n" });
+            let (actor, _tmp, mut persistence_rx) =
+                make_planner_actor_capturing(Some(tx), true).await;
+            create_test_goal(&actor);
+            let plan_path = actor.goal_tracker.lock().plan_path();
+
+            let observed_at_publish = StdArc::new(std::sync::Mutex::new(None::<bool>));
+            let observer = {
+                let actor = StdArc::clone(&actor);
+                let plan_path = plan_path.clone();
+                let observed = StdArc::clone(&observed_at_publish);
+                tokio::task::spawn_local(async move {
+                    loop {
+                        if plan_path.exists() {
+                            *observed.lock().unwrap() = actor
+                                .goal_tracker
+                                .lock()
+                                .snapshot()
+                                .map(|g| g.planning_in_flight);
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+            };
+
+            actor.maybe_run_goal_planner("do X").await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), observer).await;
+
+            assert_eq!(
+                *observed_at_publish.lock().unwrap(),
+                Some(false),
+                "planning_in_flight must already be cleared by the time the plan is published \
+                 (badge must not linger through the publish window)",
+            );
+            // End state: plan published, latch cleared, and the emitted flag
+            // sequence is exactly the transient badge on then off — no duplicate
+            // `planning=None` from the earlier clear plus the final catch-all.
+            assert!(
+                actor
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
+                    .unwrap()
+                    .plan_file
+                    .is_some()
+            );
+            let flags = drain_goal_planning_flags(&mut persistence_rx);
+            assert_eq!(
+                flags,
+                vec![Some(true), None],
+                "expected badge on then a single clear; got {flags:?}",
             );
         })
         .await;
@@ -838,9 +1096,6 @@ async fn lifecycle_fail_pause_resume_retry_success() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            // Two-phase coordinator: first spawn fails, second
-            // spawn writes the plan and returns Done. Pinned via
-            // a call counter shared with the spawn-handler task.
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
             let spawn_count = StdArc::new(AtomicUsize::new(0));
             let count_task = StdArc::clone(&spawn_count);
@@ -850,19 +1105,11 @@ async fn lifecycle_fail_pause_resume_retry_success() {
                 while let Some(ev) = rx.recv().await {
                     if let SubagentEvent::Spawn(req) = ev {
                         let n = count_task.fetch_add(1, SeqOrd::SeqCst);
-                        let plan_path = req.prompt.find("/plan.md").map(|end_idx| {
-                            let end = end_idx + "/plan.md".len();
-                            let start = req.prompt[..end_idx]
-                                .rfind(|c: char| !c.is_ascii_graphic() || c == '`')
-                                .map(|i| i + 1)
-                                .unwrap_or(0);
-                            req.prompt[start..end].to_string()
-                        });
+                        let plan_path = plan_path_from_prompt(&req.prompt);
                         if let Some(ref p) = plan_path {
                             targets_task.lock().unwrap().push(p.clone());
                         }
                         let result = if n == 0 {
-                            // First attempt — runtime failure.
                             SubagentResult {
                                 success: false,
                                 error: Some("planner failed".into()),
@@ -872,7 +1119,6 @@ async fn lifecycle_fail_pause_resume_retry_success() {
                                 ..Default::default()
                             }
                         } else {
-                            // Second attempt — write the plan.
                             if let Some(p) = plan_path.as_deref() {
                                 let _ = std::fs::create_dir_all(
                                     std::path::Path::new(p).parent().unwrap(),
@@ -895,7 +1141,6 @@ async fn lifecycle_fail_pause_resume_retry_success() {
             let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
             create_test_goal(&actor);
 
-            // First attempt — fail-closed pause.
             actor.maybe_run_goal_planner("do X").await;
             {
                 let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
@@ -908,8 +1153,6 @@ async fn lifecycle_fail_pause_resume_retry_success() {
             }
             assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
 
-            // Drive the resume + retry through the real `resume_goal`
-            // path (intercepted in handle_prompt for inference flow-through).
             let _ = actor.resume_goal().await;
 
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
@@ -927,10 +1170,15 @@ async fn lifecycle_fail_pause_resume_retry_success() {
             assert_eq!(snap.plan_file.as_deref(), Some(plan_path.as_path()));
             let targets = plan_targets.lock().unwrap();
             assert_eq!(targets.len(), 2);
-            assert_eq!(
+            assert_ne!(
                 targets[0], targets[1],
-                "both spawns target the same plan path"
+                "each attempt must use an isolated plan path"
             );
+            assert!(targets.iter().all(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("plan-"))
+            }));
         })
         .await;
 }

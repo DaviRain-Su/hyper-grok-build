@@ -264,3 +264,47 @@ async fn rename_title_survives_resume_and_stays_absent_without_rename() {
     );
     quit_gracefully(plain_resumed);
 }
+
+/// `/rename --auto` clears the prompt-border title. Followers / picker
+/// converge later when a regenerated auto title is adopted; this test
+/// pins the initiating pager's optimistic clear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
+async fn rename_auto_clears_prompt_border_title() {
+    let content = ContentController::start().await.expect("start content");
+    content.set_response(format!("{MOCK_RESPONSE_SENTINEL} unpin title turn."));
+
+    let project = tempfile::tempdir().expect("project dir");
+    std::fs::create_dir_all(project.path().join(".git")).expect("create .git");
+
+    let mut harness = spawn_settled_session(&content, project.path());
+    submit_rename(&mut harness, RENAME_TITLE);
+    wait_for_title_row(&mut harness, RENAME_TITLE, Duration::from_secs(10));
+
+    inject_keys_paced(&mut harness, b"/rename --auto");
+    harness.inject_keys(b"\r").expect("submit /rename --auto");
+    harness
+        .wait_for_text("Session title reset to auto", Duration::from_secs(15))
+        .expect("unpin durable-write ack");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        harness.update(Duration::from_millis(200));
+        let screen = harness.screen_contents();
+        if let Some(border) = prompt_top_border_row(&screen)
+            && is_plain_border_row(&border)
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("prompt top border must be plain after --auto\nscreen:\n{screen}");
+        }
+    }
+
+    assert!(
+        !harness.contains_text("panicked"),
+        "pager panicked\nscreen:\n{}",
+        harness.screen_contents()
+    );
+    quit_gracefully(harness);
+}

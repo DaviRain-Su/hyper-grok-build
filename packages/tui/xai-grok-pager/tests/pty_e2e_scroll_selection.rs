@@ -9,6 +9,8 @@
 mod common;
 #[path = "pty_e2e/scroll.rs"]
 mod scroll;
+#[path = "pty_e2e/scroll_anchor_holds_parked_marker_during_live_stream.rs"]
+mod scroll_anchor_holds_parked_marker_during_live_stream;
 
 #[path = "pty_e2e/bash_full_output_double_click_fold_pty.rs"]
 mod bash_full_output_double_click_fold_pty;

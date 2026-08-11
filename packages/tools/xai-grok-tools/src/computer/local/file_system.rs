@@ -164,6 +164,15 @@ impl AsyncFileSystem for LocalFs {
         Ok(())
     }
 
+    #[tracing::instrument(name = "fs.file_exists", skip_all)]
+    async fn file_exists(&self, path: &Path) -> Result<bool, ComputerError> {
+        match fs::metadata(path).await {
+            Ok(metadata) => Ok(metadata.is_file()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     #[tracing::instrument(name = "fs.delete_file", skip_all)]
     async fn delete_file(&self, path: &Path) -> Result<(), ComputerError> {
         if let Err(e) = fs::remove_file(path).await {

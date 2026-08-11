@@ -452,7 +452,7 @@ impl InferenceOverrides {
         })
     }
 
-    fn auth_rejection(&self, headers: &HeaderMap) -> Option<Response> {
+    pub(crate) fn auth_rejection(&self, headers: &HeaderMap) -> Option<Response> {
         let expected = self.required_token.as_deref()?;
         let valid = headers
             .get("authorization")

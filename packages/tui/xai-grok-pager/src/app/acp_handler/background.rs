@@ -545,6 +545,7 @@ pub(super) fn handle_git_head_changed(notif: &acp::ExtNotification, app: &mut Ap
             &agent.session.cwd,
             params.branch.as_deref(),
             params.main_repo.clone(),
+            params.is_worktree,
         );
         agent.current_branch = params.branch;
         agent.is_worktree = params.is_worktree;
@@ -564,6 +565,7 @@ pub(super) fn handle_git_head_changed(notif: &acp::ExtNotification, app: &mut Ap
                 &child_view.session.cwd,
                 params.branch.as_deref(),
                 params.main_repo.clone(),
+                params.is_worktree,
             );
             child_view.current_branch = params.branch;
             child_view.is_worktree = params.is_worktree;

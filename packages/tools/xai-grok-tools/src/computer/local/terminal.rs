@@ -708,7 +708,7 @@ impl LocalTerminalActor {
             .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
 
         unsafe {
-            cmd.pre_exec(crate::util::detach_from_tty);
+            cmd.pre_exec(xai_tty_utils::detach_pre_exec_hook());
         }
 
         #[cfg(target_os = "linux")]
@@ -829,7 +829,7 @@ impl LocalTerminalActor {
             .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
 
         unsafe {
-            cmd.pre_exec(crate::util::detach_from_tty);
+            cmd.pre_exec(xai_tty_utils::detach_pre_exec_hook());
         }
 
         #[cfg(target_os = "linux")]

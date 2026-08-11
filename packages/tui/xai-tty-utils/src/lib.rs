@@ -91,6 +91,61 @@ pub fn detach_from_tty() -> io::Result<()> {
     Ok(())
 }
 
+/// Reset `oom_score_adj` to 0. The score is inherited across `fork`, so a
+/// protected parent would otherwise shield everything it spawns, leaving a
+/// runaway command unkillable.
+///
+/// Best-effort: failing the spawn is worse than keeping the inherited score.
+///
+/// # Safety
+///
+/// Safe between `fork` and `exec`: raw `open`/`write`/`close` only, which are
+/// async-signal-safe and allocation-free.
+#[cfg(target_os = "linux")]
+pub fn reset_oom_score_adj() -> io::Result<()> {
+    const PATH: &[u8] = b"/proc/self/oom_score_adj\0";
+    // SAFETY: `PATH` is a NUL-terminated `'static` literal and `value` is passed
+    // with its own length; both pointers stay valid for the calls.
+    unsafe {
+        let fd = libc::open(PATH.as_ptr().cast(), libc::O_WRONLY | libc::O_CLOEXEC);
+        if fd < 0 {
+            return Ok(());
+        }
+        let value = b"0\n";
+        libc::write(fd, value.as_ptr().cast(), value.len());
+        libc::close(fd);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn reset_oom_score_adj() -> io::Result<()> {
+    Ok(())
+}
+
+/// Set by the launcher of the cyber tool server, which itself runs under a
+/// protective (negative) `oom_score_adj`, so the commands it spawns stay
+/// ordinary OOM candidates instead of inheriting that protection.
+#[cfg(unix)]
+pub const RESET_CHILD_OOM_ENV: &str = "GROK_TOOLS_RESET_CHILD_OOM";
+
+#[cfg(unix)]
+pub fn detach_from_tty_reset_oom() -> io::Result<()> {
+    reset_oom_score_adj()?;
+    detach_from_tty()
+}
+
+/// Must be called pre-fork, not from inside the hook: reading the environment
+/// is not async-signal-safe.
+#[cfg(unix)]
+pub fn detach_pre_exec_hook() -> fn() -> io::Result<()> {
+    if std::env::var_os(RESET_CHILD_OOM_ENV).is_some() {
+        detach_from_tty_reset_oom
+    } else {
+        detach_from_tty
+    }
+}
+
 // ---------------------------------------------------------------------------
 // tokio::process::Command wrapper
 // ---------------------------------------------------------------------------
@@ -103,10 +158,10 @@ pub fn detach_from_tty() -> io::Result<()> {
 pub fn detach_command(cmd: &mut tokio::process::Command) {
     #[cfg(unix)]
     {
-        // SAFETY: detach_from_tty only calls setsid/setpgid, both POSIX
-        // async-signal-safe. Satisfies the pre_exec contract.
+        // SAFETY: every hook `detach_pre_exec_hook` can return is async-signal-safe,
+        // and the env read that selects one happens here, before fork.
         unsafe {
-            cmd.pre_exec(detach_from_tty);
+            cmd.pre_exec(detach_pre_exec_hook());
         }
     }
     #[cfg(windows)]
@@ -132,10 +187,10 @@ pub fn detach_std_command(cmd: &mut std::process::Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: detach_from_tty only calls setsid/setpgid, both POSIX
-        // async-signal-safe. Satisfies the pre_exec contract.
+        // SAFETY: every hook `detach_pre_exec_hook` can return is async-signal-safe,
+        // and the env read that selects one happens here, before fork.
         unsafe {
-            cmd.pre_exec(detach_from_tty);
+            cmd.pre_exec(detach_pre_exec_hook());
         }
     }
     #[cfg(windows)]
@@ -881,6 +936,66 @@ mod tests {
     fn detach_command_does_not_panic() {
         let mut cmd = tokio::process::Command::new("echo");
         detach_command(&mut cmd);
+    }
+
+    /// `None` when lowering our own score below 0 is not permitted (it needs
+    /// `CAP_SYS_RESOURCE`).
+    #[cfg(target_os = "linux")]
+    fn child_oom_score_under(hook: fn() -> io::Result<()>) -> Option<String> {
+        let own = std::fs::read_to_string("/proc/self/oom_score_adj").expect("read own score");
+        let restore = own.trim().to_owned();
+        if std::fs::write("/proc/self/oom_score_adj", b"-500\n").is_err() {
+            return None;
+        }
+        let mut cmd = std::process::Command::new("cat");
+        cmd.arg("/proc/self/oom_score_adj")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped());
+        // SAFETY: both hooks call only async-signal-safe primitives.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(hook);
+        }
+        let out = cmd.output().expect("spawn child");
+        let _ = std::fs::write("/proc/self/oom_score_adj", format!("{restore}\n"));
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detach_from_tty_reset_oom_resets_the_child() {
+        let Some(score) = child_oom_score_under(detach_from_tty_reset_oom) else {
+            return;
+        };
+        assert_eq!(
+            score, "0",
+            "the reset variant must zero the child's oom_score_adj"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn plain_detach_from_tty_leaves_child_oom_score_inherited() {
+        let Some(score) = child_oom_score_under(detach_from_tty) else {
+            return;
+        };
+        assert_eq!(
+            score, "-500",
+            "plain detach_from_tty must not touch the child's inherited oom_score_adj (prod path)"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detach_pre_exec_hook_defaults_to_no_reset() {
+        let Some(score) = child_oom_score_under(detach_pre_exec_hook()) else {
+            return;
+        };
+        assert_eq!(
+            score, "-500",
+            "without the opt-in env the hook must not reset children"
+        );
     }
 
     #[test]

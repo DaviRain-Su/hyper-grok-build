@@ -203,6 +203,38 @@ impl ChannelBackend {
             .is_ok()
     }
 
+    /// Delete-path teardown: cancel `parent_session_id`'s children and wait, up
+    /// to `budget`, for the coordinator to drain them. Owns the event shape and
+    /// the wait policy so the host does not rebuild them. Best-effort: on a
+    /// closed channel or an elapsed budget it logs and returns (the coordinator
+    /// keeps admission closed until its own backstop deadline).
+    pub async fn teardown_session_and_drain(
+        &self,
+        parent_session_id: &str,
+        budget: std::time::Duration,
+    ) {
+        let (respond_to, response_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(SubagentEvent::TeardownSession {
+                parent_session_id: parent_session_id.to_owned(),
+                respond_to: Some(respond_to),
+            })
+            .is_err()
+        {
+            return;
+        }
+        // Err = budget elapsed with children still finishing; Ok = drained or
+        // the responder was dropped.
+        if tokio::time::timeout(budget, response_rx).await.is_err() {
+            tracing::warn!(
+                parent_session_id,
+                budget_ms = budget.as_millis() as u64,
+                "subagents still running after session-delete drain budget"
+            );
+        }
+    }
+
     pub async fn inspect(&self, id: &str) -> Option<SubagentInspection> {
         let (respond_to, response_rx) = oneshot::channel();
         self.tx

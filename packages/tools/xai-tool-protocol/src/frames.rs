@@ -961,6 +961,10 @@ pub enum IdleWithholdReason {
     PreviewRouted,
     /// Only the preview pane's own `/__grok-preview/status` liveness poll.
     PreviewStatusOnly,
+    /// A recent client-driven mutation RPC (file write, git commit, …) — a
+    /// human working on the workspace through its RPC surface rather than
+    /// through agent tool calls or the preview.
+    ClientRpc,
     /// A reason this build does not recognise — a newer sender. Never
     /// constructed locally; only produced by deserialization.
     #[serde(other)]
@@ -1436,6 +1440,38 @@ mod tests {
         let back: super::ToolServerStatusPayload =
             serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, payload);
+    }
+
+    /// Every constructible reason keeps its snake_case wire string stable —
+    /// these strings feed metric labels and cross-version peers directly.
+    #[test]
+    fn withhold_reason_wire_strings_are_stable() {
+        // Exhaustive over the locally-constructible variants: a new variant
+        // fails to compile here before it can reach the wire unpinned.
+        for reason in [
+            super::IdleWithholdReason::Durability,
+            super::IdleWithholdReason::PreviewAttached,
+            super::IdleWithholdReason::PreviewRouted,
+            super::IdleWithholdReason::PreviewStatusOnly,
+            super::IdleWithholdReason::ClientRpc,
+        ] {
+            let expected = match reason {
+                super::IdleWithholdReason::Durability => "durability",
+                super::IdleWithholdReason::PreviewAttached => "preview_attached",
+                super::IdleWithholdReason::PreviewRouted => "preview_routed",
+                super::IdleWithholdReason::PreviewStatusOnly => "preview_status_only",
+                super::IdleWithholdReason::ClientRpc => "client_rpc",
+                super::IdleWithholdReason::Unknown => unreachable!("never constructed locally"),
+            };
+            assert_eq!(
+                serde_json::to_value(reason).expect("serialize"),
+                serde_json::Value::String(expected.to_owned())
+            );
+            let back: super::IdleWithholdReason =
+                serde_json::from_value(serde_json::Value::String(expected.to_owned()))
+                    .expect("round-trip");
+            assert_eq!(back, reason);
+        }
     }
 
     /// An unrecognised reason from a newer sender must degrade to `Unknown`,

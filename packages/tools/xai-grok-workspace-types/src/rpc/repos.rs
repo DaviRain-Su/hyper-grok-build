@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::WorkspaceRpc;
+use super::{RpcActivityClass, WorkspaceRpc};
 
 /// Relative path of the provisioner manifest from the **sandbox**
 /// `workspace_directory` (pre-grove-rewrite init root, usually `/workspace`).
@@ -25,6 +25,7 @@ pub struct ReposListReq {}
 
 impl WorkspaceRpc for ReposListReq {
     const METHOD: &'static str = "workspace.repos_list";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = ReposListResponse;
 }
 

@@ -252,7 +252,8 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub client_terminal: bool,
     pub client_fs_read: bool,
     pub client_fs_write: bool,
-    pub preloaded_envrc: Option<std::collections::HashMap<String, String>>,
+    /// In-flight `.envrc` load; `None` → `spawn_and_register_session` spawns its own.
+    pub envrc: Option<xai_grok_workspace::envrc::EnvrcLoad>,
     pub persisted_signals: Option<crate::session::signals::SessionSignals>,
     pub persisted_plan_mode: Option<crate::session::plan_mode::PlanModeSnapshot>,
     pub persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
@@ -263,7 +264,6 @@ pub(crate) struct SessionSpawnOptions<'a> {
         crate::session::announcement_state::AnnouncementState,
     >,
     pub session_meta: Option<&'a acp::Meta>,
-    pub managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub model_agent_type: Option<&'a str>,
     pub session_model_id: acp::ModelId,
     pub session_yolo_mode: bool,
@@ -432,14 +432,13 @@ pub(crate) fn chat_session_spawn_options<'a>(
         client_terminal: false,
         client_fs_read: false,
         client_fs_write: false,
-        preloaded_envrc: None,
+        envrc: None,
         persisted_signals: None,
         persisted_plan_mode: None,
         persisted_goal_mode: None,
         persisted_workflow_runs: Vec::new(),
         persisted_announcement_state: None,
         session_meta,
-        managed_mcp_expires_at: None,
         model_agent_type,
         session_model_id,
         session_yolo_mode,
@@ -1432,160 +1431,6 @@ pub(crate) struct OrphanedTask {
     cwd: String,
 }
 impl MvpAgent {
-    /// Replay updates from disk and drain completions.
-    /// Returns `(initial_total_tokens, end_offset)`.
-    pub(super) async fn replay_session_updates(
-        &self,
-        session_id: &acp::SessionId,
-        cwd: &AbsPathBuf,
-        updates_file_path: &Option<PathBuf>,
-        persist_data: Option<&serde_json::Value>,
-        target_client_id: Option<&serde_json::Value>,
-        cursor: Option<&str>,
-    ) -> Result<(u64, u64, Vec<(String, String)>), acp::Error> {
-        let mut replay_timer = crate::instrumentation_timer!("session.load_session_replay");
-        replay_timer.with_field("session_id", session_id.0.as_ref());
-        replay_timer.with_field("cwd", cwd.as_str());
-        let Some(updates_path) = updates_file_path.clone() else {
-            tracing::warn!(session_id = %session_id.0, "replay: no updates file path");
-            return Ok((0, 0, Vec::new()));
-        };
-        let file_size = std::fs::metadata(&updates_path).map(|m| m.len()).unwrap_or(0);
-        let raw_contents = match std::fs::read_to_string(&updates_path) {
-            Ok(s) if !s.is_empty() => s,
-            _ => return Ok((0, 0, Vec::new())),
-        };
-        let end_offset = raw_contents.len() as u64;
-        let mut prepared = {
-            let _timer = crate::instrumentation_timer!("session.replay.read_and_filter");
-            crate::session::storage::prepare_replay_lines(&raw_contents, cursor)
-        };
-        let unfinished_subagents = std::mem::take(&mut prepared.unfinished_subagents);
-        if cursor.is_some() {
-            let sending = prepared.lines.len();
-            if prepared.mark_replay {
-                tracing::warn!(
-                    session_id = %session_id.0,
-                    "replay: cursor not found, falling back to full replay"
-                );
-            } else {
-                tracing::info!(
-                    session_id = %session_id.0,
-                    skipped = prepared.total_live - sending,
-                    remaining = sending,
-                    "replay: cursor found, skipping events"
-                );
-            }
-        }
-        let last_tokens = prepared.last_tokens;
-        let mark_replay = prepared.mark_replay;
-        if let Some(max_seq) = prepared.max_event_seq {
-            crate::util::event_id::ensure_event_counter_at_least(max_seq + 1);
-        }
-        let lines_to_send = prepared.lines;
-        let updates_count = lines_to_send.len() as u64;
-        let mut completions = Vec::with_capacity(lines_to_send.len());
-        {
-            let _timer = crate::instrumentation_timer!("session.replay.forward_updates");
-            let mut pending_tool_calls = std::collections::HashMap::new();
-            for line in &lines_to_send {
-                self.forward_raw_replay_line(
-                    line,
-                    persist_data,
-                    target_client_id,
-                    &mut completions,
-                    mark_replay,
-                    &mut pending_tool_calls,
-                );
-            }
-        }
-        if updates_count > 0 && completions.is_empty() {
-            tracing::warn!(
-                updates_count,
-                "Replay sent updates but collected 0 completions — \
-                 forward_raw_replay_line must use gateway.forward_with_completion(). \
-                 See: session/load notification ordering bug."
-            );
-        }
-        {
-            let _timer = crate::instrumentation_timer!("session.replay.drain_completions");
-            for rx in completions {
-                let _ = rx.await;
-            }
-        }
-        tracing::info!(
-            session_id = %session_id.0,
-            updates_count,
-            end_offset,
-            file_size,
-            "replay: completed"
-        );
-        replay_timer.with_field("updates_count", updates_count);
-        Ok((last_tokens, end_offset, unfinished_subagents))
-    }
-    /// Enqueue replay notifications for updates appended after `from_offset`.
-    /// Returns completion receivers; callers open the gate then drain.
-    /// Intentionally sync (not async) so no prompt-task progress before gate flip.
-    ///
-    /// When `mark_replay` is false (cursor-based reconnect), delta events are
-    /// forwarded without `_meta.isReplay` since they are truly new events the
-    /// client has not seen.
-    pub(super) fn replay_session_updates_from_offset_enqueue(
-        &self,
-        session_id: &acp::SessionId,
-        updates_file_path: &Option<PathBuf>,
-        from_offset: u64,
-        persist_data: Option<&serde_json::Value>,
-        target_client_id: Option<&serde_json::Value>,
-        mark_replay: bool,
-    ) -> Vec<tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<()>>> {
-        use std::io::{Read, Seek, SeekFrom};
-        let Some(updates_path) = updates_file_path.clone() else {
-            return Vec::new();
-        };
-        let mut file = match std::fs::File::open(&updates_path) {
-            Ok(f) => f,
-            Err(_) => return Vec::new(),
-        };
-        if file.seek(SeekFrom::Start(from_offset)).is_err() {
-            return Vec::new();
-        }
-        let mut contents = String::new();
-        if file.read_to_string(&mut contents).is_err() || contents.is_empty() {
-            return Vec::new();
-        }
-        let live_lines = crate::session::storage::filter_delta_replay_lines(&contents);
-        let delta_count = live_lines.len();
-        let mut completions = Vec::with_capacity(live_lines.len());
-        let mut pending_tool_calls = std::collections::HashMap::new();
-        for line in &live_lines {
-            self.forward_raw_replay_line(
-                line,
-                persist_data,
-                target_client_id,
-                &mut completions,
-                mark_replay,
-                &mut pending_tool_calls,
-            );
-        }
-        if delta_count > 0 && completions.is_empty() {
-            tracing::warn!(
-                delta_count,
-                "Delta replay sent updates but collected 0 completions — \
-                 forward_raw_replay_line must use gateway.forward_with_completion(). \
-                 See: session/load notification ordering bug."
-            );
-        }
-        if delta_count > 0 {
-            tracing::info!(
-                session_id = %session_id.0,
-                delta_count,
-                from_offset,
-                "Delta replay enqueued updates (drain pending)"
-            );
-        }
-        completions
-    }
     /// Scan persisted updates for `task_backgrounded` entries that have no
     /// matching `task_completed`. Applies rewind dead-branch filtering so
     /// tasks from rewound branches are not included.

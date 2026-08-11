@@ -15,6 +15,9 @@ pub const STARTUP_PHASE_MSG: &str = "startup phase";
 pub const CONNECT_FINISHED_MSG: &str = "connect finished";
 pub const STARTUP_COMPLETE_MSG: &str = "startup complete";
 pub const STARTUP_TIMING_MSG: &str = "startup timing";
+pub const STARTUP_SLOW_PHASE_MSG: &str = "startup phase running long";
+
+const SLOW_PHASE_WARN_AFTER: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -181,6 +184,11 @@ impl StartupTimer {
             .unwrap_or("unknown")
     }
 
+    /// The open phase and how long it has been open.
+    fn open_phase_age(&self) -> Option<(StartupPhase, Duration)> {
+        self.lock().current.map(|(p, t0)| (p, t0.elapsed()))
+    }
+
     /// Completed phases read `phase=dur`; the open one reads `phase>=dur`.
     pub fn summary(&self) -> String {
         let now = Instant::now();
@@ -291,8 +299,7 @@ fn current() -> Option<Arc<StartupTimer>> {
         .map(Arc::clone)
 }
 
-/// Install a new attempt, unless the latch is already set: once
-/// [`report_total`] or [`clear`] ran, this process's startup is over and the
+/// Installs a new attempt, unless startup already ended; after that the
 /// returned timer records locally only.
 pub fn begin(owner: Owner) -> Arc<StartupTimer> {
     let timer = Arc::new(StartupTimer::new());
@@ -300,11 +307,80 @@ pub fn begin(owner: Owner) -> Arc<StartupTimer> {
     let mut current = CURRENT.lock().unwrap_or_else(|e| e.into_inner());
     if !DONE.load(Ordering::Relaxed) {
         *current = Some(Arc::clone(&timer));
+        spawn_slow_phase_warnings();
     }
     timer
 }
 
-pub fn agent_owned() -> Option<Arc<StartupTimer>> {
+/// Phases already warned about, per timer.
+#[derive(Default)]
+struct WarnedPhases {
+    timer: usize,
+    phases: Vec<StartupPhase>,
+}
+
+/// A phase left open past the threshold; agent-owned timers idle with a
+/// phase open until their first client, so they are skipped.
+fn slow_phase_to_warn(
+    timer: &Arc<StartupTimer>,
+    threshold: Duration,
+    warned: &mut WarnedPhases,
+) -> Option<(StartupPhase, Duration)> {
+    if timer.owner() == Owner::Agent {
+        return None;
+    }
+    let timer_id = Arc::as_ptr(timer) as usize;
+    if warned.timer != timer_id {
+        *warned = WarnedPhases {
+            timer: timer_id,
+            phases: Vec::new(),
+        };
+    }
+    let (phase, age) = timer.open_phase_age()?;
+    if age < threshold || warned.phases.contains(&phase) {
+        return None;
+    }
+    warned.phases.push(phase);
+    Some((phase, age))
+}
+
+/// Warns once per phase that runs long. A plain thread, because startup
+/// spans runtime construction; exits when startup ends.
+fn spawn_slow_phase_warnings() {
+    static SPAWNED: std::sync::Once = std::sync::Once::new();
+    SPAWNED.call_once(|| {
+        std::thread::Builder::new()
+            .name("startup-slow-phase".into())
+            .spawn(|| {
+                let mut warned = WarnedPhases::default();
+                while !DONE.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(500));
+                    let Some(timer) = current() else { continue };
+                    if let Some((phase, age)) =
+                        slow_phase_to_warn(&timer, SLOW_PHASE_WARN_AFTER, &mut warned)
+                    {
+                        let open_ms = age.as_millis() as u64;
+                        tracing::warn!(
+                            phase = phase.label(),
+                            open_ms,
+                            "startup phase running long"
+                        );
+                        crate::unified_log::warn(
+                            STARTUP_SLOW_PHASE_MSG,
+                            None,
+                            Some(serde_json::json!({
+                                "phase": phase.label(),
+                                "open_ms": open_ms,
+                            })),
+                        );
+                    }
+                }
+            })
+            .ok();
+    });
+}
+
+pub(crate) fn agent_owned() -> Option<Arc<StartupTimer>> {
     current().filter(|p| p.owner() == Owner::Agent)
 }
 
@@ -312,8 +388,22 @@ pub(crate) fn is_active() -> bool {
     !DONE.load(Ordering::Relaxed) && current().is_some()
 }
 
-pub fn clear() {
+fn clear() {
     DONE.store(true, Ordering::Relaxed);
+    *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Stops recording for a standalone agent at its first client, so idle
+/// waiting is not counted; client-owned runs are unaffected.
+pub fn mark_agent_serving() {
+    if agent_owned().is_some() {
+        clear();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_for_tests() {
+    DONE.store(false, Ordering::Relaxed);
     *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
@@ -355,11 +445,61 @@ pub fn set_auth_mode(mode: AuthMode) {
     }
 }
 
-/// Reports the startup total and latches done, at most once per process.
-/// `Ok` means the first usable session; failure outcomes are for terminal
-/// startup failures only. A transient failure (a session create the user can
-/// retry) reports nothing, so the eventual success still records.
-pub fn report_total(outcome: StartupOutcome) {
+/// The obligation to end startup exactly once; a dropped token ends startup
+/// itself and logs a warning, so forgotten paths are visible.
+#[must_use = "startup must be finished or abandoned"]
+pub struct PendingStartup {
+    ended: bool,
+}
+
+impl PendingStartup {
+    /// One per interactive or headless process; utility commands call
+    /// [`mark_utility_process`] instead.
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        PendingStartup { ended: false }
+    }
+
+    /// Records the startup total with `outcome` and ends recording.
+    pub fn finish(mut self, outcome: StartupOutcome) {
+        report_total(outcome);
+        self.ended = true;
+    }
+
+    /// Ends recording without a total, for a run the user cancelled or one
+    /// that never was a startup.
+    pub fn abandon(mut self) {
+        clear();
+        self.ended = true;
+    }
+
+    /// Finishes a token still held in an `Option`; does nothing once taken.
+    pub fn finish_held(token: &mut Option<Self>, outcome: StartupOutcome) {
+        if let Some(pending) = token.take() {
+            pending.finish(outcome);
+        }
+    }
+}
+
+impl Drop for PendingStartup {
+    fn drop(&mut self) {
+        if self.ended {
+            return;
+        }
+        tracing::warn!("startup was never finished; ending recording");
+        crate::unified_log::warn("startup never finished", None, None);
+        clear();
+    }
+}
+
+/// Excludes a utility command from startup recording entirely.
+pub fn mark_utility_process() {
+    clear();
+}
+
+/// Records the startup total, at most once per process. A failure the user
+/// can retry records nothing, so the eventual success still counts.
+pub(crate) fn report_total(outcome: StartupOutcome) {
     if DONE.swap(true, Ordering::Relaxed) {
         return;
     }
@@ -392,6 +532,47 @@ pub fn report_total(outcome: StartupOutcome) {
     });
 }
 
+/// A deadline for a readiness-path network step. Naming the phase and
+/// bounding the wait are one call, so neither can be forgotten.
+pub struct ReadinessBudget {
+    limit: Duration,
+}
+
+impl ReadinessBudget {
+    pub const fn new(limit: Duration) -> Self {
+        Self { limit }
+    }
+
+    /// Run `fut` under the budget, attributed to `phase` for exactly the
+    /// run's duration. Returns `None` on timeout, after logging, instead of
+    /// blocking readiness.
+    pub async fn run<T>(
+        &self,
+        phase: StartupPhase,
+        fut: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        let _scope = phase_scope(phase);
+        match tokio::time::timeout(self.limit, fut).await {
+            Ok(value) => Some(value),
+            Err(_) => {
+                tracing::warn!(
+                    phase = phase.label(),
+                    limit_secs = self.limit.as_secs(),
+                    "readiness step hit its budget"
+                );
+                crate::unified_log::warn(
+                    "readiness step hit its budget",
+                    None,
+                    Some(
+                        serde_json::json!({ "phase": phase.label(), "limit_secs": self.limit.as_secs() }),
+                    ),
+                );
+                None
+            }
+        }
+    }
+}
+
 fn format_duration(d: Duration) -> String {
     let ms = d.as_millis();
     if ms < 1000 {
@@ -404,6 +585,58 @@ fn format_duration(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_phase_warning_fires_once_per_open_phase() {
+        // `StartupTimer::new` defaults to the exempt `Owner::Agent`.
+        let client_timer = || {
+            let timer = Arc::new(StartupTimer::new());
+            timer.lock().owner = Owner::Client;
+            timer
+        };
+        let timer = client_timer();
+        let mut warned = WarnedPhases::default();
+
+        assert!(
+            slow_phase_to_warn(&timer, Duration::ZERO, &mut warned).is_none(),
+            "no open phase, nothing to warn about",
+        );
+
+        timer.enter(StartupPhase::Bootstrap);
+        assert!(
+            slow_phase_to_warn(&timer, Duration::from_secs(3600), &mut warned).is_none(),
+            "a phase within budget stays quiet",
+        );
+        assert!(matches!(
+            slow_phase_to_warn(&timer, Duration::ZERO, &mut warned),
+            Some((StartupPhase::Bootstrap, _))
+        ));
+        assert!(
+            slow_phase_to_warn(&timer, Duration::ZERO, &mut warned).is_none(),
+            "one warning per phase",
+        );
+
+        timer.enter(StartupPhase::SessionCreate);
+        assert!(matches!(
+            slow_phase_to_warn(&timer, Duration::ZERO, &mut warned),
+            Some((StartupPhase::SessionCreate, _))
+        ));
+
+        let replacement = client_timer();
+        replacement.enter(StartupPhase::Bootstrap);
+        assert!(
+            slow_phase_to_warn(&replacement, Duration::ZERO, &mut warned).is_some(),
+            "a replacement timer warns afresh for the same phase",
+        );
+
+        let agent = Arc::new(StartupTimer::new());
+        agent.lock().owner = Owner::Agent;
+        agent.enter(StartupPhase::Bootstrap);
+        assert!(
+            slow_phase_to_warn(&agent, Duration::ZERO, &mut warned).is_none(),
+            "agent-owned timers idle with a phase open by design",
+        );
+    }
 
     #[test]
     fn summary_tracks_completed_and_open_phases() {
@@ -424,10 +657,9 @@ mod tests {
         );
     }
 
-    /// One test for the whole lifecycle: the statics are process-wide, so
-    /// interleaved tests would race each other.
+    // Process-wide statics: one test, or interleaved tests race.
     #[test]
-    fn global_lifecycle_records_then_latches_done() {
+    fn global_lifecycle_records_then_ends() {
         crate::unified_log::redirect_to_temp_for_tests();
 
         let p = begin(Owner::Client);
@@ -440,8 +672,6 @@ mod tests {
             "client-owned: agent must not report"
         );
 
-        // A fallback attempt before any latch replaces the install; the old
-        // handle keeps its own history.
         let p2 = begin(Owner::Client);
         enter(StartupPhase::Bootstrap);
         assert_eq!(p2.stuck_in(), "bootstrap");
@@ -461,16 +691,29 @@ mod tests {
             "done: timers must not mirror, {log}"
         );
 
-        // Latched: no re-report, no recording, and `begin` cannot re-arm.
         report_total(StartupOutcome::Ok);
         enter(StartupPhase::ModelCatalog);
         assert_eq!(p2.stuck_in(), "unknown", "ok total closes the open phase");
         assert!(p2.summary().contains("session_create="), "{}", p2.summary());
         let p3 = begin(Owner::Agent);
         enter(StartupPhase::LoadConfig);
-        assert_eq!(p3.stuck_in(), "unknown", "latched: enter records nothing");
+        assert_eq!(p3.stuck_in(), "unknown", "ended: enter records nothing");
 
         clear();
         assert!(agent_owned().is_none(), "cleared: nothing installed");
+
+        reset_for_tests();
+        mark_utility_process();
+        enter(StartupPhase::Bootstrap);
+        assert!(agent_owned().is_none(), "utility: nothing records");
+
+        reset_for_tests();
+        let p4 = begin(Owner::Client);
+        let token = PendingStartup::new();
+        enter(StartupPhase::LoadConfig);
+        assert_eq!(p4.stuck_in(), "load_config");
+        drop(token);
+        enter(StartupPhase::Bootstrap);
+        assert_eq!(p4.stuck_in(), "load_config", "dropped token ended startup");
     }
 }

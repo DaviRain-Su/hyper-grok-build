@@ -30,7 +30,6 @@ use std::sync::atomic::AtomicBool;
 use xai_computer_hub_sdk::ToolHarness;
 use xai_grok_tools::types::output::ToolRunResult;
 use xai_grok_workspace_client::{WorkspaceClient, is_transport_fatal};
-pub use xai_grok_workspace_types::rpc::WorkspaceRpc;
 pub use xai_grok_workspace_types::rpc::agents_md::DiscoverAgentsMdReq;
 pub use xai_grok_workspace_types::rpc::code_nav::{
     CodeFindDefinitionsReq, CodeFindReferencesReq, CodeGotoDefinitionReq, CodeGotoReferencesReq,
@@ -74,12 +73,17 @@ pub use xai_grok_workspace_types::rpc::worktree::{
     PrepareWorktreeFromWorktreeResponse, WorktreeDbPathReq, WorktreeDbPathResponse,
     WorktreeDbRebuildReq, WorktreeDbStatsReq, WorktreeGcReq, WorktreeListReq, WorktreeShowReq,
 };
+pub use xai_grok_workspace_types::rpc::{RpcActivityClass, WorkspaceRpc};
 /// Implements [`WorkspaceRpc`] for request types whose responses
 /// reference crate-internal types and so cannot live in the types crate.
+/// The activity class is a required argument for the same reason the trait
+/// const has no default: every method's author must decide.
 macro_rules! workspace_rpc {
-    ($ty:ty, $method:literal, $resp:ty) => {
+    ($ty:ty, $method:literal, $resp:ty, $activity:ident) => {
         impl crate::workspace_ops::WorkspaceRpc for $ty {
             const METHOD: &'static str = $method;
+            const ACTIVITY: crate::workspace_ops::RpcActivityClass =
+                crate::workspace_ops::RpcActivityClass::$activity;
             type Response = $resp;
         }
     };
@@ -140,6 +144,7 @@ pub struct GetRewindPointsReq {
 }
 impl WorkspaceRpc for GetRewindPointsReq {
     const METHOD: &'static str = "workspace.get_rewind_points";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Vec<crate::session::file_state::RewindPoint>;
 }
 fn hunk_line_info_to_wire(info: &xai_hunk_tracker::types::HunkLineInfo) -> HunkLineInfoWire {
@@ -611,7 +616,10 @@ impl WorkspaceOp for GitCheckoutCommitReq {
 workspace_rpc!(
     PrepareWorktreeFromWorktreeReq,
     "workspace.prepare_worktree_from_worktree",
-    PrepareWorktreeFromWorktreeResponse
+    PrepareWorktreeFromWorktreeResponse,
+    // Validation + path resolution only; the fork itself is the (Mutation)
+    // `worktree_create_from_worktree_sync` that follows.
+    Read
 );
 #[async_trait]
 impl WorkspaceOp for PrepareWorktreeFromWorktreeReq {
@@ -1481,6 +1489,15 @@ impl WorkspaceOps {
     }
     pub async fn workspace_info(&self) -> WorkspaceResult<Value> {
         self.rpc(&WorkspaceInfoReq {}).await
+    }
+    /// Server binary version without an RPC round-trip: own version in
+    /// local mode, the hub bind report in proxy mode (`None` before the
+    /// first bind or against servers predating the field).
+    pub fn server_version(&self) -> Option<String> {
+        match self {
+            Self::Local { .. } => Some(xai_grok_version::VERSION.to_owned()),
+            Self::Proxy { client } => client.server_binary_version(),
+        }
     }
     /// **DEPRECATED**: Use [`Self::git_status_ext`] with `format: GitStatusFormat::Prompt`
     /// instead. This method will be removed in a future release.

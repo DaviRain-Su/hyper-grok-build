@@ -1658,6 +1658,62 @@ fn no_deferred_switch_means_no_extra_effect() {
 }
 
 #[test]
+fn session_success_arms_finish_startup_obligation() {
+    xai_grok_telemetry::unified_log::redirect_to_temp_for_tests();
+    let id = AgentId(0);
+    let results = [
+        TaskResult::SessionCreated {
+            agent_id: id,
+            session_id: "new-session".into(),
+            models: None,
+            scheduler_background_loops: None,
+        },
+        TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: "resumed-session".into(),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+            scheduler_background_loops: None,
+        },
+        TaskResult::WorktreeSessionCreated {
+            agent_id: id,
+            session_id: "worktree-session".into(),
+            worktree_path: std::path::PathBuf::from("/tmp/wt"),
+            session_cwd: std::path::PathBuf::from("/tmp/wt"),
+            models: None,
+            scheduler_background_loops: None,
+        },
+        TaskResult::WorktreeForked {
+            agent_id: id,
+            session_id: "forked-session".into(),
+            worktree_path: std::path::PathBuf::from("/tmp/wt"),
+            session_cwd: std::path::PathBuf::from("/tmp/wt"),
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            resume_session_id: None,
+        },
+    ];
+
+    for result in results {
+        let mut app = test_app_with_agent();
+        app.agents.get_mut(&id).unwrap().session.session_id = None;
+        app.pending_startup = Some(xai_grok_telemetry::startup::PendingStartup::new());
+        let label = format!("{result:?}");
+
+        dispatch(Action::TaskComplete(result), &mut app);
+
+        assert!(
+            app.pending_startup.is_none(),
+            "a usable session must take the startup obligation: {label}",
+        );
+    }
+}
+
+#[test]
 fn bundle_status_ready_populates_state() {
     let mut app = test_app();
 
@@ -2134,6 +2190,133 @@ fn rename_session_failed_keeps_local_display_name_and_pushes_system_block() {
     assert!(
         text.contains("Couldn't rename session: boom"),
         "system block must surface the error; got: {text:?}"
+    );
+}
+
+#[test]
+fn reset_session_title_failed_restores_pin_and_pushes_system_block() {
+    let mut app = test_app_with_agent();
+    if let Some(a) = app.agents.get_mut(&AgentId(0)) {
+        a.display_name = Some("Manual".into());
+        a.generated_session_title = Some("Auto".into());
+    }
+    let _ = dispatch_reset_session_title(&mut app);
+    assert!(app.agents[&AgentId(0)].display_name.is_none());
+    assert_eq!(
+        app.agents[&AgentId(0)].generated_session_title.as_deref(),
+        Some("Auto")
+    );
+    let scrollback_len_before = app.agents[&AgentId(0)].scrollback.len();
+
+    let _effects = dispatch_task_result(
+        TaskResult::ResetSessionTitleFailed {
+            agent_id: AgentId(0),
+            error: "boom".into(),
+            previous_display_name: Some("Manual".into()),
+            previous_generated_title: Some("Auto".into()),
+        },
+        &mut app,
+    );
+
+    assert_eq!(
+        app.agents[&AgentId(0)].display_name.as_deref(),
+        Some("Manual"),
+        "failed unpin must restore the optimistic-cleared pin"
+    );
+    assert_eq!(
+        app.agents[&AgentId(0)].generated_session_title.as_deref(),
+        Some("Auto"),
+        "failed unpin must restore the pre-clear generated title"
+    );
+    let scrollback = &app.agents[&AgentId(0)].scrollback;
+    assert_eq!(
+        scrollback.len(),
+        scrollback_len_before + 1,
+        "system block must be appended"
+    );
+    let last = scrollback.entry(scrollback.len() - 1).expect("last entry");
+    let text = match &last.block {
+        crate::scrollback::block::RenderBlock::System(b) => b.text.clone(),
+        other => panic!("expected System block, got {other:?}"),
+    };
+    assert!(
+        text.contains("Couldn't reset session title: boom"),
+        "system block must surface the error; got: {text:?}"
+    );
+}
+
+#[test]
+fn reset_session_title_failed_does_not_restore_after_unpin_fanout() {
+    let mut app = test_app_with_agent();
+    if let Some(a) = app.agents.get_mut(&AgentId(0)) {
+        a.display_name = Some("Manual".into());
+        a.generated_session_title = Some("Auto".into());
+    }
+    let _ = dispatch_reset_session_title(&mut app);
+    if let Some(a) = app.agents.get_mut(&AgentId(0)) {
+        a.title_unpin_committed = true;
+        a.display_name = None;
+        a.generated_session_title = Some("Auto".into());
+    }
+
+    let _effects = dispatch_task_result(
+        TaskResult::ResetSessionTitleFailed {
+            agent_id: AgentId(0),
+            error: "transport dropped".into(),
+            previous_display_name: Some("Manual".into()),
+            previous_generated_title: Some("Auto".into()),
+        },
+        &mut app,
+    );
+
+    let agent = &app.agents[&AgentId(0)];
+    assert!(
+        agent.display_name.is_none(),
+        "dropped RPC after fan-out must not re-pin"
+    );
+    assert_eq!(agent.generated_session_title.as_deref(), Some("Auto"));
+    assert!(!agent.title_unpin_committed);
+    let last = agent
+        .scrollback
+        .entry(agent.scrollback.len() - 1)
+        .expect("last entry");
+    let text = match &last.block {
+        crate::scrollback::block::RenderBlock::System(b) => b.text.clone(),
+        other => panic!("expected System block, got {other:?}"),
+    };
+    assert!(
+        text.contains("Session title reset to auto"),
+        "committed unpin should confirm, not error; got: {text:?}"
+    );
+}
+
+#[test]
+fn reset_session_title_complete_pushes_system_block() {
+    let mut app = test_app_with_agent();
+    if let Some(a) = app.agents.get_mut(&AgentId(0)) {
+        a.display_name = None;
+        a.generated_session_title = None;
+    }
+    let scrollback_len_before = app.agents[&AgentId(0)].scrollback.len();
+
+    let _effects = dispatch_task_result(
+        TaskResult::ResetSessionTitleComplete {
+            agent_id: AgentId(0),
+        },
+        &mut app,
+    );
+
+    assert!(app.agents[&AgentId(0)].display_name.is_none());
+    let scrollback = &app.agents[&AgentId(0)].scrollback;
+    assert_eq!(scrollback.len(), scrollback_len_before + 1);
+    let last = scrollback.entry(scrollback.len() - 1).expect("last entry");
+    let text = match &last.block {
+        crate::scrollback::block::RenderBlock::System(b) => b.text.clone(),
+        other => panic!("expected System block, got {other:?}"),
+    };
+    assert!(
+        text.contains("Session title reset to auto"),
+        "got: {text:?}"
     );
 }
 

@@ -16847,21 +16847,16 @@ dependencies = [
 name = "xai-grok-shell-session-support"
 version = "0.1.0"
 dependencies = [
- "agent-client-protocol",
  "axum",
- "chrono",
  "reqwest 0.12.24",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tokio-util",
  "tracing",
  "xai-file-utils",
  "xai-grok-http",
- "xai-grok-shell-base",
  "xai-grok-version",
- "xai-grok-workspace",
 ]
 
 [[package]]
@@ -17236,6 +17231,7 @@ name = "xai-grok-workspace-client"
 version = "0.1.0"
 dependencies = [
  "schemars 1.0.4",
+ "semver",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

@@ -2,13 +2,10 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 
 use serde::Serialize;
 use xai_grok_tools::types::config_source::ConfigSource;
 
-use crate::auth::GrokComConfig;
-use crate::session::managed_mcp;
 use crate::session::mcp_servers;
 
 // ── Report types ────────────────────────────────────────────────
@@ -238,85 +235,6 @@ fn discover_servers(cwd: &Path) -> (Vec<ConfigSourceStatus>, Vec<DiscoveredServe
     (sources, servers)
 }
 
-// ── Managed (grok.com) server discovery ─────────────────────────
-
-const MANAGED_SOURCE_LABEL: &str = "grok.com";
-
-fn managed_skipped(reason: impl Into<String>) -> (ConfigSourceStatus, Vec<DiscoveredServer>) {
-    (
-        ConfigSourceStatus {
-            path: MANAGED_SOURCE_LABEL.to_string(),
-            status: ConfigSourceState::Skipped {
-                reason: reason.into(),
-            },
-        },
-        vec![],
-    )
-}
-
-fn managed_found(
-    count: usize,
-    servers: Vec<DiscoveredServer>,
-) -> (ConfigSourceStatus, Vec<DiscoveredServer>) {
-    (
-        ConfigSourceStatus {
-            path: MANAGED_SOURCE_LABEL.to_string(),
-            status: ConfigSourceState::Found {
-                server_count: count,
-            },
-        },
-        servers,
-    )
-}
-
-/// Discover managed `grok_com_*` servers if the user has xAI auth on disk.
-async fn try_discover_managed_servers() -> (ConfigSourceStatus, Vec<DiscoveredServer>) {
-    let grok_home = xai_grok_tools::util::grok_home::grok_home();
-    let grok_com_config = GrokComConfig::default();
-    let auth_manager = Arc::new(crate::auth::AuthManager::new(&grok_home, grok_com_config));
-
-    let Some(snapshot) = auth_manager.current_or_expired() else {
-        return managed_skipped("not logged in");
-    };
-    if !snapshot.is_managed_mcp_eligible() {
-        return managed_skipped(format!("{:?} auth (not xAI OIDC)", snapshot.auth_mode));
-    }
-
-    let token = match auth_manager.get_valid_token().await {
-        Ok(key) => key,
-        Err(_) => return managed_skipped("auth expired — run `grok login`"),
-    };
-
-    let proxy_url = crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
-
-    let configs = match managed_mcp::fetch_managed_configs(&proxy_url, &token).await {
-        Ok(configs) => configs,
-        Err(e) => return managed_skipped(format!("fetch failed: {e}")),
-    };
-    if configs.is_empty() {
-        return managed_found(0, vec![]);
-    }
-
-    let mut servers: Vec<agent_client_protocol::McpServer> = vec![];
-    managed_mcp::auto_inject_managed_servers_with_disabled(
-        &mut servers,
-        &configs,
-        &Default::default(),
-    );
-    managed_mcp::inject_managed_headers(&mut servers, &configs);
-
-    let source = ConfigSource::Managed { path: None };
-    let discovered: Vec<DiscoveredServer> = servers
-        .into_iter()
-        .map(|server| DiscoveredServer {
-            server,
-            source: source.clone(),
-        })
-        .collect();
-
-    managed_found(discovered.len(), discovered)
-}
-
 // ── Check functions ─────────────────────────────────────────────
 
 fn resolve_command(command: &str) -> Option<String> {
@@ -505,11 +423,7 @@ async fn check_server(
 // ── Entry point ─────────────────────────────────────────────────
 
 pub async fn run_doctor(cwd: &Path, name_filter: Option<&str>) -> DoctorReport {
-    let (mut sources, mut discovered) = discover_servers(cwd);
-
-    let (managed_source, managed_servers) = try_discover_managed_servers().await;
-    sources.push(managed_source);
-    discovered.extend(managed_servers);
+    let (mut sources, discovered) = discover_servers(cwd);
 
     let allowlist = &xai_grok_workspace::permission::resolution::managed_settings().mcp_allowlist;
     if allowlist.is_restricted() {

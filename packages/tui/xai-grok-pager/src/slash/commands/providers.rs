@@ -618,6 +618,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Inline,
+            current_title: None,
         };
         let items = ProvidersCommand.suggest_args(&ctx, "").expect("items");
         assert!(
@@ -639,6 +640,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Inline,
+            current_title: None,
         };
         let items = ProvidersCommand
             .suggest_args(&ctx, "clear ")

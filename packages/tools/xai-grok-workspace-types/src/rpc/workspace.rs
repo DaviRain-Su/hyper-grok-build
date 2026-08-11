@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::WorkspaceRpc;
+use super::{RpcActivityClass, WorkspaceRpc};
 
 /// `workspace.info`. `Response` stays the raw [`Value`] to preserve the
 /// `WorkspaceOps::workspace_info()` contract; [`WorkspaceInfo`] is the
@@ -14,6 +14,7 @@ pub struct WorkspaceInfoReq {}
 
 impl WorkspaceRpc for WorkspaceInfoReq {
     const METHOD: &'static str = "workspace.info";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 
@@ -24,6 +25,7 @@ pub struct LoadProjectConfigReq {}
 
 impl WorkspaceRpc for LoadProjectConfigReq {
     const METHOD: &'static str = "workspace.load_project_config";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 
@@ -34,6 +36,7 @@ pub struct LoadPermissionsReq {}
 
 impl WorkspaceRpc for LoadPermissionsReq {
     const METHOD: &'static str = "workspace.load_permissions";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 
@@ -44,6 +47,7 @@ pub struct LoadEnvrcReq {}
 
 impl WorkspaceRpc for LoadEnvrcReq {
     const METHOD: &'static str = "workspace.load_envrc";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 
@@ -56,6 +60,7 @@ pub struct ToolDefinitionsReq {
 
 impl WorkspaceRpc for ToolDefinitionsReq {
     const METHOD: &'static str = "workspace.tool_definitions";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 
@@ -68,6 +73,7 @@ pub struct ResolveFileReferencesReq {
 
 impl WorkspaceRpc for ResolveFileReferencesReq {
     const METHOD: &'static str = "workspace.resolve_file_references";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 
@@ -92,6 +98,7 @@ pub struct UpdateToolConfigReq {
 
 impl WorkspaceRpc for UpdateToolConfigReq {
     const METHOD: &'static str = "workspace.update_tool_config";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = Value;
 }
 
@@ -111,6 +118,7 @@ pub struct DropSessionReq {
 
 impl WorkspaceRpc for DropSessionReq {
     const METHOD: &'static str = "workspace.drop_session";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 
@@ -124,6 +132,7 @@ pub struct ConfigureMcpReq {
 
 impl WorkspaceRpc for ConfigureMcpReq {
     const METHOD: &'static str = "workspace.configure_mcp";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = Value;
 }
 
@@ -134,6 +143,7 @@ pub struct InstallPluginReq {}
 
 impl WorkspaceRpc for InstallPluginReq {
     const METHOD: &'static str = "workspace.install_plugin";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = Value;
 }
 
@@ -143,6 +153,7 @@ pub struct RefreshPluginsReq {}
 
 impl WorkspaceRpc for RefreshPluginsReq {
     const METHOD: &'static str = "workspace.refresh_plugins";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 
@@ -176,6 +187,7 @@ pub struct ListBackgroundTasksReq {
 
 impl WorkspaceRpc for ListBackgroundTasksReq {
     const METHOD: &'static str = "workspace.list_background_tasks";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = ListBackgroundTasksResponse;
 }
 
@@ -227,6 +239,7 @@ pub struct TasksSnapshotReq {
 
 impl WorkspaceRpc for TasksSnapshotReq {
     const METHOD: &'static str = "workspace.tasks_snapshot";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = TasksSnapshotResponse;
 }
 
@@ -254,6 +267,7 @@ pub struct ListTodosReq {
 
 impl WorkspaceRpc for ListTodosReq {
     const METHOD: &'static str = "workspace.list_todos";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = ListTodosResponse;
 }
 
@@ -268,6 +282,10 @@ pub struct WorkspaceInfo {
     /// Shell basename (e.g. `"bash"`); `"sh"` when `$SHELL` is unset.
     pub shell: String,
     pub cwd: String,
+    /// Server binary version (`xai_grok_version::VERSION`); `None` on
+    /// servers predating the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[cfg(test)]
@@ -282,9 +300,41 @@ mod tests {
             "cwd": "/workspace",
         });
         let info: WorkspaceInfo = serde_json::from_value(raw).unwrap();
-        assert_eq!(info.os, "linux");
-        assert_eq!(info.shell, "bash");
-        assert_eq!(info.cwd, "/workspace");
+        assert_eq!(
+            info,
+            WorkspaceInfo {
+                os: "linux".to_owned(),
+                shell: "bash".to_owned(),
+                cwd: "/workspace".to_owned(),
+                version: None,
+            }
+        );
+    }
+
+    #[test]
+    fn workspace_info_round_trips_version_field() {
+        let info = WorkspaceInfo {
+            os: "linux".to_owned(),
+            shell: "bash".to_owned(),
+            cwd: "/workspace".to_owned(),
+            version: Some("1.2.3".to_owned()),
+        };
+        let raw = serde_json::to_value(&info).unwrap();
+        assert_eq!(raw["version"], "1.2.3");
+        let back: WorkspaceInfo = serde_json::from_value(raw).unwrap();
+        assert_eq!(back, info);
+    }
+
+    #[test]
+    fn workspace_info_omits_absent_optional_fields() {
+        let info = WorkspaceInfo {
+            os: "linux".to_owned(),
+            shell: "bash".to_owned(),
+            cwd: "/workspace".to_owned(),
+            version: None,
+        };
+        let raw = serde_json::to_value(&info).unwrap();
+        assert!(raw.get("version").is_none());
     }
 
     #[test]

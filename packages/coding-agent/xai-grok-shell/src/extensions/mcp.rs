@@ -2,7 +2,8 @@
 //!
 //! - `x.ai/mcp/list` — list available MCP servers (agent-scoped or session-annotated)
 //! - `x.ai/mcp/call` — invoke an MCP tool directly, outside the LLM loop
-//! - `x.ai/mcp/servers_updated` — notification pushed when managed configs resolve
+//! - `x.ai/mcp/servers_updated` — local/plugin catalog after launch-dir discovery
+//!   or a folder-trust grant (not gateway connectors)
 //! - `x.ai/mcp/server_status` — per-server delta pushed by the
 //!   `StatusDispatcher` (transport-closed pollers, handshake failures,
 //!   config diffs, server-pushed list-changed notifications). See
@@ -49,7 +50,6 @@ pub mod mcp_methods {
     pub const INIT_PROGRESS: &str = "x.ai/mcp/init_progress";
 }
 use crate::agent::MvpAgent;
-use crate::session::managed_mcp::MANAGED_MCP_PREFIX;
 use crate::session::mcp_servers::{MCP_TOOL_NAME_DELIMITER, McpClient, McpServerName, McpState};
 
 // ── Wire types: mcp/list ────────────────────────────────────────────
@@ -316,13 +316,12 @@ pub struct McpReadResourceContent {
 }
 
 /// Push the full MCP catalog to the client. Called in the background after
-/// managed configs resolve so `initialize()` isn't blocked by the network fetch.
+/// launch-dir MCP discovery so `initialize()` isn't blocked by config walks.
 pub async fn notify_servers_updated(
     gateway: &xai_acp_lib::AcpAgentGatewaySender,
-    managed_configs: &[crate::session::managed_mcp::ManagedMcpConfig],
     local_servers: &[acp::McpServer],
 ) {
-    let catalog = build_mcp_catalog(managed_configs, local_servers);
+    let catalog = build_mcp_catalog(local_servers);
     let payload = McpServersUpdated {
         mcp_servers: catalog,
     };
@@ -401,46 +400,20 @@ fn mcp_server_url(server: &acp::McpServer) -> Option<&str> {
     }
 }
 
-/// Build MCP server catalog: managed + local servers, deduplicated by name.
+/// Build MCP server catalog: gateway rows + local servers, deduplicated by name.
 /// Pure function — no I/O. Used by `mcp/list`, `InitializeResponse._meta`,
 /// and `mcp/servers_updated`.
-pub fn build_mcp_catalog(
-    managed_configs: &[crate::session::managed_mcp::ManagedMcpConfig],
-    local_servers: &[acp::McpServer],
-) -> Vec<McpServerEntry> {
-    build_mcp_catalog_with_gateway_tools(managed_configs, local_servers, None, &Default::default())
+pub fn build_mcp_catalog(local_servers: &[acp::McpServer]) -> Vec<McpServerEntry> {
+    build_mcp_catalog_with_gateway_tools(local_servers, None, &Default::default())
 }
 
 pub(crate) fn build_mcp_catalog_with_gateway_tools(
-    managed_configs: &[crate::session::managed_mcp::ManagedMcpConfig],
     local_servers: &[acp::McpServer],
     gateway_catalog: Option<&crate::session::managed_mcp::GatewayToolCatalog>,
     disabled_tools: &HashMap<String, HashSet<String>>,
 ) -> Vec<McpServerEntry> {
     let mut servers: Vec<McpServerEntry> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-
-    // Managed servers (always HTTP)
-    for config in managed_configs {
-        let name = crate::session::managed_mcp::to_managed_name(&config.name);
-        if seen.insert(name.clone()) {
-            servers.push(McpServerEntry {
-                name,
-                display_name: None,
-                source: McpServerSource::Managed,
-                config: McpServerConfig::Http {
-                    url: config.endpoint.clone(),
-                    scope: config.scope.clone(),
-                    scope_id: config.scope_id.clone(),
-                    scope_name: config.scope_name.clone(),
-                },
-                source_label: None,
-                setup: None,
-                setup_values: None,
-                session: None,
-            });
-        }
-    }
 
     if let Some(catalog) = gateway_catalog {
         let reauth: HashSet<&str> = catalog
@@ -467,8 +440,10 @@ pub(crate) fn build_mcp_catalog_with_gateway_tools(
                 .get(crate::util::config::MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY)
                 .is_some_and(|set| set.contains(connector_id));
             let auth_required = reauth.contains(connector_id) || reauth.contains(connector_name);
+            let name = managed_gateway_entry_name(connector_id);
+            seen.insert(name.clone());
             servers.push(McpServerEntry {
-                name: managed_gateway_entry_name(connector_id),
+                name,
                 display_name: Some(connector_name.to_owned()),
                 source: McpServerSource::Managed,
                 config: McpServerConfig::ManagedGateway,
@@ -502,11 +477,7 @@ pub(crate) fn build_mcp_catalog_with_gateway_tools(
     for server in local_servers {
         let name = crate::session::mcp_servers::mcp_server_name(server).to_string();
         if seen.insert(name.clone()) {
-            let source = if name.starts_with(MANAGED_MCP_PREFIX) {
-                McpServerSource::Managed
-            } else {
-                McpServerSource::Local
-            };
+            let source = McpServerSource::Local;
             let config = match server {
                 acp::McpServer::Http(acp::McpServerHttp { url, .. })
                 | acp::McpServer::Sse(acp::McpServerSse { url, .. }) => McpServerConfig::Http {
@@ -559,7 +530,7 @@ fn managed_gateway_connector_id(entry_name: &str) -> Option<&str> {
 
 fn disabled_server_placeholder_entry(name: &str) -> McpServerEntry {
     let is_managed_gateway = name.starts_with(MANAGED_GATEWAY_ENTRY_PREFIX);
-    let source = if is_managed_gateway || name.starts_with(MANAGED_MCP_PREFIX) {
+    let source = if is_managed_gateway {
         McpServerSource::Managed
     } else {
         McpServerSource::Local
@@ -884,13 +855,11 @@ pub async fn call_mcp_tool(
 // ── mcp/list handler ────────────────────────────────────────────────
 
 async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
-    // Latency layout: the two costly awaits — the managed-MCP
-    // proxy fetch (~1-2s) and the session-state branch (conditional
-    // `retry_auth_required_servers` followed by `build_mcp_status`, the
-    // latter cheap since is_healthy is a state-mutex inspection) —
-    // are independent and now run concurrently via tokio::join!. OAuth
-    // retries only fire on explicit refresh (cache=false); cached opens
-    // skip them so the warm path stays fast.
+    // Latency layout: gateway catalog fetch and the session-state branch
+    // (conditional `retry_auth_required_servers` then `build_mcp_status`)
+    // run concurrently via tokio::join!. OAuth retries only fire on explicit
+    // refresh (cache=false); cached opens skip them so the warm path stays
+    // fast.
     let req = parse_params::<McpListRequest>(args)?;
 
     let cwd = req
@@ -899,19 +868,8 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .and_then(|sid| agent.get_session_cwd(&acp::SessionId::new(sid.clone())))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    // NOTE: `invalidate_cache` must remain O(μs) (in-memory `Mutex` clear)
-    // so this serial pre-step does not eat into the latency budget. If
-    // it ever grows IO (fsync, contended lock, network), fold it into the
-    // managed-fetch arm of the `tokio::join!` below instead of keeping it
-    // here — otherwise the cache=false path silently re-introduces the
-    // sequential ~500ms+ gap the concurrent layout removed.
-    if !req.cache {
-        crate::session::managed_mcp::invalidate_cache(agent.managed_mcp_cache()).await;
-        crate::session::managed_mcp::invalidate_gateway_tool_cache(agent.managed_mcp_cache()).await;
-    }
-
     // Resolve the session handle synchronously up front so the session-state
-    // future can be polled alongside the managed-MCP proxy fetch.
+    // future can be polled alongside the gateway catalog fetch.
     let session_handle = req.session_id.as_ref().and_then(|sid| {
         let acp_id = acp::SessionId::new(sid.clone());
         agent.get_session_handle(&acp_id)
@@ -934,53 +892,16 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         Some(handle.get_mcp_status().await)
     };
 
-    let gateway_tools_enabled = agent.cfg.borrow().managed_mcp_gateway_tools_enabled;
-    let (managed_configs, gateway_catalog, session_snapshot) = tokio::join!(
-        agent.get_managed_mcp_configs(),
-        async {
-            if gateway_tools_enabled {
-                agent.get_managed_mcp_gateway_tool_catalog().await
-            } else {
-                None
-            }
-        },
+    let (gateway_catalog, session_snapshot) = tokio::join!(
+        agent.fetch_gateway_catalog_for_mcp_list(cache),
         session_state_fut
     );
-
-    // Post-enrollment / explicit refresh: sync fresh state into live sessions.
-    // The two broadcasts are INDEPENDENT concerns, gated separately (and in
-    // practice mutually exclusive — legacy managed fetch runs only when gateway
-    // tools are OFF, gateway fetch only when ON):
-    if !cache {
-        // 1. Legacy managed connectors -> per-session `McpServers`. Only when
-        //    the managed fetch actually succeeded (cache `Ready`). A failed
-        //    proxy fetch returns an empty vec AND rolls the cache back to
-        //    `NotFetched`; syncing that would tear down working servers. A
-        //    genuinely-empty `Ready(vec![])` still syncs so disconnect-all works.
-        let managed_ready = matches!(
-            agent.managed_mcp_cache().lock().await.cache,
-            crate::session::managed_mcp::ManagedMcpCache::Ready(_)
-        );
-        if managed_ready {
-            agent.sync_fresh_managed_mcp_to_sessions(&managed_configs);
-        }
-        // 2. Agent-level gateway catalog -> session `search_tool` index. Only
-        //    when a fresh gateway catalog committed (`Some`); a failed refetch is
-        //    `None` and must not wipe the last-good index. This must fire even
-        //    when `managed_ready` is false: in gateway mode the legacy managed
-        //    cache stays `NotFetched`, yet the fresh gateway catalog still needs
-        //    a session-side rebuild.
-        if gateway_catalog.is_some() {
-            agent.refresh_mcp_search_index_in_sessions();
-        }
-    }
 
     let compat = agent.cfg.borrow().compat_resolved;
     let plugin_registry_snapshot = agent.plugin_registry_snapshot();
     let local_servers = crate::util::config::load_mcp_servers(&cwd, &compat);
     let disabled_tools = crate::util::config::get_all_mcp_disabled_tools(&cwd);
     let mut servers = build_mcp_catalog_with_gateway_tools(
-        &managed_configs,
         &local_servers,
         gateway_catalog.as_ref(),
         &disabled_tools,
@@ -1047,7 +968,6 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let catalog_names: HashSet<String> = servers.iter().map(|s| s.name.clone()).collect();
     let discovery = crate::session::managed_mcp::McpDiscoveryInputs {
         cwd: &cwd,
-        managed_configs: &managed_configs,
         plugin_registry: plugin_registry_snapshot.as_deref(),
         compat: &compat,
     };
@@ -1659,12 +1579,10 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     };
 
     // Presence check with personal disable ignored (no config write yet).
-    let managed_configs = agent.get_managed_mcp_configs().await;
     let plugin_reg = agent.plugin_registry_snapshot();
     let compat = agent.cfg.borrow().compat_resolved;
     let discovery = crate::session::managed_mcp::McpDiscoveryInputs {
         cwd: &cwd,
-        managed_configs: &managed_configs,
         plugin_registry: plugin_reg.as_deref(),
         compat: &compat,
     };
@@ -1683,7 +1601,7 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 
     // Clear disable only after resolve succeeds, then merge for a spawnable
-    // transport (includes managed header inject).
+    // transport.
     let was_disabled =
         crate::util::config::disabled_mcp_server_names(&cwd).contains(&req.server_name);
     let enable_paths = if was_disabled {
@@ -1727,7 +1645,6 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let found = crate::session::managed_mcp::merge_managed_mcp_servers_with_policy(
         vec![],
         &cwd,
-        &managed_configs,
         plugin_reg.as_deref(),
         &compat,
     )
@@ -1785,9 +1702,8 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     let gateway_connector_id = managed_gateway_connector_id(&req.server_name);
 
-    // Build the server config outside the session actor (may need async I/O
-    // for managed config fetch). The actual config mutation happens atomically
-    // inside the session actor via ToggleMcpServer.
+    // Persist re-enable outside the session actor (async I/O). Config mutation
+    // happens atomically inside via ToggleMcpServer.
     let server_config = if req.enabled {
         let cwd = agent
             .get_session_cwd(&acp_id)
@@ -1808,13 +1724,6 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
             return to_ext_response(Ok(McpToggleResponse { ok: true }));
         }
-        if req
-            .server_name
-            .starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-        {
-            crate::session::managed_mcp::invalidate_cache(agent.managed_mcp_cache()).await;
-        }
-        let managed_configs = agent.get_managed_mcp_configs().await;
         if let Err(e) =
             crate::util::config::save_mcp_server_enabled_in(&req.server_name, true, &cwd).await
         {
@@ -1829,7 +1738,6 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             crate::session::managed_mcp::merge_managed_mcp_servers_with_policy(
                 vec![],
                 &cwd,
-                &managed_configs,
                 agent.plugin_registry_snapshot().as_deref(),
                 &agent.cfg.borrow().compat_resolved,
             );
@@ -1838,10 +1746,7 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             .find(|s| crate::session::mcp_servers::mcp_server_name(&s.server) == req.server_name);
         match found {
             Some(s) if s.disabled_reason.is_some() => {
-                let display = req
-                    .server_name
-                    .strip_prefix(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-                    .unwrap_or(&req.server_name);
+                let display = req.server_name.as_str();
                 // Capitalize first letter for display.
                 let mut chars = display.chars();
                 let capitalized: String = match chars.next() {
@@ -2058,10 +1963,10 @@ mod tests {
     /// `build_mcp_status`) using stand-in futures, and asserts the two
     /// latency invariants `handle_list` guarantees:
     ///
-    /// 1. The two `tokio::join!` arms — `get_managed_mcp_configs` on one
+    /// 1. The two `tokio::join!` arms — gateway catalog fetch on one
     ///    side, and the session-state branch (`retry_auth_required_servers?`
     ///    + `build_mcp_status`) on the other — are polled concurrently, so
-    ///    total wall-time ≈ max(t_managed, t_session) rather than the sum.
+    ///    total wall-time ≈ max(t_catalog, t_session) rather than the sum.
     /// 2. `retry_auth_required_servers` is gated on `cache=false`. On cached
     ///    opens it is skipped entirely, removing ~500ms of OAuth retry
     ///    overhead when multiple OAuth servers are configured.
@@ -2097,7 +2002,7 @@ mod tests {
                 }
             };
 
-            // Stand-in for `agent.get_managed_mcp_configs()` (~1-2s proxy fetch).
+            // Stand-in for `agent.get_managed_mcp_gateway_tool_catalog()` (~1-2s proxy fetch).
             let managed_fut = {
                 let bump = bump.clone();
                 let drop_ = drop_.clone();
@@ -2163,9 +2068,9 @@ mod tests {
         let resp = McpListResponse {
             servers: vec![
                 McpServerEntry {
-                    name: "grok_com_linear".to_string(),
+                    name: "linear".to_string(),
                     display_name: None,
-                    source: McpServerSource::Managed,
+                    source: McpServerSource::Local,
                     config: McpServerConfig::Http {
                         url: "https://mcp.linear.app".to_string(),
                         scope: Some("team".to_string()),
@@ -2206,8 +2111,8 @@ mod tests {
             ],
         };
         let json = serde_json::to_value(&resp).unwrap();
-        // [0] managed HTTP
-        assert_eq!(json["servers"][0]["source"], "managed");
+        // [0] local HTTP
+        assert_eq!(json["servers"][0]["source"], "local");
         assert_eq!(json["servers"][0]["type"], "http");
         assert_eq!(json["servers"][0]["url"], "https://mcp.linear.app");
         assert_eq!(json["servers"][0]["scope"], "team");
@@ -2287,7 +2192,7 @@ mod tests {
             connectors_needing_reauth: vec!["slack".into()],
         };
         let servers =
-            build_mcp_catalog_with_gateway_tools(&[], &[], Some(&catalog), &Default::default());
+            build_mcp_catalog_with_gateway_tools(&[], Some(&catalog), &Default::default());
 
         assert_eq!(servers.len(), 2);
         assert_eq!(servers[0].name, "managed_gateway:linear");
@@ -2339,12 +2244,8 @@ mod tests {
                 .env(vec![]),
         );
 
-        let servers = build_mcp_catalog_with_gateway_tools(
-            &[],
-            &[local],
-            Some(&catalog),
-            &Default::default(),
-        );
+        let servers =
+            build_mcp_catalog_with_gateway_tools(&[local], Some(&catalog), &Default::default());
 
         assert_eq!(servers.len(), 2);
         assert_eq!(servers[0].name, "managed_gateway:linear");
@@ -2366,10 +2267,27 @@ mod tests {
     }
 
     #[test]
-    fn disabled_managed_http_rows_keep_non_gateway_placeholder_config() {
-        let entry = disabled_server_placeholder_entry("grok_com_slack");
-        assert_eq!(entry.source, McpServerSource::Managed);
+    fn disabled_local_rows_keep_non_gateway_placeholder_config() {
+        let entry = disabled_server_placeholder_entry("local_slack");
+        assert_eq!(entry.source, McpServerSource::Local);
         assert!(matches!(entry.config, McpServerConfig::Stdio { .. }));
+    }
+
+    #[test]
+    fn grok_com_local_name_is_not_managed_in_catalog() {
+        let local = acp::McpServer::Http(
+            acp::McpServerHttp::new("grok_com_slack", "https://mcp.example.test/sse")
+                .headers(vec![]),
+        );
+        let servers = build_mcp_catalog_with_gateway_tools(&[local], None, &Default::default());
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "grok_com_slack");
+        assert_eq!(servers[0].source, McpServerSource::Local);
+        assert!(matches!(servers[0].config, McpServerConfig::Http { .. }));
+
+        let placeholder = disabled_server_placeholder_entry("grok_com_slack");
+        assert_eq!(placeholder.source, McpServerSource::Local);
+        assert!(matches!(placeholder.config, McpServerConfig::Stdio { .. }));
     }
 
     #[test]
@@ -2406,7 +2324,7 @@ mod tests {
                 HashSet::from(["linear__create_issue".to_string()]),
             ),
         ]);
-        let servers = build_mcp_catalog_with_gateway_tools(&[], &[], Some(&catalog), &disabled);
+        let servers = build_mcp_catalog_with_gateway_tools(&[], Some(&catalog), &disabled);
         let session = servers[0].session.as_ref().unwrap();
         assert!(!session.enabled);
         assert!(session.status.is_none());
@@ -2517,9 +2435,9 @@ mod tests {
     #[test]
     fn test_disabled_session_state_serialization() {
         let entry = McpServerEntry {
-            name: "grok_com_slack".to_string(),
+            name: "slack".to_string(),
             display_name: None,
-            source: McpServerSource::Managed,
+            source: McpServerSource::Local,
             source_label: None,
             setup: None,
             setup_values: None,

@@ -1003,17 +1003,9 @@ impl SessionActor {
         // the order-sensitive `update_configs` would cause (merge order is
         // non-deterministic). Mirrors the `UpdateMcpServers` command handler.
         let t_mcp = std::time::Instant::now();
-        let managed_configs = {
-            let mcp_handle = self.managed_mcp_handle.lock().await;
-            match &mcp_handle.cache {
-                crate::session::managed_mcp::ManagedMcpCache::Ready(configs) => configs.clone(),
-                _ => vec![],
-            }
-        };
         let new_mcp_servers = crate::session::managed_mcp::merge_managed_mcp_servers(
             self.initial_client_mcp_servers.clone(),
             session_cwd,
-            &managed_configs,
             new_registry_snapshot.as_deref(),
             &self.rebuild_spec.compat,
         );

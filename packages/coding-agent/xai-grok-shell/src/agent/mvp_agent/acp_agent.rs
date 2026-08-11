@@ -45,9 +45,7 @@ impl acp::Agent for MvpAgent {
     ) -> Result<acp::InitializeResponse, acp::Error> {
         tracing::debug!(target: "sampling_log", "Received initialize request");
         xai_grok_telemetry::unified_log::info("agent initialized", None, None);
-        if xai_grok_telemetry::startup::agent_owned().is_some() {
-            xai_grok_telemetry::startup::clear();
-        }
+        xai_grok_telemetry::startup::mark_agent_serving();
         self.start_subagent_coordinator();
         if self.cfg.borrow().remote_settings.is_none() {
             self.spawn_settings_reapply();
@@ -430,12 +428,7 @@ impl acp::Agent for MvpAgent {
         let current_working_directory = self.launch_cwd.clone();
         let hostname = gethostname::gethostname();
         let mcp_servers: Vec<crate::extensions::mcp::McpServerEntry> = Vec::new();
-        let fetch_managed_mcps = self.cfg.borrow().managed_mcps_enabled
-            && self.can_fetch_managed_mcps();
-        if self.cfg.borrow().managed_mcps_enabled && !fetch_managed_mcps {
-            tracing::info!("Managed MCP fetch: DISABLED");
-        }
-        self.spawn_initialize_launch_mcp_setup(fetch_managed_mcps);
+        self.spawn_initialize_launch_mcp_setup();
         self.spawn_managed_gateway_tool_catalog_fetch();
         {
             let agent_ref = LocalRef::new(self);
@@ -2498,7 +2491,13 @@ impl acp::Agent for MvpAgent {
         if reload_model_config {
             crate::extensions::session_admin::reload_models_from_disk(self)?;
         }
-        let model = self.resolve_model_id(&args.model_id)?;
+        let model = match self.resolve_model_id(&args.model_id) {
+            Ok(model) => model,
+            Err(_) => {
+                self.models_manager.wait_for_first_catalog().await;
+                self.resolve_model_id(&args.model_id)?
+            }
+        };
         if !model.info.user_selectable {
             return Err(
                 acp::Error::invalid_params()
@@ -2563,6 +2562,9 @@ impl acp::Agent for MvpAgent {
             }
             "x.ai/workspaces/list" => {
                 crate::agent::handlers::workspaces::handle(self, &args).await
+            }
+            "x.ai/models/list" => {
+                crate::agent::handlers::models::handle(self, &args).await
             }
             "x.ai/session/updates" => {
                 crate::extensions::session_updates::handle(&args, &self.gateway).await

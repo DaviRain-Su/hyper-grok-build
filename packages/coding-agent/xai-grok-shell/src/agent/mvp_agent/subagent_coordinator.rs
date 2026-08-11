@@ -360,6 +360,10 @@ impl MvpAgent {
             .as_ref()
             .map(|h| h.ask_user_question_enabled)
             .unwrap_or_else(|| self.cfg.borrow().resolve_ask_user_question().value);
+        let parent_non_interactive = parent_handle
+            .as_ref()
+            .map(|h| h.non_interactive)
+            .unwrap_or(false);
         let (gcs_upload_method, gcs_bucket_url) = match self.trace_upload_config_snapshot() {
             Some(method) => {
                 let bucket = match &method {
@@ -448,6 +452,7 @@ impl MvpAgent {
             goal_enabled: self.cfg.borrow().resolve_goal().value,
             background_workflows_enabled: self.cfg.borrow().resolve_workflows().value,
             ask_user_question_enabled,
+            parent_non_interactive,
             parent_cmd_tx: parent_cmd_tx.clone(),
             agent_bus: parent_handle
                 .as_ref()

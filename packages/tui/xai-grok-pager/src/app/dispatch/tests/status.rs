@@ -864,6 +864,290 @@ fn dispatch_rename_session_updates_display_name_locally() {
         Some("renamed via slash"),
         "/rename must also update local display_name cache"
     );
+    match &effects[0] {
+        Effect::RenameSession { kind, .. } => {
+            assert_eq!(
+                *kind,
+                xai_grok_shell::session::unified_list::SessionKind::Build,
+                "build-lane /rename must send kind=build"
+            );
+        }
+        other => panic!("expected RenameSession, got {other:?}"),
+    }
+}
+
+#[test]
+fn dispatch_rename_session_strips_controls_before_display_name_and_effect() {
+    let mut app = test_app_with_agent();
+    let effects =
+        dispatch_rename_session(&mut app, "  Hello\u{1b}[31mWorld\u{07}\u{9b}C1  ".into());
+    assert_eq!(
+        app.agents[&AgentId(0)].display_name.as_deref(),
+        Some("Hello[31mWorldC1"),
+        "optimistic display_name must match the shell strip (no OSC/CSI/BEL/C1)"
+    );
+    match &effects[..] {
+        [Effect::RenameSession { title, .. }] => {
+            assert_eq!(title, "Hello[31mWorldC1");
+        }
+        other => panic!("expected one RenameSession, got {other:?}"),
+    }
+
+    let mut app = test_app_with_agent();
+    let effects = dispatch_rename_session(&mut app, "\u{1b}\u{07}\n\t".into());
+    assert!(
+        effects.is_empty(),
+        "control-only title must not emit RenameSession: {effects:?}"
+    );
+    assert!(
+        app.agents[&AgentId(0)].display_name.is_none(),
+        "control-only title must not paint a blank/dirty display_name"
+    );
+    assert!(
+        last_system_text(&app, AgentId(0)).contains("title must not be blank"),
+        "control-only title must surface the same failed-rename system block"
+    );
+}
+
+#[test]
+fn dispatch_rename_session_chat_kind_stamps_kind_chat() {
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.chat_kind = true;
+    agent.conversation_entry = true;
+    let effects = dispatch_rename_session(&mut app, "chat rename".into());
+    match &effects[..] {
+        [Effect::RenameSession { kind, title, .. }] => {
+            assert_eq!(title, "chat rename");
+            assert_eq!(
+                *kind,
+                xai_grok_shell::session::unified_list::SessionKind::Chat,
+                "chat-lane /rename must send kind=chat"
+            );
+        }
+        other => panic!("expected one RenameSession, got {other:?}"),
+    }
+}
+
+#[test]
+fn dispatch_rename_session_sticky_chat_local_build_stays_build() {
+    let mut app = test_app_with_agent();
+    app.chat_mode = true;
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    // Sticky `--chat` UI bit, local-disk history-bypass (not a conversation).
+    agent.chat_kind = true;
+    agent.conversation_entry = false;
+    let effects = dispatch_rename_session(&mut app, "local title".into());
+    match &effects[..] {
+        [Effect::RenameSession { kind, title, .. }] => {
+            assert_eq!(title, "local title");
+            assert_eq!(
+                *kind,
+                xai_grok_shell::session::unified_list::SessionKind::Build,
+                "history-bypass local build under sticky --chat must send kind=build"
+            );
+        }
+        other => panic!("expected one RenameSession, got {other:?}"),
+    }
+}
+
+#[test]
+fn rename_session_request_serializes_camel_case_kind() {
+    use crate::app::actions::RenameSessionRequest;
+    use xai_grok_shell::session::unified_list::SessionKind;
+
+    let build = serde_json::to_value(RenameSessionRequest::for_rename(
+        "sid".into(),
+        "T".into(),
+        "/repo".into(),
+        SessionKind::Build,
+    ))
+    .unwrap();
+    assert_eq!(
+        build,
+        serde_json::json!({
+            "sessionId": "sid",
+            "title": "T",
+            "cwd": "/repo",
+            "kind": "build",
+        })
+    );
+
+    let chat = serde_json::to_value(RenameSessionRequest::for_rename(
+        "cid".into(),
+        "Chat".into(),
+        "/tmp".into(),
+        SessionKind::Chat,
+    ))
+    .unwrap();
+    assert_eq!(
+        chat,
+        serde_json::json!({
+            "sessionId": "cid",
+            "title": "Chat",
+            "cwd": "/tmp",
+            "kind": "chat",
+        })
+    );
+
+    let unpin = serde_json::to_value(RenameSessionRequest::for_reset(
+        "sid".into(),
+        "/repo".into(),
+        SessionKind::Build,
+    ))
+    .unwrap();
+    assert_eq!(
+        unpin,
+        serde_json::json!({
+            "sessionId": "sid",
+            "title": "",
+            "cwd": "/repo",
+            "kind": "build",
+            "resetToAuto": true,
+        }),
+        "unpin must send empty title + resetToAuto so old shells reject blank"
+    );
+}
+
+#[test]
+fn dispatch_reset_session_title_clears_titles_and_emits_effect() {
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.display_name = Some("Manual".into());
+        // Post-rename both caches hold the pin (fan-out / resume).
+        agent.generated_session_title = Some("Manual".into());
+    }
+    let effects = dispatch_reset_session_title(&mut app);
+    let agent = &app.agents[&AgentId(0)];
+    assert!(
+        agent.display_name.is_none(),
+        "optimistic unpin must clear display_name"
+    );
+    assert!(
+        agent.generated_session_title.is_none(),
+        "optimistic unpin must clear generated_session_title when it matches the pin"
+    );
+    assert_ne!(
+        crate::views::session_title::entry_title(agent),
+        "Manual",
+        "dashboard/tab entry_title must not stay the manual pin"
+    );
+    match &effects[..] {
+        [
+            Effect::ResetSessionTitle {
+                agent_id,
+                session_id,
+                cwd,
+                kind,
+                previous_display_name,
+                previous_generated_title,
+            },
+        ] => {
+            assert_eq!(*agent_id, AgentId(0));
+            assert_eq!(session_id.0.as_ref(), "test-session");
+            assert_eq!(cwd, std::path::Path::new("/tmp"));
+            assert_eq!(
+                *kind,
+                xai_grok_shell::session::unified_list::SessionKind::Build
+            );
+            assert_eq!(previous_display_name.as_deref(), Some("Manual"));
+            assert_eq!(previous_generated_title.as_deref(), Some("Manual"));
+        }
+        other => panic!("expected ResetSessionTitle, got {other:?}"),
+    }
+}
+
+#[test]
+fn dispatch_reset_session_title_never_manual_keeps_generated_title() {
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.display_name = None;
+        agent.generated_session_title = Some("Auto".into());
+    }
+    let effects = dispatch_reset_session_title(&mut app);
+    let agent = &app.agents[&AgentId(0)];
+    assert!(agent.display_name.is_none());
+    assert_eq!(agent.generated_session_title.as_deref(), Some("Auto"));
+    assert_eq!(
+        crate::views::session_title::entry_title(agent),
+        "Auto",
+        "already-auto unpin must stay a UI no-op"
+    );
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::ResetSessionTitle {
+                kind: xai_grok_shell::session::unified_list::SessionKind::Build,
+                ..
+            }]
+        ),
+        "got {effects:?}"
+    );
+}
+
+#[test]
+fn dispatch_reset_session_title_sticky_chat_local_build_stays_build() {
+    let mut app = test_app_with_agent();
+    app.chat_mode = true;
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.chat_kind = true;
+        agent.conversation_entry = false;
+        agent.display_name = Some("Manual".into());
+        agent.generated_session_title = Some("Auto".into());
+    }
+    let effects = dispatch_reset_session_title(&mut app);
+    match &effects[..] {
+        [Effect::ResetSessionTitle { kind, .. }] => {
+            assert_eq!(
+                *kind,
+                xai_grok_shell::session::unified_list::SessionKind::Build,
+                "history-bypass local build under sticky --chat must unpin as build"
+            );
+        }
+        other => panic!("expected ResetSessionTitle, got {other:?}"),
+    }
+    assert!(app.agents[&AgentId(0)].display_name.is_none());
+    assert_eq!(
+        app.agents[&AgentId(0)].generated_session_title.as_deref(),
+        Some("Auto")
+    );
+}
+
+#[test]
+fn dispatch_reset_session_title_refuses_chat_kind() {
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.chat_kind = true;
+        agent.conversation_entry = true;
+        agent.display_name = Some("Chat title".into());
+        agent.generated_session_title = Some("Kept".into());
+    }
+    let scrollback_len_before = app.agents[&AgentId(0)].scrollback.len();
+    let effects = dispatch_reset_session_title(&mut app);
+    assert!(
+        effects.is_empty(),
+        "chat-kind unpin must not emit an effect, got {effects:?}"
+    );
+    let agent = &app.agents[&AgentId(0)];
+    assert_eq!(agent.display_name.as_deref(), Some("Chat title"));
+    assert_eq!(agent.generated_session_title.as_deref(), Some("Kept"));
+    assert_eq!(agent.scrollback.len(), scrollback_len_before + 1);
+    let last = agent
+        .scrollback
+        .entry(agent.scrollback.len() - 1)
+        .expect("last entry");
+    let text = match &last.block {
+        crate::scrollback::block::RenderBlock::System(b) => b.text.clone(),
+        other => panic!("expected System block, got {other:?}"),
+    };
+    assert!(
+        text.contains("Chat conversations have no auto-title to restore"),
+        "got: {text:?}"
+    );
 }
 
 /// `ConfirmResetSetting { choice: Reset }` on a SHARED Bool

@@ -26,6 +26,12 @@ impl ConditionalSkills {
         self.held.is_empty()
     }
 
+    /// Held skills (pending and activated), so registry-wide lookups can see
+    /// skills the listing withholds.
+    pub(super) fn held(&self) -> &[SkillInfo] {
+        &self.held
+    }
+
     /// A `paths:` skill that hasn't been triggered yet — withheld from the
     /// listing until a matching file is touched.
     pub(super) fn is_pending(&self, s: &SkillInfo) -> bool {

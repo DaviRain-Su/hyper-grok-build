@@ -512,3 +512,92 @@ fn headless_session_notification_unknown_tag_is_clean_ignore() {
         "an unknown display tag is a clean ignore, not an error: {logs}"
     );
 }
+
+/// Call `reply_headless_ext_method` and return what landed on the oneshot.
+fn ext_method_reply(
+    method: &str,
+    params: serde_json::Value,
+) -> xai_acp_lib::AcpResult<acp::ExtResponse> {
+    let raw = serde_json::value::to_raw_value(&params).unwrap();
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    reply_headless_ext_method(
+        xai_acp_lib::AcpArgs {
+            request: acp::ExtRequest::new(method, raw.into()),
+            response_tx: tx,
+        }
+        .boxed(),
+    );
+    rx.try_recv()
+        .expect("ext_method must be answered, never dropped")
+}
+
+/// `x.ai/ask_user_question` gets a typed `cancelled` reply on the wire;
+/// malformed params are still answered (known methods do not parse params).
+#[test]
+fn ask_user_question_replies_cancelled() {
+    use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse;
+    for params in [
+        serde_json::json!({
+            "sessionId": "s", "toolCallId": "t", "questions": [], "mode": "default",
+        }),
+        serde_json::json!("not-an-object"),
+    ] {
+        let resp =
+            ext_method_reply("x.ai/ask_user_question", params).expect("policy reply, not an error");
+        let parsed: AskUserQuestionExtResponse = serde_json::from_str(resp.0.get())
+            .expect("wire reply must deserialize as the typed response");
+        assert!(matches!(parsed, AskUserQuestionExtResponse::Cancelled));
+    }
+}
+
+/// `x.ai/exit_plan_mode` is approved (no feedback) so the shell executes the
+/// exit and the model proceeds to implement.
+#[test]
+fn exit_plan_mode_replies_approved() {
+    use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeExtResponse;
+    let resp = ext_method_reply(
+        "x.ai/exit_plan_mode",
+        serde_json::json!({"sessionId": "s", "toolCallId": "t"}),
+    )
+    .expect("policy reply, not an error");
+    let parsed: ExitPlanModeExtResponse = serde_json::from_str(resp.0.get())
+        .expect("wire reply must deserialize as the typed response");
+    assert_eq!(parsed.outcome, "approved");
+    assert!(parsed.feedback.is_none());
+}
+
+/// Unknown methods (including lookalikes of the known ones) get a
+/// MethodNotFound error carrying the method name — never a dropped channel.
+#[test]
+fn unknown_ext_method_replies_method_not_found() {
+    for method in [
+        "x.ai/some_future_method",
+        "x.ai/ask_user_questions",
+        "x.ai/exit_plan_mode2",
+        "ask_user_question",
+    ] {
+        let err = ext_method_reply(method, serde_json::json!({}))
+            .expect_err("unknown method must be an error reply");
+        assert_eq!(i32::from(err.code), -32601, "method={method}");
+        assert!(
+            err.message.contains(method),
+            "error must carry the method name: {method} -> {}",
+            err.message
+        );
+    }
+}
+
+/// A receiver dropped before the reply must not panic the responder.
+#[test]
+fn dropped_receiver_does_not_panic() {
+    let raw = serde_json::value::to_raw_value(&serde_json::json!({})).unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    drop(rx);
+    reply_headless_ext_method(
+        xai_acp_lib::AcpArgs {
+            request: acp::ExtRequest::new("x.ai/ask_user_question", raw.into()),
+            response_tx: tx,
+        }
+        .boxed(),
+    );
+}

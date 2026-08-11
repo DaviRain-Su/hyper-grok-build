@@ -50,14 +50,12 @@ pub(crate) fn build_config_resolved_event(
         .map(|c| xai_file_utils::events::McpConfigServer {
             name: inner::mcp_server_name(c).to_string(),
             transport: inner::mcp_transport_str(c).to_string(),
-            source: if inner::mcp_server_name(c)
-                .starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-            {
-                "managed"
-            } else {
-                "local"
-            }
-            .to_string(),
+            source:
+                match crate::session::mcp_dispatcher::classify_source(inner::mcp_server_name(c)) {
+                    crate::extensions::mcp::McpServerSource::Managed => "managed",
+                    crate::extensions::mcp::McpServerSource::Local => "local",
+                }
+                .to_string(),
         })
         .collect();
     xai_file_utils::events::Event::McpConfigResolved { servers, disabled }

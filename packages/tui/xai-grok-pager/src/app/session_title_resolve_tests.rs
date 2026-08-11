@@ -79,6 +79,20 @@ fn sole_manual_rename_wins_among_duplicates() {
 }
 
 #[test]
+fn pulled_sole_manual_summary_wins_among_duplicate_autos() {
+    // Shape pull writes: generated_title + title_is_manual, session_summary
+    // matching the remote title (hop contract for `--resume <title>`).
+    let pulled = summary("pulled-hop", Some("Dup"), true);
+    assert_eq!(pulled.manual_title_opt().as_deref(), Some("Dup"));
+    let s = [
+        summary("auto1", Some("Dup"), false),
+        pulled,
+        summary("auto2", Some("Dup"), false),
+    ];
+    assert_eq!(id_of(select_by_title("dup", &s).unwrap()), "pulled-hop");
+}
+
+#[test]
 fn two_manual_renames_stay_ambiguous() {
     let s = [
         summary("man1", Some("Dup"), true),

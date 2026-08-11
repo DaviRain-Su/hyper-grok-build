@@ -247,11 +247,12 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-    tokio::runtime::Builder::new_multi_thread()
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder
         .worker_threads(xai_tty_utils::runtime::capped_worker_threads().get())
-        .enable_all()
-        .build()?
-        .block_on(run(args, cwd))
+        .enable_all();
+    let rt = xai_tty_utils::runtime::build_with_blocking_pool(&mut builder)?;
+    rt.block_on(run(args, cwd))
 }
 async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();

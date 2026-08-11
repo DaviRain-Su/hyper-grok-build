@@ -78,7 +78,7 @@ use super::session::load::{
     dispatch_show_session_picker, dispatch_trigger_deep_search, session_picker_entry_matches,
     session_picker_external_filter_active,
 };
-use super::session::modal::dispatch_rename_session;
+use super::session::modal::{dispatch_rename_session, dispatch_reset_session_title};
 use super::settings::setters::{
     clear_default_model, clear_fork_secondary_model, preview_auto_dark_theme,
     preview_auto_light_theme, preview_theme, set_ask_user_question_timeout_enabled,
@@ -1128,6 +1128,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::OpenTutorial => dispatch_open_tutorial(app),
         Action::RenameSession { title } => dispatch_rename_session(app, title),
+        Action::ResetSessionTitleToAuto => dispatch_reset_session_title(app),
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),
         Action::ManageBilling => dispatch_manage_billing(app),

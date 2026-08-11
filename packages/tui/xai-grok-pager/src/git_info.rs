@@ -44,16 +44,23 @@ const CWD_GIT_CACHE_CAP: usize = 64;
 /// also updates the agent's own `current_branch` / `is_worktree` /
 /// `main_repo` fields directly. The worktree label isn't carried by the
 /// notification (and is immutable for a path), so any previously-resolved
-/// label is preserved. `is_worktree` is derived from `main_repo`, matching
-/// how [`compute_cwd_git_info`] populates the cache.
-pub fn update_from_notification(dir: &Path, branch: Option<&str>, main_repo: Option<String>) {
+/// label is preserved. `is_worktree` matches [`compute_cwd_git_info`]:
+/// notification flag, `main_repo`, or a cached non-empty label.
+pub fn update_from_notification(
+    dir: &Path,
+    branch: Option<&str>,
+    main_repo: Option<String>,
+    is_worktree: bool,
+) {
     if let Ok(mut cache) = CWD_GIT_CACHE.lock() {
         let worktree_label = cache
             .get(dir)
             .and_then(|(info, _)| info.as_ref())
             .and_then(|i| i.worktree_label.clone());
+        let is_worktree =
+            is_worktree || is_cwd_worktree(main_repo.as_deref(), worktree_label.as_deref());
         let info = CwdGitInfo {
-            is_worktree: main_repo.is_some(),
+            is_worktree,
             branch: branch.map(str::to_string),
             main_repo,
             worktree_label,
@@ -92,7 +99,8 @@ struct GitSnapshot {
 pub struct CwdGitInfo {
     /// Branch shorthand. `Some("")` for detached HEAD.
     pub branch: Option<String>,
-    /// Whether `cwd` is inside a linked git worktree.
+    /// Whether `cwd` is a worktree rather than the primary checkout
+    /// (linked `git worktree`, grok standalone clone, or worktree DB hit).
     pub is_worktree: bool,
     /// Tilde-shortened path to the main repo when in a worktree.
     pub main_repo: Option<String>,
@@ -112,11 +120,18 @@ pub fn compute_cwd_git_info(cwd: &Path) -> Option<CwdGitInfo> {
     // a `None` here means `cwd` is not a repo (or discovery failed).
     snap.repo_root_display.as_ref()?;
     Some(CwdGitInfo {
-        is_worktree: snap.main_repo_display.is_some(),
+        is_worktree: is_cwd_worktree(
+            snap.main_repo_display.as_deref(),
+            snap.worktree_label.as_deref(),
+        ),
         branch: snap.branch,
         main_repo: snap.main_repo_display,
         worktree_label: snap.worktree_label,
     })
+}
+
+fn is_cwd_worktree(main_repo: Option<&str>, worktree_label: Option<&str>) -> bool {
+    main_repo.is_some() || worktree_label.is_some_and(|s| !s.is_empty())
 }
 
 /// Per-cwd git info for render paths that display many directories (the
@@ -230,16 +245,35 @@ fn compute_snapshot(cwd: &Path) -> GitSnapshot {
             .unwrap_or_default()
     });
 
-    let main_repo_display = (repo.path() != repo.commondir())
+    let linked_main_repo = (repo.path() != repo.commondir())
         .then(|| repo.commondir().parent().map(collapse_home))
         .flatten();
 
-    let worktree_label = lookup_worktree_label(cwd);
+    // Standalone grok worktrees are CoW clones (`.git` is a directory), so
+    // `path != commondir` is false; the source marker is the back-pointer.
+    let mut marker_main_repo = None;
+    for ancestor in cwd.ancestors() {
+        let git = ancestor.join(".git");
+        if let Ok(contents) = std::fs::read_to_string(git.join("grok-worktree-source"))
+            && let trimmed = contents.trim()
+            && !trimmed.is_empty()
+        {
+            marker_main_repo = Some(collapse_home(Path::new(trimmed)));
+            break;
+        }
+        // Don't inherit a parent checkout's marker across a nested repo root.
+        if git.exists() {
+            break;
+        }
+    }
+
+    let (worktree_label, db_source_repo) = lookup_worktree_record(cwd);
+    let db_main_repo = db_source_repo.as_deref().map(collapse_home);
 
     GitSnapshot {
         repo_root_display,
         branch,
-        main_repo_display,
+        main_repo_display: marker_main_repo.or(db_main_repo).or(linked_main_repo),
         worktree_label,
     }
 }
@@ -270,27 +304,47 @@ pub fn worktree_label_index() -> std::collections::HashMap<PathBuf, String> {
     map
 }
 
-/// Look up the human-readable worktree label from the metadata DB.
+/// Look up the worktree label and source repo from the metadata DB.
 ///
-/// Returns `None` silently on any error (missing DB, no record, no label in
-/// metadata). This is called from `spawn_blocking` so DB I/O is fine.
-fn lookup_worktree_label(cwd: &Path) -> Option<String> {
-    let db = xai_fast_worktree::db::WorktreeDb::open_default().ok()?;
+/// Returns `(None, None)` silently on any error (missing DB, no record).
+/// Called from `spawn_blocking` so DB I/O is fine.
+fn lookup_worktree_record(cwd: &Path) -> (Option<String>, Option<PathBuf>) {
+    let Ok(db) = xai_fast_worktree::db::WorktreeDb::open_default() else {
+        return (None, None);
+    };
     // Try exact match first, then walk up ancestors to find the worktree root.
     for ancestor in cwd.ancestors() {
         if let Ok(Some(record)) = db.get(&ancestor.to_string_lossy()) {
-            return record.label().map(String::from);
+            let label = record.label().map(str::to_owned);
+            let source = (!record.source_repo.as_os_str().is_empty()).then_some(record.source_repo);
+            return (label, source);
+        }
+        // Nested checkout inside a registered worktree is its own repo.
+        if ancestor.join(".git").exists() {
+            break;
         }
     }
-    None
+    (None, None)
 }
 
 fn collapse_home(path: &Path) -> String {
-    let s = path.display().to_string();
-    match home_dir() {
-        Some(h) => s.strip_prefix(&h).map(|r| format!("~{r}")).unwrap_or(s),
-        None => s,
-    }
+    collapse_home_path(path, home_dir().as_deref().map(Path::new))
+}
+
+/// Tilde-collapse with a path-component prefix so `HOME=/Users/u` does not
+/// match `/Users/user/xai`, and trailing slashes on HOME do not break the join.
+fn collapse_home_path(path: &Path, home: Option<&Path>) -> String {
+    let Some(home) = home else {
+        return path.display().to_string();
+    };
+    let home = PathBuf::from(
+        home.as_os_str()
+            .to_string_lossy()
+            .trim_end_matches(['/', '\\']),
+    );
+    path.strip_prefix(&home)
+        .map(|rest| format!("~/{}", rest.display()))
+        .unwrap_or_else(|_| path.display().to_string())
 }
 
 /// Branch glyph for the git display, cached for process lifetime.
@@ -519,6 +573,171 @@ mod tests {
         assert_eq!(
             decide_branch_icon(Some("1"), HostOs::Macos, TerminalName::Iterm2),
             POWERLINE
+        );
+    }
+
+    #[test]
+    fn collapse_home_requires_whole_path_component() {
+        let home = Path::new("/Users/u");
+        assert_eq!(
+            collapse_home_path(Path::new("/Users/user/xai"), Some(home)),
+            "/Users/user/xai"
+        );
+        assert_eq!(
+            collapse_home_path(Path::new("/Users/u/xai"), Some(home)),
+            "~/xai"
+        );
+        assert_eq!(
+            collapse_home_path(Path::new("/Users/u/"), Some(Path::new("/Users/u/"))),
+            "~/"
+        );
+    }
+
+    #[test]
+    fn compute_cwd_git_info_standalone_grok_worktree() {
+        let main = crate::test_util::TempGitRepo::init("main-only");
+        let clone = main.standalone_clone("wt-branch");
+        assert!(
+            clone.path.join(".git").is_dir(),
+            "standalone clone .git is a directory"
+        );
+        assert!(
+            clone
+                .path
+                .join(".git")
+                .join("grok-worktree-source")
+                .is_file(),
+            "standalone clone carries the source marker"
+        );
+        let info = compute_cwd_git_info(&clone.path).expect("clone is a repo");
+        assert!(info.is_worktree);
+        assert_eq!(info.branch.as_deref(), Some("wt-branch"));
+        assert_eq!(
+            info.main_repo.as_deref(),
+            Some(crate::test_util::collapsed_path_display(&main.path).as_str())
+        );
+    }
+
+    #[test]
+    fn compute_cwd_git_info_standalone_marker_from_nested_cwd() {
+        let main = crate::test_util::TempGitRepo::init("main-only");
+        let clone = main.standalone_clone("wt-branch");
+        let nested = clone.path.join("sub").join("dir");
+        std::fs::create_dir_all(&nested).unwrap();
+        let info = compute_cwd_git_info(&nested).expect("nested path is in the clone");
+        assert!(info.is_worktree);
+        assert_eq!(info.branch.as_deref(), Some("wt-branch"));
+        assert_eq!(
+            info.main_repo.as_deref(),
+            Some(crate::test_util::collapsed_path_display(&main.path).as_str())
+        );
+    }
+
+    #[test]
+    fn compute_cwd_git_info_nested_plain_repo_does_not_inherit_marker() {
+        let main = crate::test_util::TempGitRepo::init("main-only");
+        let clone = main.standalone_clone("wt-branch");
+        let nested = clone.path.join("vendor").join("dep");
+        crate::test_util::init_git_repo_on_branch(&nested, "dep-branch");
+        let info = compute_cwd_git_info(&nested).expect("nested init is a repo");
+        assert!(!info.is_worktree);
+        assert!(info.main_repo.is_none());
+        assert_eq!(info.branch.as_deref(), Some("dep-branch"));
+    }
+
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn compute_cwd_git_info_nested_repo_does_not_inherit_db_record() {
+        let home = tempfile::tempdir().unwrap();
+        // serial(GROK_HOME) orders peers; EnvVarGuard restores on drop so
+        // later `open_default()` callers do not see a deleted temp home.
+        let _grok_home = crate::test_util::EnvVarGuard::set("GROK_HOME", home.path());
+        let _ = xai_fast_worktree::db::WorktreeDb::open(home.path());
+
+        let wt = crate::test_util::TempGitRepo::init("wt-branch");
+        let canon_wt = dunce::canonicalize(&wt.path).unwrap_or_else(|_| wt.path.clone());
+        let db = xai_fast_worktree::db::WorktreeDb::open(home.path()).unwrap();
+        db.register(&xai_fast_worktree::db::WorktreeRecord {
+            id: "db-wt".into(),
+            path: canon_wt,
+            source_repo: PathBuf::from("/src/main-repo"),
+            repo_name: "main-repo".into(),
+            kind: xai_fast_worktree::db::WorktreeKind::Session,
+            creation_mode: "standalone".into(),
+            git_ref: None,
+            head_commit: None,
+            session_id: None,
+            creator_pid: None,
+            created_at: 1,
+            last_accessed_at: None,
+            status: xai_fast_worktree::db::WorktreeStatus::Alive,
+            metadata: Some(serde_json::json!({ "label": "db-label" })),
+        })
+        .unwrap();
+
+        let nested = wt.path.join("vendor").join("dep");
+        crate::test_util::init_git_repo_on_branch(&nested, "dep-branch");
+        let info = compute_cwd_git_info(&nested).expect("nested init is a repo");
+        assert!(!info.is_worktree);
+        assert!(info.main_repo.is_none());
+        assert!(info.worktree_label.is_none());
+        assert_eq!(info.branch.as_deref(), Some("dep-branch"));
+    }
+
+    #[test]
+    fn update_from_notification_ors_cached_label_into_is_worktree() {
+        let dir = PathBuf::from("/nonexistent-xai-notif-label-wt");
+        {
+            let mut cache = CWD_GIT_CACHE.lock().expect("cache lock");
+            cwd_cache_insert(
+                &mut cache,
+                dir.clone(),
+                (
+                    Some(CwdGitInfo {
+                        branch: Some("main".into()),
+                        is_worktree: true,
+                        main_repo: None,
+                        worktree_label: Some("my-label".into()),
+                    }),
+                    Instant::now(),
+                ),
+            );
+        }
+        update_from_notification(&dir, Some("main"), None, /* is_worktree */ false);
+        let cache = CWD_GIT_CACHE.lock().expect("cache lock");
+        let info = cache
+            .get(&dir)
+            .and_then(|(info, _)| info.clone())
+            .expect("cache entry");
+        assert!(info.is_worktree);
+        assert_eq!(info.worktree_label.as_deref(), Some("my-label"));
+    }
+
+    #[test]
+    fn compute_cwd_git_info_plain_repo_is_not_worktree() {
+        let repo = crate::test_util::TempGitRepo::init("main");
+        let info = compute_cwd_git_info(&repo.path).expect("plain repo");
+        assert!(!info.is_worktree);
+        assert_eq!(info.branch.as_deref(), Some("main"));
+        assert!(info.main_repo.is_none());
+    }
+
+    #[test]
+    fn compute_cwd_git_info_linked_git_worktree() {
+        let main = crate::test_util::TempGitRepo::init("main-only");
+        let wt = main.add_linked_worktree("wt", "wt-branch");
+        assert!(wt.join(".git").is_file(), "linked worktree .git is a file");
+        let info = compute_cwd_git_info(&wt).expect("linked worktree is a repo");
+        assert!(info.is_worktree);
+        assert_eq!(info.branch.as_deref(), Some("wt-branch"));
+        let main_repo = info.main_repo.expect("linked worktree has main_repo");
+        let expected = crate::test_util::collapsed_path_display(&main.path);
+        let expected_canon = dunce::canonicalize(&main.path)
+            .map(|p| crate::test_util::collapsed_path_display(&p))
+            .unwrap_or_else(|_| expected.clone());
+        assert!(
+            main_repo == expected || main_repo == expected_canon,
+            "main_repo={main_repo}, expected {expected} or {expected_canon}"
         );
     }
 }

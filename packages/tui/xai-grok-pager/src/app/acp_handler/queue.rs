@@ -167,6 +167,13 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                         && stashed_pid.as_deref() != Some(pid.as_str())
                         && !raw_entries.iter().any(|(eid, _)| eid == *pid)
                         && !agent.optimistic_queue_ids.contains(*pid)
+                        // An active-goal Send Now painted block awaiting its
+                        // interjection claim: its row legitimately vanishes from
+                        // the broadcast the instant the shell converts the Send
+                        // Now into an interjection, so absence here is expected.
+                        // Keep it in place for `handle_interjection` to convert;
+                        // retiring it would drop and re-push it at the end.
+                        && !agent.is_send_now_awaiting_interjection_claim(pid)
                 })
                 .cloned()
                 .collect();

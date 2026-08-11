@@ -34,6 +34,8 @@ const DEFAULT_AGENT_CONNECT_TIMEOUT_SECS: u64 = 5;
 /// Default preview-activity withhold window. Sourced from the tracker's
 /// `PREVIEW_ACTIVITY_WINDOW_MS` so the two can't drift.
 const DEFAULT_PREVIEW_ACTIVITY_WINDOW_MS: u64 = crate::activity::PREVIEW_ACTIVITY_WINDOW_MS;
+/// Default client-RPC withhold window; `0` disables the withhold.
+const DEFAULT_RPC_ACTIVITY_WINDOW_MS: u64 = crate::activity::RPC_ACTIVITY_WINDOW_MS;
 /// Default preview-activity scrape cadence. Must stay below the withhold window.
 const DEFAULT_PREVIEW_ACTIVITY_SCRAPE_INTERVAL_MS: u64 = 10_000;
 /// Smallest window that still leaves room for a strictly-smaller scrape; only a
@@ -41,6 +43,9 @@ const DEFAULT_PREVIEW_ACTIVITY_SCRAPE_INTERVAL_MS: u64 = 10_000;
 const MIN_PREVIEW_ACTIVITY_WINDOW_MS: u64 = 2;
 /// Scrape-interval floor; `0` would busy-loop the scraper.
 const MIN_PREVIEW_ACTIVITY_SCRAPE_INTERVAL_MS: u64 = 1;
+/// Ceiling on the client-RPC withhold window, so a seconds-for-ms typo cannot
+/// pin a sandbox for a day. `0` (the kill switch) is exempt.
+const MAX_RPC_ACTIVITY_WINDOW_MS: u64 = 600_000;
 
 /// Tunable timing/threshold constants for the workspace tool server.
 #[derive(Debug, Clone)]
@@ -78,6 +83,10 @@ pub struct StatusConfig {
     /// (`GROK_WORKSPACE_PREVIEW_ACTIVITY_SCRAPE_INTERVAL_MS`); kept strictly
     /// below `preview_activity_window` by [`validate`](Self::validate).
     pub preview_activity_scrape_interval: Duration,
+    /// A client mutation RPC withholds idle for this window
+    /// (`GROK_WORKSPACE_RPC_ACTIVITY_WINDOW_MS`); zero disables. Clamped to
+    /// `MAX_RPC_ACTIVITY_WINDOW_MS` by [`validate`](Self::validate).
+    pub rpc_activity_window: Duration,
     /// True when this container booted via the sandbox restore path, which
     /// injects `GROK_SESSION_RESTORED=true`; a first boot never does.
     pub session_restored: bool,
@@ -104,6 +113,7 @@ impl Default for StatusConfig {
             preview_activity_scrape_interval: Duration::from_millis(
                 DEFAULT_PREVIEW_ACTIVITY_SCRAPE_INTERVAL_MS,
             ),
+            rpc_activity_window: Duration::from_millis(DEFAULT_RPC_ACTIVITY_WINDOW_MS),
             session_restored: false,
             revive_script_configured: false,
         }
@@ -149,6 +159,10 @@ impl StatusConfig {
             preview_activity_scrape_interval: ms_or(
                 "GROK_WORKSPACE_PREVIEW_ACTIVITY_SCRAPE_INTERVAL_MS",
                 defaults.preview_activity_scrape_interval,
+            ),
+            rpc_activity_window: ms_or(
+                "GROK_WORKSPACE_RPC_ACTIVITY_WINDOW_MS",
+                defaults.rpc_activity_window,
             ),
             session_restored: std::env::var("GROK_SESSION_RESTORED").as_deref() == Ok("true"),
             revive_script_configured: std::env::var("GROK_REVIVE_SCRIPT_CONFIGURED").as_deref()
@@ -215,6 +229,16 @@ impl StatusConfig {
             );
             self.preview_activity_window = window;
             self.preview_activity_scrape_interval = scrape;
+        }
+        let rpc_cap = Duration::from_millis(MAX_RPC_ACTIVITY_WINDOW_MS);
+        // Zero stays zero: it is the documented kill switch, not a hold.
+        if self.rpc_activity_window > rpc_cap {
+            tracing::warn!(
+                window = ?self.rpc_activity_window,
+                clamped_window = ?rpc_cap,
+                "GROK_WORKSPACE rpc activity window above cap; clamped"
+            );
+            self.rpc_activity_window = rpc_cap;
         }
     }
 }
@@ -311,6 +335,7 @@ mod tests {
             cfg.preview_activity_scrape_interval,
             Duration::from_secs(10)
         );
+        assert_eq!(cfg.rpc_activity_window, Duration::from_secs(60));
         assert!(!cfg.session_restored);
         assert!(!cfg.revive_script_configured);
     }
@@ -425,6 +450,7 @@ mod tests {
             "GROK_WORKSPACE_IDLE_IGNORE_BACKGROUND_TASKS",
             "GROK_WORKSPACE_PREVIEW_ACTIVITY_WINDOW_MS",
             "GROK_WORKSPACE_PREVIEW_ACTIVITY_SCRAPE_INTERVAL_MS",
+            "GROK_WORKSPACE_RPC_ACTIVITY_WINDOW_MS",
             "GROK_SESSION_RESTORED",
             "GROK_REVIVE_SCRIPT_CONFIGURED",
         ] {
@@ -448,6 +474,7 @@ mod tests {
             cfg.preview_activity_scrape_interval,
             default.preview_activity_scrape_interval
         );
+        assert_eq!(cfg.rpc_activity_window, default.rpc_activity_window);
         assert_eq!(cfg.session_restored, default.session_restored);
         assert_eq!(
             cfg.revive_script_configured,
@@ -548,6 +575,32 @@ mod tests {
             assert!(cfg.preview_activity_scrape_interval >= Duration::from_millis(1));
             assert!(cfg.preview_activity_scrape_interval < cfg.preview_activity_window);
         }
+    }
+
+    /// Values past the cap are repaired; `0` — the kill switch — never is.
+    #[test]
+    fn validate_clamps_rpc_activity_window_but_spares_the_kill_switch() {
+        for (window_ms, expected_ms) in [(0u64, 0u64), (60_000, 60_000), (86_400_000, 600_000)] {
+            let mut cfg = StatusConfig {
+                rpc_activity_window: Duration::from_millis(window_ms),
+                ..StatusConfig::default()
+            };
+            cfg.validate();
+            assert_eq!(
+                cfg.rpc_activity_window,
+                Duration::from_millis(expected_ms),
+                "window {window_ms}ms"
+            );
+        }
+    }
+
+    #[test]
+    fn from_env_reads_rpc_activity_window() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("GROK_WORKSPACE_RPC_ACTIVITY_WINDOW_MS", "30000") };
+        let cfg = StatusConfig::from_env();
+        unsafe { std::env::remove_var("GROK_WORKSPACE_RPC_ACTIVITY_WINDOW_MS") };
+        assert_eq!(cfg.rpc_activity_window, Duration::from_millis(30_000));
     }
 
     /// A configured agent timeout of `0` seconds is invalid (it would make

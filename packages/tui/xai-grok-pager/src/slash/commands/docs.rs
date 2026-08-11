@@ -226,6 +226,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         };
         let items = DocsCommand.suggest_args(&ctx, "").expect("suggestions");
         assert!(items.iter().any(|i| i.insert_text == "web"));

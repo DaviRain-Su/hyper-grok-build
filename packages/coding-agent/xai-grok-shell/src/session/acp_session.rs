@@ -923,10 +923,8 @@ pub(crate) struct SessionActor {
     >,
     /// [`Self::account_not_achieved_without_sampler`].
     pub(crate) goal_classifier_in_flight: std::sync::atomic::AtomicBool,
-    /// Agent-level managed MCP config cache (refreshed in background).
+    /// Agent-level managed MCP gateway catalog cache.
     pub(crate) managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
-    /// Earliest managed MCP token expiry; checked before tool dispatch.
-    pub(crate) managed_mcp_expires_at: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     /// Original client-provided MCP servers from session creation.
     /// Retained for re-merge during plugin reload.
     pub(crate) initial_client_mcp_servers: Vec<acp::McpServer>,
@@ -1948,12 +1946,6 @@ mod parallel_dispatch_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/prompt_context_persistence_tests.rs"]
 mod prompt_context_persistence_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/reactive_managed_reauth_e2e_tests.rs"]
-mod reactive_managed_reauth_e2e_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/reactive_managed_reauth_tests.rs"]
-mod reactive_managed_reauth_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/session_thread_tests.rs"]
 mod session_thread_tests;

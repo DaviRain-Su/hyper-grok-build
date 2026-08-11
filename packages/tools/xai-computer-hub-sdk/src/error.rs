@@ -130,6 +130,12 @@ impl ClientError {
         self.has_collapsed_jsonrpc_subcode("jsonrpc_-32013")
     }
 
+    /// The server's `-32099` `rate_limited` rejection: it did not act on the
+    /// request, so retrying after a backoff is duplicate-safe.
+    pub fn is_rate_limited(&self) -> bool {
+        self.has_collapsed_jsonrpc_subcode("jsonrpc_-32099")
+    }
+
     /// Map a [`ToolErrorWire`] variant into the SDK error taxonomy.
     pub fn from_wire(wire: ToolErrorWire) -> Self {
         match wire {

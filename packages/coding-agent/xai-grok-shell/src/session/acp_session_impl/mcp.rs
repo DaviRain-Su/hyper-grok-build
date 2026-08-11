@@ -17,228 +17,6 @@ impl SessionActor {
         }
         self.ensure_mcp_tools_initialized().await;
     }
-    /// If managed tokens are near expiry, swap clients using the agent-level cache.
-    pub(super) async fn refresh_managed_mcp_if_stale(&self) {
-        use crate::session::managed_mcp::ManagedMcpCache;
-        let is_stale = crate::session::managed_mcp::managed_token_is_stale(
-            *self.managed_mcp_expires_at.lock().unwrap(),
-            chrono::Utc::now(),
-        );
-        if !is_stale {
-            return;
-        }
-        let fresh_configs = match &self.managed_mcp_handle.lock().await.cache {
-            ManagedMcpCache::Ready(c) if !c.is_empty() => c.clone(),
-            _ => return,
-        };
-        self.mcp_state.lock().await.refresh_managed_clients(
-            fresh_configs
-                .iter()
-                .map(|c| (c.endpoint.as_str(), &c.headers)),
-        );
-        *self.managed_mcp_expires_at.lock().unwrap() = fresh_configs
-            .iter()
-            .filter_map(|c| c.token_expires_at)
-            .min();
-    }
-    /// Reactive managed re-auth: cache-bypassing config re-fetch, swap in fresh
-    /// headers, re-handshake once. `Ok(())` if the server is `Ready` afterward.
-    ///
-    /// Owner-scoped — only the session owning the client in `owned_clients` swaps
-    /// (`refresh_managed_clients` ignores a subagent's shared Arc, which recovers
-    /// via the leader on its next pool snapshot). The shared `ManagedMcpState`
-    /// cooldown coalesces concurrent failures and bounds a revoked connector.
-    /// Shared by both reactive entry points; locks are taken sequentially, never
-    /// nested (acquire `managed_mcp_handle` before `mcp_state` if that changes).
-    ///
-    /// Emits `metrics.mcp.managed.reauth.{triggered,outcome,cooldown_terminal}`
-    /// tracing targets, plus an `mcp.server_connection` span (`connected` with
-    /// `tool_count` on recovery, `failed`/`error_type=auth` on terminal exhaustion).
-    pub(super) async fn reactive_managed_reauth(&self, server_name: &str) -> Result<(), String> {
-        if !self
-            .mcp_state
-            .lock()
-            .await
-            .owned_clients
-            .contains_key(server_name)
-        {
-            return Err(format!(
-                "session does not own managed client '{server_name}'"
-            ));
-        }
-        let now = chrono::Utc::now();
-        if !self
-            .managed_mcp_handle
-            .lock()
-            .await
-            .reauth_allowed(server_name, now)
-        {
-            return Err(format!(
-                "managed reactive re-auth for '{server_name}' is in cooldown"
-            ));
-        }
-        tracing::info!(target: "metrics.mcp.managed.reauth.triggered", server = %server_name);
-        tracing::info!(
-            server = %server_name,
-            "managed MCP auth rejection detected, attempting reactive re-fetch"
-        );
-        let scope = || {
-            crate::util::config::mcp_server_scope(
-                server_name,
-                std::path::Path::new(self.session_info.cwd.as_str()),
-            )
-        };
-        let started = std::time::Instant::now();
-        match self.reactive_managed_reauth_inner(server_name).await {
-            Ok(tool_count) => {
-                let elapsed_ms = started.elapsed().as_millis() as i64;
-                self.managed_mcp_handle
-                    .lock()
-                    .await
-                    .record_reauth_success(server_name);
-                tracing::info!(
-                    target: "metrics.mcp.managed.reauth.outcome",
-                    server = %server_name,
-                    result = "recovered",
-                );
-                tracing::info!(server = %server_name, "managed MCP reactive re-auth recovered");
-                crate::session::telemetry::emit_mcp_connection_span(
-                    "connected",
-                    server_name,
-                    "http",
-                    scope(),
-                    Some(elapsed_ms),
-                    Some(tool_count as i64),
-                    None,
-                );
-                let payload = crate::session::mcp_dispatcher::McpServerStatusPayload {
-                    session_id: self.session_id_string(),
-                    name: server_name.to_string(),
-                    source: crate::session::mcp_dispatcher::classify_source(server_name),
-                    status: crate::session::mcp_dispatcher::McpServerStatus::Ready,
-                    reason:
-                        crate::session::mcp_dispatcher::McpServerStatusReason::ManagedTokenRefreshed,
-                    detail: None,
-                    tools: None,
-                };
-                crate::session::mcp_restart::forward_status(&self.notifications.gateway, &payload);
-                Ok(())
-            }
-            Err(e) => {
-                let elapsed_ms = started.elapsed().as_millis() as i64;
-                let failed_at = chrono::Utc::now();
-                let terminal = {
-                    let mut st = self.managed_mcp_handle.lock().await;
-                    st.record_reauth_failure(server_name, failed_at);
-                    st.reauth_is_terminal(server_name)
-                };
-                if terminal {
-                    self.mcp_state
-                        .lock()
-                        .await
-                        .record_init_failure(server_name, true, None);
-                    let payload = crate::session::mcp_dispatcher::McpServerStatusPayload {
-                        session_id: self.session_id_string(),
-                        name: server_name.to_string(),
-                        source: crate::session::mcp_dispatcher::classify_source(server_name),
-                        status: crate::session::mcp_dispatcher::McpServerStatus::NeedsAuth,
-                        reason: crate::session::mcp_dispatcher::McpServerStatusReason::AuthExpired,
-                        detail: None,
-                        tools: None,
-                    };
-                    crate::session::mcp_restart::forward_status(
-                        &self.notifications.gateway,
-                        &payload,
-                    );
-                    tracing::warn!(
-                        target: "metrics.mcp.managed.reauth.cooldown_terminal",
-                        server = %server_name,
-                    );
-                    tracing::warn!(
-                        server = %server_name,
-                        "managed MCP reactive re-auth exhausted; surfacing NeedsAuth"
-                    );
-                    crate::session::telemetry::emit_mcp_connection_span(
-                        "failed",
-                        server_name,
-                        "http",
-                        scope(),
-                        Some(elapsed_ms),
-                        None,
-                        Some(xai_grok_telemetry::events::McpErrorType::Auth.as_str()),
-                    );
-                    self.unregister_server_tools(server_name);
-                    self.refresh_mcp_snapshot_and_schedule_reminder().await;
-                }
-                tracing::info!(
-                    target: "metrics.mcp.managed.reauth.outcome",
-                    server = %server_name,
-                    result = if terminal { "failed" } else { "cooldown" },
-                );
-                Err(e)
-            }
-        }
-    }
-    /// Inner half of [`Self::reactive_managed_reauth`]: snapshot inputs, force
-    /// a fresh proxy fetch, swap clients, re-handshake, and register tools.
-    /// Split out so the caller owns the cooldown gate and the status push.
-    /// Returns the number of tools registered after recovery, so the caller can
-    /// stamp the recovered `mcp.server_connection` span with a `tool_count`.
-    async fn reactive_managed_reauth_inner(&self, server_name: &str) -> Result<usize, String> {
-        let auth_manager = self.auth_manager.clone();
-        let proxy_url = self.models_manager.endpoints().proxy_url();
-        let Some(am) = auth_manager else {
-            return Err("no auth manager; cannot re-fetch managed configs".into());
-        };
-        crate::session::managed_mcp::invalidate_cache(&self.managed_mcp_handle).await;
-        let fresh_configs = crate::session::managed_mcp::fetch_managed_mcp_configs(
-            &self.managed_mcp_handle,
-            &proxy_url,
-            &am,
-        )
-        .await;
-        if fresh_configs.is_empty() {
-            return Err("managed re-fetch returned no configs".into());
-        }
-        {
-            let mut st = self.mcp_state.lock().await;
-            st.refresh_managed_clients(
-                fresh_configs
-                    .iter()
-                    .map(|c| (c.endpoint.as_str(), &c.headers)),
-            );
-        }
-        *self.managed_mcp_expires_at.lock().unwrap() = fresh_configs
-            .iter()
-            .filter_map(|c| c.token_expires_at)
-            .min();
-        let client = {
-            let st = self.mcp_state.lock().await;
-            st.get_client(server_name)
-                .cloned()
-                .ok_or_else(|| format!("client '{server_name}' missing after refresh"))?
-        };
-        let registrations = client
-            .get_tool_registrations(self.mcp_state.clone())
-            .await
-            .map_err(|e| format!("re-handshake failed: {e}"))?;
-        let mut mcp_state = self.mcp_state.lock().await;
-        mcp_state.auth_required.remove(server_name);
-        mcp_state.clear_init_failed(server_name);
-        let tool_count = registrations.len();
-        let mut ui_tools: std::collections::HashMap<
-            String,
-            Vec<crate::extensions::mcp::McpToolEntry>,
-        > = std::collections::HashMap::new();
-        for reg in registrations {
-            self.register_mcp_tool(server_name, reg, &mut mcp_state, &mut ui_tools)
-                .await;
-        }
-        drop(mcp_state);
-        self.refresh_mcp_snapshot_and_schedule_reminder().await;
-        self.emit_mcp_tools_changed_notifications(ui_tools);
-        Ok(tool_count)
-    }
     /// Register tools from shared (inherited) MCP clients on this session's ToolBridge.
     ///
     /// Shared clients are already connected (Arc-shared from parent), so
@@ -411,9 +189,6 @@ impl SessionActor {
     /// Runs force_reauth (browser flow), then re-initializes the server
     /// and registers its tools.
     pub(super) async fn handle_mcp_auth_trigger(&self, server_name: &str) -> Result<(), String> {
-        if server_name.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX) {
-            return Err("To authenticate, visit grok.com".to_string());
-        }
         let client = match self.mcp_state.lock().await.get_client(server_name).cloned() {
             Some(c) if c.has_auth() => c,
             _ => self.recreate_http_client_with_oauth(server_name).await?,
@@ -704,8 +479,7 @@ impl SessionActor {
                         "connection failed".to_string()
                     };
                     let retries_on_use = !mcp_state.auth_required.contains(name)
-                        && matches!(cfg, acp::McpServer::Http(_) | acp::McpServer::Sse(_))
-                        && !name.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX);
+                        && matches!(cfg, acp::McpServer::Http(_) | acp::McpServer::Sse(_));
                     let reason = if retries_on_use {
                         format!("{base} — retries automatically on next tool call")
                     } else {
@@ -795,14 +569,9 @@ impl SessionActor {
         !disabled.contains(server)
     }
     /// HTTP analog of [`Self::is_stdio_server_configured`]: `true` iff
-    /// `server` has an enabled, **non-managed** `Http` / `Sse` config entry.
+    /// `server` has an enabled `Http` / `Sse` config entry.
     /// Gates [`crate::session::mcp_restart::maybe_schedule_http_recovery`].
-    /// Managed connectors (`MANAGED_MCP_PREFIX`) are excluded — out of scope
-    /// for in-place recovery; this mirrors the dispatcher's filter.
     pub(crate) async fn is_http_server_configured(&self, server: &str) -> bool {
-        if server.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX) {
-            return false;
-        }
         let mcp_state = self.mcp_state.lock().await;
         let is_http_in_configs = mcp_state
             .configs
@@ -1166,17 +935,6 @@ impl SessionActor {
                     &mcp_server_configs,
                     cwd,
                 ));
-            let managed_count = mcp_server_configs
-                .iter()
-                .filter(|c| {
-                    mcp_server_name(c).starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-                })
-                .count() as u32;
-            self.events
-                .emit(xai_file_utils::events::Event::McpManagedConfigResult {
-                    server_count: managed_count,
-                    error: None,
-                });
         }
         let configs_to_start: Vec<_> = mcp_server_configs
             .iter()
@@ -1443,13 +1201,7 @@ impl SessionActor {
                             Ok((server_name, handles, server_start.elapsed(), timeout_sec))
                         }
                         Err(e) => {
-                            let needs_auth = if server_name
-                                .starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-                            {
-                                e.is_auth_rejection()
-                            } else {
-                                client.has_auth()
-                            };
+                            let needs_auth = client.has_auth();
                             tracing::warn!(
                                 server = server_name.as_str(),
                                 elapsed_ms = server_start.elapsed().as_millis() as u64,

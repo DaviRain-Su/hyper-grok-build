@@ -1,8 +1,8 @@
 //! Worktree lifecycle methods (`workspace.create_worktree`,
 //! `workspace.remove_worktree`, `workspace.apply_worktree`,
 //! `workspace.worktree_*`).
-use super::WorkspaceRpc;
 use super::git::{ChangeType, GitFileChange};
+use super::{RpcActivityClass, WorkspaceRpc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 /// Worktree creation strategy.
@@ -92,6 +92,7 @@ pub struct CreateWorktreeRequest {
 }
 impl WorkspaceRpc for CreateWorktreeRequest {
     const METHOD: &'static str = "workspace.create_worktree";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = Value;
 }
 fn default_copy_mode() -> WorktreeCopyMode {
@@ -133,6 +134,7 @@ pub enum CreateWorktreeResponse {
 pub struct WorktreeCreateSyncReq(pub CreateWorktreeRequest);
 impl WorkspaceRpc for WorktreeCreateSyncReq {
     const METHOD: &'static str = "workspace.worktree_create_sync";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = Value;
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -151,6 +153,7 @@ pub struct RemoveWorktreeRequest {
 }
 impl WorkspaceRpc for RemoveWorktreeRequest {
     const METHOD: &'static str = "workspace.remove_worktree";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = Value;
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -208,6 +211,7 @@ pub struct CreateWorktreeFromWorktreeSyncReq {
 }
 impl WorkspaceRpc for CreateWorktreeFromWorktreeSyncReq {
     const METHOD: &'static str = "workspace.worktree_create_from_worktree_sync";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = CreateWorktreeFromWorktreeResponse;
 }
 /// Serializable version of `PrepareWorktreeResult` for wire transport.
@@ -235,6 +239,7 @@ pub struct ApplyWorktreeRequest {
 }
 impl WorkspaceRpc for ApplyWorktreeRequest {
     const METHOD: &'static str = "workspace.apply_worktree";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = Value;
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -268,6 +273,7 @@ pub struct WorktreeShowReq {
 }
 impl WorkspaceRpc for WorktreeShowReq {
     const METHOD: &'static str = "workspace.worktree_show";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +286,7 @@ pub struct WorktreeGcReq {
 }
 impl WorkspaceRpc for WorktreeGcReq {
     const METHOD: &'static str = "workspace.worktree_gc";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -292,18 +299,21 @@ pub struct WorktreeListReq {
 }
 impl WorkspaceRpc for WorktreeListReq {
     const METHOD: &'static str = "workspace.worktree_list";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeDbRebuildReq {}
 impl WorkspaceRpc for WorktreeDbRebuildReq {
     const METHOD: &'static str = "workspace.worktree_db_rebuild";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeDbPathReq {}
 impl WorkspaceRpc for WorktreeDbPathReq {
     const METHOD: &'static str = "workspace.worktree_db_path";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = WorktreeDbPathResponse;
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +324,7 @@ pub struct WorktreeDbPathResponse {
 pub struct WorktreeDbStatsReq {}
 impl WorkspaceRpc for WorktreeDbStatsReq {
     const METHOD: &'static str = "workspace.worktree_db_stats";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 #[cfg(test)]

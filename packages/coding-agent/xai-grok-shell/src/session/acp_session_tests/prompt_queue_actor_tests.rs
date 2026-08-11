@@ -1172,11 +1172,8 @@ async fn queue_input_send_now_inserts_behind_running_front_and_requests_cancel()
         .await;
 }
 
-/// Stacked send-now prompts insert FIFO (first sent runs first), not LIFO.
-/// Exercised via an active goal turn, which promotes send-now rows but never
-/// cancels — so multiple sends accumulate behind the running front.
 #[tokio::test]
-async fn queue_input_stacked_send_now_prompts_insert_fifo_during_goal_turn() {
+async fn queue_input_send_now_during_goal_turn_merges_as_interjections_fifo() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1191,10 +1188,14 @@ async fn queue_input_stacked_send_now_prompts_insert_fifo_during_goal_turn() {
                 .current_prompt_id
                 .lock()
                 .expect("current_prompt_id mutex poisoned") = Some("running".into());
-            actor
-                .tool_context
-                .goal_loop_active_gate
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            actor.goal_tracker.lock().create_goal(
+                "goal".into(),
+                "objective".into(),
+                None,
+                0,
+                "2026-01-01T00:00:00Z".into(),
+                None,
+            );
 
             for id in ["sn-1", "sn-2"] {
                 let (respond_to, _prx) = oneshot::channel();
@@ -1208,20 +1209,27 @@ async fn queue_input_stacked_send_now_prompts_insert_fifo_during_goal_turn() {
                         )
                     })
                     .await;
-                assert!(!cancel, "goal turns promote send-now but never cancel");
+                assert!(!cancel, "goal turns never cancel-and-send");
             }
 
-            let state = actor.state.lock().await;
-            let order: Vec<&str> = state
-                .pending_inputs
-                .iter()
-                .map(|i| i.prompt_id.as_str())
-                .collect();
             assert_eq!(
-                order,
-                vec!["running", "sn-1", "sn-2", "held"],
-                "send-now prompts must run in the order they were sent (FIFO)"
+                actor
+                    .state
+                    .lock()
+                    .await
+                    .pending_inputs
+                    .iter()
+                    .map(|item| item.prompt_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["running", "held"]
             );
+            let interjections: Vec<String> = actor
+                .pending_interjections
+                .drain_all()
+                .into_iter()
+                .map(|entry| entry.text)
+                .collect();
+            assert_eq!(interjections, vec!["sn-1", "sn-2"]);
         })
         .await;
 }
@@ -1430,9 +1438,8 @@ async fn queue_input_auto_send_now_during_foreground_subagent_await_window() {
         .await;
 }
 
-/// Synthetic inputs and active goal loops never take the send-now path.
 #[tokio::test]
-async fn queue_input_send_now_exempts_synthetic_and_goal_turns() {
+async fn queue_input_send_now_exempts_synthetic_prompts() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1460,28 +1467,69 @@ async fn queue_input_send_now_exempts_synthetic_and_goal_turns() {
                 })
                 .await;
             assert!(!cancel, "synthetic prompts must never cancel the turn");
+        })
+        .await;
+}
 
-            actor
-                .tool_context
-                .goal_loop_active_gate
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            let (respond_to, _p2) = oneshot::channel();
+#[tokio::test]
+async fn queue_send_now_during_goal_routes_by_kind() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.running_task = Some(running_task_stub("running"));
+                state.pending_inputs.push_back(user_item("q1", "A"));
+                state.pending_inputs.push_back(bash_item("b1", "A", "ls"));
+            }
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("running".into());
+            actor.goal_tracker.lock().create_goal(
+                "goal".into(),
+                "objective".into(),
+                None,
+                0,
+                "2026-01-01T00:00:00Z".into(),
+                None,
+            );
+
             let cancel = actor
-                .queue_input(QueueInputRequest {
-                    send_now: true,
-                    ..queue_input_request(
-                        vec![acp::ContentBlock::Text(acp::TextContent::new("nudge"))],
-                        "d-goal",
-                        respond_to,
-                    )
-                })
+                .handle_interject_queued_prompt("q1", 0, Some("A"), None)
                 .await;
-            assert!(!cancel, "goal turns must not be cancelled by send-now");
+            assert!(!cancel);
             let state = actor.state.lock().await;
             assert_eq!(
-                state.pending_inputs.back().map(|i| i.prompt_id.as_str()),
-                Some("d-goal"),
-                "goal-suppressed send-now falls back to a plain append"
+                state
+                    .pending_inputs
+                    .iter()
+                    .map(|item| item.prompt_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["running", "b1"]
+            );
+            drop(state);
+            let interjections: Vec<String> = actor
+                .pending_interjections
+                .drain_all()
+                .into_iter()
+                .map(|entry| entry.text)
+                .collect();
+            assert_eq!(interjections, vec!["text for q1"]);
+
+            let cancel = actor
+                .handle_interject_queued_prompt("b1", 0, Some("A"), None)
+                .await;
+            assert!(!cancel);
+            let state = actor.state.lock().await;
+            assert!(
+                state
+                    .pending_inputs
+                    .iter()
+                    .any(|item| item.prompt_id == "b1"),
+                "bash rows remain queued during goals"
             );
         })
         .await;

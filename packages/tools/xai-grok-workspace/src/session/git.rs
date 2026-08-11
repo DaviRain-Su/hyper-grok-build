@@ -413,6 +413,7 @@ pub fn change_type_from_git2_delta(delta: git2::Delta) -> ChangeType {
         git2::Delta::Renamed => ChangeType::Rename,
         git2::Delta::Copied => ChangeType::Copy,
         git2::Delta::Typechange => ChangeType::Typechange,
+        git2::Delta::Untracked => ChangeType::Untracked,
         other => {
             tracing::warn!(?other, "unexpected git delta type, treating as Edit");
             ChangeType::Edit
@@ -489,28 +490,67 @@ pub async fn get_branch(cwd: &Path) -> Option<String> {
         .ok()
         .filter(|b| !b.is_empty())
 }
-/// Returns (is_worktree, main_repo_display_name) if this is a worktree.
-/// The display name is the main repo path, preferably relative to $HOME as ~...
+/// Path-component tilde collapse (`~/src/repo`). String prefix matching would
+/// treat `HOME=/Users/u` as a prefix of `/Users/user/xai`.
+fn collapse_home_path(path: &Path, home: Option<&Path>) -> String {
+    let Some(home) = home else {
+        return path.display().to_string();
+    };
+    let home = PathBuf::from(
+        home.as_os_str()
+            .to_string_lossy()
+            .trim_end_matches(['/', '\\']),
+    );
+    path.strip_prefix(&home)
+        .map(|rest| format!("~/{}", rest.display()))
+        .unwrap_or_else(|_| path.display().to_string())
+}
+/// Returns (is_worktree, main_repo_display_name) if this is a git checkout.
+/// `None` when `cwd` is not inside a repo. The display name is the main repo
+/// path, preferably relative to $HOME as ~...
 pub async fn get_worktree_info(cwd: &Path) -> Option<(bool, Option<String>)> {
     let cwd = cwd.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let repo = Repository::discover(&cwd).ok()?;
-        let git_dir = repo.path().to_path_buf();
-        let common_dir = repo.commondir();
-        let is_worktree = git_dir != common_dir;
-        if !is_worktree {
-            return Some((false, None));
-        }
-        let main_root = common_dir.parent().map(|p| p.to_path_buf())?;
-        let display = if let Ok(home) = std::env::var("HOME") {
-            main_root
-                .strip_prefix(&home)
-                .map(|s| format!("~{}", s.display()))
-                .unwrap_or_else(|_| main_root.display().to_string())
-        } else {
-            main_root.display().to_string()
+        let display = |path: &Path| -> String {
+            collapse_home_path(path, std::env::var("HOME").ok().as_deref().map(Path::new))
         };
-        Some((true, Some(display)))
+        let mut marker_main = None;
+        for ancestor in cwd.ancestors() {
+            let git = ancestor.join(".git");
+            if let Ok(contents) = std::fs::read_to_string(git.join("grok-worktree-source"))
+                && let trimmed = contents.trim()
+                && !trimmed.is_empty()
+            {
+                marker_main = Some(display(Path::new(trimmed)));
+                break;
+            }
+            if git.exists() {
+                break;
+            }
+        }
+        let mut db_main = None;
+        let mut db_label = None;
+        if let Ok(db) = crate::worktree::open_db() {
+            for ancestor in cwd.ancestors() {
+                if let Ok(Some(record)) = db.get(&ancestor.to_string_lossy()) {
+                    db_label = record.label().map(str::to_owned).filter(|s| !s.is_empty());
+                    if !record.source_repo.as_os_str().is_empty() {
+                        db_main = Some(display(&record.source_repo));
+                    }
+                    break;
+                }
+                if ancestor.join(".git").exists() {
+                    break;
+                }
+            }
+        }
+        let linked_main = (repo.path() != repo.commondir())
+            .then(|| repo.commondir().parent().map(display))
+            .flatten();
+        let main_repo = marker_main.or(db_main).or(linked_main);
+        let is_worktree = main_repo.is_some() || db_label.is_some();
+        Some((is_worktree, main_repo))
     })
     .await
     .ok()
@@ -728,15 +768,20 @@ fn collect_diff_stats(
     pathspecs: Option<&[String]>,
     include_patch: bool,
 ) -> DiffStatsResult {
+    let base_ref = GitRef::parse(from);
+    let head_ref = GitRef::parse(to);
     let mut opts = DiffOptions::new();
     opts.ignore_submodules(true);
+    if matches!(head_ref, GitRef::Workdir) {
+        opts.include_untracked(true)
+            .recurse_untracked_dirs(true)
+            .show_untracked_content(true);
+    }
     if let Some(specs) = pathspecs {
         for spec in specs {
             opts.pathspec(spec);
         }
     }
-    let base_ref = GitRef::parse(from);
-    let head_ref = GitRef::parse(to);
     let diff = match create_diff(repo, &base_ref, &head_ref, false, &mut opts) {
         Some(d) => d,
         None => {
@@ -3246,6 +3291,248 @@ mod tests {
             vec!["https://github.com/xai-org/example.git".to_string()],
         );
     }
+    fn init_repo_on_branch(path: &Path, branch: &str) {
+        std::fs::create_dir_all(path).unwrap();
+        let repo = git2::Repository::init(path).unwrap();
+        std::fs::write(path.join("README"), "test\n").unwrap();
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let tree_id = {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("README")).unwrap();
+            index.write().unwrap();
+            index.write_tree().unwrap()
+        };
+        let tree = repo.find_tree(tree_id).unwrap();
+        let oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        let commit = repo.find_commit(oid).unwrap();
+        let current = repo
+            .head()
+            .ok()
+            .and_then(|h| h.shorthand().map(str::to_string));
+        if current.as_deref() != Some(branch) {
+            repo.branch(branch, &commit, true).unwrap();
+            repo.set_head(&format!("refs/heads/{branch}")).unwrap();
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+                .unwrap();
+        }
+    }
+    fn copy_dir_all(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let to = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir_all(&entry.path(), &to);
+            } else {
+                std::fs::copy(entry.path(), to).unwrap();
+            }
+        }
+    }
+    fn checkout_named_branch(repo_path: &Path, branch: &str) {
+        let repo = git2::Repository::open(repo_path).unwrap();
+        let commit = repo.head().unwrap().peel_to_commit().unwrap();
+        if repo.find_branch(branch, git2::BranchType::Local).is_err() {
+            repo.branch(branch, &commit, false).unwrap();
+        }
+        repo.set_head(&format!("refs/heads/{branch}")).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
+    }
+    fn collapse_home_for_test(path: &Path) -> String {
+        collapse_home_path(path, std::env::var("HOME").ok().as_deref().map(Path::new))
+    }
+    #[test]
+    fn collapse_home_path_requires_whole_component() {
+        let home = Path::new("/Users/u");
+        assert_eq!(
+            collapse_home_path(Path::new("/Users/user/xai"), Some(home)),
+            "/Users/user/xai"
+        );
+        assert_eq!(
+            collapse_home_path(Path::new("/Users/u/src/repo"), Some(home)),
+            "~/src/repo"
+        );
+    }
+    #[tokio::test]
+    async fn get_worktree_info_standalone_grok_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        let clone = tmp.path().join("clone");
+        init_repo_on_branch(&main, "main-only");
+        copy_dir_all(&main, &clone);
+        checkout_named_branch(&clone, "wt-branch");
+        std::fs::write(
+            clone.join(".git").join("grok-worktree-source"),
+            main.display().to_string(),
+        )
+        .unwrap();
+        assert!(clone.join(".git").is_dir());
+        assert!(clone.join(".git").join("grok-worktree-source").is_file());
+        let (is_wt, main_repo) = get_worktree_info(&clone).await.expect("clone is a repo");
+        assert!(is_wt);
+        assert_eq!(
+            main_repo.as_deref(),
+            Some(collapse_home_for_test(&main).as_str())
+        );
+        assert_eq!(get_branch(&clone).await.as_deref(), Some("wt-branch"));
+        let nested = clone.join("sub").join("dir");
+        std::fs::create_dir_all(&nested).unwrap();
+        let (nested_wt, nested_main) = get_worktree_info(&nested)
+            .await
+            .expect("nested path is in the clone");
+        assert!(nested_wt);
+        assert_eq!(
+            nested_main.as_deref(),
+            Some(collapse_home_for_test(&main).as_str())
+        );
+    }
+    #[tokio::test]
+    async fn get_worktree_info_nested_plain_repo_does_not_inherit_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        let clone = tmp.path().join("clone");
+        init_repo_on_branch(&main, "main-only");
+        copy_dir_all(&main, &clone);
+        checkout_named_branch(&clone, "wt-branch");
+        std::fs::write(
+            clone.join(".git").join("grok-worktree-source"),
+            main.display().to_string(),
+        )
+        .unwrap();
+        let nested = clone.join("vendor").join("dep");
+        init_repo_on_branch(&nested, "dep-branch");
+        let (is_wt, main_repo) = get_worktree_info(&nested)
+            .await
+            .expect("nested init is a repo");
+        assert!(!is_wt);
+        assert!(main_repo.is_none());
+        assert_eq!(get_branch(&nested).await.as_deref(), Some("dep-branch"));
+    }
+    #[tokio::test]
+    async fn get_worktree_info_tilde_collapses_home_prefix() {
+        let Some(home) = std::env::var("HOME").ok().filter(|h| !h.is_empty()) else {
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let clone = tmp.path().join("clone");
+        init_repo_on_branch(&clone, "wt-branch");
+        let fake_main = PathBuf::from(&home).join("xai-fake-main-repo-for-wt-display");
+        std::fs::write(
+            clone.join(".git").join("grok-worktree-source"),
+            fake_main.display().to_string(),
+        )
+        .unwrap();
+        let (is_wt, main_repo) = get_worktree_info(&clone).await.expect("clone is a repo");
+        assert!(is_wt);
+        assert_eq!(
+            main_repo.as_deref(),
+            Some("~/xai-fake-main-repo-for-wt-display")
+        );
+    }
+    #[tokio::test]
+    async fn get_worktree_info_plain_repo_is_not_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_on_branch(tmp.path(), "main");
+        assert_eq!(get_worktree_info(tmp.path()).await, Some((false, None)));
+    }
+    fn block_on_worktree_info(cwd: &Path) -> Option<(bool, Option<String>)> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(get_worktree_info(cwd))
+    }
+    fn register_db_worktree(home: &Path, wt: &Path, source: &Path, label: &str) {
+        let db = xai_fast_worktree::db::WorktreeDb::open(home).unwrap();
+        db.register(&xai_fast_worktree::db::WorktreeRecord {
+            id: "db-wt".into(),
+            path: dunce::canonicalize(wt).unwrap_or_else(|_| wt.to_path_buf()),
+            source_repo: source.to_path_buf(),
+            repo_name: "main-repo".into(),
+            kind: xai_fast_worktree::db::WorktreeKind::Session,
+            creation_mode: "standalone".into(),
+            git_ref: None,
+            head_commit: None,
+            session_id: None,
+            creator_pid: None,
+            created_at: 1,
+            last_accessed_at: None,
+            status: xai_fast_worktree::db::WorktreeStatus::Alive,
+            metadata: Some(serde_json::json!({ "label": label })),
+        })
+        .unwrap();
+    }
+    #[test]
+    fn get_worktree_info_db_record_without_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = dunce::canonicalize(tmp.path()).unwrap().join("grok-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let wt = tmp.path().join("clone");
+        init_repo_on_branch(&wt, "wt-branch");
+        let source = PathBuf::from("/src/main-repo");
+        register_db_worktree(&home, &wt, &source, "db-label");
+        let (is_wt, main_repo) = block_on_worktree_info(&wt).expect("clone is a repo");
+        assert!(is_wt);
+        assert_eq!(
+            main_repo.as_deref(),
+            Some(collapse_home_for_test(&source).as_str())
+        );
+    }
+    #[test]
+    fn get_worktree_info_nested_repo_does_not_inherit_db_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = dunce::canonicalize(tmp.path()).unwrap().join("grok-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let wt = tmp.path().join("clone");
+        init_repo_on_branch(&wt, "wt-branch");
+        register_db_worktree(&home, &wt, Path::new("/src/main-repo"), "db-label");
+        let nested = wt.join("vendor").join("dep");
+        init_repo_on_branch(&nested, "dep-branch");
+        let (is_wt, main_repo) = block_on_worktree_info(&nested).expect("nested init is a repo");
+        assert!(!is_wt);
+        assert!(main_repo.is_none());
+    }
+    #[tokio::test]
+    async fn get_worktree_info_linked_git_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        init_repo_on_branch(&main, "main-only");
+        let repo = git2::Repository::open(&main).unwrap();
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("wt-branch", &head_commit, false).unwrap();
+        let wt_path = tmp.path().join("my-worktree");
+        repo.worktree(
+            "my-worktree",
+            &wt_path,
+            Some(
+                git2::WorktreeAddOptions::new().reference(Some(
+                    &repo
+                        .find_branch("wt-branch", git2::BranchType::Local)
+                        .unwrap()
+                        .into_reference(),
+                )),
+            ),
+        )
+        .unwrap();
+        assert!(wt_path.join(".git").is_file());
+        let (is_wt, main_repo) = get_worktree_info(&wt_path)
+            .await
+            .expect("linked worktree is a repo");
+        assert!(is_wt);
+        let main_repo = main_repo.expect("linked worktree has main_repo");
+        let expected = collapse_home_for_test(&main);
+        let expected_canon = dunce::canonicalize(&main)
+            .map(|p| collapse_home_for_test(&p))
+            .unwrap_or_else(|_| expected.clone());
+        assert!(
+            main_repo == expected || main_repo == expected_canon,
+            "main_repo={main_repo}, expected {expected} or {expected_canon}"
+        );
+    }
     #[test]
     fn test_strip_prefix_canonicalized_basic() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3495,6 +3782,31 @@ mod tests {
     fn test_parse_numstat_empty() {
         let stats = parse_numstat("");
         assert!(stats.is_empty());
+    }
+    #[tokio::test]
+    async fn diffs_head_to_working_reports_untracked_file_additions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        std::fs::write(tmp.path().join("README.md"), "hello\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("README.md")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        std::fs::write(tmp.path().join("new.txt"), "line1\nline2\nline3\n").unwrap();
+        let data = diffs(tmp.path(), None, "HEAD", "working", false, false, false)
+            .await
+            .unwrap();
+        let file = data
+            .files
+            .iter()
+            .find(|f| f.path == "new.txt")
+            .expect("untracked file missing from HEAD→working diff");
+        assert_eq!(file.additions, 3);
+        assert_eq!(file.deletions, 0);
+        assert!(matches!(file.change_type, ChangeType::Untracked));
     }
     #[test]
     fn test_parse_porcelain_v2_ordinary() {

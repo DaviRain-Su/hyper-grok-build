@@ -38,108 +38,15 @@ fn drop_cli_catchall_allows(
 /// Build the per-session current-thread tokio runtime.
 ///
 /// Construction acquires fds (epoll/kqueue, waker) and fails with
-/// `EMFILE`/`EAGAIN` under resource pressure. Extracted so the containment
-/// contract — exhaustion returns `Err`, never aborts — is testable
-/// (`runtime_containment_tests`).
+/// `EMFILE`/`EAGAIN` under resource pressure. Cap only — pre-warm is
+/// process-lifetime (`xai_tty_utils::runtime`).
 pub(crate) fn build_session_runtime() -> std::io::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    xai_tty_utils::runtime::apply_blocking_pool(builder.enable_all()).build()
 }
-/// Building the session runtime under fd exhaustion must return `Err`, never
-/// panic (under `panic=abort` a panic kills every live session).
-///
-/// The rlimit is lowered only in a re-exec'd child (the `xai-gix-status`
-/// pattern), so parallel tests are unaffected; stdout markers distinguish
-/// skip (unenforceable environment) from pass/fail.
 #[cfg(all(test, unix))]
-mod runtime_containment_tests {
-    use super::build_session_runtime;
-    /// Env marker dispatching the re-exec'd test binary into child logic.
-    const CHILD_ENV: &str = "XAI_GROK_SHELL_RUNTIME_CONTAINMENT_CHILD";
-    const PASS_MARK: &str = "runtime-build-contained:";
-    const SKIP_MARK: &str = "skip-child:";
-    /// Child: lower RLIMIT_NOFILE, fill the fd table, assert `Err`.
-    fn run_child() -> ! {
-        let mut lim = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
-            println!("{SKIP_MARK} getrlimit failed");
-            std::process::exit(0);
-        }
-        lim.rlim_cur = 64.min(lim.rlim_max);
-        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) } != 0 {
-            println!("{SKIP_MARK} setrlimit failed");
-            std::process::exit(0);
-        }
-        let mut held = Vec::new();
-        loop {
-            let fd = unsafe { libc::dup(0) };
-            if fd < 0 {
-                break;
-            }
-            held.push(fd);
-            if held.len() > 4096 {
-                println!("{SKIP_MARK} fd limit not enforced");
-                std::process::exit(0);
-            }
-        }
-        match build_session_runtime() {
-            Err(e) => {
-                println!("{PASS_MARK} {e}");
-                std::process::exit(0);
-            }
-            Ok(_) => {
-                println!("{SKIP_MARK} runtime built despite full fd table");
-                std::process::exit(0);
-            }
-        }
-    }
-    /// Doubles as the child entry point when `CHILD_ENV` is set.
-    #[test]
-    fn child_entry_runtime_build_under_fd_exhaustion() {
-        if std::env::var_os(CHILD_ENV).is_some() {
-            run_child();
-        }
-    }
-    #[test]
-    fn runtime_build_failure_is_contained() {
-        let filter = module_path!()
-            .split_once("::")
-            .map(|(_, rest)| rest)
-            .unwrap_or_default();
-        let exe = std::env::current_exe().expect("current_exe");
-        let mut cmd = std::process::Command::new(exe);
-        cmd.arg("--exact")
-            .arg(format!(
-                "{filter}::child_entry_runtime_build_under_fd_exhaustion"
-            ))
-            .arg("--nocapture")
-            .arg("--test-threads=1")
-            .env(CHILD_ENV, "1")
-            .stdin(std::process::Stdio::null());
-        xai_tty_utils::detach_std_command(&mut cmd);
-        let out = cmd.output().expect("spawn child test process");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            out.status.success() && !stderr.contains("panicked at"),
-            "child aborted/panicked instead of containing the failure \
-             (status: {:?})\nstdout:\n{stdout}\nstderr:\n{stderr}",
-            out.status
-        );
-        if stdout.contains(SKIP_MARK) {
-            eprintln!("skipped: {stdout}");
-            return;
-        }
-        assert!(
-            stdout.contains(PASS_MARK),
-            "no pass/skip marker (filter matched nothing?)\nstdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-    }
-}
+#[path = "spawn_runtime_containment_tests.rs"]
+mod runtime_containment_tests;
 #[cfg(test)]
 mod cli_catchall_drop_tests {
     use super::drop_cli_catchall_allows;
@@ -261,7 +168,6 @@ pub(crate) async fn spawn_session_actor(
     loc_tracking_enabled: bool,
     feedback_flags: crate::session::feedback_manager::FeedbackFlags,
     managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
-    managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     managed_mcp_proxy_base_url: String,
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
@@ -1140,6 +1046,7 @@ pub(crate) async fn spawn_session_actor(
     prompt_context.normalize_for_persistence();
     save_prompt_context(&session_info, &prompt_context);
     let is_subagent_spawn = startup_hints.is_subagent;
+    let session_non_interactive = startup_hints.non_interactive;
     install_system_prompt(
         &mut conversation,
         &mut startup_hints.inherited_prefix_len,
@@ -1756,7 +1663,6 @@ pub(crate) async fn spawn_session_actor(
         pending_classifier_completions: parking_lot::Mutex::new(VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle,
-        managed_mcp_expires_at: std::sync::Mutex::new(managed_mcp_expires_at),
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announced_servers: Mutex::new(
             persisted_announcement_state
@@ -2173,6 +2079,7 @@ pub(crate) async fn spawn_session_actor(
             origin_client: origin_client.clone(),
             code_nav_enabled,
             ask_user_question_enabled,
+            non_interactive: session_non_interactive,
             plan_mode: plan_mode.clone(),
             force_compact,
             permission_handle: permissions_for_handle,
@@ -2281,7 +2188,6 @@ pub(crate) async fn spawn_session_on_thread(
     loc_tracking_enabled: bool,
     feedback_flags: crate::session::feedback_manager::FeedbackFlags,
     managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
-    managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     managed_mcp_proxy_base_url: String,
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
@@ -2456,7 +2362,6 @@ pub(crate) async fn spawn_session_on_thread(
                         loc_tracking_enabled,
                         feedback_flags,
                         managed_mcp_handle,
-                        managed_mcp_expires_at,
                         managed_mcp_proxy_base_url,
                         session_model_id,
                         session_yolo_mode,

@@ -76,9 +76,10 @@ use workflow_ingest::ingest_workflow_update;
 
 #[cfg(test)]
 pub(crate) use session_notification::apply_session_event_for_test;
+pub(crate) use session_notification::drop_unexpected_replay;
 use session_notification::{
     advance_reconnect_cursor, confirm_context_used, detect_plan_mode_change,
-    drop_unexpected_replay, handle_session_notification,
+    handle_session_notification,
 };
 
 pub(crate) use queue::PendingRunningAdoption;
@@ -737,10 +738,11 @@ fn queue_open_workflows_modal_refresh(app: &mut AppView, agent_id: AgentId) {
 
 /// Handle an xAI extension notification.
 fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
-    match notif.method.as_ref() {
-        "x.ai/session_notification" | "x.ai/session/update" => {
-            handle_session_notification(notif, app)
-        }
+    let method = notif.method.as_ref();
+    if crate::acp::is_session_update_ext_method(method) {
+        return handle_session_notification(notif, app);
+    }
+    match method {
         "x.ai/follow_ups" => handle_follow_ups(notif, app),
         "x.ai/task_backgrounded" => handle_task_backgrounded(notif, app),
         "x.ai/task_completed" => handle_task_completed(notif, app),
@@ -813,12 +815,32 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
         return false;
     };
 
-    // Dedup our own optimistic echo: if we minted this id we already rendered
-    // the block locally — drop the broadcast copy (and forget the id).
-    if let Some(iid) = interjection_id
-        && agent.self_interjection_ids.remove(iid)
-    {
-        return false;
+    if let Some(iid) = interjection_id {
+        // Two self-message flows land here, painted differently on the
+        // originator: a direct interjection (already an interjection block,
+        // tracked by `self_interjection_ids`) is a pure dedup — drop it; a goal
+        // Send Now (a plain user-prompt block in `send_now_painted_blocks`) must
+        // instead be converted to interjection styling.
+        if agent.self_interjection_ids.remove(iid) {
+            return false;
+        }
+        // `edited` is ignored: the painted block already holds the authoritative
+        // (possibly edited) text — we only restyle it. Drift resolution via
+        // `edited` matters only on the turn-start adoption path.
+        if agent.is_self_originated_prompt(iid)
+            && let Some((entry_id, _)) = agent.send_now_painted_blocks.remove(iid)
+        {
+            agent.clear_send_now_expectation();
+            if let Some(index) = agent.scrollback.index_of_id(entry_id)
+                && let Some(RenderBlock::UserPrompt(block)) = agent
+                    .scrollback
+                    .entry_mut(index)
+                    .map(|entry| &mut entry.block)
+            {
+                block.is_interjection = true;
+            }
+            return false;
+        }
     }
 
     agent

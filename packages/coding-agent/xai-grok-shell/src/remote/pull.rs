@@ -54,7 +54,9 @@ pub(crate) mod hydrate {
 
     use crate::remote::client::{BackendError, LoadDataResponse, LoadedMessage, SessionInfo};
     use crate::session::info::Info;
-    use crate::session::persistence::{CHAT_FORMAT_VERSION, Summary, default_model_id};
+    use crate::session::persistence::{
+        CHAT_FORMAT_VERSION, Summary, default_model_id, sanitize_and_cap_title,
+    };
     use crate::session::storage::{SUMMARY_FILE, UPDATES_FILE};
 
     fn io_err(path: &Path, source: std::io::Error) -> BackendError {
@@ -116,13 +118,31 @@ pub(crate) mod hydrate {
             .and_then(|v| v.as_str())
             .map(String::from);
 
+        // Pull is not the rename ext boundary — strip and cap before this
+        // reaches `display_name`.
+        //
+        // `save_session_data` writes the metadata blob, not the session-row
+        // title (`upsert` there passes title=None). Prefer an explicit blob
+        // title — including blank, which means cleared — so a stale row
+        // cannot resurrect a pin or clobber a metadata-only rename.
+        let remote_title = match meta.and_then(|m| m.get("title")) {
+            Some(v) => v.as_str().and_then(sanitize_and_cap_title),
+            None => remote.title.as_deref().and_then(sanitize_and_cap_title),
+        };
+        let generated_title = if remote_title_is_manual(meta) {
+            remote_title.clone()
+        } else {
+            None
+        };
+        let title_is_manual = generated_title.is_some();
+
         let summary = Summary {
             info: info.clone(),
             cwd_generation: 0,
             previous_cwd: None,
             pending_cwd_switch_reminder: None,
             cwd_switch_bookkeeping_generation: 0,
-            session_summary: remote.title.clone().unwrap_or_default(),
+            session_summary: remote_title.unwrap_or_default(),
             created_at: parse_rfc3339_or_now(remote.created_at.as_deref()),
             updated_at: parse_rfc3339_or_now(remote.updated_at.as_deref()),
             num_messages,
@@ -149,8 +169,8 @@ pub(crate) mod hydrate {
             // not the original remote session's, since reconstruction runs locally.
             grok_home: crate::session::persistence::grok_home_string(),
             last_active_at: None,
-            generated_title: None,
-            title_is_manual: false,
+            generated_title,
+            title_is_manual,
             worktree_label: None,
             agent_name: None,
             // Hydrated locally — record the profile this process runs under.
@@ -229,6 +249,15 @@ pub(crate) mod hydrate {
 
     fn write_file(path: &Path, data: &[u8]) -> Result<(), BackendError> {
         std::fs::write(path, data).map_err(|e| io_err(path, e))
+    }
+
+    fn remote_title_is_manual(meta: Option<&serde_json::Value>) -> bool {
+        meta.and_then(|m| {
+            m.get("title_is_manual")
+                .or_else(|| m.get("titleIsManual"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false)
     }
 }
 
@@ -456,5 +485,179 @@ mod tests {
         let content = std::fs::read_to_string(tmp.path().join("updates.jsonl")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2, "invalid message should be skipped");
+    }
+
+    fn hydrate_summary(
+        title: Option<&str>,
+        metadata: Option<serde_json::Value>,
+    ) -> crate::session::persistence::Summary {
+        let data = crate::remote::client::LoadDataResponse {
+            messages: None,
+            session: Some(crate::remote::client::SessionInfo {
+                session_id: "pull-title".into(),
+                title: title.map(str::to_owned),
+                cwd: Some("/tmp".into()),
+                status: None,
+                created_at: None,
+                updated_at: None,
+                metadata,
+            }),
+        };
+        let tmp = tempfile::TempDir::new().unwrap();
+        super::hydrate::write_to_dir(tmp.path(), &data).unwrap();
+        let json = std::fs::read_to_string(tmp.path().join("summary.json")).unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn hydrate_restores_title_is_manual_and_generated_title() {
+        let summary = hydrate_summary(
+            Some("Pinned hop"),
+            Some(serde_json::json!({ "title_is_manual": true })),
+        );
+        assert!(summary.title_is_manual);
+        assert_eq!(summary.generated_title.as_deref(), Some("Pinned hop"));
+        assert_eq!(summary.manual_title_opt().as_deref(), Some("Pinned hop"));
+    }
+
+    #[test]
+    fn hydrate_accepts_camel_case_title_is_manual() {
+        let summary = hydrate_summary(
+            Some("Camel"),
+            Some(serde_json::json!({ "titleIsManual": true })),
+        );
+        assert!(summary.title_is_manual);
+        assert_eq!(summary.generated_title.as_deref(), Some("Camel"));
+    }
+
+    #[test]
+    fn hydrate_defaults_title_is_manual_false_when_absent() {
+        let summary = hydrate_summary(Some("Auto remote"), None);
+        assert!(!summary.title_is_manual);
+        assert!(summary.generated_title.is_none());
+        assert!(summary.manual_title_opt().is_none());
+        assert_eq!(summary.display_title(), "Auto remote");
+    }
+
+    #[test]
+    fn hydrate_ignores_manual_flag_over_blank_title() {
+        let summary = hydrate_summary(
+            Some("   "),
+            Some(serde_json::json!({ "title_is_manual": true })),
+        );
+        assert!(!summary.title_is_manual);
+        assert!(summary.generated_title.is_none());
+        assert!(summary.manual_title_opt().is_none());
+    }
+
+    #[test]
+    fn hydrate_ignores_manual_flag_over_none_title() {
+        let summary = hydrate_summary(None, Some(serde_json::json!({ "title_is_manual": true })));
+        assert!(!summary.title_is_manual);
+        assert!(summary.generated_title.is_none());
+        assert!(summary.manual_title_opt().is_none());
+    }
+
+    #[test]
+    fn hydrate_prefers_metadata_title_over_stale_session_row() {
+        let summary = hydrate_summary(
+            Some("stale auto row"),
+            Some(serde_json::json!({
+                "title": "Pinned hop",
+                "title_is_manual": true
+            })),
+        );
+        assert!(summary.title_is_manual);
+        assert_eq!(summary.generated_title.as_deref(), Some("Pinned hop"));
+        assert_eq!(summary.manual_title_opt().as_deref(), Some("Pinned hop"));
+        assert_eq!(summary.display_title(), "Pinned hop");
+    }
+
+    #[test]
+    fn hydrate_blank_metadata_title_does_not_fall_back_to_stale_row() {
+        let summary = hydrate_summary(
+            Some("stale pinned row"),
+            Some(serde_json::json!({
+                "title": "",
+                "title_is_manual": false
+            })),
+        );
+        assert!(!summary.title_is_manual);
+        assert!(summary.generated_title.is_none());
+        assert!(summary.manual_title_opt().is_none());
+        assert_eq!(summary.session_summary, "");
+    }
+
+    #[test]
+    fn hydrate_from_summary_export_round_trips_manual_flag() {
+        use crate::session::export::ExportedMetadata;
+        use crate::session::info::Info;
+
+        let info = Info {
+            id: agent_client_protocol::SessionId::new("export-pull"),
+            cwd: "/tmp".into(),
+        };
+        let mut summary = crate::session::persistence::Summary::new(
+            &info,
+            agent_client_protocol::ModelId::new("test-model"),
+        )
+        .unwrap();
+        summary.generated_title = Some("Pinned hop".into());
+        summary.title_is_manual = true;
+        summary.session_summary = "stale auto".into();
+        let meta = ExportedMetadata::from_summary(&summary);
+        let json = serde_json::to_value(&meta).unwrap();
+        let pulled = hydrate_summary(meta.title.as_deref(), Some(json));
+        assert_eq!(pulled.manual_title_opt().as_deref(), Some("Pinned hop"));
+        assert_eq!(pulled.display_title(), "Pinned hop");
+    }
+
+    #[test]
+    fn hydrate_stale_exported_flag_does_not_promote_auto_fallback() {
+        use crate::session::export::ExportedMetadata;
+        use crate::session::info::Info;
+
+        let info = Info {
+            id: agent_client_protocol::SessionId::new("stale-hop"),
+            cwd: "/tmp".into(),
+        };
+        let mut summary = crate::session::persistence::Summary::new(
+            &info,
+            agent_client_protocol::ModelId::new("test-model"),
+        )
+        .unwrap();
+        summary.session_summary = "auto first-prompt summary".into();
+        summary.generated_title = Some("   ".into());
+        summary.title_is_manual = true;
+        let meta = ExportedMetadata::from_summary(&summary);
+        let pulled = hydrate_summary(
+            meta.title.as_deref(),
+            Some(serde_json::to_value(&meta).unwrap()),
+        );
+        assert!(pulled.manual_title_opt().is_none());
+        assert!(!pulled.title_is_manual);
+    }
+
+    #[test]
+    fn hydrate_strips_controls_and_caps_pulled_title() {
+        use crate::session::persistence::MAX_TITLE_SCALARS;
+
+        let dirty = format!("\u{1b}]0;PWNED\u{07}{}", "é".repeat(MAX_TITLE_SCALARS + 10));
+        let summary = hydrate_summary(
+            Some(&dirty),
+            Some(serde_json::json!({ "title_is_manual": true })),
+        );
+        const PREFIX: &str = "]0;PWNED";
+        let expected = format!(
+            "{PREFIX}{}",
+            "é".repeat(MAX_TITLE_SCALARS - PREFIX.chars().count())
+        );
+        assert_eq!(summary.display_title(), expected);
+        assert_eq!(summary.display_title().chars().count(), MAX_TITLE_SCALARS);
+        assert!(summary.title_is_manual);
+        assert_eq!(
+            summary.manual_title_opt().as_deref(),
+            Some(expected.as_str())
+        );
     }
 }

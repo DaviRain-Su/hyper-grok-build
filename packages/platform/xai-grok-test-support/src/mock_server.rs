@@ -2,7 +2,8 @@
 //!
 //! Serves the three inference endpoints (`/v1/chat/completions`,
 //! `/v1/responses`, `/v1/messages`) plus `/v1/models`, `/v1/settings`,
-//! `/v1/user`, `/v1/storage`, and `/v1/privacy/coding-data-retention`.
+//! `/v1/user`, `/v1/storage`, `/v1/privacy/coding-data-retention`, and
+//! session writeback (`POST /sessions/{id}/data`, `PUT /sessions/{id}`).
 //!
 //! The inference endpoints answer from the first source that matches: a named
 //! expectation, then the path's [`ScriptedResponse`] queue, then the active
@@ -447,6 +448,11 @@ impl MockInferenceServer {
         format!("http://{}/v1", self.addr)
     }
 
+    /// Origin without the `/v1` inference prefix (`http://127.0.0.1:PORT`).
+    pub fn origin(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
     pub fn request_count(&self) -> u32 {
         self.log.count.load(Ordering::SeqCst)
     }
@@ -653,6 +659,10 @@ impl MockInferenceServer {
         let log_cc = log.clone();
         let log_rs = log.clone();
         let log_msg = log.clone();
+        let log_session_data = log.clone();
+        let log_session_upsert = log.clone();
+        let overrides_session_data = overrides.clone();
+        let overrides_session_upsert = overrides.clone();
         let mode_cc = response_mode.clone();
         let mode_rs = response_mode.clone();
         let mode_msg = response_mode;
@@ -1002,6 +1012,60 @@ impl MockInferenceServer {
                         }
                     },
                 ),
+            )
+            .route(
+                "/sessions/{id}/data",
+                post({
+                    let log = log_session_data;
+                    let overrides = overrides_session_data;
+                    move |axum::extract::Path(id): axum::extract::Path<String>,
+                          headers: HeaderMap,
+                          Json(body): Json<Value>| {
+                        let log = log.clone();
+                        let overrides = overrides.clone();
+                        async move {
+                            if let Some(reject) = overrides.auth_rejection(&headers) {
+                                return reject;
+                            }
+                            let auth = Self::extract_auth(&headers);
+                            log.record(
+                                "POST",
+                                &format!("/sessions/{id}/data"),
+                                Some(&body),
+                                auth.as_deref(),
+                                Self::headers_vec(&headers),
+                            );
+                            StatusCode::OK.into_response()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/sessions/{id}",
+                put({
+                    let log = log_session_upsert;
+                    let overrides = overrides_session_upsert;
+                    move |axum::extract::Path(id): axum::extract::Path<String>,
+                          headers: HeaderMap,
+                          Json(body): Json<Value>| {
+                        let log = log.clone();
+                        let overrides = overrides.clone();
+                        async move {
+                            if let Some(reject) = overrides.auth_rejection(&headers) {
+                                return reject;
+                            }
+                            let auth = Self::extract_auth(&headers);
+                            log.record(
+                                "PUT",
+                                &format!("/sessions/{id}"),
+                                Some(&body),
+                                auth.as_deref(),
+                                Self::headers_vec(&headers),
+                            );
+                            StatusCode::OK.into_response()
+                        }
+                    }
+                }),
             )
             .route(
                 "/v1/storage",
@@ -2109,5 +2173,76 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(chat_stream_text(&resp.text().await.unwrap()), MERMAID_TEXT);
+    }
+
+    #[tokio::test]
+    async fn session_writeback_routes_are_logged() {
+        let server = MockInferenceServer::start().await.unwrap();
+        let client = reqwest::Client::new();
+        let origin = server.origin();
+
+        let data = client
+            .post(format!("{origin}/sessions/abc/data"))
+            .json(&json!({
+                "messages": [{ "content": "x" }],
+                "metadata": { "title": "Manual", "cwd": "/" }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(data.status(), 200);
+
+        let upsert = client
+            .put(format!("{origin}/sessions/abc"))
+            .json(&json!({ "session": { "title": "Manual" }, "agentId": "a" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(upsert.status(), 200);
+
+        let reqs = server.requests();
+        let data_req = reqs
+            .iter()
+            .find(|r| r.method == "POST" && r.path == "/sessions/abc/data")
+            .expect("POST /sessions/abc/data");
+        assert_eq!(
+            data_req
+                .body
+                .as_ref()
+                .and_then(|b| b.get("metadata"))
+                .and_then(|m| m.get("title"))
+                .and_then(|t| t.as_str()),
+            Some("Manual")
+        );
+        assert!(
+            reqs.iter()
+                .any(|r| r.method == "PUT" && r.path == "/sessions/abc"),
+            "PUT /sessions/abc must be logged"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_writeback_respects_required_auth() {
+        let server = MockInferenceServer::start_with_required_auth(
+            vec![MockModelEntry::new("test-model")],
+            "secret-token",
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+        let url = format!("{}/sessions/abc/data", server.origin());
+        let body = json!({ "messages": [], "metadata": { "title": "T", "cwd": "/" } });
+
+        let denied = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(denied.status(), 401);
+
+        let ok = client
+            .post(&url)
+            .header("authorization", "Bearer secret-token")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), 200);
     }
 }

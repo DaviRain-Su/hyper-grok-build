@@ -16,6 +16,15 @@ pub(crate) use self::journal::{RelocationJournal, RelocationLease, RelocationPha
 pub(crate) use self::view::RelocationView;
 use crate::session::persistence::{PendingCwdSwitchReminder, Summary};
 
+/// True when `~/.grok/relocations/<session_id>.json` exists.
+///
+/// Replay's parent-cwd/sibling fast path must not trust a found `updates.jsonl`
+/// while a journal is present: source and target dirs can both exist, and the
+/// journal phase is the only authority.
+pub(crate) fn has_relocation_journal(grok_home: &Path, session_id: &str) -> bool {
+    journal::journal_path(grok_home, session_id).is_file()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RelocationError {
     #[error("invalid relocation {field}: {value:?}")]

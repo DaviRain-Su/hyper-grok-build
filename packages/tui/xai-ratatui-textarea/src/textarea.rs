@@ -2073,18 +2073,20 @@ impl TextArea {
             } => {
                 self.move_cursor_down();
             }
-            // Home/End → visual row; Ctrl+A/E → logical line (emacs).
+            // Home/End → logical line (full left/right even when soft-wrapped).
+            // Super+Left/Right stay on the visual wrap row; Ctrl+A/E chain
+            // across logical lines when already at BOL/EOL.
             KeyEvent {
                 code: KeyCode::Home,
                 ..
             } => {
-                self.move_cursor_to_beginning_of_line(false);
+                self.set_cursor(self.beginning_of_current_line());
             }
 
             KeyEvent {
                 code: KeyCode::End, ..
             } => {
-                self.move_cursor_to_end_of_line(false);
+                self.set_cursor(self.end_of_current_line());
             }
             _o => {
                 #[cfg(feature = "debug-logs")]
@@ -5724,30 +5726,40 @@ mod tests {
     }
 
     #[test]
-    fn home_end_use_visual_row_when_soft_wrapped() {
+    fn home_end_use_logical_line_when_soft_wrapped() {
         // width 4 → "abcd" | "efgh" | "ij"
         let mut t = ta_with("abcdefghij");
         let _ = t.desired_height(4);
         t.set_cursor(6); // mid second visual row
 
-        t.move_cursor_to_beginning_of_line(false);
-        assert_eq!(t.cursor(), 4);
-        t.move_cursor_to_end_of_line(false);
-        assert_eq!(t.cursor(), 7);
-
         t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        assert_eq!(t.cursor(), 4);
+        assert_eq!(t.cursor(), 0);
         t.input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(t.cursor(), t.text().len());
+
+        // Super+Left/Right stay on the visual wrap row.
+        t.set_cursor(6);
+        t.move_cursor_to_beginning_of_line(false);
+        assert_eq!(t.cursor(), 4);
+        t.move_cursor_to_end_of_line(false);
         assert_eq!(t.cursor(), 7);
 
-        // Last visual row: End → text end; Home → row start.
-        t.set_cursor(8);
-        t.move_cursor_to_end_of_line(false);
-        assert_eq!(t.cursor(), t.text().len());
-        t.move_cursor_to_beginning_of_line(false);
-        assert_eq!(t.cursor(), 8);
+        // Multiline: Home/End stay on this logical line, not wrap-row or buffer.
+        let mut multi = ta_with("abcdefghij\nxyz");
+        let _ = multi.desired_height(4);
+        multi.set_cursor(6);
+        multi.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(multi.cursor(), 0);
+        multi.set_cursor(6);
+        multi.input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(multi.cursor(), "abcdefghij".len());
+        multi.set_cursor("abcdefghij\nxy".len());
+        multi.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(multi.cursor(), "abcdefghij\n".len());
+        multi.input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(multi.cursor(), multi.text().len());
 
-        // Ctrl+A/E stay logical.
+        // Ctrl+A/E stay logical (and chain across lines).
         t.set_cursor(6);
         t.move_cursor_to_beginning_of_line(true);
         assert_eq!(t.cursor(), 0);

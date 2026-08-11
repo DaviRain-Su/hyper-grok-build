@@ -158,6 +158,9 @@ pub struct AppCtx<'a> {
     /// [`CommandExecCtx::screen_mode`], carried by the owning
     /// [`SlashController`](crate::slash::SlashController).
     pub(crate) screen_mode: crate::app::ScreenMode,
+    /// Current session title for `/rename` ghost-prefill (`display_name`,
+    /// else `generated_session_title`). `None` when there is no title yet.
+    pub current_title: Option<&'a str>,
 }
 
 /// Mutable execution context for `SlashCommand::run()`.

@@ -16,7 +16,7 @@ pub use layout::compute_paint_window;
 pub use timeline::TimelineEntry;
 pub use types::*;
 
-use layout::LayoutCache;
+use layout::{LayoutCache, StructuralScrollAnchor};
 
 use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
@@ -161,6 +161,11 @@ pub struct ScrollbackState {
     /// Layout cache for navigation (entry heights, prompt descriptors).
     layout_cache: Option<LayoutCache>,
 
+    /// One-shot viewport-top anchor armed by a structural entry mutation
+    /// (removal/insertion) just before it invalidates the layout cache, and
+    /// consumed by the next `prepare_layout` — see [`StructuralScrollAnchor`].
+    structural_scroll_anchor: Option<StructuralScrollAnchor>,
+
     // Sticky modes
     /// Display mode applied to thinking blocks when they finish running.
     /// Defaults to `Collapsed` (auto-collapse on finish).
@@ -255,6 +260,7 @@ impl ScrollbackState {
             view_mode: ViewMode::AllTurns,
             last_width: 0,
             layout_cache: None,
+            structural_scroll_anchor: None,
             thinking_display_mode: DisplayMode::Collapsed,
             tick: 0,
             appearance: AppearanceConfig::default(),
@@ -658,6 +664,8 @@ impl ScrollbackState {
              block would print out of order in native scrollback"
         );
 
+        // Anchor the viewport top before the insertion shifts indices.
+        self.arm_structural_scroll_anchor();
         let id = EntryId::new(self.next_id);
         self.next_id += 1;
         let mut entry = ScrollbackEntry::new(block);
@@ -709,10 +717,14 @@ impl ScrollbackState {
     /// that was pushed at turn start. Returns `true` if an entry was removed.
     pub fn remove_entry(&mut self, id: EntryId) -> bool {
         // Capture the index before the removal shifts everything after it down.
-        let removed_index = self.entries.get_index_of(&id);
-        if self.entries.shift_remove(&id).is_none() {
+        let Some(removed_index) = self.entries.get_index_of(&id) else {
             return false;
-        }
+        };
+        // Anchor the viewport top before the removal shifts indices, then
+        // re-point it at the survivor if this removal deleted its entry.
+        self.arm_structural_scroll_anchor();
+        self.entries.shift_remove(&id);
+        self.migrate_structural_anchor_past_removal(id, removed_index);
         self.running.remove(&id);
         self.dirty_heights.remove(&id);
         self.committed.remove(&id);
@@ -723,9 +735,7 @@ impl ScrollbackState {
             self.selected = self.entries.len().checked_sub(1);
         }
         // Clamping alone is not enough here — see the cursor's contract.
-        if let Some(idx) = removed_index
-            && idx < self.commit_scan_cursor
-        {
+        if removed_index < self.commit_scan_cursor {
             self.commit_scan_cursor -= 1;
         }
         self.commit_scan_cursor = self.commit_scan_cursor.min(self.entries.len());
@@ -737,6 +747,9 @@ impl ScrollbackState {
     }
 
     pub fn remove_from(&mut self, index: usize) -> Vec<ScrollbackEntry> {
+        // Anchor a viewport parked above the cut; pruned below if the
+        // anchored entry itself is in the removed tail.
+        self.arm_structural_scroll_anchor();
         let mut removed = Vec::new();
         while self.entries.len() > index {
             if let Some((id, entry)) = self.entries.pop() {
@@ -748,6 +761,7 @@ impl ScrollbackState {
             }
         }
         removed.reverse();
+        self.prune_dead_structural_anchor();
         if let Some(sel) = self.selected
             && sel >= self.entries.len()
         {
@@ -1577,6 +1591,11 @@ impl ScrollbackState {
         // Update viewport height
         self.viewport_height = height;
 
+        // Take an armed StructuralScrollAnchor unconditionally so it never
+        // outlives the first layout pass after its mutation; only the
+        // same-width full rebuild below applies it.
+        let structural_anchor = self.structural_scroll_anchor.take();
+
         // Case 1: Cache missing or width changed - full rebuild
         if self.layout_cache.is_none() || width != self.last_width {
             // A width change re-wraps every entry, so the absolute wrapped-row
@@ -1608,6 +1627,12 @@ impl ScrollbackState {
             // is rebuilt at the new width (before settle clamps / re-pins to it).
             if let Some(anchor) = scroll_anchor {
                 self.restore_scroll_anchor(anchor);
+            } else if !width_changed {
+                // Same-width rebuild forced by a structural mutation: re-pin
+                // the pre-mutation viewport-top content by stable EntryId. On
+                // a width change the anchor is dropped instead — its row
+                // offset is meaningless after a re-wrap.
+                self.apply_structural_scroll_anchor(structural_anchor, width);
             }
             self.fixup_hidden_selection();
             self.handle_follow_mode();
@@ -1633,6 +1658,10 @@ impl ScrollbackState {
 
         // Case 2: Some entries have dirty heights - incremental update
         if !self.dirty_heights.is_empty() {
+            // Viewport-top identity BEFORE heights change. Case 2 retains
+            // the cache (no insert/remove), so the plain index stays valid
+            // for the duration of this call.
+            let top_anchor = self.viewport_top_anchor_point();
             let changes = self.update_dirty_entry_heights(width);
             self.dirty_heights.clear();
 
@@ -1667,6 +1696,12 @@ impl ScrollbackState {
                 self.compute_total_height_from_cache();
             }
 
+            // Re-pin the pre-change viewport-top row: geometry above it may
+            // have shifted virtual_y while the absolute scroll_offset stayed
+            // put (an exact no-op for changes at/below the top).
+            if let Some((entry_idx, rows_into_span)) = top_anchor {
+                self.repin_viewport_top_to_entry(entry_idx, rows_into_span);
+            }
             self.handle_follow_mode();
             // A scroll/content change may have brought estimated entries into
             // view (e.g. streaming while scrolled up); measure them exactly.

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::WorkspaceRpc;
+use super::{RpcActivityClass, WorkspaceRpc};
 
 // =========================================================================
 // Service-level file I/O
@@ -52,6 +52,7 @@ pub struct PutFilesReq {
 
 impl WorkspaceRpc for PutFilesReq {
     const METHOD: &'static str = "workspace.put_files";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = PutFilesRes;
 }
 
@@ -111,6 +112,7 @@ pub struct GetFilesReq {
 
 impl WorkspaceRpc for GetFilesReq {
     const METHOD: &'static str = "workspace.get_files";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = GetFilesRes;
 }
 
@@ -229,6 +231,7 @@ pub struct FsListReq {
 
 impl WorkspaceRpc for FsListReq {
     const METHOD: &'static str = "workspace.fs_list";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = FsListData;
 }
 
@@ -241,6 +244,7 @@ pub struct FsExistsReq {
 
 impl WorkspaceRpc for FsExistsReq {
     const METHOD: &'static str = "workspace.fs_exists";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = FsExistsData;
 }
 
@@ -273,6 +277,7 @@ pub struct FsReadFileReq {
 
 impl WorkspaceRpc for FsReadFileReq {
     const METHOD: &'static str = "workspace.fs_read_file";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = FsReadFileData;
 }
 
@@ -288,6 +293,7 @@ pub struct FsWriteFileReq {
 
 impl WorkspaceRpc for FsWriteFileReq {
     const METHOD: &'static str = "workspace.fs_write_file";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = ();
 }
 
@@ -300,6 +306,7 @@ pub struct FsDeleteFileReq {
 
 impl WorkspaceRpc for FsDeleteFileReq {
     const METHOD: &'static str = "workspace.fs_delete_file";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = ();
 }
 
@@ -407,6 +414,7 @@ pub struct ClientFsListReq {
 
 impl WorkspaceRpc for ClientFsListReq {
     const METHOD: &'static str = CLIENT_FS_LIST_METHOD;
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = ClientFsListRes;
 }
 
@@ -455,6 +463,7 @@ pub struct ClientFsStatReq {
 
 impl WorkspaceRpc for ClientFsStatReq {
     const METHOD: &'static str = CLIENT_FS_STAT_METHOD;
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = ClientFsStatRes;
 }
 
@@ -510,6 +519,7 @@ pub struct ClientFsReadFileReq {
 
 impl WorkspaceRpc for ClientFsReadFileReq {
     const METHOD: &'static str = CLIENT_FS_READ_FILE_METHOD;
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = ClientFsReadFileRes;
 }
 

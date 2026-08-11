@@ -506,6 +506,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
         assert_eq!(items.len(), 2, "model phase: one row per logical model");
@@ -539,6 +540,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         };
         // Args query has a trailing space -> effort phase. Items come out
         // ordered xhigh -> low (strongest first) per EFFORT_LEVELS.
@@ -571,6 +573,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         };
         // Still in effort phase; matcher upstream narrows to high / xhigh.
         let items = cmd.suggest_args(&ctx, "Reasoning X h").unwrap();
@@ -592,6 +595,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         };
         // No trailing space, user is still typing the model name.
         let items = cmd.suggest_args(&ctx, "Reason").unwrap();
@@ -756,6 +760,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
         assert_eq!(items.len(), 2);
@@ -788,6 +793,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         };
         // Trailing space after a locked reasoning-capable model must NOT
         // enter the effort phase — the model list is re-rendered instead.
@@ -869,6 +875,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
         assert_eq!(items.len(), 2);
@@ -926,6 +933,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         };
         // Ambiguous bare name + space must NOT enter effort phase.
         let items = cmd.suggest_args(&ctx, "GLM-5.2 ").unwrap();
@@ -997,6 +1005,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
         assert_eq!(items.len(), 1);

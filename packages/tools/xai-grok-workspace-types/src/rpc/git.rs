@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::WorkspaceRpc;
+use super::{RpcActivityClass, WorkspaceRpc};
 
 /// `workspace.git_status`. The response value is a JSON string (branch,
 /// ahead/behind, staged files), capped server-side at ~1 KB.
@@ -29,6 +29,7 @@ pub struct GitStatusReq {}
 
 impl WorkspaceRpc for GitStatusReq {
     const METHOD: &'static str = "workspace.git_status";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 
@@ -68,6 +69,7 @@ impl Default for GitStatusExtReq {
 
 impl WorkspaceRpc for GitStatusExtReq {
     const METHOD: &'static str = "workspace.git_status_ext";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = GitStatusExtResponse;
 }
 
@@ -82,6 +84,7 @@ pub struct GitFilesReq {
 
 impl WorkspaceRpc for GitFilesReq {
     const METHOD: &'static str = "workspace.git_files";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = GitReadFilesData;
 }
 
@@ -104,6 +107,7 @@ pub struct GitDiffReq {
 
 impl WorkspaceRpc for GitDiffReq {
     const METHOD: &'static str = "workspace.git_diff";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = GitDiffsData;
 }
 
@@ -116,6 +120,7 @@ pub struct GitStageReq {
 
 impl WorkspaceRpc for GitStageReq {
     const METHOD: &'static str = "workspace.git_stage";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = StageData;
 }
 
@@ -129,6 +134,7 @@ pub struct GitStageContentReq {
 
 impl WorkspaceRpc for GitStageContentReq {
     const METHOD: &'static str = "workspace.git_stage_content";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = ();
 }
 
@@ -141,6 +147,7 @@ pub struct GitUnstageReq {
 
 impl WorkspaceRpc for GitUnstageReq {
     const METHOD: &'static str = "workspace.git_unstage";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = ();
 }
 
@@ -157,6 +164,7 @@ pub struct GitDiscardReq {
 
 impl WorkspaceRpc for GitDiscardReq {
     const METHOD: &'static str = "workspace.git_discard";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = ();
 }
 
@@ -195,6 +203,7 @@ pub struct GitCommitReq {
 
 impl WorkspaceRpc for GitCommitReq {
     const METHOD: &'static str = "workspace.git_commit";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = CommitResult;
 }
 
@@ -223,6 +232,7 @@ pub struct GitSyncBaseReq {
 
 impl WorkspaceRpc for GitSyncBaseReq {
     const METHOD: &'static str = "workspace.git_sync_base";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = GitSyncBaseResult;
 }
 
@@ -256,6 +266,7 @@ pub struct GitCheckoutReq {
 
 impl WorkspaceRpc for GitCheckoutReq {
     const METHOD: &'static str = "workspace.git_checkout";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = ();
 }
 
@@ -269,6 +280,7 @@ pub struct GitStashReq {
 
 impl WorkspaceRpc for GitStashReq {
     const METHOD: &'static str = "workspace.git_stash";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = ();
 }
 
@@ -280,6 +292,7 @@ pub struct GitInfoReq {
 
 impl WorkspaceRpc for GitInfoReq {
     const METHOD: &'static str = "workspace.git_info";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = GitInfoData;
 }
 
@@ -291,6 +304,7 @@ pub struct GitBranchesReq {
 
 impl WorkspaceRpc for GitBranchesReq {
     const METHOD: &'static str = "workspace.git_branches";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = GitBranchListData;
 }
 
@@ -302,6 +316,7 @@ pub struct GitResolveRootReq {
 
 impl WorkspaceRpc for GitResolveRootReq {
     const METHOD: &'static str = "workspace.git_resolve_root";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Option<std::path::PathBuf>;
 }
 
@@ -313,6 +328,7 @@ pub struct GitCurrentCommitReq {
 
 impl WorkspaceRpc for GitCurrentCommitReq {
     const METHOD: &'static str = "workspace.git_current_commit";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Option<String>;
 }
 
@@ -324,6 +340,7 @@ pub struct DetectVcsKindReq {
 
 impl WorkspaceRpc for DetectVcsKindReq {
     const METHOD: &'static str = "workspace.detect_vcs_kind";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = VcsKind;
 }
 
@@ -338,6 +355,7 @@ pub struct GitCheckoutCommitReq {
 
 impl WorkspaceRpc for GitCheckoutCommitReq {
     const METHOD: &'static str = "workspace.git_checkout_commit";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = CheckoutCommitResponse;
 }
 
@@ -356,6 +374,7 @@ pub struct GitBranchInfoReq {}
 
 impl WorkspaceRpc for GitBranchInfoReq {
     const METHOD: &'static str = "workspace.git_branch_info";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Option<GitInfoData>;
 }
 
@@ -366,6 +385,7 @@ pub struct GitMetadataReq {}
 
 impl WorkspaceRpc for GitMetadataReq {
     const METHOD: &'static str = "workspace.git_metadata";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 
@@ -767,6 +787,7 @@ pub struct GitCollectChangesReq {
 
 impl WorkspaceRpc for GitCollectChangesReq {
     const METHOD: &'static str = "workspace.git_collect_changes";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = GitCollectChangesResponse;
 }
 

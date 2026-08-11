@@ -48,7 +48,7 @@ impl MvpAgent {
         if self.is_resident(session_id) {
             self.gateway
                 .forward_fire_and_forget(
-                    crate::session::summary::session_info_update(
+                    crate::session::summary::session_info_update_manual(
                         session_id.clone(),
                         title,
                     ),
@@ -188,29 +188,9 @@ impl MvpAgent {
             .current_or_expired()
             .is_some_and(|a| a.is_managed_mcp_eligible())
     }
-    /// Requires feature flag AND xAI authentication (OIDC or legacy WebLogin).
-    pub(super) fn can_fetch_managed_mcps(&self) -> bool {
-        let cfg = self.cfg.borrow();
-        cfg.managed_mcps_enabled && !cfg.managed_mcp_gateway_tools_enabled
-            && self.has_managed_mcp_auth()
-    }
     fn can_fetch_managed_mcp_gateway_tools(&self) -> bool {
         self.cfg.borrow().managed_mcp_gateway_tools_enabled
             && self.has_managed_mcp_auth()
-    }
-    pub(crate) async fn get_managed_mcp_configs(
-        &self,
-    ) -> Vec<crate::session::managed_mcp::ManagedMcpConfig> {
-        if !self.can_fetch_managed_mcps() {
-            return vec![];
-        }
-        let proxy_url = self.cfg.borrow().endpoints.proxy_url();
-        crate::session::managed_mcp::fetch_managed_mcp_configs(
-                &self.managed_mcp_cache,
-                &proxy_url,
-                &self.auth_manager,
-            )
-            .await
     }
     pub(crate) async fn get_managed_mcp_gateway_tool_catalog(
         &self,
@@ -300,75 +280,39 @@ impl MvpAgent {
             }
         });
     }
-    /// Push a fresh legacy managed-MCP catalog into live sessions' per-session
-    /// `McpServers` (called after `mcp/list` with `cache=false`).
-    ///
-    /// The per-session `merge_managed_mcp_servers` re-reads disk, so the whole
-    /// broadcast is deferred off the `mcp/list` response-latency path via
-    /// `spawn_local`. This ONLY re-merges/pushes connectors; rebuilding the
-    /// agent-level gateway catalog's `search_tool` index is a separate,
-    /// independently-gated broadcast (see `refresh_mcp_search_index_in_sessions`),
-    /// because the two run in mutually-exclusive modes (legacy fetch only when
-    /// gateway tools are OFF, gateway fetch only when ON).
-    /// Caller must confirm the managed fetch succeeded (cache `Ready`) first: a
-    /// failed fetch returns an empty vec and syncing it tears down live servers.
-    pub(crate) fn sync_fresh_managed_mcp_to_sessions(
-        &self,
-        managed: &[crate::session::managed_mcp::ManagedMcpConfig],
-    ) {
-        let mut sessions = Vec::new();
-        self.session_registry
-            .for_each_resident(|_, handle| {
-                sessions
-                    .push((
-                        handle.cmd_tx.clone(),
-                        handle.info.cwd.clone(),
-                        handle.initial_client_mcp_servers.clone(),
-                    ));
-            });
-        if sessions.is_empty() {
-            return;
-        }
-        let compat = self.cfg.borrow().compat_resolved;
-        let plugin_snapshot = self.plugin_registry_handle.snapshot();
-        let managed = managed.to_vec();
-        tokio::task::spawn_local(async move {
-            let mut updated = 0u32;
-            for (cmd_tx, cwd, initial_client_mcp_servers) in sessions {
-                let cwd = std::path::PathBuf::from(cwd);
-                if crate::session::managed_mcp::merge_and_send_managed_mcp_update(
-                    &cmd_tx,
-                    &cwd,
-                    initial_client_mcp_servers,
-                    &managed,
-                    plugin_snapshot.as_deref(),
-                    &compat,
-                ) {
-                    updated += 1;
-                }
-            }
-            if updated > 0 {
-                tracing::info!(
-                    updated,
-                    managed_count = managed.len(),
-                    "synced fresh managed MCP catalog into live sessions"
-                );
-            }
-        });
-    }
     /// Rebuild `search_tool` in every live session after a fresh gateway tool
     /// catalog committed.
     ///
-    /// Gateway tools live in the agent-level catalog (not per-session
-    /// `McpServers`), so a fresh gateway catalog needs a session-side
-    /// `search_tool` rebuild even though the legacy managed cache stays
-    /// `NotFetched` in gateway mode. Callers gate on a successful refetch and
-    /// skip on failure to keep the last-good index.
+    /// Gateway tools live in the agent-level catalog, not per-session
+    /// `McpServers`. Callers skip on a failed refetch so the last-good index
+    /// stays.
     pub(crate) fn refresh_mcp_search_index_in_sessions(&self) {
         let session_txs = self.resident_cmd_txs();
         for tx in session_txs {
             let _ = tx.send(SessionCommand::RefreshMcpSearchIndex);
         }
+    }
+    /// `mcp/list` catalog fetch: optional cache bust, then gateway list, then
+    /// fan `RefreshMcpSearchIndex` only when a fresh catalog commits.
+    ///
+    /// Gateway off (or no eligible auth) goes through
+    /// [`Self::get_managed_mcp_gateway_tool_catalog`], which disables the cache
+    /// the same way initialize does.
+    pub(crate) async fn fetch_gateway_catalog_for_mcp_list(
+        &self,
+        cache: bool,
+    ) -> Option<crate::session::managed_mcp::GatewayToolCatalog> {
+        if !cache {
+            crate::session::managed_mcp::invalidate_gateway_tool_cache(
+                    self.managed_mcp_cache(),
+                )
+                .await;
+        }
+        let catalog = self.get_managed_mcp_gateway_tool_catalog().await;
+        if !cache && catalog.is_some() {
+            self.refresh_mcp_search_index_in_sessions();
+        }
+        catalog
     }
     /// Resolve the launch dir's project-scope trust verdict ONCE and return it
     /// with its path.
@@ -395,15 +339,12 @@ impl MvpAgent {
     /// Resolve folder trust and load launch-dir MCP configs after `initialize`
     /// returns. The walks are synchronous and expensive in large monorepos; they
     /// must not block the ACP response (grok-desktop sends `initialize` immediately).
-    pub(super) fn spawn_initialize_launch_mcp_setup(&self, fetch_managed_mcps: bool) {
+    pub(super) fn spawn_initialize_launch_mcp_setup(&self) {
         let cwd = self.launch_cwd.clone();
         let compat = self.cfg.borrow().compat_resolved;
         let remote_settings = self.cfg.borrow().remote_settings.clone();
         let gateway = self.gateway.clone();
         let agent_mcp_state = self.agent_mcp_state.clone();
-        let managed_mcp_cache = self.managed_mcp_cache.clone();
-        let proxy_url = self.cfg.borrow().endpoints.proxy_url();
-        let auth_manager = self.auth_manager.clone();
         tokio::task::spawn_local(async move {
             let local_mcp_servers = match tokio::task::spawn_blocking(move || {
                     let local = crate::util::config::load_mcp_servers(&cwd, &compat);
@@ -425,29 +366,8 @@ impl MvpAgent {
             if !local_mcp_servers.is_empty() {
                 agent_mcp_state.lock().await.update_configs(local_mcp_servers.clone());
             }
-            crate::extensions::mcp::notify_servers_updated(
-                    &gateway,
-                    &[],
-                    &local_mcp_servers,
-                )
+            crate::extensions::mcp::notify_servers_updated(&gateway, &local_mcp_servers)
                 .await;
-            if !fetch_managed_mcps {
-                return;
-            }
-            let managed = crate::session::managed_mcp::fetch_managed_mcp_configs(
-                    &managed_mcp_cache,
-                    &proxy_url,
-                    &auth_manager,
-                )
-                .await;
-            if !managed.is_empty() {
-                crate::extensions::mcp::notify_servers_updated(
-                        &gateway,
-                        &managed,
-                        &local_mcp_servers,
-                    )
-                    .await;
-            }
         });
     }
     pub(crate) fn agent_mcp_state(
@@ -481,24 +401,16 @@ impl MvpAgent {
             "lazily populated plugin registry snapshot"
         );
     }
-    /// Fetch managed configs, admit client servers under a post-await compat
-    /// snapshot, merge, and return `(admitted_seed, merged, earliest_expiry)`.
+    /// Admit client servers and merge local / plugin / client sources.
     ///
-    /// Compat is read **after** the managed-config await so admit + merge share
-    /// one snapshot; a settings reapply during the await cannot make the
-    /// retained seed and the spawned set disagree.
+    /// Plugin registry is ensured first; admit + merge then share one compat
+    /// snapshot.
     pub(super) async fn resolve_mcp_servers(
         &self,
         client_servers: Vec<acp::McpServer>,
         cwd: &std::path::Path,
-    ) -> (
-        Vec<acp::McpServer>,
-        Vec<acp::McpServer>,
-        Option<chrono::DateTime<chrono::Utc>>,
-    ) {
+    ) -> (Vec<acp::McpServer>, Vec<acp::McpServer>) {
         self.ensure_plugin_registry();
-        let managed = self.get_managed_mcp_configs().await;
-        let expires_at = managed.iter().filter_map(|c| c.token_expires_at).min();
         let compat = self.cfg.borrow().compat_resolved;
         let admitted = crate::session::managed_mcp::admit_client_mcp_servers(
             client_servers,
@@ -508,11 +420,10 @@ impl MvpAgent {
         let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
             admitted.clone(),
             cwd,
-            &managed,
             self.plugin_registry_handle.snapshot().as_deref(),
             &compat,
         );
-        (admitted, merged, expires_at)
+        (admitted, merged)
     }
     /// Set the memory configuration (called from TUI after config resolution).
     pub fn set_memory_config(&mut self, config: crate::config::MemoryConfig) {
@@ -4013,14 +3924,13 @@ impl MvpAgent {
             client_terminal,
             client_fs_read,
             client_fs_write,
-            preloaded_envrc,
+            envrc,
             persisted_signals,
             persisted_plan_mode,
             persisted_goal_mode,
             persisted_workflow_runs,
             persisted_announcement_state,
             session_meta,
-            managed_mcp_expires_at,
             model_agent_type,
             session_model_id,
             session_yolo_mode,
@@ -4036,6 +3946,13 @@ impl MvpAgent {
             spawn_remote_settings.as_ref(),
             false,
         );
+        let load_envrc = self.cfg.borrow().session.load_envrc.unwrap_or(true);
+        let project_env_trusted = folder_trust::project_scope_allowed(cwd.as_path());
+        let envrc = envrc
+            .unwrap_or_else(|| xai_grok_workspace::envrc::spawn_envrc_load(
+                cwd.as_path().to_path_buf(),
+                load_envrc && project_env_trusted,
+            ));
         let use_acp_fs = client_fs_read && client_fs_write;
         let fs_notify_config = init
             .client_capabilities
@@ -4101,7 +4018,6 @@ impl MvpAgent {
             );
             std::sync::Arc::new(TerminalRunner::new(notifier, session_info.id.clone()))
         };
-        let load_envrc = self.cfg.borrow().session.load_envrc.unwrap_or(true);
         let startup_hints = startup_hints_from_meta(session_meta, init.meta.as_ref());
         let hunk_plan = plan_hunk_tracking(
             init
@@ -4188,21 +4104,11 @@ impl MvpAgent {
             }
             _ => None,
         };
-        let project_env_trusted = folder_trust::project_scope_allowed(cwd.as_path());
         let mut session_env = xai_grok_workspace::permission::claude_settings::load_claude_env_with_project(
             cwd.as_path(),
             project_env_trusted,
         );
-        let envrc = match preloaded_envrc {
-            Some(env) => env,
-            None => {
-                xai_grok_workspace::envrc::load_envrc_or_empty_when_trusted(
-                    cwd.as_path(),
-                    load_envrc && project_env_trusted,
-                )
-            }
-        };
-        session_env.extend(envrc);
+        session_env.extend(envrc.join().await);
         if no_color {
             session_env.extend(crate::terminal::no_color_env());
         } else {
@@ -4740,7 +4646,6 @@ impl MvpAgent {
                     loc_tracking_enabled,
                     feedback_flags,
                     self.managed_mcp_cache.clone(),
-                    managed_mcp_expires_at,
                     managed_mcp_proxy_url,
                     session_model_id,
                     session_yolo_mode,

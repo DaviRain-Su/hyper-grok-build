@@ -55,6 +55,22 @@ pub trait AsyncFileSystem: Send + Sync {
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError>;
 
     async fn delete_file(&self, path: &Path) -> Result<(), ComputerError>;
+
+    /// Whether `path` exists as a readable regular file, without reading
+    /// its contents. `Ok(false)` means a definitive not-found; other probe
+    /// failures surface as `Err`.
+    ///
+    /// The default errs with `ErrorKind::Unsupported` — callers must treat
+    /// `Err` as "unknown" and fail closed. Backends opt in by overriding
+    /// with a cheap stat/lookup; a full-content read is never an acceptable
+    /// probe (the target may be arbitrarily large or remote).
+    async fn file_exists(&self, path: &Path) -> Result<bool, ComputerError> {
+        let _ = path;
+        Err(ComputerError::io_with_kind(
+            "file_exists is not supported by this backend",
+            std::io::ErrorKind::Unsupported,
+        ))
+    }
 }
 
 // ============================================================================
@@ -430,6 +446,30 @@ mod tests {
             ce.io_error_kind(),
             Some(std::io::ErrorKind::PermissionDenied)
         );
+    }
+
+    #[tokio::test]
+    async fn file_exists_default_is_unsupported() {
+        struct MinimalFs;
+
+        #[async_trait::async_trait]
+        impl AsyncFileSystem for MinimalFs {
+            async fn read_file(&self, _path: &Path) -> Result<Vec<u8>, ComputerError> {
+                panic!("the default file_exists must not read file contents");
+            }
+            async fn write_file(&self, _path: &Path, _data: &[u8]) -> Result<(), ComputerError> {
+                unreachable!()
+            }
+            async fn delete_file(&self, _path: &Path) -> Result<(), ComputerError> {
+                unreachable!()
+            }
+        }
+
+        let err = MinimalFs
+            .file_exists(Path::new("/any"))
+            .await
+            .expect_err("default probe must err");
+        assert_eq!(err.io_error_kind(), Some(std::io::ErrorKind::Unsupported));
     }
 
     #[test]

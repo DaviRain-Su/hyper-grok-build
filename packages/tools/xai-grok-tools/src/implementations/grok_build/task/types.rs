@@ -945,9 +945,12 @@ pub enum SubagentEvent {
     ListActive(SubagentListActiveRequest),
     ListRunning(SubagentListRunningRequest),
     Completions(SubagentCompletionsRequest),
-    /// Discard a closed session's buffered completions and cancel its children.
+    /// Cancel children of `parent_session_id` and drop its buffered completions.
+    /// `respond_to`, if set, resolves when no children remain (caller should
+    /// time-bound the wait).
     TeardownSession {
         parent_session_id: String,
+        respond_to: Option<oneshot::Sender<()>>,
     },
     /// Re-open Task spawns for a parent session after a prior ParentSession stop.
     /// Emitted at the start of each user turn so Stop's late-spawn gate does not

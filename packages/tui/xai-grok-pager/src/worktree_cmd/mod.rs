@@ -97,8 +97,7 @@ enum WorktreeDbCommand {
 
 pub async fn run(args: WorktreeArgs, agent_config: &AgentConfig) -> Result<()> {
     let cancel = CancellationToken::new();
-    // A utility command is not a startup: latch so nothing records or mirrors.
-    xai_grok_telemetry::startup::clear();
+    xai_grok_telemetry::startup::mark_utility_process();
     let spawned = crate::acp::spawn::spawn_grok_shell(agent_config.clone(), &cancel, None).await?;
     // Cancel + join on every return path, including the `?` below.
     let _agent_guard =

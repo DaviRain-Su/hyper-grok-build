@@ -106,6 +106,17 @@ impl SummaryGenerator {
     pub(crate) fn mark_done(&mut self) {
         self.state = State::Done;
     }
+
+    /// Inverse of [`mark_done`]: `/rename --auto` so the next content chunk
+    /// regenerates a title through the normal if-absent path.
+    pub(crate) fn reset(&mut self) {
+        self.state = State::Idle;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_idle(&self) -> bool {
+        matches!(self.state, State::Idle)
+    }
 }
 
 /// Notify the client that a session summary is available.
@@ -143,4 +154,99 @@ pub(crate) fn session_info_update(
             acp::SessionInfoUpdate::new().title(title.to_owned()),
         ),
     )
+}
+
+/// Manual-rename fan-out: same payload as [`session_info_update`] plus
+/// `_meta.x.ai/titleIsManual`. Old clients ignore the unknown key.
+pub(crate) fn session_info_update_manual(
+    session_id: acp::SessionId,
+    title: &str,
+) -> acp::SessionNotification {
+    session_info_update(session_id, title).meta(
+        crate::extensions::notification::title_is_manual_meta()
+            .as_object()
+            .cloned(),
+    )
+}
+
+/// Unpin fan-out: no title (avoid blanking list-driven clients) +
+/// `_meta.x.ai/titleIsManual: false`.
+pub(crate) fn session_info_update_unpinned(session_id: acp::SessionId) -> acp::SessionNotification {
+    acp::SessionNotification::new(
+        session_id,
+        acp::SessionUpdate::SessionInfoUpdate(acp::SessionInfoUpdate::new()),
+    )
+    .meta(
+        crate::extensions::notification::title_is_unpinned_meta()
+            .as_object()
+            .cloned(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_info_update_manual_carries_meta_and_raw_title() {
+        let n = session_info_update_manual(acp::SessionId::new("s"), "a &amp; b");
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(
+            v["_meta"][crate::extensions::notification::TITLE_IS_MANUAL_META_KEY],
+            true
+        );
+        let title = v
+            .pointer("/update/title")
+            .or_else(|| v.pointer("/update/sessionInfoUpdate/title"))
+            .cloned();
+        assert_eq!(title, Some(serde_json::json!("a &amp; b")), "{v}");
+    }
+
+    #[test]
+    fn session_info_update_unpinned_stamps_false_meta_without_title() {
+        let n = session_info_update_unpinned(acp::SessionId::new("s"));
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(
+            v["_meta"][crate::extensions::notification::TITLE_IS_MANUAL_META_KEY],
+            false
+        );
+        let title = v
+            .pointer("/update/title")
+            .or_else(|| v.pointer("/update/sessionInfoUpdate/title"));
+        assert!(
+            title.is_none(),
+            "unpin SessionInfoUpdate must omit title: {v}"
+        );
+    }
+
+    #[test]
+    fn auto_session_info_update_omits_manual_meta() {
+        let n = session_info_update(acp::SessionId::new("s"), "Auto");
+        let v = serde_json::to_value(&n).unwrap();
+        assert!(
+            v.get("_meta")
+                .and_then(|m| m.get(crate::extensions::notification::TITLE_IS_MANUAL_META_KEY))
+                .is_none(),
+            "auto-title fan-out must not stamp titleIsManual: {v}"
+        );
+    }
+
+    #[test]
+    fn reset_returns_generator_to_idle() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sampling_client =
+            OaiCompatClient::new(xai_grok_sampler::SamplerConfig::default()).unwrap();
+        let mut generator = SummaryGenerator::new(SummaryConfig {
+            sampling_client,
+            model: String::new(),
+            persistence_tx: tx.downgrade(),
+        });
+        assert!(generator.is_idle());
+        generator.mark_done();
+        assert!(!generator.is_idle());
+        generator.reset();
+        assert!(generator.is_idle());
+        generator.reset();
+        assert!(generator.is_idle());
+    }
 }

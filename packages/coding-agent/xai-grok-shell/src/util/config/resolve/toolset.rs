@@ -495,6 +495,9 @@ pub(crate) fn resolve_ask_user_question_params_from_disk(
             system_managed,
             remote.and_then(|r| r.ask_user_question_timeout_secs),
         )),
+        // Session state stamped by AgentBuilder (non-interactive spawn), not
+        // a config key — the resolver must leave it unset.
+        non_interactive: None,
     }
 }
 

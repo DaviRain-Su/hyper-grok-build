@@ -501,3 +501,35 @@ fn parse_json_schema_rejects_non_objects_and_invalid_json() {
             .contains("invalid JSON")
     );
 }
+
+#[test]
+fn handler_answers_ext_method_instead_of_dropping() {
+    use agent_client_protocol as acp;
+    use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse;
+    let raw = serde_json::value::to_raw_value(&serde_json::json!({})).unwrap();
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    let msg = xai_acp_lib::AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
+        request: acp::ExtRequest::new("x.ai/ask_user_question", raw.into()),
+        response_tx: tx,
+    });
+    let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Json, false);
+    let mut pending = std::collections::HashSet::new();
+    let mut completed = std::collections::HashSet::new();
+    let mut ttf_logged = false;
+    super::handle_headless_acp_message(
+        msg.boxed(),
+        &mut emitter,
+        std::time::Instant::now(),
+        &mut ttf_logged,
+        false,
+        &mut pending,
+        &mut completed,
+    );
+    let resp = rx
+        .try_recv()
+        .expect("ExtMethod must be answered, never dropped")
+        .expect("policy reply, not an error");
+    let parsed: AskUserQuestionExtResponse =
+        serde_json::from_str(resp.0.get()).expect("typed wire reply");
+    assert!(matches!(parsed, AskUserQuestionExtResponse::Cancelled));
+}

@@ -32,6 +32,11 @@ pub(crate) const GOAL_ROLE_SUBAGENT_TYPE: &str = "general-purpose";
 pub(crate) const GOAL_ROLE_AWAIT_BUDGET_EXCEEDED: &str =
     "goal role subagent exceeded foreground wait budget";
 
+/// Best-effort wait for a subagent cancel to be acknowledged before giving up.
+/// The planner is aborting regardless, so this is a bound on cleanup, not a
+/// correctness gate.
+const GOAL_PLANNER_CANCEL_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Resolved per-role spawn override.
 ///
 /// `None`/`None` ⇒ inherit the current model + the session harness (the
@@ -111,7 +116,7 @@ impl RetryableSpawnError for SpawnError {
             SpawnError::Runtime {
                 cancelled: true,
                 ..
-            }
+            } | SpawnError::Interrupted
         )
     }
 }
@@ -208,6 +213,13 @@ pub(crate) enum GoalPlannerOutcome {
         plan_file: PathBuf,
         latency_ms: u64,
     },
+    /// Produced only by the planner's [`ChannelSpawner`], whose `cancel_token`
+    /// is wired to user steering / Send Now through `start_planner_run`; when
+    /// that token fires mid-spawn the attempt returns `Interrupted` so the loop
+    /// replans. The strategist and summarizer spawners pass a fresh,
+    /// never-cancelled token, so their equivalent cancel arms are unreachable in
+    /// practice.
+    Interrupted,
     FailClosed {
         reason: GoalPlannerFailClosedReason,
         latency_ms: u64,
@@ -234,6 +246,7 @@ pub(crate) trait GoalPlannerSpawner: Send + Sync {
 pub(crate) enum SpawnError {
     Transport(String),
     Runtime { message: String, cancelled: bool },
+    Interrupted,
 }
 
 impl std::fmt::Display for SpawnError {
@@ -246,6 +259,7 @@ impl std::fmt::Display for SpawnError {
                     "subagent runtime error (cancelled={cancelled}): {message}"
                 )
             }
+            Self::Interrupted => f.write_str("planner interrupted by user steering"),
         }
     }
 }
@@ -275,6 +289,7 @@ pub(crate) struct ChannelSpawner {
     /// Resolved per-role model+toolset override. Default (inherit) keeps the
     /// historic `::default()` spawn behavior.
     pub(crate) role_override: RoleSpawnOverride,
+    pub(crate) cancel_token: tokio_util::sync::CancellationToken,
     /// Event sink for the spawn-and-retry-once fail-open telemetry; `None`
     /// in tests / when no event log is wired.
     pub(crate) events: Option<EventWriter>,
@@ -321,7 +336,7 @@ impl GoalPlannerSpawner for ChannelSpawner {
                     message,
                 )
             }
-            Err(SpawnError::Transport(_)) => {}
+            Err(SpawnError::Transport(_) | SpawnError::Interrupted) => {}
         }
         outcome
     }
@@ -360,15 +375,30 @@ impl ChannelSpawner {
             await_to_completion: false,
             fork_context: true,
             owner: SubagentOwner::Task,
-            cancel_token: tokio_util::sync::CancellationToken::new(),
+            cancel_token: self.cancel_token.clone(),
         };
         let backend = ChannelBackend::new(self.event_tx.clone());
-        let result = backend
-            .spawn_with_foreground_wait(request, self.foreground_wait.as_ref())
-            .await
-            .map_err(|error| SpawnError::Transport(error.to_string()))?;
+        let cancel = self.cancel_token.clone();
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                let _ = tokio::time::timeout(
+                    GOAL_PLANNER_CANCEL_ACK_TIMEOUT,
+                    backend.cancel(id),
+                )
+                .await;
+                return Err(SpawnError::Interrupted);
+            }
+            result = backend.spawn_with_foreground_wait(request, self.foreground_wait.as_ref()) => {
+                result.map_err(|error| SpawnError::Transport(error.to_string()))?
+            }
+        };
         if result.backgrounded {
-            let _ = backend.cancel(&result.subagent_id).await;
+            let _ = tokio::time::timeout(
+                GOAL_PLANNER_CANCEL_ACK_TIMEOUT,
+                backend.cancel(&result.subagent_id),
+            )
+            .await;
             return Err(SpawnError::Runtime {
                 message: GOAL_ROLE_AWAIT_BUDGET_EXCEEDED.to_owned(),
                 cancelled: true,
@@ -465,6 +495,7 @@ pub(crate) async fn run_goal_planner(
                 emit_event,
             );
         }
+        Err(SpawnError::Interrupted) => return GoalPlannerOutcome::Interrupted,
         Err(SpawnError::Runtime { message, cancelled }) => {
             let reason = if cancelled {
                 GoalPlannerFailClosedReason::Aborted
@@ -652,6 +683,7 @@ mod tests {
             cwd: None,
             trace_sink: None,
             role_override: RoleSpawnOverride::default(),
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             events: None,
         };
         let handle = tokio::spawn(async move {
@@ -744,6 +776,7 @@ mod tests {
                     message: message.clone(),
                     cancelled: *cancelled,
                 }),
+                Err(SpawnError::Interrupted) => Err(SpawnError::Interrupted),
             }
         }
     }
@@ -1260,6 +1293,7 @@ mod tests {
                 model: Some("cfg-model".into()),
                 agent_type: Some("cursor".into()),
             },
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             events: None,
         };
         let handle = tokio::spawn(async move {
@@ -1586,6 +1620,7 @@ mod tests {
                 model: Some("cfg-model".into()),
                 agent_type: Some("general-purpose".into()),
             },
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             events: None,
         });
         let (_log, emit) = collect_events();
@@ -1651,6 +1686,7 @@ mod tests {
                 model: Some("cfg-model".into()),
                 agent_type: Some("general-purpose".into()),
             },
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             events: None,
         });
         let (_log, emit) = collect_events();

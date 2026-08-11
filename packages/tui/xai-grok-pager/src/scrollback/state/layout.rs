@@ -22,6 +22,29 @@ pub(crate) struct ScrollAnchor {
     sub_rows: i64,
 }
 
+/// One-shot anchor for the content at the top of a manually scrolled
+/// viewport, armed by a structural entry mutation (removal, insertion)
+/// immediately BEFORE it invalidates the layout cache — the last moment
+/// entry indices and the cache still agree — and consumed by the very next
+/// `prepare_layout`. Unlike [`ScrollAnchor`] it is keyed by stable
+/// [`EntryId`], because the arming mutation is exactly what shifts indices;
+/// its raw row offset is only meaningful at an unchanged width, so width
+/// changes re-anchor via [`ScrollAnchor`]'s logical-line mapping instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct StructuralScrollAnchor {
+    /// Entry at the viewport top when the arming mutation happened.
+    id: EntryId,
+    /// Wrapped rows from that entry's top down to the viewport top, measured
+    /// over the entry's full layout span — content rows plus trailing gap,
+    /// matching `entry_at_virtual_row`'s attribution of gap rows to the entry
+    /// above, so a top parked on a gap row stays a gap row.
+    rows_into_span: usize,
+    /// `scroll_offset` at arm time. A mismatch at consume time means explicit
+    /// navigation moved the viewport between the mutation and its frame; the
+    /// anchor is stale and must not override that.
+    armed_scroll_offset: usize,
+}
+
 /// Cached layout data for efficient navigation and rendering.
 ///
 /// This is rebuilt when entries change or viewport width changes.
@@ -515,6 +538,143 @@ impl ScrollbackState {
         };
         let new_top_content_y = entry_y + new_rows_into_entry;
         self.scroll_offset = new_top_content_y
+            .saturating_sub(base_y)
+            .min(self.max_scroll_offset());
+    }
+
+    /// Arm a one-shot [`StructuralScrollAnchor`] for the current viewport top.
+    /// Call BEFORE mutating the entries map. The first mutation before a
+    /// frame wins — it saw the on-screen geometry; later mutations have no
+    /// cache to anchor against (removals keep the armed anchor honest via
+    /// [`Self::migrate_structural_anchor_past_removal`]).
+    pub(super) fn arm_structural_scroll_anchor(&mut self) {
+        if self.structural_scroll_anchor.is_some() {
+            return;
+        }
+        let Some((entry_idx, rows_into_span)) = self.viewport_top_anchor_point() else {
+            return;
+        };
+        let Some((id, _)) = self.entries.get_index(entry_idx) else {
+            return;
+        };
+        self.structural_scroll_anchor = Some(StructuralScrollAnchor {
+            id: *id,
+            rows_into_span,
+            armed_scroll_offset: self.scroll_offset,
+        });
+    }
+
+    /// Keep an armed anchor meaningful across the removal that follows it
+    /// (and any further removals before the next frame): when the anchored
+    /// entry itself was just removed, re-point at the first LATER survivor —
+    /// the entry that shifted into `removed_index` — pinned to the vacated
+    /// viewport-top row. With nothing surviving below the removal, the anchor
+    /// is dropped and the plain max-offset clamp takes over.
+    pub(super) fn migrate_structural_anchor_past_removal(
+        &mut self,
+        removed_id: EntryId,
+        removed_index: usize,
+    ) {
+        let Some(anchor) = self.structural_scroll_anchor else {
+            return;
+        };
+        if anchor.id != removed_id {
+            return;
+        }
+        let survivor = self.entries.get_index(removed_index).map(|(id, _)| *id);
+        self.structural_scroll_anchor = survivor.map(|id| StructuralScrollAnchor {
+            id,
+            rows_into_span: 0,
+            armed_scroll_offset: anchor.armed_scroll_offset,
+        });
+    }
+
+    /// Drop an armed anchor whose entry no longer exists. For bulk tail
+    /// removal (`remove_from`), where everything at and after the anchor can
+    /// vanish at once with no later survivor to migrate to.
+    pub(super) fn prune_dead_structural_anchor(&mut self) {
+        if let Some(anchor) = self.structural_scroll_anchor
+            && self.index_of_id(anchor.id).is_none()
+        {
+            self.structural_scroll_anchor = None;
+        }
+    }
+
+    /// Apply a taken [`StructuralScrollAnchor`] after the same-width full
+    /// rebuild that the arming mutation forced, re-pinning the pre-mutation
+    /// viewport-top content. Skipped when follow took over or when explicit
+    /// navigation moved the viewport since arming (`armed_scroll_offset`
+    /// mismatch — user intent wins).
+    pub(super) fn apply_structural_scroll_anchor(
+        &mut self,
+        anchor: Option<StructuralScrollAnchor>,
+        width: u16,
+    ) {
+        let Some(anchor) = anchor else {
+            return;
+        };
+        if self.follow_mode || self.scroll_offset != anchor.armed_scroll_offset {
+            return;
+        }
+        let Some(entry_idx) = self.index_of_id(anchor.id) else {
+            return;
+        };
+        // The rebuild reset every height to a cheap ESTIMATE, while
+        // `rows_into_span` was measured against the entry's EXACT pre-mutation
+        // layout. Measure the anchor entry exactly first, or the span clamp in
+        // the re-pin would squeeze an exact row against a transient
+        // under-estimate and jump within an entry whose content never changed.
+        self.measure_span_and_rebuild(entry_idx, entry_idx, width);
+        self.repin_viewport_top_to_entry(entry_idx, anchor.rows_into_span);
+    }
+
+    /// Identity of the viewport-top row as `(entry_idx, rows_into_span)`: the
+    /// entry owning the top row (gap rows attribute to the entry above, per
+    /// `entry_at_virtual_row`) and the row offset from that entry's top over
+    /// its full layout span — content rows plus trailing gap — so a top parked
+    /// on a gap row round-trips as that same gap row. `None` when there is
+    /// nothing to anchor: following (the bottom re-pins itself each frame), an
+    /// unscrolled top, or no layout.
+    pub(super) fn viewport_top_anchor_point(&self) -> Option<(usize, usize)> {
+        if self.follow_mode || self.scroll_offset == 0 {
+            return None;
+        }
+        let (top, _) = self.viewport_virtual_bounds()?;
+        let entry_idx = self.entry_at_virtual_row(top)?;
+        let entry_y = *self.layout_cache.as_ref()?.virtual_y.get(entry_idx)?;
+        Some((entry_idx, top.saturating_sub(entry_y)))
+    }
+
+    /// Re-derive `scroll_offset` so the row `rows_into_span` below entry
+    /// `entry_idx`'s top sits at the viewport top again, after `virtual_y`
+    /// changed at an unchanged width. A change that only touched geometry at
+    /// or below the viewport top re-derives the exact same offset, so
+    /// below-viewport mutations never move the viewport.
+    ///
+    /// The row offset is clamped within the entry's CURRENT layout span
+    /// (content rows plus trailing gap — a gap-row park is never squeezed onto
+    /// a content row) so a genuinely shrunken anchor entry cannot spill the
+    /// top into unrelated content, and to `max_scroll_offset`.
+    pub(super) fn repin_viewport_top_to_entry(&mut self, entry_idx: usize, rows_into_span: usize) {
+        let Some(cache) = self.layout_cache.as_ref() else {
+            return;
+        };
+        let range = self.visible_entry_range();
+        if !range.contains(&entry_idx) {
+            return;
+        }
+        let (Some(&base_y), Some(&entry_y)) = (
+            cache.virtual_y.get(range.start),
+            cache.virtual_y.get(entry_idx),
+        ) else {
+            return;
+        };
+        let span_rows = cache
+            .entries
+            .get(entry_idx)
+            .map_or(0, |e| e.height as usize + e.gap_after as usize);
+        let rows_into_span = rows_into_span.min(span_rows.saturating_sub(1));
+        self.scroll_offset = (entry_y + rows_into_span)
             .saturating_sub(base_y)
             .min(self.max_scroll_offset());
     }
@@ -1693,6 +1853,7 @@ pub fn compute_paint_window(
 mod tests {
     use super::super::test_util::*;
     use super::*;
+    use crate::scrollback::entry::EntryId;
     use crate::theme::cache::pin_theme;
     use pretty_assertions::assert_eq;
     use ratatui::style::Color;
@@ -2790,6 +2951,453 @@ mod tests {
             state.scroll_offset(),
             max_after,
             "still pinned to bottom after resize"
+        );
+    }
+
+    fn no_vpad_no_sticky_state() -> ScrollbackState {
+        use crate::appearance::AppearanceConfig;
+        let mut state = ScrollbackState::new();
+        let mut appearance = AppearanceConfig {
+            show_timestamps: false,
+            ..Default::default()
+        };
+        appearance.scrollback.blocks.prompt.vpad = false;
+        appearance.scrollback.display.sticky_headers = false;
+        state.set_appearance(appearance);
+        state
+    }
+
+    fn push_anchor_fillers(state: &mut ScrollbackState, n: usize) {
+        for i in 0..n {
+            state.push_block(agent_block(&format!("filler-{i}")));
+        }
+    }
+
+    /// Measure `id` exactly (scroll-to-top runs the target measure path), then
+    /// leave it measured even after later parking a downstream marker.
+    fn measure_entry_exact(
+        state: &mut ScrollbackState,
+        id: EntryId,
+        width: u16,
+        height: u16,
+    ) -> usize {
+        state.prepare_layout(width, height);
+        let idx = state.index_of_id(id).expect("entry must exist");
+        state.scroll_to_entry_top(idx);
+        state.prepare_layout(width, height);
+        let idx = state.index_of_id(id).expect("entry must exist");
+        assert!(
+            measured_at(state, idx),
+            "precondition: entry {idx} must be exactly measured"
+        );
+        idx
+    }
+
+    fn park_entry_at_row_zero(
+        state: &mut ScrollbackState,
+        id: EntryId,
+        width: u16,
+        height: u16,
+    ) -> usize {
+        state.prepare_layout(width, height);
+        let idx = state.index_of_id(id).expect("park target must exist");
+        state.scroll_to_entry_top(idx);
+        state.prepare_layout(width, height);
+        let idx = state.index_of_id(id).expect("park target must exist");
+        assert!(
+            !state.is_follow_mode(),
+            "parking at the viewport top must disable follow"
+        );
+        assert_eq!(
+            screen_row_of(state, idx),
+            0,
+            "precondition: parked entry must sit at screen row 0"
+        );
+        idx
+    }
+
+    /// Growing a streaming entry above a manually parked viewport must keep that
+    /// marker at screen row 0. Missing semantic-anchor compensation lets
+    /// `patch_virtual_y_for_dirty` shift later `virtual_y` while `scroll_offset`
+    /// stays put, so the marker jolts downward.
+    #[test]
+    fn growing_entry_above_manual_viewport_keeps_marker_at_screen_row_zero() {
+        let _theme = pin_theme();
+        const W: u16 = 80;
+        const H: u16 = 12;
+        let mut state = no_vpad_no_sticky_state();
+
+        let stream_id = state.start_streaming_agent();
+        assert!(state.push_chunk_to_agent(stream_id, "seed paragraph\n\n"));
+        let marker_id = state.push_block(agent_block("SCROLL-ANCHOR-MARKER"));
+        push_anchor_fillers(&mut state, 40);
+
+        measure_entry_exact(&mut state, stream_id, W, H);
+        park_entry_at_row_zero(&mut state, marker_id, W, H);
+
+        let stream_idx = state.index_of_id(stream_id).unwrap();
+        let marker_idx = state.index_of_id(marker_id).unwrap();
+        assert!(
+            stream_idx < marker_idx,
+            "precondition: streaming entry must sit above the marker"
+        );
+        assert!(
+            measured_at(&state, stream_idx),
+            "precondition: upstream streaming entry must stay exactly measured after park"
+        );
+        let height_before = state.get_cached_entry_height(stream_idx).unwrap();
+        let marker_vy_before = state.get_cached_virtual_y().unwrap()[marker_idx];
+        let scroll_before = state.scroll_offset();
+
+        for i in 0..20 {
+            assert!(state.push_chunk_to_agent(stream_id, &format!("grow paragraph {i}\n\n")));
+        }
+        state.prepare_layout(W, H);
+
+        let stream_idx = state.index_of_id(stream_id).unwrap();
+        let height_after = state.get_cached_entry_height(stream_idx).unwrap();
+        assert!(
+            height_after > height_before,
+            "precondition: exactly-measured upstream streaming entry must grow \
+             (before={height_before}, after={height_after})"
+        );
+        assert!(
+            measured_at(&state, stream_idx),
+            "upstream entry must remain exactly measured after growth"
+        );
+
+        let marker_idx = state
+            .index_of_id(marker_id)
+            .expect("marker EntryId must survive growth");
+        let marker_vy_after = state.get_cached_virtual_y().unwrap()[marker_idx];
+        let row = screen_row_of(&state, marker_idx);
+        assert_eq!(
+            row,
+            0,
+            "manual viewport must keep marker at screen row 0 after upstream \
+             streaming growth; observed row {row} (delta {row} from row 0); \
+             marker virtual_y {marker_vy_before} → {marker_vy_after}, \
+             scroll_offset {scroll_before} → {}",
+            state.scroll_offset()
+        );
+    }
+
+    /// Removing a multi-row entry above a manually parked viewport (edit
+    /// coalesce / collapse) must keep that marker at screen row 0. A full-cache
+    /// rebuild that leaves `scroll_offset` uncompensated jolts the marker.
+    /// Negative `screen_row_of` is valid failure evidence (marker now above the
+    /// viewport); this must not panic or clamp-to-top into a false pass.
+    #[test]
+    fn removing_entry_above_manual_viewport_keeps_marker_at_screen_row_zero() {
+        let _theme = pin_theme();
+        const W: u16 = 80;
+        const H: u16 = 12;
+        let mut state = no_vpad_no_sticky_state();
+
+        let removable_id = state.push_block(RenderBlock::stub(
+            (0..12)
+                .map(|i| format!("removable-line-{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Color::Blue,
+        ));
+        let marker_id = state.push_block(agent_block("SCROLL-ANCHOR-MARKER"));
+        push_anchor_fillers(&mut state, 40);
+
+        let removable_idx = measure_entry_exact(&mut state, removable_id, W, H);
+        let removable_h = state.get_cached_entry_height(removable_idx).unwrap();
+        assert!(
+            removable_h > 1,
+            "precondition: removable entry must be multi-row (height={removable_h})"
+        );
+        park_entry_at_row_zero(&mut state, marker_id, W, H);
+        assert!(
+            measured_at(&state, state.index_of_id(removable_id).unwrap()),
+            "precondition: removable entry must stay exactly measured after park"
+        );
+
+        let marker_idx = state.index_of_id(marker_id).unwrap();
+        let prefix_before = state.get_cached_virtual_y().unwrap()[marker_idx];
+        let scroll_before = state.scroll_offset();
+        assert!(
+            prefix_before > 0,
+            "precondition: removable prefix must occupy rows above the marker"
+        );
+
+        assert!(state.remove_entry(removable_id));
+        state.prepare_layout(W, H);
+
+        assert!(
+            state.total_height > H as usize,
+            "post-removal transcript must still overflow the viewport \
+             (total={}, vh={H}); max_offset=0 would clamp to row 0 and fake a pass",
+            state.total_height
+        );
+
+        let marker_idx = state
+            .index_of_id(marker_id)
+            .expect("marker EntryId must survive removal");
+        let prefix_after = state.get_cached_virtual_y().unwrap()[marker_idx];
+        assert!(
+            prefix_before > prefix_after,
+            "precondition: real prefix height must be removed \
+             (before={prefix_before}, after={prefix_after})"
+        );
+
+        let row = screen_row_of(&state, marker_idx);
+        assert_eq!(
+            row,
+            0,
+            "manual viewport must keep marker at screen row 0 after upstream \
+             removal; observed row {row} (negative = marker above viewport); \
+             prefix virtual_y {prefix_before} → {prefix_after}, \
+             scroll_offset {scroll_before} → {}",
+            state.scroll_offset()
+        );
+    }
+
+    /// Removing the viewport-top entry itself must fall back deterministically:
+    /// the next surviving entry gets pinned to the vacated viewport-top row
+    /// instead of the stale offset landing on whatever content drifted there.
+    #[test]
+    fn removing_viewport_top_entry_pins_next_survivor_at_screen_row_zero() {
+        let _theme = pin_theme();
+        const W: u16 = 80;
+        const H: u16 = 12;
+        let mut state = no_vpad_no_sticky_state();
+
+        state.push_block(agent_block("above-the-marker"));
+        let marker_id = state.push_block(agent_block("SCROLL-ANCHOR-MARKER"));
+        let survivor_id = state.push_block(agent_block("next-survivor"));
+        push_anchor_fillers(&mut state, 40);
+
+        park_entry_at_row_zero(&mut state, marker_id, W, H);
+
+        assert!(state.remove_entry(marker_id));
+        state.prepare_layout(W, H);
+
+        assert!(
+            state.total_height > H as usize,
+            "post-removal transcript must still overflow the viewport \
+             (total={}, vh={H}); max_offset=0 would clamp to row 0 and fake a pass",
+            state.total_height
+        );
+        let survivor_idx = state
+            .index_of_id(survivor_id)
+            .expect("survivor EntryId must exist");
+        assert_eq!(
+            screen_row_of(&state, survivor_idx),
+            0,
+            "next surviving entry must be pinned to the vacated viewport top \
+             (scroll_offset {})",
+            state.scroll_offset()
+        );
+    }
+
+    /// A content mutation below a manually parked viewport must not move it:
+    /// `scroll_offset` stays put and the parked marker keeps its screen row.
+    #[test]
+    fn growth_below_manual_viewport_leaves_scroll_offset_unchanged() {
+        let _theme = pin_theme();
+        const W: u16 = 80;
+        const H: u16 = 12;
+        let mut state = no_vpad_no_sticky_state();
+
+        state.push_block(agent_block("above-the-marker"));
+        let marker_id = state.push_block(agent_block("SCROLL-ANCHOR-MARKER"));
+        push_anchor_fillers(&mut state, 40);
+        let stream_id = state.start_streaming_agent();
+        assert!(state.push_chunk_to_agent(stream_id, "seed paragraph\n\n"));
+
+        park_entry_at_row_zero(&mut state, marker_id, W, H);
+        let marker_idx = state.index_of_id(marker_id).unwrap();
+        let stream_idx = state.index_of_id(stream_id).unwrap();
+        assert!(
+            marker_idx < stream_idx,
+            "precondition: streaming entry must sit below the marker"
+        );
+        let scroll_before = state.scroll_offset();
+
+        for i in 0..10 {
+            assert!(state.push_chunk_to_agent(stream_id, &format!("tail growth {i}\n\n")));
+        }
+        state.prepare_layout(W, H);
+
+        assert_eq!(
+            state.scroll_offset(),
+            scroll_before,
+            "growth below the viewport must not move a manually parked viewport"
+        );
+        let marker_idx = state.index_of_id(marker_id).unwrap();
+        assert_eq!(
+            screen_row_of(&state, marker_idx),
+            0,
+            "marker must hold screen row 0 while content grows below"
+        );
+    }
+
+    /// A viewport top parked on the inter-entry GAP row (attributed to the
+    /// entry above, per `entry_at_virtual_row`) must also be a strict no-op
+    /// under below-viewport growth: the span-based re-pin keeps the gap row a
+    /// gap row instead of clamping it onto the owner's last content row.
+    #[test]
+    fn growth_below_gap_parked_viewport_keeps_gap_row_at_top() {
+        let _theme = pin_theme();
+        const W: u16 = 80;
+        const H: u16 = 12;
+        let mut state = no_vpad_no_sticky_state();
+
+        let gap_owner_id = state.push_block(RenderBlock::stub(
+            "gap-owner-0\ngap-owner-1\ngap-owner-2".to_string(),
+            Color::Blue,
+        ));
+        let below_id = state.push_block(agent_block("first-below-the-gap"));
+        push_anchor_fillers(&mut state, 40);
+        let stream_id = state.start_streaming_agent();
+        assert!(state.push_chunk_to_agent(stream_id, "seed paragraph\n\n"));
+
+        // Park the viewport top exactly on the 1-row gap after the owner.
+        measure_entry_exact(&mut state, gap_owner_id, W, H);
+        let below_idx = state.index_of_id(below_id).unwrap();
+        let gap_top = {
+            let range = state.visible_entry_range();
+            let vy = state.get_cached_virtual_y().unwrap();
+            (vy[below_idx] - vy[range.start]) - 1
+        };
+        state.set_scroll_offset(gap_top);
+        state.prepare_layout(W, H);
+        assert!(
+            !state.is_follow_mode() && state.scroll_offset() == gap_top && gap_top > 0,
+            "precondition: manually parked on the gap row (offset {gap_top})"
+        );
+        assert_eq!(
+            screen_row_of(&state, below_idx),
+            1,
+            "precondition: viewport top is the gap row (next entry at row 1)"
+        );
+
+        for i in 0..10 {
+            assert!(state.push_chunk_to_agent(stream_id, &format!("tail growth {i}\n\n")));
+        }
+        state.prepare_layout(W, H);
+
+        assert_eq!(
+            state.scroll_offset(),
+            gap_top,
+            "below-viewport growth must not move a gap-parked viewport"
+        );
+        assert_eq!(
+            screen_row_of(&state, state.index_of_id(below_id).unwrap()),
+            1,
+            "the entry below the gap must stay at screen row 1"
+        );
+    }
+
+    /// Same-width full rebuild (upstream removal) with the viewport parked
+    /// several rows INTO a word-wrapping entry: the re-pin must measure the
+    /// anchor entry exactly instead of clamping the exact row offset against
+    /// the rebuild's transient (smaller) estimate, which would jump upward
+    /// within an entry whose own content never changed.
+    #[test]
+    fn removal_above_wrapped_park_keeps_row_inside_wrapping_entry() {
+        let _theme = pin_theme();
+        const W: u16 = 20;
+        const H: u16 = 12;
+        let mut state = no_vpad_no_sticky_state();
+
+        let removable_id = state.push_block(RenderBlock::stub(
+            (0..6)
+                .map(|i| format!("rm-{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Color::Blue,
+        ));
+        // One long paragraph of words too wide to pair up on a 20-col line:
+        // word-wrap burns ~half of each line, so the char-ceil estimate
+        // undershoots the exact wrapped height — what makes the clamp bite.
+        let wrap_id = state.push_block(agent_block(&"aaaaaaaaaaa ".repeat(30)));
+        push_anchor_fillers(&mut state, 60);
+
+        measure_entry_exact(&mut state, removable_id, W, H);
+        let wrap_idx = measure_entry_exact(&mut state, wrap_id, W, H);
+        let exact = state.get_cached_entry_height(wrap_idx).unwrap() as usize;
+        let estimate = {
+            let theme = Theme::current();
+            let entry = state.entry(wrap_idx).unwrap();
+            EntryRenderer::new(entry, &theme)
+                .with_appearance_ref(state.appearance())
+                .with_cwd(state.cwd())
+                .estimate_height(state.entry_area_width(W)) as usize
+        };
+        // Park deeper into the entry than the estimate reaches, so a clamp
+        // against the transient estimate would provably move the row.
+        let rows_into = exact - 2;
+        assert!(
+            estimate < rows_into,
+            "precondition: rebuild estimate ({estimate}) must undershoot the \
+             park depth ({rows_into} of {exact} exact rows) or the clamp \
+             cannot bite"
+        );
+        state.set_scroll_offset(state.scroll_offset() + rows_into);
+        state.prepare_layout(W, H);
+        assert_eq!(
+            screen_row_of(&state, wrap_idx),
+            -(rows_into as i64),
+            "precondition: parked {rows_into} rows into the wrapping entry"
+        );
+
+        assert!(state.remove_entry(removable_id));
+        state.prepare_layout(W, H);
+
+        let wrap_idx = state.index_of_id(wrap_id).unwrap();
+        assert!(
+            measured_at(&state, wrap_idx),
+            "anchor entry must be measured exactly before the re-pin clamps"
+        );
+        assert_eq!(
+            screen_row_of(&state, wrap_idx),
+            -(rows_into as i64),
+            "removal above must keep the same wrapped row of the anchor \
+             entry at the viewport top (exact {exact}, estimate {estimate})"
+        );
+    }
+
+    /// The anchored entry AND its immediate successor both removed before the
+    /// next frame (edit coalescing, reconnect cleanup): the armed anchor must
+    /// keep migrating to the first later survivor rather than giving up after
+    /// one hop.
+    #[test]
+    fn removing_top_entry_and_successor_pins_first_later_survivor() {
+        let _theme = pin_theme();
+        const W: u16 = 80;
+        const H: u16 = 12;
+        let mut state = no_vpad_no_sticky_state();
+
+        state.push_block(agent_block("above-the-marker"));
+        let marker_id = state.push_block(agent_block("SCROLL-ANCHOR-MARKER"));
+        let successor_id = state.push_block(agent_block("immediate-successor"));
+        let survivor_id = state.push_block(agent_block("first-later-survivor"));
+        push_anchor_fillers(&mut state, 40);
+
+        park_entry_at_row_zero(&mut state, marker_id, W, H);
+
+        assert!(state.remove_entry(marker_id));
+        assert!(state.remove_entry(successor_id));
+        state.prepare_layout(W, H);
+
+        assert!(
+            state.total_height > H as usize,
+            "post-removal transcript must still overflow the viewport \
+             (total={}, vh={H})",
+            state.total_height
+        );
+        let survivor_idx = state.index_of_id(survivor_id).expect("survivor must exist");
+        assert_eq!(
+            screen_row_of(&state, survivor_idx),
+            0,
+            "anchor must migrate past BOTH removals to the first later \
+             survivor (scroll_offset {})",
+            state.scroll_offset()
         );
     }
 

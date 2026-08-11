@@ -21,6 +21,20 @@ use super::types::QuestionAnnotation;
 /// purpose-built message rather than a generic permission-denial string.
 pub const CANCEL_TEXT: &str = "User declined to answer the questions. Continue with the task using your best judgment, or ask different questions.";
 
+/// Tool result text for unanswered questionnaires in non-interactive sessions
+/// (headless `-p`, SDK): there is no user, so "user declined" would be a lie.
+pub const NO_OPERATOR_TEXT: &str = "No user is available to answer questions in this non-interactive session. Continue with your best judgment; do not wait for clarification.";
+
+/// Single source for the unanswered (cancel / timeout) tool result text, so
+/// the two paths cannot drift between interactive and non-interactive wording.
+pub fn unanswered_text(non_interactive: bool) -> &'static str {
+    if non_interactive {
+        NO_OPERATOR_TEXT
+    } else {
+        CANCEL_TEXT
+    }
+}
+
 // ── Path A: Accepted ────────────────────────────────────────────────────
 
 /// Format the tool result for Path A (user accepted and submitted answers).
@@ -706,6 +720,14 @@ Questions asked and answers provided:
         assert_eq!(
             CANCEL_TEXT,
             "User declined to answer the questions. Continue with the task using your best judgment, or ask different questions."
+        );
+    }
+
+    #[test]
+    fn format_no_operator() {
+        assert_eq!(
+            NO_OPERATOR_TEXT,
+            "No user is available to answer questions in this non-interactive session. Continue with your best judgment; do not wait for clarification."
         );
     }
 }

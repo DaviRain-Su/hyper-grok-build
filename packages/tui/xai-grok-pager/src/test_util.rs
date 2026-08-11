@@ -1,6 +1,7 @@
 //! Shared test utilities for the pager crate.
 //!
 //! Compiled only in `#[cfg(test)]` builds. Import via `crate::test_util`.
+use std::path::{Path, PathBuf};
 /// Minimal `AgentView` for unit tests outside the dispatch/handler modules
 /// (which keep their own richer factories).
 pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent_view::AgentView {
@@ -243,5 +244,118 @@ impl GrokHomeFixture {
         xai_grok_shell::util::grok_home::grok_home()
             .join("sessions")
             .join(&encoded)
+    }
+}
+/// On-disk git checkout living under a tempdir. Dropping the fixture deletes it.
+pub struct TempGitRepo {
+    _dir: tempfile::TempDir,
+    pub path: PathBuf,
+}
+impl TempGitRepo {
+    pub fn init(branch: &str) -> Self {
+        let dir = tempfile::tempdir().expect("temp git root");
+        let path = dir.path().join("repo");
+        init_git_repo_on_branch(&path, branch);
+        Self { _dir: dir, path }
+    }
+    /// CoW-style standalone clone: `.git` is a directory plus `grok-worktree-source`.
+    pub fn standalone_clone(&self, branch: &str) -> Self {
+        let dir = tempfile::tempdir().expect("temp clone root");
+        let path = dir.path().join("clone");
+        copy_dir_all(&self.path, &path);
+        checkout_named_branch(&path, branch);
+        std::fs::write(
+            path.join(".git").join("grok-worktree-source"),
+            self.path.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        Self { _dir: dir, path }
+    }
+    /// Linked `git worktree` of `branch` as a sibling of this checkout.
+    /// `.git` at the returned path is a file. Keep `self` alive while using it.
+    pub fn add_linked_worktree(&self, name: &str, branch: &str) -> PathBuf {
+        let repo = git2::Repository::open(&self.path).unwrap();
+        let commit = repo.head().unwrap().peel_to_commit().unwrap();
+        if repo.find_branch(branch, git2::BranchType::Local).is_err() {
+            repo.branch(branch, &commit, false).unwrap();
+        }
+        let wt_path = self
+            .path
+            .parent()
+            .expect("repo lives in a temp parent")
+            .join(name);
+        let reference = repo
+            .find_branch(branch, git2::BranchType::Local)
+            .unwrap()
+            .into_reference();
+        repo.worktree(
+            name,
+            &wt_path,
+            Some(git2::WorktreeAddOptions::new().reference(Some(&reference))),
+        )
+        .unwrap();
+        wt_path
+    }
+}
+/// Match [`crate::git_info`] tilde-collapse of a filesystem path.
+pub fn collapsed_path_display(path: &Path) -> String {
+    let home = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h.trim_end_matches(['/', '\\'])));
+    match home {
+        Some(h) => path
+            .strip_prefix(&h)
+            .map(|rest| format!("~/{}", rest.display()))
+            .unwrap_or_else(|_| path.display().to_string()),
+        None => path.display().to_string(),
+    }
+}
+pub fn init_git_repo_on_branch(path: &Path, branch: &str) {
+    std::fs::create_dir_all(path).unwrap();
+    let repo = git2::Repository::init(path).unwrap();
+    std::fs::write(path.join("README"), "test\n").unwrap();
+    let sig = git2::Signature::now("test", "test@test.com").unwrap();
+    let tree_id = {
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("README")).unwrap();
+        index.write().unwrap();
+        index.write_tree().unwrap()
+    };
+    let tree = repo.find_tree(tree_id).unwrap();
+    let oid = repo
+        .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+        .unwrap();
+    let commit = repo.find_commit(oid).unwrap();
+    let current = repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().map(str::to_string));
+    if current.as_deref() != Some(branch) {
+        repo.branch(branch, &commit, true).unwrap();
+        repo.set_head(&format!("refs/heads/{branch}")).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
+    }
+}
+fn checkout_named_branch(repo_path: &Path, branch: &str) {
+    let repo = git2::Repository::open(repo_path).unwrap();
+    let commit = repo.head().unwrap().peel_to_commit().unwrap();
+    if repo.find_branch(branch, git2::BranchType::Local).is_err() {
+        repo.branch(branch, &commit, false).unwrap();
+    }
+    repo.set_head(&format!("refs/heads/{branch}")).unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+}
+fn copy_dir_all(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_all(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), to).unwrap();
+        }
     }
 }

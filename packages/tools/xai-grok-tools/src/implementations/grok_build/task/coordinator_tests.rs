@@ -828,6 +828,7 @@ async fn teardown_session_children_spares_other_sessions() {
         .sender()
         .send(SubagentEvent::TeardownSession {
             parent_session_id: "parent".to_owned(),
+            respond_to: None,
         })
         .expect("actor command channel open");
 
@@ -841,6 +842,149 @@ async fn teardown_session_children_spares_other_sessions() {
     let _ = harness.finish.send(());
     let keep = keep.await.unwrap().unwrap();
     assert!(keep.success && !keep.cancelled);
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn teardown_holds_admission_until_children_drain_then_reopens() {
+    // wait_after_cancel keeps the cancelled child in `active` until finish, so
+    // the delete-path hold stays live across the whole flow: a mid-drain spawn
+    // is refused, OpenSpawnAdmission cannot reopen it, and once the child
+    // finishes the ack resolves and a later spawn is admitted again.
+    let mut harness = harness_with_options(true, true, CoordinatorConfig::default());
+    let child = spawn_session_child(&mut harness, "slow", "parent").await;
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("slow"));
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    harness
+        .backend
+        .sender()
+        .send(SubagentEvent::TeardownSession {
+            parent_session_id: "parent".to_owned(),
+            respond_to: Some(tx),
+        })
+        .expect("actor command channel open");
+
+    // Same channel as TeardownSession: FIFO guarantees the block is set first.
+    let mut late = request("late", false);
+    late.parent_session_id = "parent".to_owned();
+    assert!(
+        harness.backend.spawn(late).await.unwrap().cancelled,
+        "spawn must be refused while the teardown drains"
+    );
+
+    // OpenSpawnAdmission must not reopen mid-drain (CancelTurn → next-prompt
+    // race during /delete).
+    harness
+        .backend
+        .sender()
+        .send(SubagentEvent::OpenSpawnAdmission {
+            parent_session_id: "parent".to_owned(),
+        })
+        .expect("actor command channel open");
+    let mut still_blocked = request("still-blocked", false);
+    still_blocked.parent_session_id = "parent".to_owned();
+    assert!(
+        harness
+            .backend
+            .spawn(still_blocked)
+            .await
+            .unwrap()
+            .cancelled,
+        "OpenSpawnAdmission must not reopen during teardown drain"
+    );
+
+    // Finishing the cancelled child drains the session and resolves the ack.
+    let _ = harness.finish.send(());
+    assert!(child.await.unwrap().unwrap().cancelled);
+    tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+        .await
+        .expect("drain ack")
+        .expect("drain channel");
+
+    // A later spawn on the same session is admitted and runs to completion.
+    let admitted = tokio::spawn({
+        let backend = harness.backend.clone();
+        let mut req = request("after-drain", false);
+        req.parent_session_id = "parent".to_owned();
+        async move { backend.spawn(req).await }
+    });
+    assert_eq!(
+        harness
+            .requests
+            .recv()
+            .await
+            .as_ref()
+            .map(|r| r.id.as_str()),
+        Some("after-drain")
+    );
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("after-drain"));
+    let _ = harness.finish.send(());
+    let result = admitted.await.unwrap().unwrap();
+    assert!(
+        result.success && !result.cancelled,
+        "spawn must be admitted once the teardown drain completes: {result:?}"
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn teardown_drain_deadline_reopens_spawns() {
+    // A cancelled child that never finishes must not block spawns for the
+    // process lifetime: the coordinator's backstop deadline force-reopens.
+    let mut harness = harness_with_options(true, true, CoordinatorConfig::default());
+    let child = spawn_session_child(&mut harness, "stuck", "parent").await;
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("stuck"));
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    harness
+        .backend
+        .sender()
+        .send(SubagentEvent::TeardownSession {
+            parent_session_id: "parent".to_owned(),
+            respond_to: Some(tx),
+        })
+        .expect("actor command channel open");
+
+    // Blocked: the cancelled child stays in `active` (finish never fired).
+    let mut blocked = request("blocked", false);
+    blocked.parent_session_id = "parent".to_owned();
+    assert!(
+        harness.backend.spawn(blocked).await.unwrap().cancelled,
+        "spawn must be refused while the teardown drains"
+    );
+
+    // Past the backstop: the hold force-clears and the ack resolves even
+    // though the child is still stuck.
+    tokio::time::advance(TEARDOWN_DRAIN_MAX + std::time::Duration::from_secs(1)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+        .await
+        .expect("drain ack after deadline")
+        .expect("drain channel");
+
+    // Admission reopened: a later spawn on the same session starts.
+    let _admitted = tokio::spawn({
+        let backend = harness.backend.clone();
+        let mut req = request("after-deadline", false);
+        req.parent_session_id = "parent".to_owned();
+        async move { backend.spawn(req).await }
+    });
+    assert_eq!(
+        harness
+            .requests
+            .recv()
+            .await
+            .as_ref()
+            .map(|r| r.id.as_str()),
+        Some("after-deadline"),
+        "spawn must be admitted once the drain deadline force-reopens admission"
+    );
+
+    let _ = harness.finish.send(());
+    let _ = child.await;
     harness.actor.abort();
 }
 
@@ -879,6 +1023,7 @@ async fn teardown_cancels_background_child_without_rebuffering() {
         .sender()
         .send(SubagentEvent::TeardownSession {
             parent_session_id: "parent".to_owned(),
+            respond_to: None,
         })
         .expect("actor command channel open");
 
@@ -918,6 +1063,7 @@ async fn teardown_rejects_spawn_from_cancelled_parent() {
         .sender()
         .send(SubagentEvent::TeardownSession {
             parent_session_id: "parent".to_owned(),
+            respond_to: None,
         })
         .expect("actor command channel open");
 
@@ -1478,6 +1624,7 @@ async fn teardown_session_drops_only_that_sessions_buffer() {
         .sender()
         .send(SubagentEvent::TeardownSession {
             parent_session_id: "parent-a".to_owned(),
+            respond_to: None,
         })
         .expect("actor command channel open");
 
@@ -1873,6 +2020,7 @@ async fn teardown_purges_a_queued_spawn_without_rebuffering() {
         .sender()
         .send(SubagentEvent::TeardownSession {
             parent_session_id: "parent".to_owned(),
+            respond_to: None,
         })
         .expect("actor command channel open");
 

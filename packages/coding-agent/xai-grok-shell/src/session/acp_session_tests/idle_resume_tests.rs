@@ -290,7 +290,6 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
                 managed_mcp_handle: Default::default(),
-                managed_mcp_expires_at: std::sync::Mutex::new(None),
                 initial_client_mcp_servers: vec![],
                 tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
                 mcp_announced_servers: Mutex::new(HashMap::new()),

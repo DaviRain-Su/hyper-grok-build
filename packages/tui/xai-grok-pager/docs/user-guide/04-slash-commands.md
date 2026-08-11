@@ -88,7 +88,7 @@ Leave the current session and return to the welcome screen. Alias: `/welcome`.
 
 ### `/delete`
 
-Delete the current session's history. Confirms first. Returns to the welcome screen, or to the dashboard when you opened the session from the dashboard.
+Delete the current session's history. Confirms first. Stops any running turn, background tasks, and subagents before wiping history. Returns to the welcome screen, or to the dashboard when you opened the session from the dashboard.
 
 To delete a session you are not in, open `/resume` or the welcome session list and press `d` then `y`. On the dashboard, press `Ctrl+X` twice or click `[✗]`.
 
@@ -98,7 +98,10 @@ Rename the current session. Alias: `/title`.
 
 ```
 /rename new session title
+/rename --auto
 ```
+
+`--auto` unpins a manual title and lets auto-titling resume. It applies to Build sessions only — chat conversations have no local auto-titler. It must be the only argument (`/rename --auto Something` is an error). A session cannot be named `--auto` via this command; use the dashboard rename editor (`Ctrl+R`) for that pathological case.
 
 ---
 

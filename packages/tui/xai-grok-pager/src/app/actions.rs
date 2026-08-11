@@ -10,6 +10,7 @@ use super::agent::AgentId;
 use crate::scrollback::entry::EntryId;
 use agent_client_protocol as acp;
 use xai_grok_shell::sampling::types::ReasoningEffort;
+use xai_grok_shell::session::unified_list::SessionKind;
 /// Typed error for model switch failures. Replaces the raw `String` in
 /// `TaskResult::SwitchModelComplete` so dispatch can match on the variant
 /// instead of parsing strings.
@@ -755,6 +756,8 @@ pub enum Action {
     RenameSession {
         title: String,
     },
+    /// Unpin the current session title (`/rename --auto`).
+    ResetSessionTitleToAuto,
     /// Show detailed context usage (progress bar, token breakdown, stats).
     ShowContextInfo,
     /// `/usage` — session token/cost, plus consumer credits when visible.
@@ -2135,6 +2138,17 @@ pub enum Effect {
         session_id: acp::SessionId,
         title: String,
         cwd: std::path::PathBuf,
+        kind: SessionKind,
+    },
+    /// Unpin the current session title (`/rename --auto`).
+    ResetSessionTitle {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        cwd: std::path::PathBuf,
+        kind: SessionKind,
+        /// Pre-clear caches so `ResetSessionTitleFailed` can restore the pin.
+        previous_display_name: Option<String>,
+        previous_generated_title: Option<String>,
     },
     /// Delete a session's stored data (local + remote) via
     /// `x.ai/session/delete`.
@@ -2266,6 +2280,45 @@ pub enum Effect {
         plan: Box<crate::diagnostics::FixPlan>,
     },
 }
+/// Wire params for `x.ai/session/rename`. Shared with the effect executor
+/// so dispatch tests can pin the exact camelCase payload.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RenameSessionRequest {
+    pub session_id: String,
+    pub title: String,
+    pub cwd: String,
+    pub kind: SessionKind,
+    /// Empty-title + `true` is the unpin convention. Omitted when false so
+    /// ordinary rename payloads stay byte-identical for old shells.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reset_to_auto: bool,
+}
+impl RenameSessionRequest {
+    pub(crate) fn for_rename(
+        session_id: String,
+        title: String,
+        cwd: String,
+        kind: SessionKind,
+    ) -> Self {
+        Self {
+            session_id,
+            title,
+            cwd,
+            kind,
+            reset_to_auto: false,
+        }
+    }
+    pub(crate) fn for_reset(session_id: String, cwd: String, kind: SessionKind) -> Self {
+        Self {
+            session_id,
+            title: String::new(),
+            cwd,
+            kind,
+            reset_to_auto: true,
+        }
+    }
+}
 /// Outcome of an `x.ai/subagent/cancel` request, telling dispatch whether the
 /// pager must finalize the subagent row itself.
 #[derive(Debug)]
@@ -2295,6 +2348,20 @@ pub enum DoctorPlanningOutcome {
 /// Result from a completed async [`Effect`].
 ///
 /// Wrapped in `Action::TaskComplete` and dispatched synchronously.
+impl TaskResult {
+    /// True for results that deliver the first usable session. A quit
+    /// before dispatch abandons instead of recording; accepted so the
+    /// token stays single-owner.
+    pub fn ends_startup(&self) -> bool {
+        matches!(
+            self,
+            TaskResult::SessionCreated { .. }
+                | TaskResult::SessionLoaded { .. }
+                | TaskResult::WorktreeSessionCreated { .. }
+                | TaskResult::WorktreeForked { .. }
+        )
+    }
+}
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
@@ -2765,6 +2832,17 @@ pub enum TaskResult {
     RenameSessionFailed {
         agent_id: AgentId,
         error: String,
+    },
+    /// `/rename --auto` completed successfully.
+    ResetSessionTitleComplete {
+        agent_id: AgentId,
+    },
+    /// `/rename --auto` failed.
+    ResetSessionTitleFailed {
+        agent_id: AgentId,
+        error: String,
+        previous_display_name: Option<String>,
+        previous_generated_title: Option<String>,
     },
     /// Session delete completed successfully.
     DeleteSessionComplete {

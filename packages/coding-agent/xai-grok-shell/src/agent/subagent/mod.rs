@@ -194,6 +194,10 @@ pub(crate) struct SubagentSpawnContext {
     /// Whether the `ask_user_question` tool is exposed to this subagent,
     /// inherited from the parent session (see `build_subagent_spawn_context`).
     pub ask_user_question_enabled: bool,
+    /// Whether the parent session is non-interactive (headless `-p` / SDK),
+    /// copied onto the child's `StartupHints` so its ask_user_question also
+    /// returns no-operator text instead of pretending a user declined.
+    pub parent_non_interactive: bool,
     /// Parent session command channel. Carries lifecycle notifications the
     /// parent persists (`SubagentSpawned` / `SubagentFinished`) and — when
     /// goal mode is on — transient `SubagentProgress` ticks the parent

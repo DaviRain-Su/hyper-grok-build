@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::WorkspaceRpc;
+use super::{RpcActivityClass, WorkspaceRpc};
 
 /// Begin tracking file state for a prompt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +14,7 @@ pub struct BeginPromptReq {
 
 impl WorkspaceRpc for BeginPromptReq {
     const METHOD: &'static str = "workspace.begin_prompt";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = ();
 }
 
@@ -26,6 +27,7 @@ pub struct EndPromptReq {
 
 impl WorkspaceRpc for EndPromptReq {
     const METHOD: &'static str = "workspace.end_prompt";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = ();
 }
 
@@ -38,6 +40,7 @@ pub struct RewindToReq {
 
 impl WorkspaceRpc for RewindToReq {
     const METHOD: &'static str = "workspace.rewind_to";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = FileRewindResponse;
 }
 

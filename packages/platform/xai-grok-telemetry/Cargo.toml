@@ -61,7 +61,7 @@ whoami = { workspace = true }
 uuid = { workspace = true, features = ["v5", "v7"] }
 obfstr = { workspace = true, optional = true }
 mid = "4.0.0"
-tokio = { workspace = true, features = ["macros", "sync", "rt"] }
+tokio = { workspace = true, features = ["macros", "sync", "rt", "time"] }
 parking_lot = { workspace = true }
 xai-grok-auth = { workspace = true }
 opentelemetry = { workspace = true }

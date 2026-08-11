@@ -517,6 +517,53 @@ fn storage_view_follows_journal_authority_and_fails_closed_without_it() {
 }
 
 #[test]
+fn hinted_replay_skips_non_authoritative_source_while_journal_exists() {
+    let temp = tempfile::tempdir().unwrap();
+    let sid = "reloc-child";
+    let source = create_source(temp.path(), "/source", sid, 0);
+    let journal = RelocationJournal::test_new(sid, "/source", "/target", RelocationPhase::Ready);
+    let target = create_valid_target(temp.path(), &journal);
+    super::journal::write(temp.path(), &journal, None).unwrap();
+
+    let source_line = r#"{"timestamp":1,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"source-transcript"}}}}"#;
+    let target_line = r#"{"timestamp":1,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"target-transcript"}}}}"#;
+    fs::write(
+        source.join(super::super::UPDATES_FILE),
+        format!("{source_line}\n"),
+    )
+    .unwrap();
+    fs::write(
+        target.join(super::super::UPDATES_FILE),
+        format!("{target_line}\n"),
+    )
+    .unwrap();
+
+    let mut texts = Vec::new();
+    let emission = super::super::stream_replay_updates_at_hinted(
+        sid,
+        temp.path(),
+        super::super::ReplayPathHint {
+            parent_cwd: Some(Path::new("/source")),
+            child_cwd: None,
+        },
+        |update| {
+            if let acp::SessionUpdate::UserMessageChunk(chunk) = update
+                && let acp::ContentBlock::Text(text) = chunk.content
+            {
+                texts.push(text.text);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(emission, super::super::ReplayEmission::Emitted);
+    assert_eq!(
+        texts,
+        vec!["target-transcript".to_string()],
+        "Ready journal must win over the parent-cwd/sibling fast path"
+    );
+}
+
+#[test]
 fn cwd_scoped_storage_view_ignores_unrelated_malformed_authority() {
     let temp = tempfile::tempdir().unwrap();
     let requested = create_source(temp.path(), "/requested", "requested", 0);

@@ -100,6 +100,25 @@ pub fn attach_trace_to_grpc_request_mut(metadata: &mut MetadataMap) {
     });
 }
 
+/// The current span's W3C `traceparent`, for protocols that carry trace
+/// context in a message field instead of transport metadata; `None` when
+/// there is no valid span context.
+pub fn current_traceparent() -> Option<String> {
+    use opentelemetry::trace::TraceContextExt;
+    let context = Span::current().context();
+    let span_ref = context.span();
+    let span_context = span_ref.span_context();
+    if !span_context.is_valid() {
+        return None;
+    }
+    Some(format!(
+        "00-{}-{}-{:02x}",
+        span_context.trace_id(),
+        span_context.span_id(),
+        span_context.trace_flags() & opentelemetry::TraceFlags::SAMPLED,
+    ))
+}
+
 /// Trace context propagation: send the trace context by injecting it into the metadata of the given
 /// request.
 pub fn attach_trace_to_grpc_request<T>(

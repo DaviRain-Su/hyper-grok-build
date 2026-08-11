@@ -168,7 +168,7 @@ impl GoalStrategistSpawner for ChannelSpawner {
                     message,
                 )
             }
-            Err(SpawnError::Transport(_)) => {}
+            Err(SpawnError::Transport(_) | SpawnError::Interrupted) => {}
         }
         outcome
     }
@@ -340,6 +340,15 @@ pub(crate) async fn run_goal_strategist(
             tracing::warn!(error = %detail, "goal strategist: transport error; failing open");
             return record_fail_open(
                 GoalStrategistFailReason::Transport,
+                inputs.attempt,
+                inputs.consecutive_failures,
+                started,
+                emit_event,
+            );
+        }
+        Err(SpawnError::Interrupted) => {
+            return record_fail_open(
+                GoalStrategistFailReason::Aborted,
                 inputs.attempt,
                 inputs.consecutive_failures,
                 started,
@@ -800,6 +809,7 @@ mod tests {
                     message: message.clone(),
                     cancelled: *cancelled,
                 }),
+                Err(SpawnError::Interrupted) => Err(SpawnError::Interrupted),
             }
         }
     }

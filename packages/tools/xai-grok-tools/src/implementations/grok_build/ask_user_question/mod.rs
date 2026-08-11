@@ -51,7 +51,7 @@ const MIGRATION_FALLBACK: bool = true;
 /// Default max time to wait for the user to answer the questionnaire (all
 /// questions in this tool call share one timer): 30 minutes. On expiry the
 /// tool returns the same skipped/cancel text as a user dismiss
-/// (`CANCEL_TEXT`), not a tool failure.
+/// (`format::unanswered_text`), not a tool failure.
 ///
 /// The shell resolves `[toolset.ask_user_question]` across its config tiers
 /// and injects the result as [`AskUserQuestionParams`]; when no resolved
@@ -113,6 +113,11 @@ pub struct AskUserQuestionParams {
     /// `None` falls back to the env override / [`RESPONSE_TIMEOUT`].
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Session state stamped by the agent builder for non-interactive
+    /// sessions (headless `-p`, SDK) — NOT a user config key. `Some(true)`
+    /// switches the cancel/timeout result to [`format::NO_OPERATOR_TEXT`].
+    #[serde(default)]
+    pub non_interactive: Option<bool>,
 }
 
 crate::register_resource!("grok_build", "AskUserQuestion", AskUserQuestionParams);
@@ -419,7 +424,7 @@ impl xai_tool_runtime::Tool for AskUserQuestionTool {
         }
 
         // ── Step 5: Emit UserQuestionAsked + read the wait budget ───────
-        let wait = {
+        let params = {
             let questions_json = serde_json::to_value(&input.questions)
                 .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
             let res = resources.lock().await;
@@ -434,8 +439,10 @@ impl xai_tool_runtime::Tool for AskUserQuestionTool {
             res.get::<crate::types::resources::Params<AskUserQuestionParams>>()
                 .map(|p| p.0)
                 .unwrap_or_default()
-                .wait_budget()
         };
+        let wait = params.wait_budget();
+        // One wording for both unanswered paths (cancel + timeout below).
+        let unanswered = format::unanswered_text(params.non_interactive.unwrap_or(false));
         tracing::info!(
             question_count,
             timeout_secs = ?wait.map(|d| d.as_secs()),
@@ -470,7 +477,7 @@ impl xai_tool_runtime::Tool for AskUserQuestionTool {
                 // can open the next questionnaire (stale UI is cancelled when
                 // a new ext_method arrives). Same model text as cancel.
                 return Ok(AskUserQuestionOutput::UserAnswered {
-                    message: format::CANCEL_TEXT.to_string(),
+                    message: unanswered.to_string(),
                 });
             }
         };
@@ -507,7 +514,7 @@ impl xai_tool_runtime::Tool for AskUserQuestionTool {
                 Ok(AskUserQuestionOutput::UserAnswered { message })
             }
             Ok(UserQuestionResponse::Cancelled) => Ok(AskUserQuestionOutput::UserAnswered {
-                message: format::CANCEL_TEXT.to_string(),
+                message: unanswered.to_string(),
             }),
             Err(UserQuestionError::TransportError(msg)) => {
                 Err(xai_tool_runtime::ToolError::execution(
@@ -848,6 +855,90 @@ mod tests {
         }
     }
 
+    /// A cancel in a non-interactive session (builder-stamped params) must
+    /// return the honest no-operator text, not "user declined".
+    #[tokio::test]
+    async fn non_interactive_cancel_returns_no_operator_text() {
+        let (shared, mut rx) = resources_with_sender_and_params(AskUserQuestionParams {
+            non_interactive: Some(true),
+            ..Default::default()
+        });
+        let tool = AskUserQuestionTool;
+
+        let input = AskUserQuestionInput {
+            questions: vec![make_question("Q?", &["A"])],
+            use_id_keyed_format: false,
+        };
+
+        let handle = tokio::spawn({
+            let shared = shared.clone();
+            async move {
+                xai_tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "tc-ni"), input)
+                    .await
+            }
+        });
+
+        let request = rx.recv().await.unwrap();
+        request
+            .result_tx
+            .send(Ok(UserQuestionResponse::Cancelled))
+            .unwrap();
+
+        let result = handle.await.unwrap().unwrap();
+        match result {
+            AskUserQuestionOutput::UserAnswered { message } => {
+                assert_eq!(message, format::NO_OPERATOR_TEXT);
+            }
+            other => panic!(
+                "Expected UserAnswered with no-operator text, got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// A timeout in a non-interactive session also returns the no-operator
+    /// text — both unanswered paths share one wording source.
+    #[tokio::test(start_paused = true)]
+    async fn non_interactive_timeout_returns_no_operator_text() {
+        let (shared, mut rx) = resources_with_sender_and_params(AskUserQuestionParams {
+            timeout_enabled: Some(true),
+            timeout_secs: Some(5),
+            non_interactive: Some(true),
+        });
+        let tool = AskUserQuestionTool;
+
+        let input = AskUserQuestionInput {
+            questions: vec![make_question("Q?", &["A", "B"])],
+            use_id_keyed_format: false,
+        };
+
+        let handle = tokio::spawn({
+            let shared = shared.clone();
+            async move {
+                xai_tool_runtime::Tool::run(
+                    &tool,
+                    test_ctx_with_call_id(shared, "tc-ni-timeout"),
+                    input,
+                )
+                .await
+            }
+        });
+
+        let _request = rx.recv().await.expect("should receive request");
+        tokio::time::advance(std::time::Duration::from_secs(6)).await;
+
+        let result = handle.await.unwrap().unwrap();
+        match result {
+            AskUserQuestionOutput::UserAnswered { message } => {
+                assert_eq!(message, format::NO_OPERATOR_TEXT);
+            }
+            other => panic!(
+                "Expected UserAnswered with no-operator text, got {:?}",
+                other
+            ),
+        }
+    }
+
     /// Whole questionnaire (multi-question batch) shares one 6-minute timer.
     /// No `Params` injected — pins the legacy env→default budget for
     /// consumers that never resolve `[toolset.ask_user_question]`.
@@ -960,11 +1051,13 @@ mod tests {
         let disabled = AskUserQuestionParams {
             timeout_enabled: Some(false),
             timeout_secs: Some(30),
+            non_interactive: None,
         };
         assert_eq!(disabled.wait_budget(), None, "disabled timer waits forever");
         let zero = AskUserQuestionParams {
             timeout_enabled: Some(true),
             timeout_secs: Some(0),
+            non_interactive: None,
         };
         assert_eq!(
             zero.wait_budget(),
@@ -980,6 +1073,7 @@ mod tests {
         let (shared, mut rx) = resources_with_sender_and_params(AskUserQuestionParams {
             timeout_enabled: Some(true),
             timeout_secs: Some(5),
+            non_interactive: None,
         });
         let tool = AskUserQuestionTool;
 
@@ -1015,6 +1109,7 @@ mod tests {
         let (shared, mut rx) = resources_with_sender_and_params(AskUserQuestionParams {
             timeout_enabled: Some(false),
             timeout_secs: Some(1),
+            non_interactive: None,
         });
         let tool = AskUserQuestionTool;
 

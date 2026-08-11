@@ -128,6 +128,34 @@ async fn subagent_spawn_context_inherits_parent_ask_user_question_gate() {
     );
 }
 
+/// A subagent copies the parent's `non_interactive` flag, so a headless (`-p`)
+/// parent's children also get no-operator ask_user_question text instead of
+/// waiting on a user who does not exist.
+#[tokio::test]
+async fn subagent_spawn_context_copies_parent_non_interactive() {
+    let agent = build_minimal_agent_for_tests();
+
+    // Headless parent → child context is non-interactive.
+    let sid_headless = acp::SessionId::new("parent-headless");
+    let mut handle_headless = make_test_handle("test-model", false, None);
+    handle_headless.non_interactive = true;
+    agent.insert_resident(&sid_headless, handle_headless);
+    let ctx_headless = agent.build_subagent_spawn_context(sid_headless.0.as_ref());
+    assert!(
+        ctx_headless.parent_non_interactive,
+        "subagent must copy the parent's non_interactive flag (headless -p parent)"
+    );
+
+    // Interactive parent (the default) → child context stays interactive.
+    let sid_tui = acp::SessionId::new("parent-tui");
+    agent.insert_resident(&sid_tui, make_test_handle("test-model", false, None));
+    let ctx_tui = agent.build_subagent_spawn_context(sid_tui.0.as_ref());
+    assert!(
+        !ctx_tui.parent_non_interactive,
+        "an interactive parent must not mark its subagents non-interactive"
+    );
+}
+
 #[tokio::test]
 async fn subagent_spawn_context_inherits_parent_configured_cutoff() {
     let agent = build_minimal_agent_for_tests();

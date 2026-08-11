@@ -6,13 +6,14 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::WorkspaceRpc;
+use super::{RpcActivityClass, WorkspaceRpc};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HookRegistryReq {}
 
 impl WorkspaceRpc for HookRegistryReq {
     const METHOD: &'static str = "workspace.hook_registry";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = HookRegistryWire;
 }
 

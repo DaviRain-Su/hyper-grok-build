@@ -35,6 +35,21 @@ pub struct WorkflowAgentInfo {
     pub duration_ms: u64,
 }
 
+/// `_meta` key on rename fan-out (`SessionSummaryGenerated` + ACP
+/// `SessionInfoUpdate`). Old clients ignore unknown meta.
+pub const TITLE_IS_MANUAL_META_KEY: &str = "x.ai/titleIsManual";
+
+/// `_meta` object carried on a manual-rename fan-out.
+pub fn title_is_manual_meta() -> serde_json::Value {
+    serde_json::json!({ TITLE_IS_MANUAL_META_KEY: true })
+}
+
+/// `_meta` object carried on `/rename --auto` fan-out. Distinct from
+/// *absent* meta (auto title — must not clobber `display_name`).
+pub fn title_is_unpinned_meta() -> serde_json::Value {
+    serde_json::json!({ TITLE_IS_MANUAL_META_KEY: false })
+}
+
 /// xAI-specific session notification (parallel to acp::SessionNotification)
 /// This wraps an XaiSessionUpdate with session context for persistence and replay.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

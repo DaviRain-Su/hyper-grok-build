@@ -142,6 +142,42 @@ fn session_title_hydration_manual_restores_display_name_cold_cache_only() {
         Some("Fresh Rename"),
         "hydration is a cold-cache fallback, never an overwrite"
     );
+    assert_eq!(
+        app.agents[&id].generated_session_title.as_deref(),
+        Some("Disk Title"),
+        "generated_session_title is also cold-cache; a live title must not be clobbered"
+    );
+}
+/// A live auto title (SessionSummaryGenerated) that wins the race with the
+/// disk read must not be replaced — ghost-prefill falls back to this field.
+#[test]
+fn session_title_hydration_does_not_clobber_live_generated_title() {
+    let mut app = test_app();
+    dispatch(
+        Action::LoadSession("sess-title".into(), None, false),
+        &mut app,
+    );
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().generated_session_title = Some("Live Auto".into());
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionMetaFromDisk {
+            agent_id: id,
+            title: Some(("Stale Disk Title".into(), false)),
+            last_turn_summary: None,
+            last_turn_summary_gen: 0,
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert_eq!(
+        agent.generated_session_title.as_deref(),
+        Some("Live Auto"),
+        "late disk hydrate must not replace a live generated title"
+    );
+    assert!(
+        agent.display_name.is_none(),
+        "auto disk titles must not restore display_name"
+    );
 }
 /// Whitespace-only titles from disk are ignored entirely, manual or not.
 #[test]
@@ -164,6 +200,72 @@ fn session_title_hydration_ignores_blank_title() {
     let agent = &app.agents[&id];
     assert!(agent.display_name.is_none());
     assert!(agent.generated_session_title.is_none());
+}
+/// Pure C0/whitespace titles strip to blank — skip rather than restoring
+/// the unsanitized string into `display_name`.
+#[test]
+fn session_title_hydration_skips_control_only_title() {
+    let mut app = test_app();
+    dispatch(
+        Action::LoadSession("sess-title".into(), None, false),
+        &mut app,
+    );
+    let id = AgentId(0);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionMetaFromDisk {
+            agent_id: id,
+            title: Some(("\u{1b}\u{07}\n\t".into(), true)),
+            last_turn_summary: None,
+            last_turn_summary_gen: 0,
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.display_name.is_none(),
+        "control-only title must not land in display_name, got {:?}",
+        agent.display_name
+    );
+    assert!(
+        agent.generated_session_title.is_none(),
+        "control-only title must not land in generated_session_title, got {:?}",
+        agent.generated_session_title
+    );
+}
+/// Dirty-but-nonempty on-disk titles are stripped then capped before restore.
+#[test]
+fn session_title_hydration_sanitizes_and_caps_dirty_title() {
+    use xai_grok_shell::session::persistence::MAX_TITLE_SCALARS;
+    let mut app = test_app();
+    dispatch(
+        Action::LoadSession("sess-title".into(), None, false),
+        &mut app,
+    );
+    let id = AgentId(0);
+    let dirty = format!(
+        "ok\u{1b}]0;PWNED\u{07}{}",
+        "é".repeat(MAX_TITLE_SCALARS + 5)
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionMetaFromDisk {
+            agent_id: id,
+            title: Some((dirty, true)),
+            last_turn_summary: None,
+            last_turn_summary_gen: 0,
+        }),
+        &mut app,
+    );
+    const PREFIX: &str = "ok]0;PWNED";
+    let expected = format!(
+        "{PREFIX}{}",
+        "é".repeat(MAX_TITLE_SCALARS - PREFIX.chars().count())
+    );
+    let agent = &app.agents[&id];
+    assert_eq!(agent.display_name.as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        agent.generated_session_title.as_deref(),
+        Some(expected.as_str())
+    );
 }
 /// The persisted last-turn summary hydrates cold-cache only: a value already
 /// set by a live `LastTurnSummary` delivery (always newer than any disk read)
@@ -272,6 +374,58 @@ fn session_loaded_without_adoption_finishes_replayed_running_entries() {
         !agent.scrollback.has_running_entries(),
         "replayed running entries must be finished when no turn is adopted"
     );
+}
+/// Resume into a cwd with `.git/grok-worktree-source` sets `session.is_worktree`.
+#[test]
+fn load_session_marks_standalone_worktree_cwd() {
+    let mut app = test_app();
+    let main = crate::test_util::TempGitRepo::init("main-only");
+    let clone = main.standalone_clone("wt-branch");
+    dispatch(
+        Action::LoadSession("sess-wt".into(), Some(clone.path.clone()), false),
+        &mut app,
+    );
+    assert!(
+        app.agents[&AgentId(0)].session.is_worktree,
+        "resume into a standalone grok worktree must set session.is_worktree"
+    );
+    assert_eq!(app.agents[&AgentId(0)].session.cwd, clone.path);
+}
+#[test]
+fn load_session_plain_repo_is_not_worktree() {
+    let mut app = test_app();
+    let repo = crate::test_util::TempGitRepo::init("main");
+    dispatch(
+        Action::LoadSession("sess-plain-git".into(), Some(repo.path.clone()), false),
+        &mut app,
+    );
+    assert!(!app.agents[&AgentId(0)].session.is_worktree);
+}
+#[test]
+fn remote_restore_marks_standalone_worktree_cwd() {
+    let mut app = test_app();
+    let main = crate::test_util::TempGitRepo::init("main-only");
+    let clone = main.standalone_clone("wt-branch");
+    app.cwd = clone.path.clone();
+    let _ = dispatch_load_session_with_restore(
+        &mut app,
+        "remote-wt".into(),
+        clone.path.display().to_string(),
+    );
+    assert!(app.agents[&AgentId(0)].session.is_worktree);
+    assert_eq!(app.agents[&AgentId(0)].session.cwd, clone.path);
+}
+#[test]
+fn remote_restore_plain_repo_is_not_worktree() {
+    let mut app = test_app();
+    let repo = crate::test_util::TempGitRepo::init("main");
+    app.cwd = repo.path.clone();
+    let _ = dispatch_load_session_with_restore(
+        &mut app,
+        "remote-plain".into(),
+        repo.path.display().to_string(),
+    );
+    assert!(!app.agents[&AgentId(0)].session.is_worktree);
 }
 /// Cross-cwd resume anchors the agent cwd to the resolved origin cwd.
 #[test]
@@ -723,10 +877,11 @@ fn session_restored_refuses_local_build_under_chat_mode() {
         "placeholder agent must be removed on refuse"
     );
 }
-/// `SessionRestored` never carries a conversation-entry bit: the follow-up
-/// LoadSession stays `chat_kind: false`; the agent UI bit is sticky `--chat`.
+/// `SessionRestored` follow-up LoadSession stays `chat_kind: false` (not a
+/// picker conversation entry). Sticky `--chat` with no local disk still
+/// opens as chat, so `conversation_entry` / rename kind are Chat.
 #[test]
-fn session_restored_load_never_sets_conversation_entry_bit() {
+fn session_restored_sticky_chat_sets_conversation_entry() {
     let mut app = test_app_with_agent();
     let id = *app.agents.keys().next().unwrap();
     app.chat_mode = true;
@@ -747,6 +902,14 @@ fn session_restored_load_never_sets_conversation_entry_bit() {
     ));
     let agent = app.agents.get(&id).expect("agent kept");
     assert!(agent.chat_kind, "agent UI bit comes from sticky --chat");
+    assert!(
+        agent.conversation_entry,
+        "sticky --chat restore with no local disk opens as chat (rename kind)"
+    );
+    assert_eq!(
+        agent.rename_kind(),
+        xai_grok_shell::session::unified_list::SessionKind::Chat
+    );
 }
 /// Completing a mid-session login restores the agent view instead of
 /// running the startup load-session flow.

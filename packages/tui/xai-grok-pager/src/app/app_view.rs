@@ -612,6 +612,8 @@ pub struct ScreenModeRelaunch {
 }
 /// Root view component — owns all application state.
 pub struct AppView {
+    /// Taken by whichever path reaches a usable session (or interactive idle) first.
+    pub pending_startup: Option<xai_grok_telemetry::startup::PendingStartup>,
     /// Which view is currently active.
     pub active_view: ActiveView,
     /// View to return to after a mid-session login flow completes or is
@@ -1262,6 +1264,19 @@ fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bo
     chrono::Utc::now() >= next
 }
 impl AppView {
+    /// Finishes startup if this view still holds the obligation; does nothing after.
+    pub(crate) fn finish_startup(&mut self, outcome: xai_grok_telemetry::startup::StartupOutcome) {
+        xai_grok_telemetry::startup::PendingStartup::finish_held(
+            &mut self.pending_startup,
+            outcome,
+        );
+    }
+    /// Releases the obligation without recording; does nothing after finish.
+    pub(crate) fn abandon_startup(&mut self) {
+        if let Some(pending) = self.pending_startup.take() {
+            pending.abandon();
+        }
+    }
     pub fn is_zdr_blocked(&self) -> bool {
         self.is_zdr && !self.zdr_access_enabled
     }
@@ -1476,6 +1491,7 @@ impl AppView {
         welcome_prompt.adopt_slash_mru(slash_mru.clone());
         welcome_prompt.adopt_command_tags(command_tags.clone());
         Self {
+            pending_startup: None,
             active_view: ActiveView::Welcome,
             auth_return_view: None,
             agents: IndexMap::new(),
@@ -6205,6 +6221,7 @@ pub(crate) mod tests {
     pub(crate) fn test_app() -> AppView {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         AppView {
+            pending_startup: None,
             active_view: ActiveView::Welcome,
             auth_return_view: None,
             agents: indexmap::IndexMap::new(),

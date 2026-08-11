@@ -349,6 +349,74 @@
         });
     }
 
+    /// Isolated `isReplay` with `loading_replay == false`: drop_unexpected_replay
+    /// runs before SubagentSpawned (`!meta.is_replay` is defense-in-depth).
+    #[test]
+    fn replayed_subagent_spawned_without_loading_replay_is_dropped() {
+        with_replay_disk_home(|_| {
+            let child_sid = "child-unexpected-replay";
+            let mut app = make_app_with_agent("sess-parent");
+            assert!(!app.agents[&AgentId(0)].session.loading_replay);
+            write_child_updates_jsonl(
+                replay_disk_test_home(),
+                child_sid,
+                &(child_tool_line(child_sid) + "\n"),
+            );
+            let spawned = subagent_ext_replay(
+                "sess-parent",
+                serde_json::json!({
+                    "sessionUpdate": "subagent_spawned",
+                    "subagent_id": child_sid,
+                    "parent_session_id": "sess-parent",
+                    "child_session_id": child_sid,
+                    "subagent_type": "explore",
+                    "description": "scan src/",
+                }),
+                "sess-parent-1",
+            );
+            handle_ext_notification(&spawned, &mut app);
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                agent.subagent_sessions.is_empty(),
+                "unexpected replay spawn must not register"
+            );
+            assert!(agent.subagent_views.is_empty());
+        });
+    }
+
+    #[test]
+    fn late_replay_grace_accepts_is_replay_after_loading_replay_clears() {
+        let mut app = make_app_with_agent("sess-late");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(!agent.session.loading_replay);
+        agent.arm_late_replay_grace();
+        let meta = crate::acp::meta::NotificationMeta {
+            is_replay: true,
+            ..crate::acp::meta::NotificationMeta::default()
+        };
+        assert!(
+            !drop_unexpected_replay(agent, &meta, "sess-late", "test"),
+            "isReplay during late grace must apply"
+        );
+    }
+
+    #[test]
+    fn live_update_closes_late_replay_grace() {
+        let mut app = make_app_with_agent("sess-late");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.arm_late_replay_grace();
+        let live = crate::acp::meta::NotificationMeta::default();
+        assert!(!drop_unexpected_replay(agent, &live, "sess-late", "test"));
+        let replay = crate::acp::meta::NotificationMeta {
+            is_replay: true,
+            ..crate::acp::meta::NotificationMeta::default()
+        };
+        assert!(
+            drop_unexpected_replay(agent, &replay, "sess-late", "test"),
+            "this-session live must close late grace"
+        );
+    }
+
     /// Resume: a `SubagentSpawned` during `loading_replay` must defer the child
     /// transcript load (the dominant large-session resume cost) to first open.
     #[test]

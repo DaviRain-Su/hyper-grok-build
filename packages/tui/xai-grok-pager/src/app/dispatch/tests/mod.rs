@@ -48,7 +48,9 @@ use super::prompt::{dispatch_doctor, dispatch_send_prompt, dispatch_send_prompt_
 use super::session::fork::build_child_fork_marker;
 use super::session::lifecycle::{dispatch_new_session_inner, drain_startup_actions, finish_trust};
 use super::session::load::{dispatch_load_session_with_restore, reanchor_grouped_selection};
-use super::session::modal::{dispatch_rename_session, dispatch_sessions_confirm_close};
+use super::session::modal::{
+    dispatch_rename_session, dispatch_reset_session_title, dispatch_sessions_confirm_close,
+};
 use super::settings::setters::set_default_model_inner;
 use super::settings::ui::{action_for_reset, apply_setting_rollback};
 use super::status::scrub_error_for_toast;
@@ -74,6 +76,7 @@ use std::time::Instant;
 fn test_app() -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AppView {
+        pending_startup: None,
         active_view: ActiveView::Welcome,
         auth_return_view: None,
         agents: IndexMap::new(),

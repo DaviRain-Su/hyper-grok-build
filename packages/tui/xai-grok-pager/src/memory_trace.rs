@@ -41,9 +41,33 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[path = "memory_trace_wait.rs"]
+mod memory_trace_wait;
+use memory_trace_wait::wait_full_interval;
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[path = "memory_trace_signal_topology_tests.rs"]
+mod memory_trace_signal_topology_tests;
+
+/// Test-only: `pthread_t` of the live `grok-memtrace` sampler, published when
+/// the thread starts so the isolated SIGCHLD topology test can `pthread_kill`
+/// that waiter (errno is thread-local; process-wide `kill` can miss it).
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+static SAMPLER_PTHREAD: AtomicUsize = AtomicUsize::new(0);
+
+/// Test-only accessor for [`SAMPLER_PTHREAD`]. `None` until the sampler thread
+/// has entered its entry point after [`start`].
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(super) fn test_only_sampler_pthread() -> Option<usize> {
+    let value = SAMPLER_PTHREAD.load(Ordering::SeqCst);
+    (value != 0).then_some(value)
+}
 
 pub use xai_tty_utils::{ProcessResources, sample_process_memory};
 
@@ -406,9 +430,11 @@ fn interval_from_env() -> Duration {
     let secs = std::env::var("GROK_MEMTRACE_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(30)
-        .max(5);
-    Duration::from_secs(secs)
+        .unwrap_or(30);
+    // Production floors at 5s so accidental tiny values don't spam samples.
+    // Test builds allow 1s so isolated regressions can finish quickly.
+    let min_secs = if cfg!(test) { 1 } else { 5 };
+    Duration::from_secs(secs.max(min_secs))
 }
 
 fn first_threshold_from_env() -> u64 {
@@ -449,14 +475,22 @@ pub fn start(dir: PathBuf) {
         )));
     }
     let interval = interval_from_env();
-    // Detached sampler; the thread holds no locks across sleeps and dies
-    // with the process. Named for `sample`/Instruments visibility.
+    // Detached sampler: holds no locks across waits, and the JoinHandle is
+    // dropped so nothing else can unpark this thread (see memory_trace_wait).
+    // Named for `sample`/Instruments visibility; dies with the process.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    SAMPLER_PTHREAD.store(0, Ordering::SeqCst);
     let _ = std::thread::Builder::new()
         .name("grok-memtrace".into())
         .spawn(move || {
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+            {
+                // SAFETY: pthread_self returns this thread's valid pthread_t.
+                SAMPLER_PTHREAD.store(unsafe { libc::pthread_self() as usize }, Ordering::SeqCst);
+            }
             let mut wrote_start = false;
             loop {
-                std::thread::sleep(interval);
+                wait_full_interval(interval);
                 with_sink(|s| {
                     if !wrote_start {
                         wrote_start = true;

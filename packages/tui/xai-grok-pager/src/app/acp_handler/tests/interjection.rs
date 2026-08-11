@@ -229,6 +229,29 @@
     }
 
     #[test]
+    fn goal_send_now_notification_claims_optimistic_prompt_block() {
+        let mut app = make_app_with_agent("sess-view");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.note_self_originated_prompt("prompt-1");
+        let entry_id = agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("steer the goal".to_string()));
+        agent
+            .send_now_painted_blocks
+            .insert("prompt-1".to_string(), (entry_id, false));
+
+        let affected = handle_ext_notification(
+            &interjection_ext_with_id("sess-view", "steer the goal", Some("prompt-1")),
+            &mut app,
+        );
+        assert!(!affected, "the optimistic block already represents the message");
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(!agent.send_now_painted_blocks.contains_key("prompt-1"));
+        assert!(agent.expect_send_now_cancel.is_none());
+        assert_eq!(last_interjection_text(&agent.scrollback).as_deref(), Some("steer the goal"));
+    }
+
+    #[test]
     fn interjection_notification_with_foreign_id_renders() {
         // A broadcast carrying an id this client did NOT mint (another pane's
         // interjection) must render — only the originator dedups by its own id.

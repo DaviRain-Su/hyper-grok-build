@@ -1,6 +1,10 @@
 /// Truncation threshold, matching the shell's large-prompt limit.
 pub const LARGE_PROMPT_THRESHOLD: usize = 25_000;
 
+/// Trailing reminder so a mid-turn steer does not drop in-flight work.
+const UNFINISHED_TASKS_REMINDER: &str =
+    "Make sure to complete any unfinished tasks from previous turns.";
+
 /// Wrap a user message in the canonical `<user_query>` envelope.
 pub fn user_query(user_message: &str) -> String {
     format!(
@@ -10,9 +14,8 @@ pub fn user_query(user_message: &str) -> String {
     )
 }
 
-/// Wrap interjection text as a synthetic user message with a mid-turn note.
-/// No deferral instruction: the model decides how to weigh it against
-/// in-flight work. Output is byte-identical to the shell's historical format.
+/// Wrap interjection text as a synthetic user message with a mid-turn note
+/// and a reminder to finish in-flight work from earlier turns.
 pub fn format_interjection(text: String) -> String {
     let truncated = if text.len() > LARGE_PROMPT_THRESHOLD {
         let end = text
@@ -27,7 +30,7 @@ pub fn format_interjection(text: String) -> String {
     };
 
     format!(
-        "The user sent a message while you were working:\n{}",
+        "The user sent a message while you were working:\n{}\n{UNFINISHED_TASKS_REMINDER}",
         user_query(&truncated)
     )
 }
@@ -40,8 +43,11 @@ mod tests {
     fn wraps_in_user_query_with_midturn_note() {
         let out = format_interjection("stop and fix the test first".into());
         assert!(out.starts_with("The user sent a message while you were working:\n<user_query>\n"));
-        assert!(out.ends_with("\n</user_query>"));
         assert!(out.contains("stop and fix the test first"));
+        assert!(
+            out.ends_with(&format!("</user_query>\n{UNFINISHED_TASKS_REMINDER}")),
+            "unfinished-task reminder must follow the wrapped query, got: {out}"
+        );
     }
 
     #[test]
@@ -56,5 +62,9 @@ mod tests {
     fn short_text_untouched() {
         let out = format_interjection("hi".into());
         assert!(!out.contains("[truncated]"));
+        assert_eq!(
+            out,
+            "The user sent a message while you were working:\n<user_query>\nhi\n</user_query>\nMake sure to complete any unfinished tasks from previous turns."
+        );
     }
 }

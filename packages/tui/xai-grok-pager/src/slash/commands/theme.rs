@@ -186,6 +186,7 @@ mod tests {
                 usage_command_visible: true,
                 workflows_available: true,
                 screen_mode: crate::app::ScreenMode::Fullscreen,
+                current_title: None,
             };
             let items = cmd.suggest_args(&ctx, "").expect("should return items");
             assert_eq!(items[0].insert_text, "auto");
@@ -209,6 +210,7 @@ mod tests {
                 usage_command_visible: true,
                 workflows_available: true,
                 screen_mode: crate::app::ScreenMode::Fullscreen,
+                current_title: None,
             };
             let items = cmd.suggest_args(&ctx, "").expect("should return items");
             assert!(
@@ -233,6 +235,7 @@ mod tests {
                 usage_command_visible: true,
                 workflows_available: true,
                 screen_mode: crate::app::ScreenMode::Fullscreen,
+                current_title: None,
             };
             let items = cmd.suggest_args(&ctx, "").expect("should return items");
             assert!(
@@ -258,6 +261,7 @@ mod tests {
                 usage_command_visible: true,
                 workflows_available: true,
                 screen_mode: crate::app::ScreenMode::Fullscreen,
+                current_title: None,
             };
             let items = cmd.suggest_args(&ctx, "").expect("should return items");
             let groknight = items
@@ -287,6 +291,7 @@ mod tests {
                 usage_command_visible: true,
                 workflows_available: true,
                 screen_mode: crate::app::ScreenMode::Fullscreen,
+                current_title: None,
             };
             let items = cmd.suggest_args(&ctx, "").expect("should return items");
             // No concrete theme should show "(active)" in auto mode.

@@ -13,13 +13,14 @@ use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use axum::{
     Router,
     extract::{
         ConnectInfo, Query, State,
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -69,10 +70,27 @@ pub struct ServerConfig {
 struct ServerState {
     agent_config: AgentConfig,
     secret: String,
-    /// Channel to send new WebSocket connections to the persistent agent thread.
-    /// Lazily initialised on first connection; protected by a tokio Mutex so the
-    /// axum handler (which is `Send`) can acquire it.
-    agent_conn_tx: tokio::sync::Mutex<Option<mpsc::UnboundedSender<NewConnectionChannels>>>,
+    /// Persistent agent slot. Lazily initialised on first connection; protected
+    /// by a tokio Mutex so the axum handler (which is `Send`) can acquire it.
+    agent_slot: tokio::sync::Mutex<AgentSlot>,
+    /// Monotonic id for each boot attempt. Reclaim/fail/drop must match it
+    /// or a stale waiter can clobber a newer `Booting` and spawn a second agent.
+    boot_gen: AtomicU64,
+}
+
+/// Lifecycle of the persistent agent OS thread.
+enum AgentSlot {
+    Down,
+    /// In-flight spawn. `watch` wakes waiters when the slot leaves this state.
+    Booting {
+        boot_id: u64,
+        rx: tokio::sync::watch::Receiver<()>,
+    },
+    Up(mpsc::UnboundedSender<NewConnectionChannels>),
+}
+
+fn is_boot_gen(slot: &AgentSlot, boot_id: u64) -> bool {
+    matches!(slot, AgentSlot::Booting { boot_id: id, .. } if *id == boot_id)
 }
 
 /// Channels bridging a single WebSocket connection to the agent thread.
@@ -129,6 +147,202 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_connection(socket, state, addr))
 }
 
+/// Start the persistent agent if needed and return its connection sender.
+///
+/// Ready covers runtime build only. Waiters do not hold the slot lock.
+async fn ensure_persistent_agent(
+    state: &ServerState,
+) -> Option<mpsc::UnboundedSender<NewConnectionChannels>> {
+    loop {
+        let mut slot = state.agent_slot.lock().await;
+        match &*slot {
+            AgentSlot::Up(tx) if !tx.is_closed() => return Some(tx.clone()),
+            AgentSlot::Up(_) => {
+                warn!("Persistent agent thread died — will respawn");
+                *slot = AgentSlot::Down;
+            }
+            AgentSlot::Booting { boot_id, rx } => {
+                let boot_id = *boot_id;
+                let rx = rx.clone();
+                drop(slot);
+                reclaim_abandoned_boot(&state.agent_slot, rx, boot_id).await;
+            }
+            AgentSlot::Down => {
+                let (conn_tx, conn_rx) = mpsc::unbounded_channel();
+                let (ready_tx, ready_rx) =
+                    tokio::sync::oneshot::channel::<Result<(), std::io::ErrorKind>>();
+                let (boot_tx, boot_rx) = tokio::sync::watch::channel(());
+                let boot_id = state.boot_gen.fetch_add(1, Ordering::Relaxed) + 1;
+                *slot = AgentSlot::Booting {
+                    boot_id,
+                    rx: boot_rx,
+                };
+                let agent_config = state.agent_config.clone();
+                drop(slot);
+                // Drop of this future (client gone mid-ready) must leave the
+                // slot, or later callers spin forever on a dead watch.
+                let mut boot = BootSlotGuard::new(&state.agent_slot, boot_tx, boot_id);
+                if let Err(e) = thread::Builder::new()
+                    .name("agent-persistent".into())
+                    .spawn(move || persistent_agent_thread(agent_config, conn_rx, ready_tx))
+                {
+                    warn!(error = %e, "Failed to spawn persistent agent thread");
+                    return fail_boot(&state.agent_slot, boot_id).await;
+                }
+                match ready_rx.await {
+                    Ok(Ok(())) => {
+                        let mut slot = state.agent_slot.lock().await;
+                        if is_boot_gen(&slot, boot_id) {
+                            *slot = AgentSlot::Up(conn_tx.clone());
+                            drop(slot);
+                            boot.notify_waiters();
+                            info!("Persistent agent thread spawned");
+                            return Some(conn_tx);
+                        }
+                        // Another attempt owns the slot; drop conn_tx so this
+                        // thread's receiver closes instead of going live.
+                        drop(slot);
+                        boot.notify_waiters();
+                    }
+                    Ok(Err(kind)) => {
+                        warn!(?kind, "Persistent agent runtime failed");
+                        return fail_boot(&state.agent_slot, boot_id).await;
+                    }
+                    Err(_) => {
+                        warn!("Persistent agent thread died during startup");
+                        return fail_boot(&state.agent_slot, boot_id).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Resets a `Booting` slot whose watch sender vanished (cancel / panic).
+///
+/// `changed()` then returns immediately; without reclaim, waiters loop on
+/// `Booting` forever and the agent can never start again.
+async fn reclaim_abandoned_boot(
+    slot: &tokio::sync::Mutex<AgentSlot>,
+    mut rx: tokio::sync::watch::Receiver<()>,
+    boot_id: u64,
+) {
+    if rx.changed().await.is_err() {
+        let mut slot = slot.lock().await;
+        if is_boot_gen(&slot, boot_id) {
+            *slot = AgentSlot::Down;
+        }
+    }
+}
+
+/// Best-effort revert of `Booting` if `ensure_persistent_agent` is dropped
+/// before it stores `Up` or `Down`. `try_lock` is enough: a waiter that
+/// holds the mutex will see the dropped sender and reclaim.
+#[must_use]
+struct BootSlotGuard<'a> {
+    slot: &'a tokio::sync::Mutex<AgentSlot>,
+    boot_tx: Option<tokio::sync::watch::Sender<()>>,
+    boot_id: u64,
+}
+
+impl<'a> BootSlotGuard<'a> {
+    fn new(
+        slot: &'a tokio::sync::Mutex<AgentSlot>,
+        boot_tx: tokio::sync::watch::Sender<()>,
+        boot_id: u64,
+    ) -> Self {
+        Self {
+            slot,
+            boot_tx: Some(boot_tx),
+            boot_id,
+        }
+    }
+
+    fn notify_waiters(&mut self) {
+        if let Some(tx) = self.boot_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+impl Drop for BootSlotGuard<'_> {
+    fn drop(&mut self) {
+        let Some(tx) = self.boot_tx.take() else {
+            return;
+        };
+        if let Ok(mut slot) = self.slot.try_lock()
+            && is_boot_gen(&slot, self.boot_id)
+        {
+            *slot = AgentSlot::Down;
+        }
+        drop(tx);
+    }
+}
+
+async fn fail_boot(
+    slot: &tokio::sync::Mutex<AgentSlot>,
+    boot_id: u64,
+) -> Option<mpsc::UnboundedSender<NewConnectionChannels>> {
+    let mut slot = slot.lock().await;
+    if is_boot_gen(&slot, boot_id) {
+        *slot = AgentSlot::Down;
+    }
+    None
+}
+
+fn persistent_agent_thread(
+    agent_config: AgentConfig,
+    conn_rx: mpsc::UnboundedReceiver<NewConnectionChannels>,
+    ready_tx: tokio::sync::oneshot::Sender<Result<(), std::io::ErrorKind>>,
+) -> std::io::Result<()> {
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    let rt = match xai_tty_utils::runtime::build_with_blocking_pool(builder.enable_all()) {
+        Ok(rt) => {
+            if ready_tx.send(Ok(())).is_err() {
+                // Booter cancelled; drop `rt` so its keep-alive pool does
+                // not overlap a respawn's 16-wide pre-warm (EAGAIN).
+                return Ok(());
+            }
+            rt
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to create runtime for agent");
+            let _ = ready_tx.send(Err(e.kind()));
+            return Err(e);
+        }
+    };
+
+    // Same abandon after a successful ack: cancel drops `conn_tx`.
+    if conn_rx.is_closed() {
+        return Ok(());
+    }
+
+    // Prefetch is HTTP; it must not delay the first WS.
+    let auth = agent_config.create_auth_manager().current();
+    let fetch_auth = ModelFetchAuth::resolve(&agent_config.endpoints, auth.is_some());
+    let prefetched_models = if auth.is_some()
+        || agent_config.endpoints.has_custom_endpoint()
+        || fetch_auth != ModelFetchAuth::Session
+    {
+        prefetch_models_blocking(&agent_config.endpoints, auth.as_ref(), fetch_auth)
+    } else {
+        None
+    };
+    info!("Prefetched models: {:?}", prefetched_models);
+
+    if conn_rx.is_closed() {
+        return Ok(());
+    }
+
+    let local_set = tokio::task::LocalSet::new();
+    local_set.block_on(&rt, async move {
+        run_persistent_agent(agent_config, conn_rx, prefetched_models).await
+    });
+
+    warn!("Persistent agent thread exiting");
+    Ok(())
+}
+
 /// Handle an authenticated WebSocket connection.
 ///
 /// On first connection, spawns a persistent agent thread that owns the MvpAgent.
@@ -143,70 +357,40 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
     let (to_agent_tx, to_agent_rx) = mpsc::unbounded_channel::<String>();
     let (from_agent_tx, mut from_agent_rx) = mpsc::unbounded_channel::<String>();
 
-    // Ensure the persistent agent thread is running (lazy init on first connection).
-    // If the previous agent thread died (panic, etc.), clear the stale sender so we
-    // respawn a fresh one.
-    {
-        let mut agent_tx_guard = state.agent_conn_tx.lock().await;
-
-        // Check if existing sender is still alive (receiver not dropped)
-        if let Some(ref tx) = *agent_tx_guard
-            && tx.is_closed()
-        {
-            warn!("Persistent agent thread died — will respawn");
-            *agent_tx_guard = None;
-        }
-
-        if agent_tx_guard.is_none() {
-            let (conn_tx, conn_rx) = mpsc::unbounded_channel();
-
-            let agent_config = state.agent_config.clone();
-            let _agent_thread = thread::Builder::new()
-                .name("agent-persistent".to_string())
-                .spawn(move || {
-                    // Prefetch models before creating the runtime (blocking is OK here)
-                    let auth = agent_config.create_auth_manager().current();
-                    let fetch_auth =
-                        ModelFetchAuth::resolve(&agent_config.endpoints, auth.is_some());
-                    let prefetched_models = if auth.is_some()
-                        || agent_config.endpoints.has_custom_endpoint()
-                        || fetch_auth != ModelFetchAuth::Session
-                    {
-                        prefetch_models_blocking(&agent_config.endpoints, auth.as_ref(), fetch_auth)
-                    } else {
-                        None
-                    };
-
-                    info!("Prefetched models: {:?}", prefetched_models);
-
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("Failed to create runtime for agent");
-
-                    let local_set = tokio::task::LocalSet::new();
-                    local_set.block_on(&rt, async move {
-                        run_persistent_agent(agent_config, conn_rx, prefetched_models).await
-                    });
-
-                    warn!("Persistent agent thread exiting");
-                });
-
-            *agent_tx_guard = Some(conn_tx);
-            info!("Persistent agent thread spawned");
-        }
-
-        // Send new WS channels to the agent thread
-        if let Some(ref tx) = *agent_tx_guard
-            && tx
+    let attached = match ensure_persistent_agent(&state).await {
+        Some(tx) => {
+            let sent = tx
                 .send(NewConnectionChannels {
                     from_ws_rx: to_agent_rx,
                     to_ws_tx: from_agent_tx,
                 })
-                .is_err()
-        {
-            warn!("Failed to send connection channels to agent thread");
+                .is_ok();
+            if !sent {
+                warn!("Failed to send connection channels to agent thread");
+                let mut slot = state.agent_slot.lock().await;
+                if let AgentSlot::Up(live) = &*slot
+                    && live.is_closed()
+                {
+                    *slot = AgentSlot::Down;
+                }
+            }
+            sent
         }
+        None => {
+            warn!("Persistent agent is not available");
+            false
+        }
+    };
+    if !attached {
+        // Do not start the ping loop: the client would see a live socket
+        // that never reaches the agent.
+        let _ = ws_write
+            .send(Message::Close(Some(CloseFrame {
+                code: close_code::AGAIN,
+                reason: "persistent agent unavailable".into(),
+            })))
+            .await;
+        return;
     }
 
     // Task: Read from WS, send to agent thread
@@ -312,6 +496,7 @@ async fn run_persistent_agent(
         MvpAgent::new(gateway, &agent_config, auth_manager, prefetched_models)
             .unwrap_or_else(crate::agent::init::exit_on_config_error),
     );
+    agent.models_manager.spawn_background_refresh();
 
     let relay_dest: RelayDest = Rc::new(RefCell::new(None));
 
@@ -463,7 +648,8 @@ pub async fn run_agent_server(
     let state = Arc::new(ServerState {
         agent_config,
         secret: config.secret,
-        agent_conn_tx: tokio::sync::Mutex::new(None),
+        agent_slot: tokio::sync::Mutex::new(AgentSlot::Down),
+        boot_gen: AtomicU64::new(0),
     });
 
     let app = Router::new()
@@ -486,3 +672,7 @@ pub async fn run_agent_server(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod server_tests;

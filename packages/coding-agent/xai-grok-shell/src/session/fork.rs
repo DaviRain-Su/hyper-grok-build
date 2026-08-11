@@ -187,6 +187,7 @@ async fn sync_forked_session_to_backend(
         subagent_role: None,
         fork_context_source: None,
         subagent_depth: None,
+        title_is_manual: None,
     };
 
     client

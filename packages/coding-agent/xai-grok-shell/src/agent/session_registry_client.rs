@@ -461,6 +461,23 @@ mod tests {
         assert!(json.get("repoHeadAtEnd").is_none());
     }
 
+    #[test]
+    fn empty_summary_is_sent_not_omitted() {
+        let req = UpdateRequest {
+            summary: Some(String::new()),
+            first_prompt: None,
+            last_turn_number: None,
+            repo_head_at_end: None,
+            restorable_turn_number: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            json.get("summary"),
+            Some(&serde_json::json!("")),
+            "unpin must POST summary:\"\" so a merge replica drops the prior title"
+        );
+    }
+
     // Wire-contract tests: server reads the camelCase `deviceId` key.
 
     fn minimal_register_request(device_id: Option<String>) -> RegisterRequest {

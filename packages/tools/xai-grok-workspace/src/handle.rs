@@ -628,6 +628,9 @@ impl WorkspaceHandle {
             .with_idle_ignores_background(config.status_config.idle_ignores_background)
             .with_preview_activity_window_ms(
                 config.status_config.preview_activity_window.as_millis() as u64,
+            )
+            .with_rpc_activity_window_ms(
+                config.status_config.rpc_activity_window.as_millis() as u64,
             ),
         );
         activity_tracker.set_event_writers(session_event_writers.clone());

@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use agent_client_protocol as acp;
 use tokio::task::JoinSet;
 use xai_acp_lib::{AcpAgentTx, acp_send};
-use xai_grok_telemetry::startup::{self, StartupOutcome, StartupPhase};
+use xai_grok_telemetry::startup::{self, StartupPhase};
 use actions::{
     ClipboardPasteTarget, Effect, ProbedAttachment, SubagentKillOutcome,
     SwitchModelError, TaskResult,
@@ -245,17 +245,17 @@ pub(crate) fn execute(
                         Some(serde_json::json!({"mcp_server_count": mcp_count})),
                     );
                     let create_start = std::time::Instant::now();
-                    let result = acp_send(
+                    let result = helpers::acp_send_bounded(
                             acp::NewSessionRequest::new(session_cwd.clone())
                                 .mcp_servers(mcp_servers)
                                 .meta(meta),
                             &tx,
+                            "Session creation",
                         )
                         .await;
                     let create_elapsed_ms = create_start.elapsed().as_millis() as u64;
                     match result {
                         Ok(resp) => {
-                            startup::report_total(StartupOutcome::Ok);
                             ulog::info(
                                 "session.create.done",
                                 Some(&resp.session_id.0),
@@ -364,7 +364,13 @@ pub(crate) fn execute(
                                 .into(),
                         );
                         let _phase = startup::phase_scope(StartupPhase::SessionCreate);
-                        let ext_resp = match acp_send(ext_req, &tx).await {
+                        let ext_resp = match helpers::acp_send_bounded(
+                                ext_req,
+                                &tx,
+                                "Worktree session resume",
+                            )
+                            .await
+                        {
                             Ok(resp) => {
                                 tracing::info!(
                                 session_id = %sid,
@@ -437,7 +443,6 @@ pub(crate) fn execute(
                         let (code_restored, restore_summary, restore_degree) = parse_worktree_restore_payload(
                             result_obj,
                         );
-                        startup::report_total(StartupOutcome::Ok);
                         return TaskResult::WorktreeForked {
                             agent_id,
                             session_id: acp::SessionId::new(new_session_id),
@@ -558,16 +563,16 @@ pub(crate) fn execute(
                         &xai_grok_tools::types::compat::CompatConfig::default(),
                     );
                     let _phase = startup::phase_scope(StartupPhase::SessionCreate);
-                    let result = acp_send(
+                    let result = helpers::acp_send_bounded(
                             acp::NewSessionRequest::new(session_cwd.clone())
                                 .mcp_servers(mcp_servers)
                                 .meta(meta),
                             &tx,
+                            "Worktree session creation",
                         )
                         .await;
                     match result {
                         Ok(resp) => {
-                            startup::report_total(StartupOutcome::Ok);
                             TaskResult::WorktreeSessionCreated {
                                 agent_id,
                                 session_id: resp.session_id,
@@ -618,7 +623,7 @@ pub(crate) fn execute(
                     let _phase = startup::phase_scope(StartupPhase::SessionCreate);
                     ulog::info("session.load.start", Some(&acp_session_id.0), None);
                     let load_started = std::time::Instant::now();
-                    let result = acp_send(
+                    let result = helpers::acp_send_bounded(
                             acp::LoadSessionRequest::new(
                                     acp_session_id.clone(),
                                     cwd.clone(),
@@ -626,6 +631,7 @@ pub(crate) fn execute(
                                 .mcp_servers(mcp_servers.clone())
                                 .meta(meta.clone()),
                             &tx,
+                            "Session loading",
                         )
                         .await;
                     let load_elapsed_ms = load_started.elapsed().as_millis() as u64;
@@ -642,7 +648,6 @@ pub(crate) fn execute(
                                 Some(&acp_session_id.0),
                                 Some(serde_json::json!({"elapsed_ms": load_elapsed_ms})),
                             );
-                            startup::report_total(StartupOutcome::Ok);
                             let (code_restored, restore_summary, restore_degree) = parse_session_load_restore_meta(
                                 resp.meta.as_ref(),
                             );
@@ -3375,59 +3380,68 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::RenameSession { agent_id, session_id, title, cwd } => {
+        Effect::RenameSession { agent_id, session_id, title, cwd, kind } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    #[derive(serde::Serialize)]
-                    #[serde(rename_all = "camelCase")]
-                    struct RenameRequest {
-                        session_id: String,
-                        title: String,
-                        cwd: String,
-                    }
-                    let request = acp::ExtRequest::new(
-                        "x.ai/session/rename",
-                        serde_json::value::to_raw_value(
-                                &RenameRequest {
-                                    session_id: session_id.0.to_string(),
-                                    title: title.clone(),
-                                    cwd: cwd.to_string_lossy().to_string(),
-                                },
-                            )
-                            .expect("serialize rename params")
-                            .into(),
-                    );
-                    match acp_send(request, &tx).await {
-                        Ok(resp) => {
-                            let wrapper: serde_json::Value = serde_json::from_str(
-                                    resp.0.get(),
-                                )
-                                .unwrap_or_default();
-                            if let Some(err) = wrapper
-                                .get("error")
-                                .filter(|v| !v.is_null())
-                            {
-                                let msg = err
-                                    .as_str()
-                                    .map(String::from)
-                                    .unwrap_or_else(|| err.to_string());
-                                return TaskResult::RenameSessionFailed {
-                                    agent_id,
-                                    error: msg,
-                                };
-                            }
+                    match session_rename_rpc(
+                            &tx,
+                            actions::RenameSessionRequest::for_rename(
+                                session_id.0.to_string(),
+                                title.clone(),
+                                cwd.to_string_lossy().to_string(),
+                                kind,
+                            ),
+                        )
+                        .await
+                    {
+                        Ok(()) => {
                             TaskResult::RenameSessionComplete {
                                 agent_id,
                                 title,
                             }
                         }
-                        Err(e) => {
+                        Err(error) => {
                             TaskResult::RenameSessionFailed {
                                 agent_id,
-                                error: sanitize_user_error(
-                                    &format!("couldn't rename session: {e}"),
-                                ),
+                                error,
+                            }
+                        }
+                    }
+                });
+        }
+        Effect::ResetSessionTitle {
+            agent_id,
+            session_id,
+            cwd,
+            kind,
+            previous_display_name,
+            previous_generated_title,
+        } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    match session_rename_rpc(
+                            &tx,
+                            actions::RenameSessionRequest::for_reset(
+                                session_id.0.to_string(),
+                                cwd.to_string_lossy().to_string(),
+                                kind,
+                            ),
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            TaskResult::ResetSessionTitleComplete {
+                                agent_id,
+                            }
+                        }
+                        Err(error) => {
+                            TaskResult::ResetSessionTitleFailed {
+                                agent_id,
+                                error,
+                                previous_display_name,
+                                previous_generated_title,
                             }
                         }
                     }
@@ -4636,6 +4650,38 @@ async fn fetch_session_usage(
             "invalid session usage response".to_string()
         })?;
     Ok(parsed.usage)
+}
+/// Shared `x.ai/session/rename` RPC for rename and `/rename --auto`.
+async fn session_rename_rpc(
+    tx: &AcpAgentTx,
+    request: actions::RenameSessionRequest,
+) -> Result<(), String> {
+    let verb = if request.reset_to_auto {
+        "reset session title"
+    } else {
+        "rename session"
+    };
+    let ext = acp::ExtRequest::new(
+        "x.ai/session/rename",
+        serde_json::value::to_raw_value(&request)
+            .expect("serialize rename params")
+            .into(),
+    );
+    match acp_send(ext, tx).await {
+        Ok(resp) => {
+            let wrapper: serde_json::Value = serde_json::from_str(resp.0.get())
+                .unwrap_or_default();
+            if let Some(err) = wrapper.get("error").filter(|v| !v.is_null()) {
+                let msg = err
+                    .as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| err.to_string());
+                return Err(msg);
+            }
+            Ok(())
+        }
+        Err(e) => Err(sanitize_user_error(&format!("couldn't {verb}: {e}"))),
+    }
 }
 /// Look up the session title/summary from local persistence.
 async fn lookup_session_title(session_id: &acp::SessionId) -> Option<String> {

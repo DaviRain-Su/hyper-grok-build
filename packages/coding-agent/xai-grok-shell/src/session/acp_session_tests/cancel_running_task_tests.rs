@@ -291,7 +291,6 @@ async fn persist_ack_waits_for_disk_flush_before_success_inner() {
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
                 managed_mcp_handle: Default::default(),
-                managed_mcp_expires_at: std::sync::Mutex::new(None),
                 initial_client_mcp_servers: vec![],
                 tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
                 mcp_announced_servers: Mutex::new(HashMap::new()),
@@ -796,7 +795,6 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
                 managed_mcp_handle: Default::default(),
-                managed_mcp_expires_at: std::sync::Mutex::new(None),
                 initial_client_mcp_servers: vec![],
                 tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
                 mcp_announced_servers: Mutex::new(HashMap::new()),
@@ -1104,7 +1102,6 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
                 managed_mcp_handle: Default::default(),
-                managed_mcp_expires_at: std::sync::Mutex::new(None),
                 initial_client_mcp_servers: vec![],
                 tool_metadata_snapshot: Arc::new(
                     std::sync::Mutex::new(Default::default()),
@@ -2552,7 +2549,6 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
                 managed_mcp_handle: Default::default(),
-                managed_mcp_expires_at: std::sync::Mutex::new(None),
                 initial_client_mcp_servers: vec![],
                 tool_metadata_snapshot: Arc::new(
                     std::sync::Mutex::new(Default::default()),

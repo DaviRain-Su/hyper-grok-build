@@ -1,7 +1,5 @@
 //! Replay of records earlier builds wrote, asserted on what reaches the client.
 
-use std::collections::HashMap;
-
 use agent_client_protocol as acp;
 use serde_json::Value;
 
@@ -21,9 +19,8 @@ async fn replay_shrinks_an_oversized_completion() {
         &line,
         /*persist_data*/ None,
         /*target_client_id*/ None,
-        &mut Vec::new(),
         /*mark_replay*/ false,
-        &mut HashMap::new(),
+        &mut crate::session::storage::ReplayToolCollapser::new(),
     );
 
     let params = next_ext_notification_params(&mut rx).expect("the record must still be sent");
@@ -95,9 +92,8 @@ async fn a_marked_replay_is_fitted_after_its_metadata_is_added() {
         &line,
         Some(&persist),
         /*target_client_id*/ None,
-        &mut Vec::new(),
         /*mark_replay*/ true,
-        &mut HashMap::new(),
+        &mut crate::session::storage::ReplayToolCollapser::new(),
     );
 
     let params = next_ext_notification_params(&mut rx).expect("the record must still be sent");
@@ -122,9 +118,8 @@ async fn replay_drops_a_completion_nothing_can_shrink() {
         &line,
         /*persist_data*/ None,
         /*target_client_id*/ None,
-        &mut Vec::new(),
         /*mark_replay*/ false,
-        &mut HashMap::new(),
+        &mut crate::session::storage::ReplayToolCollapser::new(),
     );
 
     assert!(next_ext_notification_params(&mut rx).is_none());
@@ -140,9 +135,8 @@ async fn replay_forwards_records_within_the_limit_untouched() {
         &line,
         /*persist_data*/ None,
         /*target_client_id*/ None,
-        &mut Vec::new(),
         /*mark_replay*/ false,
-        &mut HashMap::new(),
+        &mut crate::session::storage::ReplayToolCollapser::new(),
     );
 
     let params = next_ext_notification_params(&mut rx).expect("forwarded");
@@ -162,13 +156,27 @@ async fn replay_leaves_other_oversized_records_alone() {
         &line,
         /*persist_data*/ None,
         /*target_client_id*/ None,
-        &mut Vec::new(),
         /*mark_replay*/ false,
-        &mut HashMap::new(),
+        &mut crate::session::storage::ReplayToolCollapser::new(),
     );
 
     let params = next_ext_notification_params(&mut rx).expect("forwarded");
     assert_eq!(params, recorded);
+}
+
+#[tokio::test]
+async fn parent_replay_does_not_emit_meta_less_unfinished_tool_call() {
+    let (agent, mut rx) = build_agent_with_gateway();
+    let mut collapser = crate::session::storage::ReplayToolCollapser::new();
+    let tool = r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"t1","title":"bash","status":"pending"},"_meta":{"eventId":"s-1"}}}"#;
+    let start = r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"t1","title":"ls"},"_meta":{"eventId":"s-2"}}}"#;
+    agent.forward_raw_replay_line(tool, None, None, false, &mut collapser);
+    agent.forward_raw_replay_line(start, None, None, false, &mut collapser);
+    assert_eq!(collapser.pending_len(), 1);
+    assert!(
+        rx.try_recv().is_err(),
+        "parent must not synthesize a meta-less ToolCall at EOF"
+    );
 }
 
 /// Stale-task reconciliation on a cold load builds its completion from a

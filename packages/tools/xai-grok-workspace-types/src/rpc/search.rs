@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::WorkspaceRpc;
+use super::{RpcActivityClass, WorkspaceRpc};
 
 // =========================================================================
 // Content search (`workspace.ripgrep`)
@@ -44,6 +44,7 @@ pub struct ContentSearchRequest {
 
 impl WorkspaceRpc for ContentSearchRequest {
     const METHOD: &'static str = "workspace.ripgrep";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = ContentSearchData;
 }
 
@@ -137,6 +138,7 @@ pub struct FuzzyOpenReq {
 
 impl WorkspaceRpc for FuzzyOpenReq {
     const METHOD: &'static str = "workspace.fuzzy_open";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = String;
 }
 
@@ -154,6 +156,7 @@ pub struct FuzzyChangeReq {
 // Response: Whether the search existed (so the shell can return "not found").
 impl WorkspaceRpc for FuzzyChangeReq {
     const METHOD: &'static str = "workspace.fuzzy_change";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = bool;
 }
 
@@ -164,6 +167,7 @@ pub struct FuzzyCloseReq {
 
 impl WorkspaceRpc for FuzzyCloseReq {
     const METHOD: &'static str = "workspace.fuzzy_close";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = bool;
 }
 
@@ -177,6 +181,7 @@ pub struct FuzzyStatusReq {
 
 impl WorkspaceRpc for FuzzyStatusReq {
     const METHOD: &'static str = "workspace.fuzzy_search";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
 

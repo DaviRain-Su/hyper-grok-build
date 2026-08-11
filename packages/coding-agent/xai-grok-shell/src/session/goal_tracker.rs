@@ -699,6 +699,13 @@ pub struct GoalTracker {
     orchestration: Option<GoalOrchestration>,
     session_dir: PathBuf,
     active_since: Option<Instant>,
+    planner_run: Option<GoalPlannerRunState>,
+}
+
+#[derive(Debug)]
+pub(crate) struct GoalPlannerRunState {
+    pub(crate) cancel: tokio_util::sync::CancellationToken,
+    pub(crate) steering: Vec<String>,
 }
 
 impl GoalTracker {
@@ -707,6 +714,7 @@ impl GoalTracker {
             orchestration: None,
             session_dir,
             active_since: None,
+            planner_run: None,
         }
     }
 
@@ -778,11 +786,34 @@ impl GoalTracker {
             orchestration: Some(snapshot),
             session_dir,
             active_since,
+            planner_run: None,
         }
     }
 
     pub fn snapshot(&self) -> Option<&GoalOrchestration> {
         self.orchestration.as_ref()
+    }
+
+    pub(crate) fn start_planner_run(&mut self, cancel: tokio_util::sync::CancellationToken) {
+        self.planner_run = Some(GoalPlannerRunState {
+            cancel,
+            steering: Vec::new(),
+        });
+    }
+
+    pub(crate) fn take_planner_run(&mut self) -> Option<GoalPlannerRunState> {
+        self.planner_run.take()
+    }
+
+    pub(crate) fn steer_planner(&mut self, steering: String) {
+        let Some(run) = self.planner_run.as_mut() else {
+            return;
+        };
+        if steering.is_empty() {
+            return;
+        }
+        run.steering.push(steering);
+        run.cancel.cancel();
     }
 
     pub(crate) fn snapshot_mut(&mut self) -> Option<&mut GoalOrchestration> {
@@ -1426,6 +1457,18 @@ mod tests {
 
     fn make_tracker() -> GoalTracker {
         GoalTracker::new(PathBuf::from("/tmp/test-goal-session"))
+    }
+
+    #[test]
+    fn empty_steering_does_not_cancel_planner() {
+        let mut tracker = make_tracker();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        tracker.start_planner_run(cancel.clone());
+
+        tracker.steer_planner(String::new());
+
+        assert!(!cancel.is_cancelled());
+        assert!(tracker.take_planner_run().unwrap().steering.is_empty());
     }
 
     fn activate_tracker(t: &mut GoalTracker) {

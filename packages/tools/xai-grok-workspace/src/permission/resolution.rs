@@ -1203,20 +1203,18 @@ impl McpServerAllowlist {
     }
 }
 
-/// Namespace prefix for managed (grok.com-injected) MCP server names. Defined
-/// here (shell depends on workspace) and re-exported by shell's `to_managed_name`
-/// so the prefix and policy matching never drift.
+/// Namespace prefix for legacy injected MCP server names (`grok_com_*`).
+/// Policy matching still uses this spelling.
 pub const MANAGED_MCP_PREFIX: &str = "grok_com_";
 
 /// Max `char` length of a managed runtime name (`grok_com_` + normalized display
-/// name), sized to the 64-char tool-name budget. Shared by `to_managed_name` and
-/// `mcp_name_matches` so a long policy `serverName` still matches its truncated
-/// runtime name.
+/// name), sized to the 64-char tool-name budget. Shared with `mcp_name_matches`
+/// so a long policy `serverName` still matches its truncated runtime name.
 pub const MANAGED_MCP_NAME_MAX_CHARS: usize = 39;
 
 /// Normalize a bare MCP display name to its runtime spelling (lowercase, spaces
-/// → `_`). Shared by `to_managed_name` and `mcp_name_matches` so the policy and
-/// runtime sides never drift.
+/// → `_`). Shared with `mcp_name_matches` so the policy and runtime sides never
+/// drift.
 pub fn normalize_managed_name(bare: &str) -> String {
     bare.to_lowercase().replace(' ', "_")
 }

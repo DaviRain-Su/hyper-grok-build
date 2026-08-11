@@ -57,6 +57,7 @@ mod tests {
             subagent_role: None,
             fork_context_source: None,
             subagent_depth: None,
+            title_is_manual: None,
         };
 
         let sync = RemoteSync::new(

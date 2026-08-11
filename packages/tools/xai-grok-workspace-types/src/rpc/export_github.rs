@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::WorkspaceRpc;
+use super::{RpcActivityClass, WorkspaceRpc};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportGithubReq {
@@ -15,6 +15,7 @@ pub struct ExportGithubReq {
 
 impl WorkspaceRpc for ExportGithubReq {
     const METHOD: &'static str = "workspace.export_github";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = ExportGithubResponse;
 }
 

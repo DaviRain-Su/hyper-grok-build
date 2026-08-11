@@ -8,10 +8,43 @@ use super::*;
 /// Compile-time constant for v1; remote tunability is a deferred follow-up.
 pub(super) const GOAL_CONTINUATION_BACKOFF_THRESHOLD: u32 = 3;
 
+/// Upper bound on planner attempts per `maybe_run_goal_planner` call, so
+/// repeated steering / interruptions cannot spin the retry loop forever.
+pub(super) const GOAL_PLANNER_MAX_ATTEMPTS: u32 = 5;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GoalClassifierPolicy {
     pub enabled: bool,
     pub max_runs: u32,
+}
+
+struct GoalPlannerStateGuard<'a> {
+    tracker: &'a parking_lot::Mutex<crate::session::goal_tracker::GoalTracker>,
+}
+
+impl Drop for GoalPlannerStateGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(state) = self.tracker.lock().take_planner_run() {
+            state.cancel.cancel();
+        }
+    }
+}
+
+/// What `run_goal_planner_attempt` tells the `maybe_run_goal_planner` loop to
+/// do next.
+enum PlannerAttemptStep {
+    /// Nothing to run or keep (disabled, no coordinator, goal changed/gone, plan
+    /// present, or staging failed) — break.
+    Stop,
+    /// Interrupted with new steering — fold it in and replan.
+    Steered(Vec<String>),
+    /// Ran to a terminal outcome — the loop decides publish/pause.
+    Ran {
+        goal_id: String,
+        plan_file: std::path::PathBuf,
+        attempt_file: tempfile::TempPath,
+        outcome: crate::session::goal_planner::GoalPlannerOutcome,
+    },
 }
 
 impl DrainSource {
@@ -1050,27 +1083,269 @@ impl SessionActor {
     /// compatible template), or when `plan_file` is already populated.
     /// On `FailClosed` the goal is paused with the canonical reason.
     pub(super) async fn maybe_run_goal_planner(&self, objective: &str) {
+        let objective = objective.to_owned();
+        let mut steering = Vec::new();
+        let run_goal_id = self
+            .goal_tracker
+            .lock()
+            .snapshot()
+            .map(|goal| goal.goal_id.clone());
+        let _planner_state = GoalPlannerStateGuard {
+            tracker: &self.goal_tracker,
+        };
+        let mut attempt = 0u32;
+        loop {
+            // Exhausting the retry cap pauses the goal with the canonical
+            // message (like any other planner failure), never leaving it Active
+            // with no plan.
+            if attempt >= GOAL_PLANNER_MAX_ATTEMPTS {
+                tracing::debug!(
+                    "goal planner: reached max attempts ({GOAL_PLANNER_MAX_ATTEMPTS}); \
+                     pausing goal"
+                );
+                if let Some(goal_id) = run_goal_id.as_deref() {
+                    let _ = self
+                        .auto_pause_goal_if_matches_with_message(
+                            goal_id,
+                            crate::session::goal_tracker::GoalPauseReason::User,
+                            planner_failure_pause_message(),
+                        )
+                        .await;
+                }
+                break;
+            }
+            attempt += 1;
+
+            let (goal_id, plan_file, attempt_file, outcome) = match self
+                .run_goal_planner_attempt(&objective, &steering, run_goal_id.as_deref(), attempt)
+                .await
+            {
+                PlannerAttemptStep::Stop => break,
+                PlannerAttemptStep::Steered(extra) => {
+                    steering.extend(extra);
+                    continue;
+                }
+                PlannerAttemptStep::Ran {
+                    goal_id,
+                    plan_file,
+                    attempt_file,
+                    outcome,
+                } => (goal_id, plan_file, attempt_file, outcome),
+            };
+
+            // Publish decision. Re-checked after every await so stale planner
+            // work never publishes onto a paused/cleared/replaced goal; one
+            // predicate keeps the checks below in sync.
+            let same_active_goal = |goal: &crate::session::goal_tracker::GoalOrchestration| {
+                goal.goal_id == goal_id
+                    && goal.status == crate::session::goal_tracker::GoalStatus::Active
+            };
+            match outcome {
+                crate::session::goal_planner::GoalPlannerOutcome::Planned { .. } => {
+                    let can_publish = self
+                        .goal_tracker
+                        .lock()
+                        .snapshot()
+                        .is_some_and(|goal| same_active_goal(goal) && goal.plan_file.is_none());
+                    if !can_publish {
+                        break;
+                    }
+                    // The subagent produced a plan and we are committing to
+                    // publish it. `run_goal_planner_attempt` already took the
+                    // planner run, so steering can no longer replan — a late
+                    // Send Now landing in the publish window is correctly
+                    // delivered only as an interjection. Turn the "planning…"
+                    // badge off NOW, before the plan/baseline I/O below, instead
+                    // of only at the very end, so the UI never advertises
+                    // "planning" while it can no longer replan.
+                    self.clear_goal_planning_latch(run_goal_id.as_deref()).await;
+                    if attempt_file.persist(&plan_file).is_err() {
+                        let still_same_goal =
+                            self.goal_tracker.lock().snapshot().is_some_and(|goal| {
+                                same_active_goal(goal) && goal.plan_file.is_none()
+                            });
+                        if still_same_goal {
+                            let _ = self
+                                .auto_pause_goal_if_matches_with_message(
+                                    &goal_id,
+                                    crate::session::goal_tracker::GoalPauseReason::User,
+                                    planner_failure_pause_message(),
+                                )
+                                .await;
+                        }
+                        break;
+                    }
+                    // Record `plan_file`, then snapshot the planner's ORIGINAL
+                    // plan as the immutable baseline the verifier diffs later
+                    // edits against. Capture once: this runs only when no plan
+                    // exists yet, and the `is_none()` guard keeps a restart /
+                    // re-entry from overwriting it.
+                    let baseline_target = {
+                        let mut tracker = self.goal_tracker.lock();
+                        let src = tracker.plan_path();
+                        let dst = tracker.plan_baseline_path();
+                        let Some(goal) = tracker
+                            .snapshot_mut()
+                            .filter(|goal| same_active_goal(goal) && goal.plan_file.is_none())
+                        else {
+                            break;
+                        };
+                        let need_baseline = goal.plan_baseline_file.is_none();
+                        goal.plan_file = Some(plan_file);
+                        need_baseline.then_some((src, dst))
+                    };
+                    if let Some((src, dst)) = baseline_target {
+                        let tmp = dst
+                            .with_file_name(format!("plan-baseline-{}.md", uuid::Uuid::now_v7()));
+                        let baseline_file = match tempfile::TempPath::try_from_path(tmp.clone()) {
+                            Ok(guard) => guard,
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    "goal planner: could not stage plan baseline path; \
+                                     PLAN_CHANGES will render (none)"
+                                );
+                                break;
+                            }
+                        };
+                        match tokio::fs::copy(&src, &tmp).await {
+                            Ok(_) => {
+                                let mut tracker = self.goal_tracker.lock();
+                                let can_publish = tracker.snapshot().is_some_and(|goal| {
+                                    same_active_goal(goal)
+                                        && goal.plan_file.as_deref() == Some(src.as_path())
+                                        && goal.plan_baseline_file.is_none()
+                                });
+                                if can_publish
+                                    && baseline_file.persist(&dst).is_ok()
+                                    && let Some(goal) = tracker.snapshot_mut()
+                                {
+                                    goal.plan_baseline_file = Some(dst);
+                                }
+                            }
+                            Err(err) => tracing::warn!(
+                                error = %err,
+                                src = %src.display(),
+                                "goal planner: failed to snapshot plan baseline; \
+                                 PLAN_CHANGES will render (none)",
+                            ),
+                        }
+                    }
+                }
+                crate::session::goal_planner::GoalPlannerOutcome::Interrupted => continue,
+                crate::session::goal_planner::GoalPlannerOutcome::FailClosed { .. } => {
+                    let _ = self
+                        .auto_pause_goal_if_matches_with_message(
+                            &goal_id,
+                            crate::session::goal_tracker::GoalPauseReason::User,
+                            planner_failure_pause_message(),
+                        )
+                        .await;
+                }
+            }
+            break;
+        }
+
+        // Catch-all latch reset for every exit path that did NOT already clear
+        // it at the commit-to-publish point (Stop / cap-exhausted / fail-closed /
+        // steered-retry, or a publish that broke out before committing). The
+        // conditional emit inside the helper keeps the success path's earlier
+        // clear from being re-emitted as a duplicate `planning=None`; a no-op if
+        // the orchestration has since vanished or the goal was replaced.
+        self.clear_goal_planning_latch(run_goal_id.as_deref()).await;
+    }
+
+    /// Clear the goal's "planning…" latch for `run_goal_id` and, only if it was
+    /// actually set, emit a snapshot-derived `GoalUpdated` so the pager's
+    /// planning badge turns off. Returns whether the latch was set (and thus an
+    /// emit happened).
+    ///
+    /// Two call sites in [`Self::maybe_run_goal_planner`] share this: the
+    /// commit-to-publish point (once the planner run is taken and a plan is
+    /// being published, steering can no longer replan, so the planning phase is
+    /// over — turn the badge off BEFORE the publish/baseline I/O) and the
+    /// catch-all on every other exit path. The conditional emit keeps the two
+    /// sites from double-emitting a redundant `planning=None`.
+    async fn clear_goal_planning_latch(&self, run_goal_id: Option<&str>) -> bool {
+        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+        let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
+        let mut tracker = self.goal_tracker.lock();
+        let cleared = tracker
+            .snapshot_mut()
+            .filter(|goal| Some(goal.goal_id.as_str()) == run_goal_id)
+            .is_some_and(|goal| std::mem::replace(&mut goal.planning_in_flight, false));
+        if cleared {
+            self.goal_notify_sender().emit_goal_updated(
+                &mut tracker,
+                tokens_used,
+                finished_marginal,
+            );
+        }
+        cleared
+    }
+
+    /// Run one planner attempt: re-validate the goal, stage the attempt file,
+    /// spawn the planner, and run it to an outcome. Returns a
+    /// [`PlannerAttemptStep`] for the loop to act on. Holds no `goal_tracker`
+    /// lock across the spawn `.await`.
+    async fn run_goal_planner_attempt(
+        &self,
+        objective: &str,
+        steering: &[String],
+        run_goal_id: Option<&str>,
+        attempt: u32,
+    ) -> PlannerAttemptStep {
         if !self.goal_planner_enabled {
-            return;
+            return PlannerAttemptStep::Stop;
         }
         let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
             tracing::debug!("goal planner: no subagent coordinator channel; skipping");
-            return;
+            return PlannerAttemptStep::Stop;
         };
-        let plan_file = {
+        let (goal_id, plan_file, attempt_plan_file) = {
             let tracker = self.goal_tracker.lock();
             match tracker.snapshot() {
-                Some(o) if o.plan_file.is_some() => {
-                    tracing::debug!("goal planner: plan already present; skipping");
-                    return;
+                Some(goal)
+                    if Some(goal.goal_id.as_str()) != run_goal_id
+                        || goal.status != crate::session::goal_tracker::GoalStatus::Active =>
+                {
+                    return PlannerAttemptStep::Stop;
                 }
-                Some(_) => tracker.plan_path(),
-                None => return,
+                Some(goal) if goal.plan_file.is_some() => {
+                    tracing::debug!("goal planner: plan already present; skipping");
+                    return PlannerAttemptStep::Stop;
+                }
+                Some(o) => {
+                    let plan_file = tracker.plan_path();
+                    let attempt_plan_file =
+                        plan_file.with_file_name(format!("plan-{}.md", uuid::Uuid::now_v7()));
+                    (o.goal_id.clone(), plan_file, attempt_plan_file)
+                }
+                None => return PlannerAttemptStep::Stop,
             }
         };
+        // `TempPath` deletes on drop and persists by rename, so any early exit
+        // cleans up the staged file and a failed rename can't leave it behind.
+        let attempt_file = match tempfile::TempPath::try_from_path(attempt_plan_file.clone()) {
+            Ok(guard) => guard,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "goal planner: could not stage attempt plan path; skipping planner"
+                );
+                return PlannerAttemptStep::Stop;
+            }
+        };
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.goal_tracker
+            .lock()
+            .start_planner_run(cancel_token.clone());
 
-        // `GOAL_PLANNER_MAX_RUNS` is telemetry-only; resume retries are unbounded.
-        let attempt = 1u32;
+        let attempt_objective = if steering.is_empty() {
+            objective.to_owned()
+        } else {
+            format!("{objective}\n\nUser steering:\n{}", steering.join("\n\n"))
+        };
 
         let model_id = self
             .chat_state_handle
@@ -1090,11 +1365,7 @@ impl SessionActor {
             .lock()
             .expect("current_prompt_id mutex poisoned")
             .clone();
-        // The planner is a verbatim mirror-child fork: its request prefix matches
-        // the parent and the radix cache is per-model, so it must run on the
-        // parent session model. Any configured planner role model is intentionally
-        // ignored on this path (breadcrumb below for observability parity with the
-        // strategist, which still resolves a role model).
+        // Mirror-child forks must use the parent model to reuse its cached prefix.
         let role_override = crate::session::goal_planner::RoleSpawnOverride::default();
         if !matches!(
             self.goal_role_models.planner,
@@ -1104,9 +1375,6 @@ impl SessionActor {
                 "goal planner: configured role model ignored — forced to parent model for verbatim-fork cache reuse"
             );
         }
-        // Render planner-prompt tool-name placeholders from the PARENT's resolved
-        // toolset (the exact tools the verbatim mirror sends) — honoring renames
-        // and the Write->Edit fallback — instead of static defaults.
         let tool_names = self.resolve_inherit_role_tool_names().await;
         let inherit_tool_names = tool_names.clone();
         let spawner: std::sync::Arc<dyn crate::session::goal_planner::GoalPlannerSpawner> =
@@ -1120,23 +1388,20 @@ impl SessionActor {
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),
                 trace_sink: Some((self.chat_state_handle.clone(), task_tool_name)),
                 role_override,
+                cancel_token,
                 events: Some(self.events.writer()),
             });
 
-        // Surface the "planning…" badge while the subagent runs. Cleared
-        // unconditionally below so it can never get stuck on screen.
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         self.emit_goal_planning(current_tokens);
 
         let outcome = crate::session::goal_planner::run_goal_planner(
             spawner,
             crate::session::goal_planner::GoalPlannerInputs {
-                objective,
+                objective: &attempt_objective,
                 context: &context,
-                plan_file: &plan_file,
+                plan_file: &attempt_plan_file,
                 attempt,
-                // Planner is forced to the parent model (no role override), so the
-                // effective role model is always the parent.
                 model_id: crate::session::goal_planner::effective_role_model_id(None, &model_id),
                 tool_names: &tool_names,
                 inherit_tool_names: &inherit_tool_names,
@@ -1150,67 +1415,19 @@ impl SessionActor {
         // represented by its own turn). No-op when the spawn recorded nothing.
         self.chat_state_handle.flush_harness_trace_turn();
 
-        match outcome {
-            crate::session::goal_planner::GoalPlannerOutcome::Planned { plan_file, .. } => {
-                // Record `plan_file`, then snapshot the planner's ORIGINAL plan
-                // as the immutable baseline the verifier diffs later edits
-                // against. Capture once: `maybe_run_goal_planner` only runs when
-                // no plan exists yet, and the `is_none()` guard keeps a restart /
-                // re-entry from overwriting it.
-                let baseline_target = {
-                    let mut tracker = self.goal_tracker.lock();
-                    let src = tracker.plan_path();
-                    let dst = tracker.plan_baseline_path();
-                    let need_baseline = tracker
-                        .snapshot()
-                        .is_some_and(|o| o.plan_baseline_file.is_none());
-                    if let Some(o) = tracker.snapshot_mut() {
-                        o.plan_file = Some(plan_file);
-                    }
-                    need_baseline.then_some((src, dst))
-                };
-                if let Some((src, dst)) = baseline_target {
-                    match tokio::fs::copy(&src, &dst).await {
-                        Ok(_) => {
-                            let mut tracker = self.goal_tracker.lock();
-                            // `None` here means the goal ended concurrently during
-                            // the copy; the orphaned baseline file is harmless
-                            // (never referenced without a recorded path).
-                            if let Some(o) = tracker.snapshot_mut() {
-                                o.plan_baseline_file = Some(dst);
-                            }
-                        }
-                        Err(err) => tracing::warn!(
-                            error = %err,
-                            src = %src.display(),
-                            "goal planner: failed to snapshot plan baseline; \
-                             PLAN_CHANGES will render (none)",
-                        ),
-                    }
-                }
-            }
-            crate::session::goal_planner::GoalPlannerOutcome::FailClosed { .. } => {
-                let _ = self
-                    .auto_pause_goal_if_active_with_message(
-                        crate::session::goal_tracker::GoalPauseReason::User,
-                        planner_failure_pause_message(),
-                    )
-                    .await;
-            }
+        let planner_state = self.goal_tracker.lock().take_planner_run();
+        if let Some(state) = planner_state
+            && !state.steering.is_empty()
+        {
+            return PlannerAttemptStep::Steered(state.steering);
         }
 
-        // Reset the latch on every exit path (success, fail-closed,
-        // mid-run status change) and emit so the "planning…" badge turns
-        // off. Unconditional here because `setup_goal` has no later emit;
-        // no-op if the orchestration has since vanished.
-        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-        let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
-        let mut tracker = self.goal_tracker.lock();
-        if let Some(o) = tracker.snapshot_mut() {
-            o.planning_in_flight = false;
+        PlannerAttemptStep::Ran {
+            goal_id,
+            plan_file,
+            attempt_file,
+            outcome,
         }
-        self.goal_notify_sender()
-            .emit_goal_updated(&mut tracker, tokens_used, finished_marginal);
     }
 
     /// Run the stall-triggered strategist subagent (best-effort, fail-OPEN).

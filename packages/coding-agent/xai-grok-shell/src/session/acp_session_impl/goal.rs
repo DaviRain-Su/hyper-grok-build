@@ -1443,7 +1443,9 @@ impl SessionActor {
         &self,
         reason: crate::session::goal_tracker::GoalPauseReason,
     ) {
-        let _ = self.auto_pause_goal_if_active_inner(reason, None).await;
+        let _ = self
+            .auto_pause_goal_if_active_inner(reason, None, None)
+            .await;
     }
 
     pub(crate) async fn auto_pause_goal_if_active_with_message(
@@ -1451,19 +1453,43 @@ impl SessionActor {
         reason: crate::session::goal_tracker::GoalPauseReason,
         message: String,
     ) -> bool {
-        self.auto_pause_goal_if_active_inner(reason, Some(message))
+        self.auto_pause_goal_if_active_inner(reason, Some(message), None)
             .await
     }
 
+    /// Pause only if the active goal still has `goal_id` — the goal-identity
+    /// variant used by stale planner work, so a replacement goal created while
+    /// the planner ran cannot be paused by the previous goal's failure.
+    pub(crate) async fn auto_pause_goal_if_matches_with_message(
+        &self,
+        goal_id: &str,
+        reason: crate::session::goal_tracker::GoalPauseReason,
+        message: String,
+    ) -> bool {
+        self.auto_pause_goal_if_active_inner(reason, Some(message), Some(goal_id))
+            .await
+    }
+
+    /// Shared auto-pause body. Pauses the goal (with `message`, else the bare
+    /// reason) and emits, but only when the goal is `Active` AND — when
+    /// `expected_goal_id` is `Some` — still carries that id.
     async fn auto_pause_goal_if_active_inner(
         &self,
         reason: crate::session::goal_tracker::GoalPauseReason,
         message: Option<String>,
+        expected_goal_id: Option<&str>,
     ) -> bool {
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         {
             let mut tracker = self.goal_tracker.lock();
-            if tracker.status() != Some(crate::session::goal_tracker::GoalStatus::Active) {
+            let is_match = match expected_goal_id {
+                Some(goal_id) => tracker.snapshot().is_some_and(|goal| {
+                    goal.goal_id == goal_id
+                        && goal.status == crate::session::goal_tracker::GoalStatus::Active
+                }),
+                None => tracker.status() == Some(crate::session::goal_tracker::GoalStatus::Active),
+            };
+            if !is_match {
                 return false;
             }
             match message {

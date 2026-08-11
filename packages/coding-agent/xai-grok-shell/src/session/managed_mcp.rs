@@ -1,6 +1,6 @@
-//! Shell-side managed MCP: merges MCP server sources, then injects managed
-//! OAuth headers, and binds the extracted credential/catalog machinery to
-//! shell's auth manager.
+//! Shell-side MCP merge: local/plugin/compat sources plus admitted client
+//! servers. Managed connectors exist only via the gateway catalog
+//! (`GET /v1/mcp/tools/list`), not as injected `grok_com_*` HTTP servers.
 //!
 //! Merge layers are applied in order; later `insert()` beats earlier
 //! `or_insert()`:
@@ -10,60 +10,16 @@
 //!   - `.mcp.json`    — `or_insert` (team baseline)
 //!   - Client         — `insert` (wins except keys rejected by a disabled
 //!                      vendor `mcps` kill switch; see `admit_client_mcp_servers`)
-//!   - Managed        — header injection + auto-create missing connectors
 //!
-//! The transport/cache/injection core lives in
+//! The gateway catalog/call core lives in
 //! `xai_grok_shell_session_support::managed_mcp` and is re-exported here so
 //! `crate::session::managed_mcp::…` paths keep resolving unchanged.
 
 pub use xai_grok_shell_session_support::managed_mcp::*;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use agent_client_protocol as acp;
-
-/// Build a [`RefreshContext`] whose token provider resolves fresh tokens from
-/// `auth_manager`; the extracted refresh task never sees the auth manager
-/// itself, only the closure.
-fn refresh_context(
-    proxy_base_url: String,
-    auth_manager: Arc<crate::auth::AuthManager>,
-) -> RefreshContext {
-    RefreshContext {
-        proxy_base_url,
-        token_provider: Arc::new(move || -> TokenFuture {
-            let auth_manager = auth_manager.clone();
-            Box::pin(async move { auth_manager.get_valid_token().await.ok() })
-        }),
-    }
-}
-
-/// Resolve an auth key from `auth_manager` then [`get_or_fetch`] the managed MCP
-/// configs (with a [`RefreshContext`] for proactive refresh). Single source for
-/// the auth-key dance across every managed-config fetch —
-/// [`crate::agent::MvpAgent::get_managed_mcp_configs`], the interactive
-/// folder-trust grant reload, agent-init MCP setup, and the reactive re-auth
-/// re-fetch — so the copies can't drift.
-/// Callers gate on `can_fetch_managed_mcps`/auth before calling.
-pub(crate) async fn fetch_managed_mcp_configs(
-    handle: &ManagedMcpStateHandle,
-    proxy_url: &str,
-    auth_manager: &Arc<crate::auth::AuthManager>,
-) -> Vec<ManagedMcpConfig> {
-    let auth_key = auth_manager
-        .get_valid_token()
-        .await
-        .ok()
-        .or_else(|| auth_manager.current_or_expired().map(|a| a.key));
-    get_or_fetch(
-        handle,
-        proxy_url,
-        auth_key.as_deref(),
-        Some(refresh_context(proxy_url.to_string(), auth_manager.clone())),
-    )
-    .await
-}
 
 /// Dedup key for the merge map: normalized URL for Http/Sse, name for Stdio.
 fn mcp_server_key(s: &acp::McpServer) -> String {
@@ -89,45 +45,32 @@ pub(crate) fn mcp_server_name(s: &acp::McpServer) -> &str {
 pub(crate) fn merge_managed_mcp_servers(
     client_mcp_servers: Vec<acp::McpServer>,
     cwd: &std::path::Path,
-    managed_configs: &[ManagedMcpConfig],
     plugin_registry: Option<&xai_grok_agent::plugins::PluginRegistry>,
     compat: &xai_grok_tools::types::compat::CompatConfig,
 ) -> Vec<acp::McpServer> {
-    merge_managed_mcp_servers_with_policy(
-        client_mcp_servers,
-        cwd,
-        managed_configs,
-        plugin_registry,
-        compat,
-    )
-    .into_iter()
-    .filter(|s| s.disabled_reason.is_none())
-    .map(|s| s.server)
-    .collect()
+    merge_managed_mcp_servers_with_policy(client_mcp_servers, cwd, plugin_registry, compat)
+        .into_iter()
+        .filter(|s| s.disabled_reason.is_none())
+        .map(|s| s.server)
+        .collect()
 }
 
-/// Merge the managed catalog into ONE live session's MCP set and push the
+/// Merge local/plugin/client MCP sources into ONE live session and push the
 /// result via [`crate::session::SessionCommand::UpdateMcpServers`]; returns
 /// `true` if the command was enqueued (session still alive).
 ///
-/// Shared core for every "re-merge managed configs into a live session" path
-/// (`mcp/list cache=false`, config hot-reload, post-grant reload) so the merge
+/// Shared core for every "re-merge MCP sources into a live session" path
+/// (config hot-reload, post-grant reload, plugin reload) so the merge
 /// inputs and the dropped-oneshot-response contract can't drift between them.
 pub(crate) fn merge_and_send_managed_mcp_update(
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
     cwd: &std::path::Path,
     initial_client_mcp_servers: Vec<acp::McpServer>,
-    managed: &[ManagedMcpConfig],
     plugin_registry: Option<&xai_grok_agent::plugins::PluginRegistry>,
     compat: &xai_grok_tools::types::compat::CompatConfig,
 ) -> bool {
-    let merged = merge_managed_mcp_servers(
-        initial_client_mcp_servers,
-        cwd,
-        managed,
-        plugin_registry,
-        compat,
-    );
+    let merged =
+        merge_managed_mcp_servers(initial_client_mcp_servers, cwd, plugin_registry, compat);
     let (tx, _rx) = tokio::sync::oneshot::channel();
     cmd_tx
         .send(crate::session::SessionCommand::UpdateMcpServers {
@@ -181,7 +124,6 @@ pub(crate) fn admit_client_mcp_servers(
 pub(crate) fn merge_managed_mcp_servers_with_policy(
     client_mcp_servers: Vec<acp::McpServer>,
     cwd: &std::path::Path,
-    managed_configs: &[ManagedMcpConfig],
     plugin_registry: Option<&xai_grok_agent::plugins::PluginRegistry>,
     compat: &xai_grok_tools::types::compat::CompatConfig,
 ) -> Vec<McpServerWithPolicy> {
@@ -200,9 +142,7 @@ pub(crate) fn merge_managed_mcp_servers_with_policy(
     let disabled = crate::util::config::disabled_mcp_server_names(cwd);
 
     let mut merged: Vec<acp::McpServer> = servers.into_values().collect();
-    inject_managed_headers(&mut merged, managed_configs);
-    auto_inject_managed_servers_with_disabled(&mut merged, managed_configs, &disabled);
-    // Deterministic order: this list is collected from a HashMap (random
+    // Deterministic order: this list is collected from a HashMap (random)
     // iteration order). Downstream equality checks (`mcp_servers_equal`, used
     // by both `update_configs` and the `update_configs_diff` short-circuit) are
     // order-sensitive, so an unsorted list makes an unchanged server set look
@@ -438,75 +378,10 @@ fn non_toml_mcp_servers_with_source(
     out
 }
 
-/// Managed catalog servers that pass inject gates: non-empty headers and first
-/// display-name wins. Does **not** filter personal disable — callers that merge
-/// into a live session apply `disabled_names` themselves.
-pub(crate) fn managed_injectable_servers(
-    managed_configs: &[ManagedMcpConfig],
-) -> Vec<acp::McpServer> {
-    let mut seen_display_names: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for config in managed_configs {
-        if config.headers.is_empty() {
-            continue;
-        }
-        if !seen_display_names.insert(config.name.to_lowercase()) {
-            continue;
-        }
-        let name = to_managed_name(&config.name);
-        let headers = config
-            .headers
-            .iter()
-            .map(|(k, v)| acp::HttpHeader::new(k.clone(), v.clone()))
-            .collect();
-        out.push(acp::McpServer::Http(
-            acp::McpServerHttp::new(name, config.endpoint.clone()).headers(headers),
-        ));
-    }
-    out
-}
-
-/// Auto-create `grok_com_*` entries for managed configs not already in `merged`.
-/// Dedup by display name (first scope wins). Skips names in `disabled_names`.
-pub(crate) fn auto_inject_managed_servers_with_disabled(
-    merged: &mut Vec<acp::McpServer>,
-    managed_configs: &[ManagedMcpConfig],
-    disabled_names: &std::collections::HashSet<String>,
-) {
-    if managed_configs.is_empty() {
-        return;
-    }
-
-    let existing_names: std::collections::HashSet<String> = merged
-        .iter()
-        .map(|s| mcp_server_name(s).to_owned())
-        .collect();
-    let mut count = 0usize;
-
-    for server in managed_injectable_servers(managed_configs) {
-        let name = mcp_server_name(&server);
-        if existing_names.contains(name) {
-            continue;
-        }
-        if disabled_names.contains(name) {
-            tracing::debug!(server_name = %name, "Auto-inject skipped: disabled in config.toml");
-            continue;
-        }
-        merged.push(server);
-        count += 1;
-    }
-
-    if count > 0 {
-        tracing::info!(count, "Auto-injected managed MCP connectors");
-    }
-}
-
 /// Shared inputs for MCP definition discovery (list stubs and setup probe).
 #[derive(Clone, Copy)]
 pub(crate) struct McpDiscoveryInputs<'a> {
     pub cwd: &'a std::path::Path,
-    pub managed_configs: &'a [ManagedMcpConfig],
     pub plugin_registry: Option<&'a xai_grok_agent::plugins::PluginRegistry>,
     pub compat: &'a xai_grok_tools::types::compat::CompatConfig,
 }
@@ -515,10 +390,10 @@ pub(crate) struct McpDiscoveryInputs<'a> {
 ///
 /// Presence probe for list stubs (not a spawnable merge result). Shares the
 /// non-TOML walk ([`non_toml_mcp_servers_with_source`]), TOML last-wins URL
-/// keying, managed name-based inject, and folder-trust last with
+/// keying, and folder-trust last with
 /// [`merge_managed_mcp_servers_with_policy`]. Does **not** include client
-/// forwarded servers or managed header rewrite. TOML `enabled = false` is
-/// force-enabled for stubs. Returns transports keyed by server name.
+/// forwarded servers. TOML `enabled = false` is force-enabled for stubs.
+/// Returns transports keyed by server name.
 pub(crate) fn discover_mcp_definitions_ignoring_disable(
     inputs: &McpDiscoveryInputs<'_>,
 ) -> HashMap<String, acp::McpServer> {
@@ -528,7 +403,6 @@ pub(crate) fn discover_mcp_definitions_ignoring_disable(
     };
 
     let cwd = inputs.cwd;
-    let managed_configs = inputs.managed_configs;
     let plugin_registry = inputs.plugin_registry;
     let compat = inputs.compat;
 
@@ -556,18 +430,13 @@ pub(crate) fn discover_mcp_definitions_ignoring_disable(
     // Deterministic collapse: lowest sorted transport key wins a shared name.
     let mut key_order: Vec<_> = by_key.keys().cloned().collect();
     key_order.sort();
-    let mut by_name: HashMap<String, acp::McpServer> =
-        HashMap::with_capacity(by_key.len() + managed_configs.len());
+    let mut by_name: HashMap<String, acp::McpServer> = HashMap::with_capacity(by_key.len());
     for key in key_order {
         let Some(transport) = by_key.remove(&key) else {
             continue;
         };
         let name = mcp_server_name(&transport).to_string();
         by_name.entry(name).or_insert(transport);
-    }
-    for server in managed_injectable_servers(managed_configs) {
-        let name = mcp_server_name(&server).to_string();
-        by_name.entry(name).or_insert(server);
     }
 
     let servers: Vec<acp::McpServer> = by_name.into_values().collect();
@@ -671,39 +540,8 @@ pub(crate) fn merge_plugin_oauth_into(
 mod tests {
     use super::*;
 
-    fn make_managed(name: &str, endpoint: &str, scope: &str) -> ManagedMcpConfig {
-        ManagedMcpConfig {
-            name: name.to_string(),
-            endpoint: endpoint.to_string(),
-            headers: HashMap::from([("Authorization".into(), "Bearer tok".into())]),
-            token_expires_at: None,
-            scope: Some(scope.to_string()),
-            scope_id: Some(format!("{scope}-id-123")),
-            scope_name: None,
-        }
-    }
-
     fn empty_cwd() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
-    }
-
-    #[test]
-    fn auto_inject_creates_server_for_unmatched_managed_config() {
-        let managed = vec![make_managed("Slack", "https://mcp.slack.com/sse", "user")];
-        let cwd = empty_cwd();
-        let compat = xai_grok_tools::types::compat::CompatConfig::default();
-        let merged = merge_managed_mcp_servers(vec![], cwd.path(), &managed, None, &compat);
-        let slack = merged
-            .iter()
-            .find(|s| matches!(s, acp::McpServer::Http(acp::McpServerHttp { name, .. }) if name == "grok_com_slack"));
-        let slack = slack.expect("should have auto-injected grok_com_slack");
-        match slack {
-            acp::McpServer::Http(acp::McpServerHttp { url, headers, .. }) => {
-                assert_eq!(url, "https://mcp.slack.com/sse");
-                assert!(headers.iter().any(|h| h.name == "Authorization"));
-            }
-            other => panic!("expected Http server, got {:?}", other),
-        }
     }
 
     /// A client-provided server (e.g. a client session binding injected at
@@ -724,7 +562,7 @@ mod tests {
         )];
         let cwd = empty_cwd();
         let compat = xai_grok_tools::types::compat::CompatConfig::default();
-        let merged = merge_managed_mcp_servers(client, cwd.path(), &[], None, &compat);
+        let merged = merge_managed_mcp_servers(client, cwd.path(), None, &compat);
         assert!(
             merged.iter().any(|s| matches!(
                 s,
@@ -758,7 +596,6 @@ mod tests {
         let merged = merge_managed_mcp_servers(
             vec![client_stdio("killswitch-cache")],
             cwd.path(),
-            &[],
             None,
             &compat,
         );
@@ -778,7 +615,6 @@ mod tests {
         let merged = merge_managed_mcp_servers(
             vec![client_stdio("killswitch-cache")],
             cwd.path(),
-            &[],
             None,
             &compat,
         );
@@ -802,7 +638,6 @@ mod tests {
                 client_stdio("client-only-binding"),
             ],
             cwd.path(),
-            &[],
             None,
             &compat,
         );
@@ -841,7 +676,6 @@ args = ["ok"]
         let merged = merge_managed_mcp_servers(
             vec![client_stdio("killswitch-cache")],
             cwd.path(),
-            &[],
             None,
             &compat,
         );
@@ -878,7 +712,7 @@ args = ["ok"]
 
         std::fs::remove_file(cwd.path().join(".cursor").join("mcp.json")).unwrap();
 
-        let merged = merge_managed_mcp_servers(admitted, cwd.path(), &[], None, &compat);
+        let merged = merge_managed_mcp_servers(admitted, cwd.path(), None, &compat);
         assert!(
             !merged
                 .iter()
@@ -914,8 +748,7 @@ args = ["ok"]
             )
             .headers(vec![]),
         );
-        let merged =
-            merge_managed_mcp_servers(vec![matching, other], cwd.path(), &[], None, &compat);
+        let merged = merge_managed_mcp_servers(vec![matching, other], cwd.path(), None, &compat);
         assert!(
             !merged
                 .iter()
@@ -1057,10 +890,8 @@ args = ["ok"]
         assert_eq!(surviving, ["slackbot"]);
     }
 
-    /// Drive the expectation through [`to_managed_name`] (not a hand-written
-    /// literal) so this fails if policy/runtime name normalization ever drifts.
     #[test]
-    fn policy_server_name_matches_to_managed_name_transform() {
+    fn policy_server_name_matches_legacy_grok_com_runtime_spelling() {
         use xai_grok_workspace::permission::resolution::{AllowedMcpServer, McpServerAllowlist};
 
         let managed_server = |runtime: &str| {
@@ -1074,12 +905,13 @@ args = ["ok"]
         };
         let source = || Some(std::path::PathBuf::from("/test/managed-settings.json"));
 
-        for display in ["Slack", "My Server"] {
-            let runtime = to_managed_name(display);
-
+        for (display, runtime) in [
+            ("Slack", "grok_com_slack"),
+            ("My Server", "grok_com_my_server"),
+        ] {
             let deny = McpServerAllowlist::new(vec![], vec![name_entry(display)], source());
             let tagged = apply_mcp_server_policy(
-                managed_server(&runtime),
+                managed_server(runtime),
                 &std::collections::HashSet::new(),
                 &deny,
             );
@@ -1094,7 +926,7 @@ args = ["ok"]
 
             let allow = McpServerAllowlist::new(vec![name_entry(display)], vec![], source());
             let tagged = apply_mcp_server_policy(
-                managed_server(&runtime),
+                managed_server(runtime),
                 &std::collections::HashSet::new(),
                 &allow,
             );
@@ -1104,63 +936,6 @@ args = ["ok"]
                 tagged[0].disabled_reason
             );
         }
-    }
-
-    #[test]
-    fn auto_inject_dedup_by_display_name_first_scope_wins() {
-        let managed = vec![
-            make_managed("Linear", "https://mcp.linear.app", "user"),
-            make_managed("Linear", "https://mcp.linear.app", "team"),
-        ];
-        let cwd = empty_cwd();
-        let compat = xai_grok_tools::types::compat::CompatConfig::default();
-        let merged = merge_managed_mcp_servers(vec![], cwd.path(), &managed, None, &compat);
-        let linear_count = merged
-            .iter()
-            .filter(|s| matches!(s, acp::McpServer::Http(acp::McpServerHttp { name, .. }) if name == "grok_com_linear"))
-            .count();
-        assert_eq!(linear_count, 1, "should dedup by display name");
-    }
-
-    #[test]
-    fn auto_inject_skips_existing_server() {
-        let managed = vec![make_managed("Slack", "https://mcp.slack.com/sse", "user")];
-        let client = vec![acp::McpServer::Http(
-            acp::McpServerHttp::new(
-                "grok_com_slack".to_string(),
-                "https://mcp.slack.com/sse".to_string(),
-            )
-            .headers(vec![]),
-        )];
-        let cwd = empty_cwd();
-        let compat = xai_grok_tools::types::compat::CompatConfig::default();
-        let merged = merge_managed_mcp_servers(client, cwd.path(), &managed, None, &compat);
-        let slack_count = merged
-            .iter()
-            .filter(|s| matches!(s, acp::McpServer::Http(acp::McpServerHttp { name, .. }) if name == "grok_com_slack"))
-            .count();
-        assert_eq!(slack_count, 1, "should not duplicate existing server");
-    }
-
-    #[test]
-    fn auto_inject_skips_disabled() {
-        let managed = vec![
-            make_managed("Slack", "https://mcp.slack.com/sse", "user"),
-            make_managed("Linear", "https://mcp.linear.app", "user"),
-        ];
-        let disabled: std::collections::HashSet<String> =
-            ["grok_com_slack".to_string()].into_iter().collect();
-        let mut merged = vec![];
-        auto_inject_managed_servers_with_disabled(&mut merged, &managed, &disabled);
-
-        let has_slack = merged
-            .iter()
-            .any(|s| matches!(s, acp::McpServer::Http(acp::McpServerHttp { name, .. }) if name == "grok_com_slack"));
-        let has_linear = merged
-            .iter()
-            .any(|s| matches!(s, acp::McpServer::Http(acp::McpServerHttp { name, .. }) if name == "grok_com_linear"));
-        assert!(!has_slack, "disabled connector should be skipped");
-        assert!(has_linear, "non-disabled connector should be injected");
     }
 
     #[test]
@@ -1190,7 +965,7 @@ enabled = false
         .unwrap();
 
         let compat = xai_grok_tools::types::compat::CompatConfig::default();
-        let merged = merge_managed_mcp_servers(vec![], cwd.path(), &[], None, &compat);
+        let merged = merge_managed_mcp_servers(vec![], cwd.path(), None, &compat);
         assert!(
             !merged.iter().any(|server| matches!(
                 server,
@@ -1228,7 +1003,7 @@ enabled = false
             )
             .headers(vec![]),
         )];
-        let merged = merge_managed_mcp_servers(client, untrusted.path(), &[], None, &compat);
+        let merged = merge_managed_mcp_servers(client, untrusted.path(), None, &compat);
         assert!(
             !merged.iter().any(|s| mcp_server_name(s) == "projsrv"),
             "untrusted workspace must drop its repo-local MCP server"
@@ -1240,7 +1015,7 @@ enabled = false
 
         let trusted = repo_with_project_server();
         crate::agent::folder_trust::record_for_test(trusted.path(), true);
-        let merged = merge_managed_mcp_servers(vec![], trusted.path(), &[], None, &compat);
+        let merged = merge_managed_mcp_servers(vec![], trusted.path(), None, &compat);
         assert!(
             merged.iter().any(|s| mcp_server_name(s) == "projsrv"),
             "trusted workspace must keep its repo-local MCP server"
@@ -1308,10 +1083,6 @@ enabled = false
         // Simulate disabling via disabled_mcp_server_names.
         let disabled: std::collections::HashSet<String> =
             ["test-server".to_string()].into_iter().collect();
-
-        // auto_inject_managed_servers_with_disabled is for managed servers;
-        // for plugin servers, the disabled check happens during merge.
-        // Verify the server name matches what would be checked.
         assert!(
             disabled.contains("test-server"),
             "disabled set should contain the server name used in .mcp.json"

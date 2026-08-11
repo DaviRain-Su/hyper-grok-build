@@ -107,13 +107,20 @@ pub struct ExportedMetadata {
     /// Subagent nesting depth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_depth: Option<u32>,
+    /// Whether `title` was set by a manual rename. Omitted when `None`
+    /// (`skip_serializing_if = "Option::is_none"`). Producers write
+    /// `Some(true)` via `then_some(true)` / `manual_title_opt()`, and
+    /// `ClearTitle` writes `Some(false)` so a merge-style backend drops
+    /// a prior pin. Auto `SetTitle` still omits the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_is_manual: Option<bool>,
 }
 
 impl ExportedMetadata {
     /// Build metadata from a [`Summary`].
     pub(crate) fn from_summary(summary: &Summary) -> Self {
         Self {
-            title: Some(summary.session_summary.clone()).filter(|s| !s.is_empty()),
+            title: summary.display_title_opt(),
             cwd: summary.info.cwd.clone(),
             model_id: Some(summary.current_model_id.0.to_string()),
             created_at: Some(summary.created_at.to_rfc3339()),
@@ -126,6 +133,7 @@ impl ExportedMetadata {
             subagent_role: None,
             fork_context_source: None,
             subagent_depth: None,
+            title_is_manual: summary.manual_title_opt().is_some().then_some(true),
         }
     }
 }
@@ -167,5 +175,171 @@ impl ExportedSession {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod from_summary_tests {
+    use super::*;
+    use crate::session::info::Info;
+    use crate::session::persistence::Summary;
+
+    #[test]
+    fn from_summary_title_uses_display_title_not_stale_session_summary() {
+        let info = Info {
+            id: acp::SessionId::new("export-title"),
+            cwd: "/tmp".into(),
+        };
+        let mut summary = Summary::new(&info, acp::ModelId::new("test-model")).unwrap();
+        summary.session_summary = "stale auto title".into();
+        summary.generated_title = Some("Manual rename".into());
+        summary.title_is_manual = true;
+
+        let meta = ExportedMetadata::from_summary(&summary);
+        assert_eq!(
+            meta.title.as_deref(),
+            Some("Manual rename"),
+            "export title must follow display_title() (generated_title), not session_summary"
+        );
+    }
+
+    #[test]
+    fn from_summary_auto_generated_title_wins_over_session_summary() {
+        let info = Info {
+            id: acp::SessionId::new("export-auto"),
+            cwd: "/tmp".into(),
+        };
+        let mut summary = Summary::new(&info, acp::ModelId::new("test-model")).unwrap();
+        summary.session_summary = "first prompt fallback".into();
+        summary.generated_title = Some("Auto".into());
+        summary.title_is_manual = false;
+        assert_eq!(
+            ExportedMetadata::from_summary(&summary).title.as_deref(),
+            Some("Auto")
+        );
+    }
+
+    #[test]
+    fn from_summary_falls_back_to_session_summary_when_generated_absent() {
+        let info = Info {
+            id: acp::SessionId::new("export-fallback"),
+            cwd: "/tmp".into(),
+        };
+        let mut summary = Summary::new(&info, acp::ModelId::new("test-model")).unwrap();
+        summary.session_summary = "fallback".into();
+        summary.generated_title = None;
+        assert_eq!(
+            ExportedMetadata::from_summary(&summary).title.as_deref(),
+            Some("fallback")
+        );
+    }
+
+    #[test]
+    fn from_summary_blank_titles_export_none() {
+        let info = Info {
+            id: acp::SessionId::new("export-blank"),
+            cwd: "/tmp".into(),
+        };
+        let mut summary = Summary::new(&info, acp::ModelId::new("test-model")).unwrap();
+        summary.session_summary = "  ".into();
+        summary.generated_title = Some("".into());
+        assert_eq!(ExportedMetadata::from_summary(&summary).title, None);
+    }
+
+    #[test]
+    fn from_summary_title_is_manual_true_when_manual() {
+        let info = Info {
+            id: acp::SessionId::new("export-manual-flag"),
+            cwd: "/tmp".into(),
+        };
+        let mut summary = Summary::new(&info, acp::ModelId::new("test-model")).unwrap();
+        summary.generated_title = Some("Pinned".into());
+        summary.title_is_manual = true;
+        assert_eq!(
+            ExportedMetadata::from_summary(&summary).title_is_manual,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn from_summary_omits_stale_manual_flag_over_blank_generated_title() {
+        let info = Info {
+            id: acp::SessionId::new("export-stale-flag"),
+            cwd: "/tmp".into(),
+        };
+        let mut summary = Summary::new(&info, acp::ModelId::new("test-model")).unwrap();
+        summary.session_summary = "auto first-prompt summary".into();
+        summary.generated_title = Some("   ".into());
+        summary.title_is_manual = true;
+        let meta = ExportedMetadata::from_summary(&summary);
+        assert!(
+            summary.manual_title_opt().is_none(),
+            "local contract: stale flag is not a manual title"
+        );
+        assert_eq!(
+            meta.title_is_manual, None,
+            "stale flag must not be exported"
+        );
+        assert_eq!(
+            meta.title.as_deref(),
+            Some("auto first-prompt summary"),
+            "display fallback still exports as title text"
+        );
+    }
+
+    #[test]
+    fn title_is_manual_omitted_when_false_or_none() {
+        let info = Info {
+            id: acp::SessionId::new("export-flag-omit"),
+            cwd: "/tmp".into(),
+        };
+        let mut summary = Summary::new(&info, acp::ModelId::new("test-model")).unwrap();
+        summary.generated_title = Some("Auto".into());
+        summary.title_is_manual = false;
+        let meta = ExportedMetadata::from_summary(&summary);
+        assert_eq!(meta.title_is_manual, None);
+        let json = serde_json::to_value(&meta).unwrap();
+        assert!(
+            json.get("title_is_manual").is_none(),
+            "false/None must omit the field for wire stability: {json}"
+        );
+
+        let mut none_flag = meta.clone();
+        none_flag.title_is_manual = None;
+        let json_none = serde_json::to_value(&none_flag).unwrap();
+        assert!(json_none.get("title_is_manual").is_none());
+
+        let mut explicit_false = meta;
+        explicit_false.title_is_manual = Some(false);
+        let json_false = serde_json::to_value(&explicit_false).unwrap();
+        assert_eq!(
+            json_false.get("title_is_manual"),
+            Some(&serde_json::json!(false))
+        );
+    }
+
+    #[test]
+    fn title_is_manual_round_trips_when_true() {
+        let meta = ExportedMetadata {
+            title: Some("Pinned".into()),
+            cwd: "/tmp".into(),
+            model_id: None,
+            created_at: None,
+            updated_at: None,
+            total_messages: None,
+            parent_session_id: None,
+            session_kind: None,
+            subagent_type: None,
+            subagent_persona: None,
+            subagent_role: None,
+            fork_context_source: None,
+            subagent_depth: None,
+            title_is_manual: Some(true),
+        };
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json["title_is_manual"], true);
+        let back: ExportedMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(back.title_is_manual, Some(true));
+        assert_eq!(back.title.as_deref(), Some("Pinned"));
     }
 }

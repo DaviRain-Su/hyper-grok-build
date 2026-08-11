@@ -1042,9 +1042,21 @@ impl AgentView {
             },
             show_accent_line: false,
             show_borders: true,
-            title: self.display_name.clone(),
+            title: self
+                .display_name
+                .as_deref()
+                .map(|s| crate::views::session_title::sanitize_display_text(s).into_owned()),
             image_preview: true,
         };
+        let next = crate::views::session_title::rename_source_title_raw(self)
+            .map(crate::views::session_title::sanitize_display_text);
+        if self.prompt.slash_current_title() != next.as_deref() {
+            self.prompt
+                .set_slash_current_title(next.map(|s| s.into_owned()));
+            if self.prompt.slash_open() {
+                self.prompt.refresh_slash(&self.session.models);
+            }
+        }
         let compact = appearance.prompt.compact;
         let inner_width = AgentViewLayout::inner_width(area, layout_cfg, compact);
         let banner_height = if banner_height > 0 {

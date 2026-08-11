@@ -17,10 +17,7 @@ use xai_acp_lib::{
     acp_channels,
 };
 use xai_grok_shell::{
-    agent::{
-        MvpAgent, activity::SESSION_FLUSH_GRACE, config::Config as AgentConfig,
-        models::RefreshStrategy,
-    },
+    agent::{MvpAgent, activity::SESSION_FLUSH_GRACE, config::Config as AgentConfig},
     auth::AuthManager,
     util::grok_home::grok_home,
 };
@@ -210,11 +207,6 @@ pub async fn spawn_grok_shell(
     let (agent_config, models_manager) =
         xai_grok_shell::agent::init::bootstrap(&agent_config, &auth_manager, None)
             .map_err(|e| anyhow::anyhow!(e))?;
-    models_manager
-        .list_models(RefreshStrategy::OnlineIfUncached)
-        .await;
-    // Self-heal a cold-cache/failed boot fetch once the backend recovers,
-    // matching the leader and stdio paths.
     models_manager.spawn_background_refresh();
 
     let agent_cancel = cancel.child_token();
@@ -242,7 +234,7 @@ pub async fn spawn_grok_shell(
     // Spawn the agent thread with direct dispatch
     startup::enter(StartupPhase::SpawnWorker);
     let handle =
-        spawn_agent_thread_direct(spawn_fn, acp_agent, agent_cancel.clone(), skills_paths)?;
+        spawn_agent_thread_direct(spawn_fn, acp_agent, agent_cancel.clone(), skills_paths).await?;
 
     Ok(SpawnedAgent {
         thread_handle: handle,
@@ -256,18 +248,26 @@ pub async fn spawn_grok_shell(
 ///
 /// The agent runs on a single-threaded tokio LocalSet runtime.
 /// RPC requests go directly to the agent via Rc, bypassing simplex pipes.
-fn spawn_agent_thread_direct(
+async fn spawn_agent_thread_direct(
     spawn_agent: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<ProviderRouterAgent>> + Send + 'static>,
     channel: AcpAgentChannel,
     cancel: CancellationToken,
     skills_paths: Vec<String>,
 ) -> Result<thread::JoinHandle<Result<()>>> {
+    // Off the UI worker: failure must fail spawn, not start ACP.
+    let rt = tokio::task::spawn_blocking(|| {
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        xai_tty_utils::runtime::build_with_blocking_pool(builder.enable_all())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("agent runtime worker join: {e}"))?
+    .map_err(|e| {
+        tracing::error!(error = %e, "failed to start agent runtime");
+        anyhow::anyhow!("failed to start agent runtime: {e}")
+    })?;
     Ok(thread::Builder::new()
         .name("acp-agent-worker".into())
         .spawn(move || -> Result<()> {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let client_tx = channel.tx.clone();

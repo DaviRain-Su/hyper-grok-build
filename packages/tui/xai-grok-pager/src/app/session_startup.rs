@@ -105,17 +105,25 @@ pub fn parent_session_is_worktree(session_id: &str, cwd: &Path) -> bool {
         {
             return true;
         }
+        if v.get("worktree_label")
+            .and_then(|k| k.as_str())
+            .is_some_and(|s| !s.is_empty())
+        {
+            return true;
+        }
     }
-    let mut cur = Some(cwd);
-    while let Some(dir) = cur {
+    if let Some(info) = crate::git_info::compute_cwd_git_info(cwd) {
+        return info.is_worktree;
+    }
+    for dir in cwd.ancestors() {
         let git = dir.join(".git");
         if git.is_file() {
             return true;
         }
         if git.is_dir() {
-            return false;
+            return std::fs::read_to_string(git.join("grok-worktree-source"))
+                .is_ok_and(|s| !s.trim().is_empty());
         }
-        cur = dir.parent();
     }
     false
 }
@@ -1311,6 +1319,111 @@ mod tests {
     use clap::Parser;
     fn parse(args: &[&str]) -> PagerArgs {
         PagerArgs::try_parse_from(args).unwrap()
+    }
+    #[test]
+    fn parent_session_is_worktree_detects_standalone_marker() {
+        let main = crate::test_util::TempGitRepo::init("main-only");
+        let clone = main.standalone_clone("wt-branch");
+        assert!(clone.path.join(".git").is_dir());
+        assert!(parent_session_is_worktree("any-sid", &clone.path));
+        assert!(!parent_session_is_worktree("any-sid", &main.path));
+    }
+    #[test]
+    fn parent_session_is_worktree_detects_linked_git_worktree() {
+        let main = crate::test_util::TempGitRepo::init("main-only");
+        let wt = main.add_linked_worktree("wt", "wt-branch");
+        assert!(wt.join(".git").is_file());
+        assert!(parent_session_is_worktree("any-sid", &wt));
+        assert!(!parent_session_is_worktree("any-sid", &main.path));
+    }
+    #[test]
+    fn parent_session_is_worktree_relocated_gitdir_file_is_not_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("sub");
+        crate::test_util::init_git_repo_on_branch(&repo_path, "main");
+        let git_dir = tmp.path().join("modules").join("sub");
+        std::fs::create_dir_all(git_dir.parent().unwrap()).unwrap();
+        std::fs::rename(repo_path.join(".git"), &git_dir).unwrap();
+        std::fs::write(
+            repo_path.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        assert!(repo_path.join(".git").is_file());
+        assert!(
+            git2::Repository::discover(&repo_path).is_ok(),
+            "relocated gitdir must still discover"
+        );
+        assert!(!parent_session_is_worktree("any-sid", &repo_path));
+    }
+    #[test]
+    fn parent_session_is_worktree_plain_clone_nested_in_linked_worktree() {
+        let main = crate::test_util::TempGitRepo::init("main-only");
+        let wt = main.add_linked_worktree("wt", "wt-branch");
+        let nested = wt.join("vendor").join("dep");
+        crate::test_util::init_git_repo_on_branch(&nested, "dep-branch");
+        assert!(!parent_session_is_worktree("any-sid", &nested));
+        assert!(!parent_session_is_worktree("any-sid", &main.path));
+    }
+    #[test]
+    fn parent_session_is_worktree_broken_gitdir_file_is_last_resort_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("broken");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".git"), "not-a-gitdir\n").unwrap();
+        assert!(git2::Repository::discover(&dir).is_err());
+        assert!(parent_session_is_worktree("any-sid", &dir));
+    }
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn parent_session_is_worktree_summary_session_kind() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let repo = crate::test_util::TempGitRepo::init("main");
+        let cwd = repo.path.to_string_lossy().to_string();
+        fx.write_summary(
+            &cwd,
+            "sid-kind",
+            serde_json::json!({ "session_kind": "worktree" }),
+        );
+        assert!(parent_session_is_worktree("sid-kind", &repo.path));
+    }
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn parent_session_is_worktree_summary_source_workspace_dir() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let repo = crate::test_util::TempGitRepo::init("main");
+        let cwd = repo.path.to_string_lossy().to_string();
+        fx.write_summary(
+            &cwd,
+            "sid-src",
+            serde_json::json!({ "source_workspace_dir": "/src/main" }),
+        );
+        assert!(parent_session_is_worktree("sid-src", &repo.path));
+        fx.write_summary(
+            &cwd,
+            "sid-src-empty",
+            serde_json::json!({ "source_workspace_dir": "" }),
+        );
+        assert!(!parent_session_is_worktree("sid-src-empty", &repo.path));
+    }
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn parent_session_is_worktree_summary_worktree_label() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let repo = crate::test_util::TempGitRepo::init("main");
+        let cwd = repo.path.to_string_lossy().to_string();
+        fx.write_summary(
+            &cwd,
+            "sid-label",
+            serde_json::json!({ "worktree_label": "my-wt" }),
+        );
+        assert!(parent_session_is_worktree("sid-label", &repo.path));
+        fx.write_summary(
+            &cwd,
+            "sid-label-empty",
+            serde_json::json!({ "worktree_label": "" }),
+        );
+        assert!(!parent_session_is_worktree("sid-label-empty", &repo.path));
     }
     #[test]
     fn deferred_startup_owner_take_is_atomic() {
