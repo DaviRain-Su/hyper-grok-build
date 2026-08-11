@@ -4,6 +4,57 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.0-r2] — 2026-08-11
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `b13fa52`
+  (monorepo `SOURCE_REV` `a51a1dc…`), remaining based on upstream **1.0.0**.
+  Notable upstream:
+  - `/rename`: `--auto` unpins a manual title; title cap with ghost-prefill;
+    cross-host manual titles; remote revert
+  - Non-blocking startup made structural; a requested quit always exits the
+    process
+  - Bound `.envrc` evaluation so a blocked read can't freeze session load
+    (session load barrier)
+  - Faster local `/resume` on large session transcripts; subagents drain
+    before session delete
+  - Answer HITL ExtMethods on `-p`; remind the model to finish previous work
+    on mid-turn send; Send Now allowed throughout goal mode
+  - Standalone-worktree branch display; standalone worktree flag kept across
+    cwd switch and resume; dashboard no longer clobbers the worktree badge
+  - Git diff stats now include untracked files
+  - Failed skill reads suggest registered skill paths
+  - Memory-trace wait made signal-safe; scroll-anchor jolt diagnostics
+  - Tools server protected from the OOM killer, with OOM kills attributed
+  - Tokio blocking pools capped and pre-warmed to stop EAGAIN aborts
+  - `workspace.info` reports the workspace server version
+  - Textarea: Home/End jump to the logical line when the prompt is wrapped
+  - Sandbox: Linux-only hook write-deny code gated off macOS
+  - Model picker waits for the first catalog before failing an unknown model;
+    auth visibility no longer evicts an explicit user pick
+  - Replay collapses in-progress tool-call updates; reactive managed-MCP
+    reauth removed upstream
+
+### Fixed
+- Kept Hyper platform catalog restamping (`restamp_platform_credentials`)
+  alongside upstream's `rebuild_bundled` reset in the models manager.
+- Kept the codex-live critical-command drain racing upstream's new
+  session-load-barrier tick in the TUI event loop.
+- Regenerated encrypted prompt templates from `templates/*.md`; the base
+  prompt picks up upstream's non-interactive-session note while keeping
+  Hyper's customizations.
+- `ToolContext::new` is test-only per upstream (env preloaded at call sites);
+  Hyper's soft-interrupt cancel call ignores the new `WakeBarrier`.
+- Fork replay tests moved to upstream's new `storage/replay_tests.rs`,
+  keeping Hyper's extended `SubagentFinished` fields.
+- Slash-command tests pass `wasm_commands` and the new `AppCtx.current_title`
+  / `ArgItem` fields after upstream's `/rename` and completion changes.
+- Reserve Hyper's pager builtin names (`/providers`, `/claude`, `/nexus`,
+  `/changes` + aliases such as `/review`, `/scoped-models`, `/live`,
+  `/readiness`, …) in the shell's `PAGER_COMMAND_KEYS` so skills and
+  workflows can no longer shadow them; sample names in shell collision tests
+  moved off the reserved `review`.
+
 ## [1.0.0-r1] — 2026-08-08
 
 ### Changed
