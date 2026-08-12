@@ -270,6 +270,120 @@ impl WorkspaceRpc for GitCheckoutReq {
     type Response = ();
 }
 
+// Explicit-git-surface ops (control plane → sandbox). Git mutates only through
+// these platform ops; there is no autonomous agent commit/push/merge.
+
+/// `EnsureBinding` — ensure the conversation branch (`conv/<id>`) exists and is
+/// checked out, forking it off `base_ref` if absent (never writing the base).
+/// Idempotent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitEnsureBindingReq {
+    #[serde(default)]
+    pub git_root: Option<std::path::PathBuf>,
+    /// The conversation branch to ensure, e.g. `conv/<conversation_id>`.
+    pub session_branch: String,
+    /// Ref to fork the conv branch from when it does not yet exist locally: the
+    /// remote default branch, a branch tip, or a commit SHA.
+    pub base_ref: String,
+}
+
+impl WorkspaceRpc for GitEnsureBindingReq {
+    const METHOD: &'static str = "workspace.git_ensure_binding";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
+    type Response = GitEnsureBindingResult;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitEnsureBindingResult {
+    /// The branch now checked out (echoes `session_branch`).
+    pub branch: String,
+    /// `true` if the conv branch was created off `base_ref` by this call.
+    pub created: bool,
+    /// HEAD after the op (full hex), if the repo has any commits.
+    pub head_sha: Option<String>,
+}
+
+/// `MergeToMain` — merge the conversation branch into its target branch (the
+/// publish path, or an explicit "Merge" button). Merge, never rebase; never
+/// force. On conflicts the implementer aborts and restores `session_branch`
+/// (no `MERGE_HEAD` left on the integration branch).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitMergeToMainReq {
+    #[serde(default)]
+    pub git_root: Option<std::path::PathBuf>,
+    /// The conversation branch to merge (`conv/<id>`). Same identity as
+    /// [`super::super::binding::ResolvedRepoSource::session_branch`].
+    pub session_branch: String,
+    /// Integration branch from the binding resolver
+    /// (`ResolvedRepoSource.merge_target`). `None` or empty is a hard error —
+    /// do not serde-default to `main` (BYO remotes use `master`/`trunk`).
+    #[serde(default)]
+    pub target_branch: Option<String>,
+    /// Push the target branch after a successful merge.
+    #[serde(default)]
+    pub push: bool,
+}
+
+impl GitMergeToMainReq {
+    /// Resolved non-empty target, or `None` if the caller omitted/blanked it.
+    pub fn required_target_branch(&self) -> Option<&str> {
+        self.target_branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+}
+
+impl WorkspaceRpc for GitMergeToMainReq {
+    const METHOD: &'static str = "workspace.git_merge_to_main";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
+    type Response = GitMergeToMainResult;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitMergeToMainResult {
+    pub outcome: GitMergeToMainOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GitMergeToMainOutcome {
+    /// The conv branch is already an ancestor of the target; nothing to merge.
+    /// `sha` is the target HEAD.
+    UpToDate { sha: String },
+    /// Clean merge (or fast-forward); `sha` is the new target HEAD.
+    Merged { sha: String },
+    /// The merge hit conflicts; the implementer aborted and restored
+    /// `session_branch`. `files` are the unmerged paths. The workspace must
+    /// not be left with `MERGE_HEAD` on the integration branch.
+    Conflicts { files: Vec<String> },
+}
+
+/// `Push` — push a branch to `origin` after a commit, classifying the outcome.
+/// Never forces (a non-fast-forward on a single-writer conv branch is a
+/// conflict to surface, not to overwrite).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitPushReq {
+    #[serde(default)]
+    pub git_root: Option<std::path::PathBuf>,
+    /// Branch to push. `None` ⇒ current `HEAD`.
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+impl WorkspaceRpc for GitPushReq {
+    const METHOD: &'static str = "workspace.git_push";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
+    type Response = GitPushResult;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitPushResult {
+    pub status: PushStatus,
+    /// Combined git output (sanitized), for diagnostics/FE.
+    pub output: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitStashReq {
     #[serde(default)]

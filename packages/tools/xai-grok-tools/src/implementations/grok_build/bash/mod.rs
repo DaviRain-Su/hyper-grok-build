@@ -1378,7 +1378,7 @@ impl BashTool {
             .param_for_kind(ToolKind::BackgroundTaskAction, "task_ids")
             .unwrap_or("task_ids");
         Ok(format!(
-            "Use {get_task_name} tool with {task_ids_param}=[\"{task_id}\"] to retrieve the output."
+            "Use {get_task_name} with {task_ids_param}=[\"{task_id}\"] when you need the output."
         ))
     }
 
@@ -3394,8 +3394,9 @@ mod tests {
         match result {
             BashToolOutput::Background(bg) => {
                 assert!(
-                    bg.retrieval_hint
-                        .contains("Use get_task_output tool with task_ids=[\"t2\"]"),
+                    bg.retrieval_hint.contains(
+                        "Use get_task_output with task_ids=[\"t2\"] when you need the output."
+                    ),
                     "Hint should fall back to canonical names: {}",
                     bg.retrieval_hint
                 );

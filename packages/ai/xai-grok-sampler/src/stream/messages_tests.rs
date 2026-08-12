@@ -528,6 +528,9 @@ async fn server_error_event_yields_failed_500() {
             assert_eq!(error.kind, crate::events::SamplingErrorKind::Api);
             assert_eq!(error.status_code, Some(500));
             assert!(error.message.contains("overloaded_error"));
+            // Messages error events have no code slot; a code appearing here
+            // would make typed events eligible for a destructive image strip.
+            assert_eq!(error.error_code, None);
         }
         other => panic!("expected Failed, got {other:?}"),
     }

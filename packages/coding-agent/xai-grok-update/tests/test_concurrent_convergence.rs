@@ -42,7 +42,9 @@ use common::{
     FakeBinGuard, can_exec_shell_scripts, host_platform, make_update_config, reset_home,
     set_test_version, small_good_artifact, test_home,
 };
-use xai_grok_update::auto_update::{ensure_latest_on_disk, install_internal_from_base, run_update};
+use xai_grok_update::auto_update::{
+    CliUpdateTrigger, ensure_latest_on_disk, install_internal_from_base, run_update,
+};
 use xai_grok_update::version::installed_on_disk_version;
 
 /// Assert the active `~/.grok/bin/grok` resolves to the expected versioned
@@ -203,7 +205,9 @@ async fn run_update_skips_download_when_disk_already_current() {
     fake_managed_install("0.2.7");
     let mut cfg = make_update_config("stable");
 
-    let result = run_update(false, None, None, &mut cfg).await.unwrap();
+    let result = run_update(false, None, None, &mut cfg, CliUpdateTrigger::UserCommand)
+        .await
+        .unwrap();
 
     assert_eq!(
         result.as_deref(),
@@ -230,7 +234,9 @@ async fn run_update_force_still_redownloads_when_disk_current() {
     fake_managed_install("0.2.7");
     let mut cfg = make_update_config("stable");
 
-    let result = run_update(true, None, None, &mut cfg).await.unwrap();
+    let result = run_update(true, None, None, &mut cfg, CliUpdateTrigger::UserCommand)
+        .await
+        .unwrap();
 
     assert_eq!(result.as_deref(), Some("0.2.7"));
     assert_eq!(
@@ -273,7 +279,9 @@ async fn npm_update_not_suppressed_by_leftover_newer_internal_symlink() {
     fake_managed_install("0.2.9");
     let mut cfg = make_update_config("stable");
 
-    let result = run_update(false, None, None, &mut cfg).await.unwrap();
+    let result = run_update(false, None, None, &mut cfg, CliUpdateTrigger::UserCommand)
+        .await
+        .unwrap();
 
     assert_eq!(
         result.as_deref(),
@@ -405,7 +413,7 @@ async fn ensure_latest_repairs_dangling_symlink_by_downloading() {
 async fn run_concurrent_installs(
     server: &ArtifactServer,
     versions: &[&str],
-) -> Vec<anyhow::Result<()>> {
+) -> Vec<anyhow::Result<String>> {
     let base = server.uri();
     let mut tasks = Vec::new();
     for version in versions {

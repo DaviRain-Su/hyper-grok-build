@@ -137,6 +137,31 @@ impl ProcessScope {
     pub fn enroll(&self, child: &tokio::process::Child) -> io::Result<Arc<ProcessGroup>> {
         let mut group = ProcessGroup::new()?;
         group.attach(child)?;
+        self.register_owned(group)
+    }
+
+    /// Register a detached synchronous child and return its process-group owner.
+    ///
+    /// The child must be (or lead) its own group/job — spawn via
+    /// [`crate::detach_std_command`] (Unix `setsid`) first, otherwise later
+    /// `kill` signals a group that is not this child's.
+    ///
+    /// The scope holds only a `Weak` registration.
+    /// Keep the owner until direct-child reap, then drop it to prevent later
+    /// signals to a recycled PID. If the scope is closed, the group is killed
+    /// but the caller must still reap the child.
+    ///
+    /// # Errors
+    ///
+    /// Returns group creation/attachment errors or a closed-scope error.
+    #[must_use = "the returned Arc<ProcessGroup> must be kept alive until the child is reaped"]
+    pub fn enroll_std(&self, child: &std::process::Child) -> io::Result<Arc<ProcessGroup>> {
+        let mut group = ProcessGroup::new()?;
+        group.attach_std(child)?;
+        self.register_owned(group)
+    }
+
+    fn register_owned(&self, group: ProcessGroup) -> io::Result<Arc<ProcessGroup>> {
         let group = Arc::new(group);
         if !self.register(&group) {
             return Err(io::Error::other(
@@ -389,5 +414,40 @@ mod tests {
             died(&mut child).await,
             "a child registered after kill_all must be killed immediately"
         );
+    }
+
+    fn std_sleeper() -> std::process::Command {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("1000");
+        crate::detach_std_command(&mut cmd);
+        cmd
+    }
+
+    #[test]
+    fn enroll_std_after_close_kills_and_leaves_reap_to_caller() {
+        let scope = ProcessScope::new();
+        scope.kill_all();
+        #[allow(clippy::disallowed_methods)] // test: exercises enroll_std after close
+        let mut child = std_sleeper().spawn().expect("spawn sleeper");
+
+        assert!(scope.enroll_std(&child).is_err());
+        assert!(child.wait().expect("caller reaps child").code().is_none());
+        assert_eq!(scope.live_count(), 0);
+    }
+
+    #[test]
+    fn enroll_std_owner_accepts_close_after_registration() {
+        let scope = ProcessScope::new();
+        #[allow(clippy::disallowed_methods)] // test: exercises enroll_std
+        let mut child = std_sleeper().spawn().expect("spawn sleeper");
+        let group = scope.enroll_std(&child).expect("enroll child");
+
+        scope.kill_all();
+        let status = crate::wait_child_bounded(&mut child, Duration::from_secs(3))
+            .expect("wait for killed child")
+            .expect("killed child reaches terminal status");
+        assert!(!status.success());
+        drop(group);
+        assert_eq!(scope.live_count(), 0);
     }
 }

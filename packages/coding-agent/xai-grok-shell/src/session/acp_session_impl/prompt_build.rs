@@ -824,10 +824,15 @@ impl SessionActor {
     ) -> Result<String, acp::Error> {
         let prior = self.chat_state_handle.get_conversation().await;
         let outline = crate::session::image_describe::build_conversation_outline(&prior);
-        let session_dir = crate::session::persistence::session_dir(&crate::session::info::Info {
-            id: self.session_info.id.clone(),
-            cwd: self.session_info.cwd.clone(),
-        });
+        let session_dir = crate::session::persistence::ensure_owner_only_session_dir(
+            &crate::session::info::Info {
+                id: self.session_info.id.clone(),
+                cwd: self.session_info.cwd.clone(),
+            },
+        )
+        .map_err(|e| {
+            acp::Error::internal_error().data(format!("failed to create session dir: {e}"))
+        })?;
         let persisted = crate::session::image_describe::persist_user_images(&session_dir, images)
             .map_err(|e| {
             acp::Error::internal_error()

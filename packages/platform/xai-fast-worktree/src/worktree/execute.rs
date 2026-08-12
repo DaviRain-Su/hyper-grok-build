@@ -396,6 +396,11 @@ fn finalize_clean_and_ref(
         }
     }
 
+    let dest_git = worktree_path.join(".git");
+    let keep = copy::standalone::origin_keep_names_for_git_ref(&dest_git, git_ref);
+    copy::standalone::sanitize_standalone_git_dir_keeping(&dest_git, &keep)
+        .context("failed to sanitize standalone .git/ after snapshot")?;
+
     git::get_head_commit(worktree_path).context("failed to get HEAD commit")
 }
 
@@ -1054,14 +1059,20 @@ fn execute_standalone_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResul
 
     let source_git = source_root.join(".git");
     let dest_git = dest.join(".git");
+    let origin_keep = copy::standalone::origin_keep_names_for_git_ref(&source_git, &git_ref);
+    let origin_keep_for_copy = origin_keep.clone();
 
     // Spawn .git/ copy in background.
     let git_copy_handle = std::thread::Builder::new()
         .name("standalone-git-copy".to_string())
         .spawn(move || {
             let start = std::time::Instant::now();
-            let stats = copy::gitdir::copy_git_dir(&source_git, &dest_git)
-                .context("failed to copy .git/ directory for standalone worktree")?;
+            let stats = copy::gitdir::copy_git_dir_keeping_origin(
+                &source_git,
+                &dest_git,
+                &origin_keep_for_copy,
+            )
+            .context("failed to copy .git/ directory for standalone worktree")?;
             tracing::debug!(
                 elapsed = ?start.elapsed(),
                 files = stats.files_copied,
@@ -1209,6 +1220,10 @@ fn execute_standalone_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResul
     if git_ref != "HEAD" {
         tracing::debug!(git_ref = %git_ref, "checking out ref");
         git::checkout_ref(&dest, &git_ref)?;
+        // Dest HEAD may be detached (origin/foo). Reuse the pre-checkout keep
+        // set so sanitize cannot drop the tip CoW preserved.
+        copy::standalone::sanitize_standalone_git_dir_keeping(&dest.join(".git"), &origin_keep)
+            .context("failed to sanitize standalone .git/ after checkout")?;
     }
 
     // Phase 6: Copy ignored files (optional).

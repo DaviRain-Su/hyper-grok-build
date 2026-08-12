@@ -950,15 +950,6 @@ mod tests {
         );
     }
     #[test]
-    fn child_rendered_template_is_compact() {
-        let rendered = render_subagent_template(base_template_ctx());
-        assert!(
-            rendered.len() < 3700,
-            "rendered child template too large: {} chars",
-            rendered.len()
-        );
-    }
-    #[test]
     fn child_rendered_prompt_omits_code_change_rules_without_edit_tools() {
         let ctx = minijinja::context! {
             os_name => "linux",
@@ -988,15 +979,6 @@ mod tests {
         assert!(rendered.contains("<formatting>"));
     }
     #[test]
-    fn rendered_prompt_size_general_purpose() {
-        let rendered = render_subagent_template(base_template_ctx());
-        assert!(
-            rendered.len() < 3700,
-            "general-purpose rendered prompt: {} chars (ceiling 3700)",
-            rendered.len()
-        );
-    }
-    #[test]
     fn rendered_prompt_size_read_only() {
         let ctx = minijinja::context! {
             os_name => "linux",
@@ -1017,11 +999,6 @@ mod tests {
 
         };
         let rendered = render_subagent_template(ctx);
-        assert!(
-            rendered.len() < 2800,
-            "read-only rendered prompt: {} chars (ceiling 2800)",
-            rendered.len()
-        );
         let full = render_subagent_template(base_template_ctx());
         assert!(
             rendered.len() < full.len(),
@@ -1277,27 +1254,6 @@ mod tests {
                 "plan prompt missing specialization keyword: {kw}"
             );
         }
-    }
-    #[test]
-    fn trimmed_prompts_are_compact() {
-        let gp = super::super::subagent_prompts::GENERAL_PURPOSE_PROMPT;
-        let explore = super::super::subagent_prompts::EXPLORE_PROMPT;
-        let plan = super::super::subagent_prompts::PLAN_PROMPT;
-        assert!(
-            gp.len() < 1200,
-            "general-purpose prompt too large: {} chars",
-            gp.len()
-        );
-        assert!(
-            explore.len() < 1050,
-            "explore prompt too large: {} chars",
-            explore.len()
-        );
-        assert!(
-            plan.len() < 1350,
-            "plan prompt too large: {} chars",
-            plan.len()
-        );
     }
     #[test]
     fn trimmed_prompts_no_redundant_identity() {

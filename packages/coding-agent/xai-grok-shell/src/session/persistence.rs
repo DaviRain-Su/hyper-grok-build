@@ -889,9 +889,35 @@ fn resumed_session_sandbox_profile_in_root(
 /// Get file path for storing a large prompt.
 /// Creates the prompts subdirectory if it doesn't exist.
 /// Path format: `{session_dir}/prompts/prompt_{prompt_index}.txt`
+/// Owner-only session dir + `<encoded-cwd>` shield, for writers that bypass
+/// a storage adapter's `init_session` (e.g. chat-kind sessions).
+pub(crate) fn ensure_owner_only_session_dir(info: &Info) -> std::io::Result<PathBuf> {
+    ensure_owner_only_session_dir_in(&grok_home(), info)
+}
+
+/// Inner implementation with an injectable grok home for tests.
+fn ensure_owner_only_session_dir_in(grok_home: &Path, info: &Info) -> std::io::Result<PathBuf> {
+    let _ = crate::util::grok_home::ensure_sessions_cwd_dir_in(grok_home, &info.cwd);
+    let dir = session_dir_in(grok_home, info);
+    crate::util::grok_home::create_dir_all_owner_only(&dir)?;
+    Ok(dir)
+}
+
+/// `session_dir` with an injectable grok home (pure path computation).
+fn session_dir_in(grok_home: &Path, info: &Info) -> PathBuf {
+    crate::util::grok_home::sessions_cwd_dir_in(grok_home, &info.cwd).join(info.id.to_string())
+}
+
 pub(crate) fn get_prompt_file_path(info: &Info, prompt_index: usize) -> PathBuf {
-    let prompts_dir = session_dir(info).join("prompts");
-    std::fs::create_dir_all(&prompts_dir).ok();
+    get_prompt_file_path_in(&grok_home(), info, prompt_index)
+}
+
+/// Inner implementation with an injectable grok home for tests.
+fn get_prompt_file_path_in(grok_home: &Path, info: &Info, prompt_index: usize) -> PathBuf {
+    // Best-effort; failures surface on the prompt-file write itself.
+    let _ = ensure_owner_only_session_dir_in(grok_home, info);
+    let prompts_dir = session_dir_in(grok_home, info).join("prompts");
+    let _ = crate::util::grok_home::create_dir_all_owner_only(&prompts_dir);
     prompts_dir.join(format!("prompt_{}.txt", prompt_index))
 }
 
@@ -2804,9 +2830,8 @@ pub(crate) async fn new(
 }
 
 /// Create a persistence handle that writes to an explicit directory on disk.
-///
-/// Used for subagent child sessions whose files live under the parent's
-/// session directory: `{parent_session_dir}/subagents/{subagent_id}/`.
+/// Used for subagent child sessions (top-level `sessions/<cwd>/<id>` dirs;
+/// only their metadata nests under the parent's session dir).
 ///
 /// Unlike [`new()`], this:
 /// - Uses `JsonlStorageAdapter::with_explicit_session_dir()` to bypass

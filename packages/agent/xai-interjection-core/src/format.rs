@@ -1,6 +1,8 @@
 /// Truncation threshold, matching the shell's large-prompt limit.
 pub const LARGE_PROMPT_THRESHOLD: usize = 25_000;
 
+pub const INTERJECTION_NOTE: &str = "The user sent a message while you were working:";
+
 /// Trailing reminder so a mid-turn steer does not drop in-flight work.
 const UNFINISHED_TASKS_REMINDER: &str =
     "Make sure to complete any unfinished tasks from previous turns.";
@@ -30,7 +32,7 @@ pub fn format_interjection(text: String) -> String {
     };
 
     format!(
-        "The user sent a message while you were working:\n{}\n{UNFINISHED_TASKS_REMINDER}",
+        "{INTERJECTION_NOTE}\n{}\n{UNFINISHED_TASKS_REMINDER}",
         user_query(&truncated)
     )
 }

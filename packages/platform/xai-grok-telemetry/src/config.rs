@@ -39,6 +39,27 @@ impl TelemetryMode {
         }
     }
 }
+#[cfg(test)]
+mod telemetry_mode_tests {
+    use super::TelemetryMode;
+    /// A parent process hands its resolved mode to spawned children via
+    /// `GROK_TELEMETRY_ENABLED={mode}` (Display), so every Display output
+    /// must parse back to the same mode.
+    #[test]
+    fn display_round_trips_through_parse() {
+        for mode in [
+            TelemetryMode::Enabled,
+            TelemetryMode::Disabled,
+            TelemetryMode::SessionMetrics,
+        ] {
+            assert_eq!(
+                TelemetryMode::parse(&mode.to_string()),
+                Some(mode),
+                "Display value for {mode:?} must parse back to itself"
+            );
+        }
+    }
+}
 impl std::fmt::Display for TelemetryMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

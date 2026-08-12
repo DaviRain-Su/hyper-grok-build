@@ -1255,11 +1255,13 @@ fn stamp_live_fork_session_metadata(
     inherited_prefix_len: Option<usize>,
     fork_context_source: &str,
 ) {
-    let dir = session::persistence::session_dir(child_session_info);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(error = %e, "live fork: could not create child session dir for metadata stamp");
-        return;
-    }
+    let dir = match session::persistence::ensure_owner_only_session_dir(child_session_info) {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(error = %e, "live fork: could not create child session dir for metadata stamp");
+            return;
+        }
+    };
     let summary_path = dir.join("summary.json");
     let model = acp::ModelId::new(model_id);
     let mut summary = std::fs::read(&summary_path)

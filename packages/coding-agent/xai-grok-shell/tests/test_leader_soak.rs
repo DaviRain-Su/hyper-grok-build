@@ -384,15 +384,19 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
             }
 
             // A missing sample means the probe failed, which would silently
-            // retire the nightly budget. Threads are Linux-only.
+            // retire the nightly budget. macOS samples threads too now, but
+            // the bound is tuned against Linux nightlies, so a macOS run
+            // logs the growth without enforcing it.
             match growth.threads {
                 Some(thread_growth) => {
                     eprintln!("[soak] threads: growth {thread_growth}");
-                    assert!(
-                        thread_growth <= max_thread_growth,
-                        "leader threads grew by {thread_growth} over the soak \
-                         (bound {max_thread_growth})"
-                    );
+                    if cfg!(target_os = "linux") {
+                        assert!(
+                            thread_growth <= max_thread_growth,
+                            "leader threads grew by {thread_growth} over the soak \
+                             (bound {max_thread_growth})"
+                        );
+                    }
                 }
                 None if cfg!(target_os = "linux") => {
                     panic!("thread growth sample unavailable; the soak cannot bound it")

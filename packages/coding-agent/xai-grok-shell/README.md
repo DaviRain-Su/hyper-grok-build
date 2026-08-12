@@ -2269,7 +2269,8 @@ restrict_network = true
 # Paths the agent can read but NOT write/delete
 read_only = ["/data"]
 
-# Additional writable paths
+# Additional writable paths (literal directory grants — no globs;
+# trailing /** is treated as the parent directory)
 read_write = ["/tmp/scratch"]
 
 # Paths denied entirely

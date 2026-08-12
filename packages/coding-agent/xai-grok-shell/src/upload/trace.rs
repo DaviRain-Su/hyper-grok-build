@@ -966,19 +966,21 @@ pub(crate) struct SessionStateBuildError {
     pub reason: &'static str,
     pub error: anyhow::Error,
 }
-/// Build a gzipped tar holding a single `chat_history.jsonl` entry from the
-/// in-memory conversation `messages`.
-///
-/// The trace viewer renders a turn's conversation only from the
-/// `chat_history.jsonl` entry inside a session-state archive, parsed as JSONL.
-/// Harness sub-turns upload no other session state, so we emit that shape from
-/// the same items that feed `turn_messages.json`: each `ConversationItem`
-/// serialized compactly, one per `\n`-terminated line. Empty `messages` yield a
-/// zero-byte payload the viewer treats as "no history" (harness pairs always
-/// carry ≥1 message, so this is only a safety floor).
-pub(crate) fn build_chat_history_session_state(
+fn session_state_archive_join_error(err: tokio::task::JoinError) -> SessionStateBuildError {
+    SessionStateBuildError {
+        reason: "archive_failed",
+        error: anyhow::anyhow!("spawn_blocking join failed: {err}"),
+    }
+}
+fn serialize_chat_history_jsonl(
     messages: &[xai_grok_sampling_types::conversation::ConversationItem],
 ) -> Result<Vec<u8>, SessionStateBuildError> {
+    {
+        let _ = messages;
+        Ok(Vec::new())
+    }
+}
+fn compress_chat_history_archive(jsonl: Vec<u8>) -> Result<Vec<u8>, SessionStateBuildError> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
     fn archive_failed(error: std::io::Error) -> SessionStateBuildError {
@@ -987,10 +989,8 @@ pub(crate) fn build_chat_history_session_state(
             error: error.into(),
         }
     }
-    let jsonl = {
-        let _ = messages;
-        Vec::new()
-    };
+    #[cfg(test)]
+    apply_test_archive_fault().map_err(archive_failed)?;
     let mut archive_data = Vec::new();
     {
         let encoder = GzEncoder::new(&mut archive_data, Compression::default());
@@ -1013,6 +1013,34 @@ pub(crate) fn build_chat_history_session_state(
             .map_err(archive_failed)?;
     }
     Ok(archive_data)
+}
+/// Build a gzipped tar holding a single `chat_history.jsonl` entry from the
+/// in-memory conversation `messages`.
+///
+/// The trace viewer renders a turn's conversation only from the
+/// `chat_history.jsonl` entry inside a session-state archive, parsed as JSONL.
+/// Harness sub-turns upload no other session state, so we emit that shape from
+/// the same items that feed `turn_messages.json`: each `ConversationItem`
+/// serialized compactly, one per `\n`-terminated line. Empty `messages` yield a
+/// zero-byte payload the viewer treats as "no history" (harness pairs always
+/// carry ≥1 message, so this is only a safety floor).
+pub(crate) async fn build_chat_history_session_state(
+    messages: &[xai_grok_sampling_types::conversation::ConversationItem],
+) -> Result<Vec<u8>, SessionStateBuildError> {
+    let jsonl = serialize_chat_history_jsonl(messages)?;
+    match tokio::task::spawn_blocking(move || compress_chat_history_archive(jsonl)).await {
+        Ok(result) => result,
+        Err(e) => Err(session_state_archive_join_error(e)),
+    }
+}
+pub(crate) async fn build_chat_history_then_move_capture(
+    capture: xai_chat_state::TurnCapture,
+) -> (
+    Result<Vec<u8>, SessionStateBuildError>,
+    xai_chat_state::TurnCapture,
+) {
+    let session_state = build_chat_history_session_state(&capture.messages).await;
+    (session_state, capture)
 }
 pub(crate) async fn upload_harness_session_archive(
     _ctx: &PromptTraceContext,
@@ -1337,7 +1365,9 @@ pub(crate) fn spawn_upload_queue(
 fn enqueue_outcome_is_durable(outcome: &EnqueueOutcome) -> bool {
     match outcome {
         EnqueueOutcome::Enqueued | EnqueueOutcome::Deduplicated => true,
-        EnqueueOutcome::FellBackToInline | EnqueueOutcome::Failed { .. } => false,
+        EnqueueOutcome::FellBackToInline
+        | EnqueueOutcome::Failed { .. }
+        | EnqueueOutcome::Skipped { .. } => false,
     }
 }
 /// Durable-accept a trace artifact for the flush-bounded blocking path: the
@@ -1494,6 +1524,72 @@ fn sort_session_files_by_priority(files: &mut [crate::session::persistence::Copi
         "updates.jsonl" => 3,
         _ => 4,
     });
+}
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum ArchiveBuildFault {
+    Panic = 1,
+    Io = 2,
+}
+#[cfg(test)]
+static ARCHIVE_BUILD_FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+#[cfg(test)]
+struct ArchiveFaultGuard;
+#[cfg(test)]
+impl Drop for ArchiveFaultGuard {
+    fn drop(&mut self) {
+        ARCHIVE_BUILD_FAULT.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+#[cfg(test)]
+fn set_archive_build_fault(fault: ArchiveBuildFault) -> ArchiveFaultGuard {
+    ARCHIVE_BUILD_FAULT.store(fault as u8, std::sync::atomic::Ordering::SeqCst);
+    ArchiveFaultGuard
+}
+#[cfg(test)]
+fn apply_test_archive_fault() -> std::io::Result<()> {
+    match ARCHIVE_BUILD_FAULT.swap(0, std::sync::atomic::Ordering::SeqCst) {
+        1 => panic!("test-forced archive panic"),
+        2 => Err(std::io::Error::other("test-forced archive io failure")),
+        _ => Ok(()),
+    }
+}
+#[cfg(test)]
+fn build_session_state_archive(
+    mut session_copy: crate::session::persistence::SessionStateCopy,
+    session_id: &str,
+) -> std::io::Result<Vec<u8>> {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    #[cfg(test)]
+    apply_test_archive_fault()?;
+    sort_session_files_by_priority(&mut session_copy.files);
+    let mut archive_data = Vec::new();
+    {
+        let encoder = GzEncoder::new(&mut archive_data, Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        for file in &session_copy.files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(file.data.len() as u64);
+            header.set_mode(0o644);
+            header.set_mtime(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            );
+            if let Err(e) = archive.append_data(&mut header, &file.name, file.data.as_slice()) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    file = %file.name,
+                    error = %e,
+                    "Failed to add file to session state archive"
+                );
+            }
+        }
+        archive.into_inner().and_then(|encoder| encoder.finish())?;
+    }
+    Ok(archive_data)
 }
 #[cfg(test)]
 mod tests {
@@ -2320,13 +2416,113 @@ mod tests {
         }
         out
     }
-    #[test]
-    fn chat_history_session_state_empty_messages_yields_valid_empty_archive() {
-        let archive = build_chat_history_session_state(&[]).unwrap();
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(archive_build_fault)]
+    async fn chat_history_session_state_empty_messages_yields_valid_empty_archive() {
+        let archive = build_chat_history_session_state(&[]).await.unwrap();
         let entries = read_tar_gz_entries(&archive);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, "chat_history.jsonl");
         assert!(entries[0].1.is_empty());
+    }
+    #[test]
+    fn chat_history_jsonl_is_empty_when_feature_disabled() {
+        use xai_grok_sampling_types::conversation::ConversationItem;
+        let messages = vec![ConversationItem::user("ignored without the feature")];
+        let jsonl = serialize_chat_history_jsonl(&messages).unwrap();
+        assert!(jsonl.is_empty());
+        assert_eq!(messages.len(), 1);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(archive_build_fault)]
+    async fn chat_history_wrapper_ignores_messages_when_feature_disabled() {
+        use xai_grok_sampling_types::conversation::ConversationItem;
+        let messages = vec![ConversationItem::user("must not appear in the archive")];
+        let archive = build_chat_history_session_state(&messages).await.unwrap();
+        let entries = read_tar_gz_entries(&archive);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "chat_history.jsonl");
+        assert!(entries[0].1.is_empty());
+    }
+    #[test]
+    #[serial_test::serial(archive_build_fault)]
+    fn chat_history_compress_round_trips_owned_jsonl() {
+        let jsonl = b"{\"role\":\"user\",\"content\":\"hi\"}\n";
+        let archive = compress_chat_history_archive(jsonl.to_vec()).unwrap();
+        let entries = read_tar_gz_entries(&archive);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "chat_history.jsonl");
+        assert_eq!(entries[0].1, jsonl);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(archive_build_fault)]
+    async fn chat_history_spawn_blocking_panic_is_archive_failed() {
+        let _fault = set_archive_build_fault(ArchiveBuildFault::Panic);
+        let err = build_chat_history_session_state(&[])
+            .await
+            .expect_err("compress panic must surface as archive_failed");
+        assert_eq!(err.reason, "archive_failed");
+        let msg = format!("{:#}", err.error);
+        assert!(
+            msg.contains("spawn_blocking join failed"),
+            "join error must keep cancel vs panic distinguishable: {msg}"
+        );
+    }
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(archive_build_fault)]
+    async fn chat_history_spawn_blocking_io_error_is_archive_failed() {
+        let _fault = set_archive_build_fault(ArchiveBuildFault::Io);
+        let err = build_chat_history_session_state(&[])
+            .await
+            .expect_err("compress io error must surface as archive_failed");
+        assert_eq!(err.reason, "archive_failed");
+        assert!(format!("{:#}", err.error).contains("test-forced archive io failure"));
+    }
+    fn session_copy_with(
+        files: Vec<(&str, &[u8])>,
+    ) -> crate::session::persistence::SessionStateCopy {
+        crate::session::persistence::SessionStateCopy {
+            files: files
+                .into_iter()
+                .map(|(name, data)| CopiedSessionFile {
+                    name: name.to_string(),
+                    data: data.to_vec(),
+                })
+                .collect(),
+        }
+    }
+    #[test]
+    #[serial_test::serial(archive_build_fault)]
+    fn session_state_archive_contains_sorted_files() {
+        let session_copy = session_copy_with(vec![
+            ("call_001.jsonl", b"call"),
+            ("summary.json", b"sum"),
+            ("chat_history.jsonl", b"hist"),
+            ("events.jsonl", b"ev"),
+        ]);
+        let archive = build_session_state_archive(session_copy, "test-sid").unwrap();
+        let entries = read_tar_gz_entries(&archive);
+        let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "summary.json",
+                "chat_history.jsonl",
+                "events.jsonl",
+                "call_001.jsonl"
+            ]
+        );
+        assert_eq!(entries[0].1, b"sum");
+        assert_eq!(entries[1].1, b"hist");
+        assert_eq!(entries[2].1, b"ev");
+        assert_eq!(entries[3].1, b"call");
+    }
+    #[test]
+    #[serial_test::serial(archive_build_fault)]
+    fn session_state_archive_empty_files_is_valid_tar_gz() {
+        let archive = build_session_state_archive(session_copy_with(vec![]), "test-sid").unwrap();
+        let entries = read_tar_gz_entries(&archive);
+        assert!(entries.is_empty());
     }
     #[test]
     fn turn_result_metadata_serializes_token_breakdown() {
@@ -2483,6 +2679,9 @@ mod tests {
         ));
         assert!(!enqueue_outcome_is_durable(&EnqueueOutcome::Failed {
             reason: "upload queue worker is shut down".to_owned(),
+        }));
+        assert!(!enqueue_outcome_is_durable(&EnqueueOutcome::Skipped {
+            reason: "collect_deadline".to_owned(),
         }));
     }
     /// A disabled verdict escalates exactly once over a prior recovery (pairs

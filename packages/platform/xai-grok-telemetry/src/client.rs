@@ -265,6 +265,14 @@ pub async fn track(event_name: &str, request_id: &str, ctx: &UserContext, mut me
     }
 }
 
+/// Resolved mode of the initialized client, `None` when off. Lets a parent
+/// hand its mode to a spawned child that cannot re-resolve remote settings.
+pub fn current_mode() -> Option<TelemetryMode> {
+    let lock = TELEMETRY_CLIENT.get_or_init(|| Mutex::new(None));
+    let guard = lock.lock().unwrap_or_else(|err| err.into_inner());
+    guard.as_ref().map(|c| c.mode)
+}
+
 /// Sync the user's Mixpanel profile once per init. Fire-and-forget.
 ///
 /// Only runs in [`TelemetryMode::Enabled`]. SessionMetrics mode may emit

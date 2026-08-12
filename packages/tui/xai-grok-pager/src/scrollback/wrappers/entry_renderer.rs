@@ -259,6 +259,8 @@ impl<'a> EntryRenderer<'a> {
         // shares the accent color, so an active group's glyph animates with
         // the same wave as a running tool row's bullet.
         if let Some(GroupHeaderLabel::VerbRun(vg)) = self.group_header_label {
+            use unicode_width::UnicodeWidthStr;
+
             let glyph_color = if vg.failed {
                 let style = Style::default().fg(self.theme.accent_error);
                 buf.set_string_safe(
@@ -299,11 +301,30 @@ impl<'a> EntryRenderer<'a> {
             // headers. The selection caret (the expandable indicator in
             // scrollback_pane.rs) overdraws the diamond on the selected row
             // and flips `›`/`⌄` with the group's fold state.
+            let prefix = group_header_chrome_prefix();
             let mut spans = vec![ratatui::text::Span::styled(
-                group_header_chrome_prefix(),
+                prefix.clone(),
                 Style::default().fg(glyph_color),
             )];
-            spans.extend(vg.line.spans.iter().cloned());
+            let hook_start = vg
+                .line
+                .spans
+                .iter()
+                .position(|span| span.content.starts_with("  [hooks: "));
+            if let Some(hook_start) = hook_start {
+                let suffix_width: usize = vg.line.spans[hook_start..]
+                    .iter()
+                    .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                    .sum();
+                let label_budget = usize::from(content_area.width)
+                    .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
+                    .saturating_sub(suffix_width);
+                let label = ratatui::text::Line::from(vg.line.spans[..hook_start].to_vec());
+                spans.extend(crate::render::line_utils::truncate_line(label, label_budget).spans);
+                spans.extend(vg.line.spans[hook_start..].iter().cloned());
+            } else {
+                spans.extend(vg.line.spans.iter().cloned());
+            }
             let line = ratatui::text::Line::from(spans);
             buf.set_line_safe(content_area.x, content_area.y, &line, content_area.width);
             return;

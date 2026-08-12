@@ -99,6 +99,16 @@ If the user and project files define the same custom profile differently, Grok u
 | `read_write`       | String[] | Additional read-write paths                          |
 | `deny`             | String[] | Paths or globs to kernel-deny (read + write/rename; see notes). An entry with `*`, `?`, or `[` is a glob |
 
+> **Note on `read_only` / `read_write`:** These are **literal directory grants**,
+> not globs. A trailing `/**` (or `/*`) is treated as the parent directory, so
+> `…/cache/**` grants `…/cache` (and a bare `/**` grants `/`). Any entry that
+> still contains `*`, `?`, or `[` after that (e.g. `/home/**/cache`, or a
+> directory literally named `dir[1]`) is skipped with a warning — list the
+> concrete directories you need, or put globs under `deny`. Entries with
+> leading or trailing whitespace are also skipped with a warning: whitespace
+> is significant in literal paths, so fix the entry rather than relying on
+> trimming.
+
 > **Note on `deny`:** A non-empty `deny` list is **kernel-enforced**. Denied paths
 > are **read-denied and write/rename-denied** via Seatbelt on macOS and a bwrap
 > bind-over on Linux, so a denied path can neither be read (via `bash`, `grep`, or

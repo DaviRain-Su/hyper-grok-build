@@ -9210,7 +9210,8 @@ mod tests {
             acp::ModelId::new("alpha-model"),
             acp::ModelInfo::new(acp::ModelId::new("alpha-model"), "Alpha Model"),
         );
-        state.models.update_catalog(available, Some(model_id));
+        state.models.update_catalog(available);
+        state.models.set_current(model_id, None);
         // Mirror how the real dashboard types into the dispatch box:
         // caret at end so `/model ` is in the args phase.
         state.dispatch.set_text("/model ");
@@ -9278,7 +9279,8 @@ mod tests {
             model_id.clone(),
             acp::ModelInfo::new(model_id.clone(), "Hover Model"),
         );
-        state.models.update_catalog(available, Some(model_id));
+        state.models.update_catalog(available);
+        state.models.set_current(model_id, None);
         state.dispatch.set_text("/model ");
         let end = state.dispatch.text().len();
         state.dispatch.textarea.set_cursor(end);

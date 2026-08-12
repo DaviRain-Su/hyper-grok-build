@@ -373,7 +373,8 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
         "Workspace server starting — sessions created dynamically via server bind"
     );
     let server_id = args.server_id.clone();
-    let status_config = xai_grok_workspace::StatusConfig::from_env();
+    let mut status_config = xai_grok_workspace::StatusConfig::from_env();
+    status_config.preview_control_port = args.preview.preview_control_port;
     let preview_shutdown = if args.preview.preview_enabled {
         let control_port = args.preview.preview_control_port;
         let cfg = args.preview.into_preview_args(cwd.clone());

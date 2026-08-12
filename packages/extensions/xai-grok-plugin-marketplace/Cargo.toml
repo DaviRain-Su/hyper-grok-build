@@ -14,7 +14,6 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
-wait-timeout = { workspace = true }
 xai-tty-utils = { workspace = true }
 xai-grok-agent = { workspace = true }
 xai-grok-config = { workspace = true }

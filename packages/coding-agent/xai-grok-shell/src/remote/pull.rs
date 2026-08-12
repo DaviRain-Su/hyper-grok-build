@@ -40,6 +40,10 @@ pub async fn pull_session_to_local(
         cwd: cwd.clone(),
     };
     let dir = crate::session::persistence::session_dir(&info);
+    // Ensure the `<encoded-cwd>` shield up front (best-effort).
+    if let Err(e) = crate::util::grok_home::ensure_sessions_cwd_dir(cwd) {
+        tracing::warn!(?e, "failed to ensure sessions cwd dir for pulled session");
+    }
 
     let num_messages = hydrate::write_to_dir(&dir, &loaded)?;
 
@@ -81,7 +85,7 @@ pub(crate) mod hydrate {
             cwd: remote.cwd.clone().expect("caller verified cwd is Some"),
         };
 
-        std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
+        crate::util::grok_home::create_dir_all_owner_only(dir).map_err(|e| io_err(dir, e))?;
 
         let num_messages = loaded.messages.as_ref().map_or(0, |m| m.len());
         let mut num_chat_messages = 0;
@@ -350,9 +354,18 @@ mod tests {
             }),
         };
         let tmp = tempfile::TempDir::new().unwrap();
-        super::hydrate::write_to_dir(tmp.path(), &data).unwrap();
+        // Subdir so the owner-only assertion covers a dir write_to_dir created.
+        let dir = tmp.path().join("session");
+        super::hydrate::write_to_dir(&dir, &data).unwrap();
 
-        let chat = std::fs::read_to_string(tmp.path().join("chat_history.jsonl")).unwrap();
+        #[cfg(unix)]
+        assert_eq!(
+            crate::test_support::unix_mode(&dir),
+            0o700,
+            "hydrated session dir must be owner-only"
+        );
+
+        let chat = std::fs::read_to_string(dir.join("chat_history.jsonl")).unwrap();
         let items: Vec<crate::sampling::ConversationItem> = chat
             .lines()
             .filter(|l| !l.is_empty())

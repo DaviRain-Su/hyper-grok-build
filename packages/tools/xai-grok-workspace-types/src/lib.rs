@@ -74,6 +74,7 @@
 //! `xai-grok-workspace-grpc` crate. The Rust types defined here are
 //! the source of truth.
 
+pub mod binding;
 pub mod chunks;
 pub mod error;
 pub mod events;

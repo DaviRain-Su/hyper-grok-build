@@ -163,28 +163,22 @@ where
         .map_err(std::io::Error::other)?
 }
 
-async fn persist_state_to_path(
-    path: &std::path::Path,
-    state: &PermissionState,
-) -> std::io::Result<()> {
-    persist_state_to_path_with_writer(path, state, |path, contents| {
-        xai_grok_config::fs_atomic::write_atomically(path, contents, None)
-    })
-    .await
-}
-
 async fn persist_state_to_dir(
     dir: &std::path::Path,
     state: &PermissionState,
     client_identifier: Option<&str>,
 ) {
-    if let Err(e) = tokio::fs::create_dir_all(dir).await {
-        tracing::warn!(?e, "failed creating permission state directory");
-        return;
-    }
     let path = state_file_path(dir, client_identifier);
-    if let Err(e) = persist_state_to_path(&path, state).await {
-        tracing::warn!(?e, path = %path.display(), "failed writing permission state");
+    let dir = dir.to_path_buf();
+    // Owner-only dir creation rides the writer's spawn_blocking: GROK_HOME may
+    // sit on a slow filesystem, so no blocking fs work on the async worker.
+    let result = persist_state_to_path_with_writer(&path, state, move |path, contents| {
+        xai_grok_config::create_dir_all_owner_only(&dir)?;
+        xai_grok_config::fs_atomic::write_atomically(path, contents, None)
+    })
+    .await;
+    if let Err(e) = result {
+        tracing::warn!(?e, path = %path.display(), "failed persisting permission state");
     }
 }
 
@@ -193,7 +187,24 @@ pub(crate) async fn persist_state(
     state: &PermissionState,
     client_identifier: Option<&str>,
 ) {
-    persist_state_to_dir(&state_dir_for_cwd(cwd), state, client_identifier).await
+    // Canonical creator: also tightens the sessions root this write may create,
+    // on the blocking pool (mkdir + chmod can stall on slow filesystems). Falls
+    // back to the computed path (persist_state_to_dir re-creates it) so a
+    // failed ensure still gets a write attempt.
+    let cwd_str = cwd.as_str().to_owned();
+    let ensured =
+        tokio::task::spawn_blocking(move || xai_grok_config::ensure_sessions_cwd_dir(&cwd_str))
+            .await
+            .map_err(std::io::Error::other)
+            .and_then(|r| r);
+    let dir = match ensured {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(?e, "failed ensuring sessions cwd dir for permission state");
+            state_dir_for_cwd(cwd)
+        }
+    };
+    persist_state_to_dir(&dir, state, client_identifier).await
 }
 
 pub async fn cleanup_stale_permission_state(max_age: std::time::Duration) {
@@ -554,6 +565,19 @@ allowed_mcp_servers = ["a"]
         let rewritten: PermissionState =
             toml::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
         assert_legacy_mcp_state_migrated(&rewritten);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn persist_state_to_dir_creates_owner_only_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sessions").join("%2Fsome%2Fcwd");
+
+        persist_state_to_dir(&dir, &PermissionState::default(), None).await;
+
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[tokio::test]

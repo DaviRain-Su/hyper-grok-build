@@ -26,6 +26,7 @@
 //! sandbox.apply(workspace).expect("sandbox apply failed");
 //! sandbox.install();
 //! ```
+mod allow_path;
 pub mod child_net;
 mod deny;
 mod hook_write_deny;

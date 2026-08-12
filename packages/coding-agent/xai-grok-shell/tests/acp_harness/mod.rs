@@ -136,6 +136,9 @@ where
     (client_conn, init)
 }
 
+// Dead-code allows below: same per-binary compilation as `AutoApproveClient`
+// above — each helper is used by some including test binaries, not all.
+#[allow(dead_code)]
 pub async fn ext_method(
     conn: &acp::ClientSideConnection,
     method: &str,
@@ -153,6 +156,7 @@ pub async fn ext_method(
     serde_json::from_str(resp.0.get()).unwrap_or_else(|e| panic!("{method}: bad response: {e}"))
 }
 
+#[allow(dead_code)]
 pub async fn new_session(
     conn: &acp::ClientSideConnection,
     cwd: &std::path::Path,
@@ -205,6 +209,9 @@ fn set_test_env(grok_home: &std::path::Path, server_url: &str) {
         std::env::set_var("GROK_TELEMETRY_ENABLED", "false");
         std::env::set_var("GROK_FEEDBACK_ENABLED", "false");
         std::env::set_var("GROK_TRACE_UPLOAD", "false");
+        // Turn summaries fire a post-turn side-call to the same mock endpoint
+        // on a spawned task; the race makes request-count assertions flaky.
+        std::env::set_var("GROK_TURN_SUMMARY", "false");
     }
 }
 

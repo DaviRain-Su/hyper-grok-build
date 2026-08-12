@@ -6,12 +6,14 @@
 //! The `objects/` directory (often the largest subtree) is copied in parallel
 //! using a thread pool for better throughput on SSDs.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 
 use crate::copy::cow::clone_file;
+use crate::copy::standalone::{StandaloneCopyFilter, sanitize_standalone_git_dir_keeping};
 
 /// Statistics from copying the `.git/` directory.
 #[derive(Clone, Debug, Default)]
@@ -73,8 +75,21 @@ struct CopyWork {
 /// - Stale worktree registrations (`worktrees/`)
 /// - Transient state files (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, etc.)
 /// - In-progress rebase/cherry-pick state (`sequencer/`, `rebase-merge/`)
+/// - Extra `refs/remotes/origin/*` tips (keeps HEAD/main/master/current/@{upstream})
+/// - `.git/shallow` when its grafts are not on HEAD's first-parent chain
+#[cfg(test)]
 pub(crate) fn copy_git_dir(source_git: &Path, dest_git: &Path) -> Result<GitDirCopyStats> {
-    copy_git_dir_with_workers(source_git, dest_git, num_cpus::get())
+    copy_git_dir_keeping_origin(source_git, dest_git, &HashSet::new())
+}
+
+/// Like [`copy_git_dir`], but keep extra `refs/remotes/origin/*` names through
+/// CoW skip + post-copy sanitize so a later checkout can still see them.
+pub(crate) fn copy_git_dir_keeping_origin(
+    source_git: &Path,
+    dest_git: &Path,
+    extra_origin: &HashSet<String>,
+) -> Result<GitDirCopyStats> {
+    copy_git_dir_with_workers(source_git, dest_git, num_cpus::get(), extra_origin)
 }
 
 /// `copy_git_dir` with an explicit worker cap, so tests can force the parallel
@@ -83,6 +98,7 @@ fn copy_git_dir_with_workers(
     source_git: &Path,
     dest_git: &Path,
     max_workers: usize,
+    extra_origin: &HashSet<String>,
 ) -> Result<GitDirCopyStats> {
     anyhow::ensure!(
         source_git.is_dir(),
@@ -95,13 +111,16 @@ fn copy_git_dir_with_workers(
     let symlinks_copied = AtomicU64::new(0);
     let entries_skipped = AtomicU64::new(0);
 
+    let filter = StandaloneCopyFilter::from_git_dir_keeping(source_git, extra_origin);
+
     // First pass: collect work items for parallel copy.
     // We collect all (source, dest) pairs, then process them in parallel.
     let mut work_items: Vec<CopyWork> = Vec::new();
     collect_work_recursive(
         source_git,
         dest_git,
-        0,
+        Path::new(""),
+        &filter,
         &mut work_items,
         &dirs_created,
         &entries_skipped,
@@ -163,6 +182,9 @@ fn copy_git_dir_with_workers(
         }
     }
 
+    sanitize_standalone_git_dir_keeping(dest_git, extra_origin)
+        .context("failed to sanitize standalone .git/ after copy")?;
+
     let stats = GitDirCopyStats {
         files_copied: files_copied.load(Ordering::Relaxed),
         dirs_created: dirs_created.load(Ordering::Relaxed),
@@ -189,7 +211,8 @@ fn copy_git_dir_with_workers(
 fn collect_work_recursive(
     source: &Path,
     dest: &Path,
-    depth: usize,
+    rel: &Path,
+    filter: &StandaloneCopyFilter,
     work_items: &mut Vec<CopyWork>,
     dirs_created: &AtomicU64,
     entries_skipped: &AtomicU64,
@@ -206,10 +229,11 @@ fn collect_work_recursive(
             .with_context(|| format!("failed to read entry in {}", source.display()))?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
+        let child_rel = rel.join(&name);
 
-        if should_skip(&name_str, depth) {
+        if should_skip(&name_str, rel, filter) {
             entries_skipped.fetch_add(1, Ordering::Relaxed);
-            tracing::trace!(entry = %name_str, depth, "skipping .git/ entry");
+            tracing::trace!(entry = %name_str, rel = %child_rel.display(), "skipping .git/ entry");
             continue;
         }
 
@@ -224,7 +248,8 @@ fn collect_work_recursive(
             collect_work_recursive(
                 &source_path,
                 &dest_path,
-                depth + 1,
+                &child_rel,
+                filter,
                 work_items,
                 dirs_created,
                 entries_skipped,
@@ -242,7 +267,7 @@ fn collect_work_recursive(
             // `fsmonitor--daemon.ipc` socket). Skip it instead of failing the
             // whole `.git/` copy.
             entries_skipped.fetch_add(1, Ordering::Relaxed);
-            tracing::debug!(entry = %name_str, depth, "skipping non-regular .git/ entry");
+            tracing::debug!(entry = %name_str, rel = %child_rel.display(), "skipping non-regular .git/ entry");
         }
     }
 
@@ -301,17 +326,21 @@ fn copy_single_entry(
     Ok(())
 }
 
-/// Decide whether to skip a `.git/` entry based on its name and depth.
-fn should_skip(name: &str, depth: usize) -> bool {
+/// Decide whether to skip a `.git/` entry based on its name and relative path.
+fn should_skip(name: &str, rel_parent: &Path, filter: &StandaloneCopyFilter) -> bool {
     // Skip lock files at any depth
     if name.ends_with(".lock") {
         return true;
     }
+    let at_root = rel_parent.as_os_str().is_empty();
     // Skip known top-level entries
-    if depth == 0 && SKIP_TOP_LEVEL.contains(&name) {
+    if at_root && SKIP_TOP_LEVEL.contains(&name) {
         return true;
     }
-    false
+    if at_root && name == "shallow" && !filter.keep_shallow {
+        return true;
+    }
+    filter.should_skip_origin_remote(&rel_parent.join(name))
 }
 
 #[cfg(test)]
@@ -537,7 +566,7 @@ mod tests {
         // onto it fails (EISDIR) deterministically, even as root.
         std::fs::create_dir_all(dest_git.join("obj0")).unwrap();
 
-        let err = copy_git_dir_with_workers(&source_git, &dest_git, 4)
+        let err = copy_git_dir_with_workers(&source_git, &dest_git, 4, &HashSet::new())
             .expect_err("a failed .git/ entry copy must propagate as an error");
         // The error names the failing entry, not some unrelated setup failure.
         let chain = format!("{err:#}");

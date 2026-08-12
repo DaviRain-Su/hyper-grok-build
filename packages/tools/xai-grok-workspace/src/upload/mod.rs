@@ -314,6 +314,18 @@ pub(crate) async fn upload_tool_state_queued(
             record_upload_outcome("tool_state", "succeeded");
             Ok(())
         }
+        EnqueueOutcome::Skipped { reason } => {
+            dc_log!(
+                info,
+                session_id = %session_id,
+                turn_number,
+                skip_reason = reason.as_str(),
+                "workspace: tool_state upload skipped"
+            );
+            record_upload_skipped("tool_state", &reason);
+            record_upload_outcome("tool_state", "skipped");
+            Ok(())
+        }
         EnqueueOutcome::Failed { reason } => Err(reason.into()),
     }
 }

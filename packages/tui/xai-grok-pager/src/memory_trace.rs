@@ -103,6 +103,12 @@ struct TraceEvent<'a> {
     /// Resident set size.
     #[serde(skip_serializing_if = "Option::is_none")]
     rss_bytes: Option<u64>,
+    /// Live OS thread count, recorded for offline analysis (the threshold
+    /// buckets key on footprint only). A count scaling with work done
+    /// (background tasks, subagents) instead of holding a flat baseline is
+    /// a leak.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    threads: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     alloc: Option<AllocatorStats>,
     /// Purge: which memory cliff triggered it (call-site tag).
@@ -301,6 +307,7 @@ impl Sink {
             kind,
             footprint_bytes: mem.footprint_bytes,
             rss_bytes: mem.rss_bytes,
+            threads: mem.threads,
             alloc,
             reason,
             hook_installed,
@@ -345,6 +352,7 @@ impl Sink {
             kind: "threshold",
             footprint_bytes: Some(footprint),
             rss_bytes: None,
+            threads: None,
             alloc: None,
             reason: None,
             hook_installed: None,
@@ -499,6 +507,7 @@ pub fn start(dir: PathBuf) {
                             kind: "start",
                             footprint_bytes: None,
                             rss_bytes: None,
+                            threads: None,
                             alloc: None,
                             reason: None,
                             hook_installed: None,
@@ -533,6 +542,7 @@ pub fn record_crash_sample() {
         kind: "crash",
         footprint_bytes: mem.footprint_bytes,
         rss_bytes: mem.rss_bytes,
+        threads: mem.threads,
         alloc: STATS_PROVIDER.get().and_then(|p| p()),
         reason: None,
         hook_installed: None,

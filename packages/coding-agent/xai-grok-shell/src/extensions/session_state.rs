@@ -168,7 +168,7 @@ fn write_import(
     state: &std::collections::HashMap<String, Value>,
     updates: &[Value],
 ) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
+    crate::util::grok_home::create_dir_all_owner_only(dir)?;
 
     // Clear every file this import owns so a leftover from a failed attempt can't
     // merge with the new snapshot; this import is authoritative.
@@ -281,6 +281,12 @@ mod tests {
 
         write_import(dir, &state, &updates).unwrap();
 
+        #[cfg(unix)]
+        assert_eq!(
+            crate::test_support::unix_mode(dir),
+            0o700,
+            "imported session dir must be owner-only"
+        );
         assert!(dir.join("summary.json").exists(), "summary.json written");
         assert_eq!(
             std::fs::read_to_string(dir.join("plan.json")).unwrap(),

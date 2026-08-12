@@ -584,8 +584,7 @@ impl ScrollbackEntry {
                 super::block::RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_))
             );
             match ctx.mode {
-                super::types::DisplayMode::Collapsed => {
-                    // Append [hooks: N/M] to the first (header) line for all events
+                DisplayMode::Collapsed => {
                     if let Some(suffix_spans) = render_hooks_inline_suffix(hd)
                         && let Some(first_line) = output.lines.first_mut()
                     {
@@ -593,12 +592,11 @@ impl ScrollbackEntry {
                     }
                 }
                 _ => {
-                    // Expanded: separator + separate sections
                     let pre = render_hooks_for_mode("pre_tool_use", &hd.pre_hooks, ctx.mode);
                     let post = render_hooks_for_mode("post_tool_use", &hd.post_hooks, ctx.mode);
                     let has_any = !pre.is_empty() || !post.is_empty() || !hd.lifecycle.is_empty();
-                    // Lifecycle blocks already show the event name as the block header,
-                    // so skip the separator (no tool output above) and the section header.
+                    // Lifecycle blocks already use the event name as their
+                    // header, so a separator before their detail is redundant.
                     if has_any && !is_lifecycle {
                         output.lines.push(render_hook_separator());
                     }

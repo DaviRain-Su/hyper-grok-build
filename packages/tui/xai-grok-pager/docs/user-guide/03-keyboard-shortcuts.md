@@ -117,7 +117,9 @@ They share one contract:
   Where it leaves to is the one thing that differs per card — the question card
   and the permission prompt park the keyboard in the scrollback so you can
   scroll up and read the context behind them (the card stays on screen), while
-  the cancel-turn panel's "keep everything running" resolves it outright.
+  the cancel-turn panel's "keep running" closes the panel and leaves the
+  turn (and any subagents) running. Enter or `1`–`4` still pick a
+  cancel-and-subagent choice.
 - With the keyboard parked, the shortcuts bar shows the scrollback's own keys,
   and its focus hint names the card rather than the prompt: `Tab/Space:
   question`. That hint is pinned, so a narrow bar can never trim away the only

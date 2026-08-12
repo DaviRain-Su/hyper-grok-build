@@ -6,8 +6,8 @@ use super::common::*;
 /// One realistic journey: turn 1 streams; queue P1 and P2; remove P1;
 /// send I1 now via the chord (cancel-and-send: turn 1 is cancelled silently
 /// and I1 runs as its own turn); P2 promotes as the following turn. The
-/// final request's user-message sequence must be exactly [prompt, I1 (no
-/// interjection preamble), P2] with P1 absent everywhere.
+/// final request's user-message sequence must be exactly [prompt, I1 (with
+/// the interjection preamble), P2] with P1 absent everywhere.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn queue_and_interjection_lifecycle() {
@@ -117,10 +117,13 @@ async fn queue_and_interjection_lifecycle() {
     assert_eq!(3, finals.len(), "expected 3 user messages: {finals:#?}");
     assert!(finals[0].contains(PROMPT), "first: {finals:#?}");
     assert!(
-        finals[1].contains("lifecycle i-one") && !finals[1].contains(INTERJECTION_WIRE_PREFIX),
-        "second must be I1 with no interjection preamble: {finals:#?}"
+        finals[1].contains("lifecycle i-one") && finals[1].contains(INTERJECTION_WIRE_PREFIX),
+        "second must be I1 with the interjection preamble: {finals:#?}"
     );
-    assert!(finals[2].contains("lifecycle p-two"), "third: {finals:#?}");
+    assert!(
+        finals[2].contains("lifecycle p-two") && !finals[2].contains(INTERJECTION_WIRE_PREFIX),
+        "third must be the naturally drained P2 with no send-now preamble: {finals:#?}"
+    );
     assert!(
         !last.to_string().contains("lifecycle p-one"),
         "removed P1 reached the wire"

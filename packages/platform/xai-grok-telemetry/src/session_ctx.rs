@@ -213,6 +213,10 @@ impl Drop for PendingEventGuard {
     }
 }
 
+/// Drain bound for one-shot CLI commands. Returns once the post lands
+/// (~1.7s cold); the bound only bites on a black-holed network.
+pub const CLI_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Wait (up to `timeout`) for in-flight event posts to finish. For commands
 /// that exit as soon as their work is done; the agent runs long enough that
 /// its events land on their own.

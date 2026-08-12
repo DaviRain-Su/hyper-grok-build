@@ -795,7 +795,9 @@ impl ScrollbackState {
             };
             let needs_measure = (start..=end).any(|idx| {
                 cache.entries.get(idx).is_some_and(|info| {
-                    !cache.measured[idx] && info.height != 0 && !info.is_group_header()
+                    !cache.measured[idx]
+                        && info.height != 0
+                        && (!info.is_group_header() || info.is_expanded_verb_header())
                 })
             });
             if !needs_measure {
@@ -822,9 +824,9 @@ impl ScrollbackState {
             }
             let info = cache.entries[idx];
             // Estimated entries always have height >= 1, so a height of 0 here
-            // means group truncation hid this entry; group headers render a
-            // synthetic line. Neither needs a markdown render.
-            if info.height == 0 || info.is_group_header() {
+            // means group truncation hid this entry. Synthetic-only headers need
+            // no block render; an expanded verb header also owns member 0 rows.
+            if info.height == 0 || (info.is_group_header() && !info.is_expanded_verb_header()) {
                 continue;
             }
             let Some((entry_id, entry)) = self.entries.get_index(idx) else {
@@ -833,10 +835,11 @@ impl ScrollbackState {
             let renderer = EntryRenderer::new(entry, &theme)
                 .with_appearance_ref(&self.appearance)
                 .with_cwd(cwd);
-            cache.entries[idx].height = match inline_edit_height {
+            let member_height = match inline_edit_height {
                 Some((edit_id, h)) if edit_id == *entry_id => h,
                 _ => renderer.desired_height(entry_area_width),
             };
+            cache.entries[idx].height = info.with_verb_header_row(member_height);
             // Truncated height only feeds prompt sticky-header min_height, so
             // only prompts pay for the extra Truncated-mode render; others keep
             // their seeded value (unused for non-prompts).
@@ -1140,14 +1143,15 @@ impl ScrollbackState {
             let Some((_, entry)) = self.entries.get_index(idx) else {
                 continue;
             };
-
+            let info = cache.entries[idx];
             let renderer = EntryRenderer::new(entry, &theme)
                 .with_appearance_ref(&self.appearance)
                 .with_cwd(cwd);
-            let new_height = match inline_edit_height {
+            let member_height = match inline_edit_height {
                 Some((edit_id, h)) if edit_id == id => h,
                 _ => renderer.desired_height(entry_area_width),
             };
+            let new_height = info.with_verb_header_row(member_height);
             let old_height = cache.entries[idx].height;
             // This entry now has an exact (re)measured height, so it no longer
             // needs the lazy viewport measurement pass.

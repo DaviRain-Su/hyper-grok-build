@@ -3,14 +3,17 @@
 //! Provides persistent caching of git marketplace repos.
 //! Cache root: `~/.grok/marketplace-cache/<url-hash>/`
 
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
-use wait_timeout::ChildExt;
 
 /// Default TTL for marketplace cache freshness (5 minutes).
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -18,6 +21,9 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Hard cap for clone/fetch so a bad marketplace URL cannot hang list/refresh.
 const NETWORK_OP_TIMEOUT: Duration = Duration::from_secs(15);
+const STDERR_DIAGNOSTIC_CAP: usize = 64 * 1024;
+const STDERR_DIAGNOSTIC_TAIL_CAP: usize = STDERR_DIAGNOSTIC_CAP / 2;
+const STDERR_TRUNCATION_MARKER: &[u8] = b"\n[... git stderr truncated ...]\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncMode {
@@ -235,26 +241,7 @@ fn unique_reclone_suffix() -> u128 {
         .unwrap_or(0)
 }
 
-/// Environment variables set on every git command to suppress interactive prompts.
-pub const GIT_AUTH_SUPPRESSION_ENVS: [(&str, &str); 4] = [
-    ("GIT_TERMINAL_PROMPT", "0"),
-    ("GIT_ASKPASS", ""),
-    ("GIT_LFS_SKIP_SMUDGE", "1"),
-    ("GIT_SSH_COMMAND", "ssh -o BatchMode=yes"),
-];
-
-/// Git command with auth/LFS/SSH prompt suppression and `--no-optional-locks`.
-pub fn git_command() -> std::process::Command {
-    let mut cmd = std::process::Command::new("git");
-    xai_tty_utils::detach_std_command(&mut cmd);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.envs(xai_tty_utils::pager_env());
-    for &(key, val) in &GIT_AUTH_SUPPRESSION_ENVS {
-        cmd.env(key, val);
-    }
-    cmd.arg("--no-optional-locks");
-    cmd
-}
+pub use xai_tty_utils::{GIT_AUTH_SUPPRESSION_ENVS, git_command, git_command_locking};
 
 fn clone_cli_command(url: &str, branch: Option<&str>, dest: &Path) -> std::process::Command {
     let mut cmd = git_command();
@@ -295,34 +282,316 @@ fn fetch_cli_command(repo_dir: &Path, branch: Option<&str>) -> std::process::Com
 fn run_git_timed(cmd: &mut Command, what: &str, timeout: Duration) -> Result<(), String> {
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
-    #[allow(clippy::disallowed_methods)] // git command, killed and reaped on timeout
+    #[allow(clippy::disallowed_methods)] // enrolled before any waiter thread starts
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to run git {what}: {e}"))?;
-    match child.wait_timeout(timeout) {
+    let group = match xai_tty_utils::global_process_scope().enroll_std(&child) {
+        Ok(group) => group,
+        Err(error) => {
+            let _ = child.kill();
+            if !matches!(
+                xai_tty_utils::wait_child_bounded(&mut child, xai_tty_utils::KILL_REAP_TIMEOUT,),
+                Ok(Some(_))
+            ) {
+                transfer_git_cleanup(
+                    what,
+                    GitReaperOwners {
+                        child: Some((child, None)),
+                        stderr: None,
+                    },
+                );
+            }
+            return Err(format!(
+                "failed to enroll git {what} process group: {error}"
+            ));
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => match spawn_stderr_reader(stderr) {
+            Ok(reader) => reader,
+            Err(error) => {
+                kill_git_child(what, child, group, None, CleanupIdentity::Certain);
+                return Err(format!("failed to start git {what} stderr reader: {error}"));
+            }
+        },
+        None => {
+            kill_git_child(what, child, group, None, CleanupIdentity::Certain);
+            return Err(format!("failed to capture git {what} stderr"));
+        }
+    };
+
+    match xai_tty_utils::wait_child_bounded(&mut child, timeout) {
         Ok(Some(status)) => {
-            let mut stderr = Vec::new();
-            if let Some(mut err) = child.stderr.take() {
-                let _ = err.read_to_end(&mut stderr);
-            }
-            if status.success() {
-                Ok(())
-            } else {
-                let stderr = String::from_utf8_lossy(&stderr);
-                tracing::debug!("git {what} stderr: {stderr}");
-                Err(git_failure_message(what, &stderr))
-            }
+            drop(group);
+            finish_git_status(what, status, stderr)
         }
         Ok(None) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            Err(format!("git {what} timed out after {}s", timeout.as_secs()))
+            let stderr = kill_git_child(what, child, group, Some(stderr), CleanupIdentity::Certain);
+            Err(git_message_with_stderr(
+                format!("git {what} timed out after {}s", timeout.as_secs()),
+                what,
+                stderr.as_deref(),
+            ))
         }
-        Err(e) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            Err(format!("failed to wait for git {what}: {e}"))
+        Err(error) => {
+            let identity = if xai_tty_utils::is_child_wait_identity_uncertain(&error) {
+                CleanupIdentity::Uncertain
+            } else {
+                CleanupIdentity::Certain
+            };
+            let stderr = kill_git_child(what, child, group, Some(stderr), identity);
+            Err(git_message_with_stderr(
+                format!("failed to wait for git {what}: {error}"),
+                what,
+                stderr.as_deref(),
+            ))
         }
+    }
+}
+
+fn finish_git_status(what: &str, status: ExitStatus, stderr: StderrReader) -> Result<(), String> {
+    // A successful git exit must not become Err: clone_repo's inspect_err deletes dest.
+    let stderr = finish_stderr_or_reap(what, stderr).unwrap_or_default();
+    if status.success() {
+        return Ok(());
+    }
+    tracing::debug!(
+        operation = what,
+        stderr = %String::from_utf8_lossy(&stderr),
+        "git command failed"
+    );
+    Err(git_failure_message(what, &stderr))
+}
+
+// Inherited writers (persistent ssh) never EOF; bound the drain and reap a still-blocked reader.
+fn finish_stderr_or_reap(what: &str, mut stderr: StderrReader) -> Option<Vec<u8>> {
+    match stderr.finish_bounded(xai_tty_utils::KILL_REAP_TIMEOUT) {
+        Some(Ok(bytes)) => Some(bytes),
+        Some(Err(error)) => {
+            tracing::debug!(
+                operation = what,
+                error = %error,
+                "git stderr reader failed"
+            );
+            None
+        }
+        None => {
+            tracing::debug!(operation = what, "git stderr reader timed out");
+            transfer_git_cleanup(
+                what,
+                GitReaperOwners {
+                    child: None,
+                    stderr: Some(stderr),
+                },
+            );
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CleanupIdentity {
+    Certain,
+    Uncertain,
+}
+
+fn kill_git_child(
+    what: &str,
+    mut child: Child,
+    group: Arc<xai_tty_utils::ProcessGroup>,
+    stderr: Option<StderrReader>,
+    identity: CleanupIdentity,
+) -> Option<Vec<u8>> {
+    // ECHILD makes numeric group identity unsafe; dropping its owner prevents
+    // later scope cleanup from signaling a recycled group.
+    let group = match identity {
+        CleanupIdentity::Certain => {
+            if let Err(group_error) = group.kill()
+                && let Err(child_error) = child.kill()
+            {
+                tracing::warn!(error = %group_error, fallback_error = %child_error, operation = what, "git group and direct-child kill failed");
+            }
+            Some(group)
+        }
+        CleanupIdentity::Uncertain => {
+            tracing::error!(
+                operation = what,
+                "git wait returned ECHILD; numeric cleanup forbidden"
+            );
+            drop(group);
+            None
+        }
+    };
+    let child =
+        match xai_tty_utils::wait_child_bounded(&mut child, xai_tty_utils::KILL_REAP_TIMEOUT) {
+            Ok(Some(_)) => {
+                drop(group);
+                None
+            }
+            Ok(None) => Some((child, group)),
+            Err(error) => {
+                tracing::warn!(error = %error, operation = what, "git bounded reap failed");
+                Some((child, group))
+            }
+        };
+    if child.is_some() {
+        transfer_git_cleanup(what, GitReaperOwners { child, stderr });
+        return None;
+    }
+    stderr.and_then(|stderr| finish_stderr_or_reap(what, stderr))
+}
+
+struct GitReaperOwners {
+    child: Option<(Child, Option<Arc<xai_tty_utils::ProcessGroup>>)>,
+    stderr: Option<StderrReader>,
+}
+
+impl GitReaperOwners {
+    fn finish(mut self) {
+        if let Some((mut child, group)) = self.child.take() {
+            let _ = child.wait();
+            drop(group);
+        }
+        if let Some(stderr) = self.stderr.take() {
+            let _ = stderr.finish();
+        }
+    }
+}
+
+fn transfer_git_cleanup(what: &str, mut owners: GitReaperOwners) {
+    if owners.stderr.is_none()
+        && let Some((child, group)) = owners.child.take()
+    {
+        if let Err((error, child, group)) =
+            xai_tty_utils::spawn_child_reaper("marketplace-git-reaper", child, group)
+        {
+            tracing::error!(error = %error, operation = what, child_id = child.id(), has_group = group.is_some(), "git cleanup bounded abandonment: reaper thread spawn failed");
+        }
+        return;
+    }
+    let owners = Arc::new(std::sync::Mutex::new(Some(owners)));
+    let thread_owners = Arc::clone(&owners);
+    if let Err(error) = std::thread::Builder::new()
+        .name("marketplace-git-reaper".to_owned())
+        .spawn(move || {
+            let owners = thread_owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(owners) = owners {
+                owners.finish();
+            }
+        })
+    {
+        let owners = owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        tracing::error!(error = %error, operation = what, has_child = owners.as_ref().is_some_and(|owners| owners.child.is_some()), has_reader = owners.as_ref().is_some_and(|owners| owners.stderr.is_some()), "git cleanup bounded abandonment: reaper thread spawn failed");
+    }
+}
+
+struct StderrReader {
+    receiver: Receiver<io::Result<Vec<u8>>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl StderrReader {
+    fn finish(mut self) -> io::Result<Vec<u8>> {
+        let result = self.receiver.recv().unwrap_or_else(|error| {
+            Err(io::Error::other(format!(
+                "stderr reader disconnected: {error}"
+            )))
+        });
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        result
+    }
+
+    fn finish_bounded(&mut self, timeout: Duration) -> Option<io::Result<Vec<u8>>> {
+        match self.receiver.recv_timeout(timeout) {
+            Ok(result) => {
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+                Some(result)
+            }
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = self.thread.take().map(JoinHandle::join);
+                Some(Err(io::Error::other("stderr reader disconnected")))
+            }
+        }
+    }
+}
+
+fn spawn_stderr_reader(mut stderr: ChildStderr) -> io::Result<StderrReader> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let thread = std::thread::Builder::new()
+        .name("marketplace-git-stderr".to_string())
+        .spawn(move || {
+            let mut diagnostic = CappedStderr::new();
+            let mut buffer = [0_u8; 8192];
+            let result = loop {
+                match stderr.read(&mut buffer) {
+                    Ok(0) => break Ok(diagnostic.finish()),
+                    Ok(read) => diagnostic.push(&buffer[..read]),
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => break Err(error),
+                }
+            };
+            let _ = sender.send(result);
+        })?;
+    Ok(StderrReader {
+        receiver,
+        thread: Some(thread),
+    })
+}
+
+struct CappedStderr {
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
+    is_truncated: bool,
+}
+
+impl CappedStderr {
+    fn new() -> Self {
+        Self {
+            head: Vec::new(),
+            tail: VecDeque::with_capacity(STDERR_DIAGNOSTIC_TAIL_CAP),
+            is_truncated: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        let head_cap = STDERR_DIAGNOSTIC_CAP - STDERR_DIAGNOSTIC_TAIL_CAP;
+        let head_remaining = head_cap.saturating_sub(self.head.len());
+        let (head, tail) = bytes.split_at(bytes.len().min(head_remaining));
+        self.head.extend_from_slice(head);
+        if tail.is_empty() {
+            return;
+        }
+        self.is_truncated |=
+            self.tail.len().saturating_add(tail.len()) > STDERR_DIAGNOSTIC_TAIL_CAP;
+        let keep_start = tail.len().saturating_sub(STDERR_DIAGNOSTIC_TAIL_CAP);
+        let tail = &tail[keep_start..];
+        let discard = self
+            .tail
+            .len()
+            .saturating_add(tail.len())
+            .saturating_sub(STDERR_DIAGNOSTIC_TAIL_CAP);
+        self.tail.drain(..discard);
+        self.tail.extend(tail);
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.is_truncated {
+            self.head.extend_from_slice(STDERR_TRUNCATION_MARKER);
+        }
+        self.head.extend(self.tail);
+        self.head
     }
 }
 
@@ -330,25 +599,51 @@ fn run_git_timed(cmd: &mut Command, what: &str, timeout: Duration) -> Result<(),
 /// progress ("Cloning into ...") to stderr alongside real errors, so keep
 /// only `fatal:`/`error:` lines, and translate the prompts-disabled auth
 /// failure (we set GIT_TERMINAL_PROMPT=0 / ssh BatchMode) out of git-speak.
-fn git_failure_message(what: &str, stderr: &str) -> String {
+fn git_failure_message(what: &str, stderr: impl AsRef<[u8]>) -> String {
     const AUTH_PATTERNS: [&str; 3] = [
         "could not read Username",
         "could not read Password",
         "Authentication failed",
     ];
-    if AUTH_PATTERNS.iter().any(|p| stderr.contains(p)) {
-        return format!(
-            "git {what} failed: authentication required or not a git repository (check the URL)"
-        );
-    }
-    let salient: Vec<&str> = stderr
-        .lines()
-        .filter(|line| line.starts_with("fatal:") || line.starts_with("error:"))
-        .collect();
-    if salient.is_empty() {
-        format!("git {what} failed: {}", stderr.trim())
+    let prefix = format!("git {what} failed: ");
+    let message_cap = prefix.len().saturating_add(STDERR_DIAGNOSTIC_CAP);
+    let stderr = String::from_utf8_lossy(stderr.as_ref());
+    let detail = if AUTH_PATTERNS.iter().any(|pattern| stderr.contains(pattern)) {
+        "authentication required or not a git repository (check the URL)".to_owned()
     } else {
-        format!("git {what} failed: {}", salient.join("; "))
+        let salient: Vec<&str> = stderr
+            .lines()
+            .filter(|line| line.starts_with("fatal:") || line.starts_with("error:"))
+            .collect();
+        if salient.is_empty() {
+            stderr.trim().to_owned()
+        } else {
+            salient.join("; ")
+        }
+    };
+    let mut message = prefix + &detail;
+    if message.len() > message_cap {
+        let mut end = message_cap;
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
+    }
+    message
+}
+
+fn git_message_with_stderr(prefix: String, what: &str, stderr: Option<&[u8]>) -> String {
+    let Some(stderr) = stderr.filter(|bytes| !bytes.is_empty()) else {
+        return prefix;
+    };
+    let failure = git_failure_message(what, stderr);
+    let detail_prefix = format!("git {what} failed: ");
+    match failure
+        .strip_prefix(&detail_prefix)
+        .filter(|detail| !detail.is_empty())
+    {
+        Some(detail) => format!("{prefix}: {detail}"),
+        None => prefix,
     }
 }
 
@@ -499,6 +794,26 @@ mod tests {
     }
 
     #[test]
+    fn capped_stderr_separates_gap_and_caps_invalid_utf8_rendering() {
+        let mut diagnostic = CappedStderr::new();
+        diagnostic.push(b"Authentication ");
+        diagnostic.push(&vec![b'x'; STDERR_DIAGNOSTIC_CAP * 2]);
+        diagnostic.push(b"failed\nfatal: late\n");
+        let stderr = diagnostic.finish();
+        assert!(
+            stderr
+                .windows(STDERR_TRUNCATION_MARKER.len())
+                .any(|window| window == STDERR_TRUNCATION_MARKER)
+        );
+        let message = git_failure_message("clone", &stderr);
+        assert_eq!(message, "git clone failed: fatal: late");
+
+        let invalid = vec![0xff; STDERR_DIAGNOSTIC_CAP];
+        let rendered = git_failure_message("fetch", invalid);
+        assert!(rendered.len() <= "git fetch failed: ".len() + STDERR_DIAGNOSTIC_CAP);
+    }
+
+    #[test]
     fn git_failure_message_maps_auth_prompt_to_plain_language() {
         let stderr = "Cloning into '/tmp/x'...\nfatal: could not read Username for 'https://mcp.linear.app': terminal prompts disabled\n";
         assert_eq!(
@@ -526,6 +841,49 @@ mod tests {
     }
 
     #[test]
+    fn finish_git_status_success_ignores_reader_failure() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(sender);
+        let reader = StderrReader {
+            receiver,
+            thread: None,
+        };
+        let status = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                ExitStatus::from_raw(0)
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::ExitStatusExt;
+                ExitStatus::from_raw(0)
+            }
+        };
+        finish_git_status("clone", status, reader).unwrap();
+    }
+
+    #[test]
+    fn git_message_with_stderr_appends_salient_detail() {
+        assert_eq!(
+            git_message_with_stderr(
+                "git clone timed out after 15s".to_owned(),
+                "clone",
+                Some(b"Cloning into x...\nfatal: unable to access 'https://example.com/'\n"),
+            ),
+            "git clone timed out after 15s: fatal: unable to access 'https://example.com/'"
+        );
+        assert_eq!(
+            git_message_with_stderr(
+                "git clone timed out after 15s".to_owned(),
+                "clone",
+                Some(b""),
+            ),
+            "git clone timed out after 15s"
+        );
+    }
+
+    #[test]
     fn probe_git_remote_accepts_git_repo() {
         if !git_available() {
             eprintln!("skipping git-dependent test: git binary not available");
@@ -549,14 +907,56 @@ mod tests {
         assert!(err.contains("ls-remote failed"), "{err}");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn run_git_timed_kills_hung_process() {
-        let mut cmd = Command::new("sleep");
-        cmd.arg("30");
-        let start = Instant::now();
-        let err = run_git_timed(&mut cmd, "sleep", Duration::from_millis(200)).unwrap_err();
+    fn run_git_timed_drains_more_than_a_pipe_buffer_without_false_timeout() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "head -c 262144 /dev/zero >&2"]);
+        xai_tty_utils::detach_std_command(&mut cmd);
+
+        run_git_timed(&mut cmd, "stderr-flood", Duration::from_secs(3)).expect("git command");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_git_timed_kills_hung_process_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("descendant-finished");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!("(sleep 2; touch {}) & wait", marker.display()));
+        xai_tty_utils::detach_std_command(&mut cmd);
+
+        let err = run_git_timed(&mut cmd, "sleep", Duration::from_millis(100)).unwrap_err();
         assert!(err.contains("timed out"), "{err}");
-        assert!(start.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(2200));
+        assert!(!marker.exists(), "timeout must kill detached descendants");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_git_timed_timeout_includes_captured_stderr() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf 'fatal: still cloning\\n' >&2; exec sleep 30"]);
+        xai_tty_utils::detach_std_command(&mut cmd);
+
+        let err = run_git_timed(&mut cmd, "clone", Duration::from_secs(1)).unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(err.contains("fatal: still cloning"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_git_timed_preserves_late_salient_output_after_the_cap() {
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "head -c 262144 /dev/zero >&2; printf '\\nfatal: late failure\\n' >&2; exit 1",
+        ]);
+        xai_tty_utils::detach_std_command(&mut cmd);
+
+        let err = run_git_timed(&mut cmd, "fetch", Duration::from_secs(3)).unwrap_err();
+        assert!(err.contains("fatal: late failure"), "{err}");
     }
 
     #[test]

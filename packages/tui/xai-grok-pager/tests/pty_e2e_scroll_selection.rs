@@ -62,6 +62,8 @@ mod scroll_debug_hud_env_toggles_overlay;
 mod scroll_does_not_crash;
 #[path = "pty_e2e/sticky_header_drag_copy_pty.rs"]
 mod sticky_header_drag_copy_pty;
+#[path = "pty_e2e/stuck_drag_finishes_on_bare_motion_pty.rs"]
+mod stuck_drag_finishes_on_bare_motion_pty;
 #[path = "pty_e2e/stuck_drag_recovers_on_esc_pty.rs"]
 mod stuck_drag_recovers_on_esc_pty;
 #[path = "pty_e2e/trackpad_flood_does_not_under_travel.rs"]

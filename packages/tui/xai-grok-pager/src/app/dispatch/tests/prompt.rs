@@ -2945,7 +2945,7 @@ fn prompt_history_loaded_refreshes_open_history_search_with_current_query() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.prompt_history = vec!["first prompt".into(), "second prompt".into()];
         let history = agent.combined_prompt_history();
-        agent.prompt.history_search.activate(&history, "");
+        assert!(agent.prompt.history_search.activate(&history, ""));
         agent.prompt.set_text("third");
         agent.prompt.history_search.update_query("third");
         for _ in 0..100 {

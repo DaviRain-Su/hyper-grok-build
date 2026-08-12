@@ -69,6 +69,7 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+if [ -n "${{FAKE_URL_LOG:-}}" ] && [ -n "$url" ]; then echo "$url" >> "$FAKE_URL_LOG"; fi
 if [ "$head" = 1 ]; then
   if [ "$want_code" = 1 ]; then printf '200'; else printf 'HTTP/1.1 200 OK\r\nContent-Length: %s\r\n\r\n' "$fullsize"; fi
   exit 0
@@ -337,6 +338,104 @@ fn install_sh_blitz_keeps_grok_runnable_under_corruption() {
         // grok always runs (new good binary on success, previous-good on
         // rejection).
         assert_active_grok_runs(home.path());
+    }
+}
+
+/// Write a fake macOS/x86_64 host: `uname -m` reports x86_64; `sysctl`
+/// answers `hw.optional.arm64` with `1` on Apple Silicon (a Rosetta shell)
+/// or fails like a genuine Intel Mac (key missing).
+/// The two macOS/x86_64 host shapes the Rosetta probe distinguishes.
+#[derive(Clone, Copy)]
+enum FakeHost {
+    /// Rosetta shell on Apple Silicon: `sysctl hw.optional.arm64` prints 1.
+    AppleSiliconRosetta,
+    /// Genuine Intel Mac: the sysctl key is missing.
+    IntelMac,
+}
+
+fn write_fake_macos_x86_host(dir: &Path, host: FakeHost) {
+    let sysctl = if matches!(host, FakeHost::AppleSiliconRosetta) {
+        "#!/bin/bash\n[ \"$1\" = -n ] && [ \"$2\" = hw.optional.arm64 ] && { echo 1; exit 0; }\nexit 1\n"
+    } else {
+        "#!/bin/bash\nexit 1\n"
+    };
+    for (name, body) in [
+        (
+            "uname",
+            "#!/bin/bash\ncase \"$1\" in -s) echo Darwin ;; -m) echo x86_64 ;; *) echo Darwin ;; esac\n",
+        ),
+        ("sysctl", sysctl),
+    ] {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// Run an install script against a fake macOS/x86_64 host and return the
+/// artifact URLs it requested. The enterprise script requires auth, provided
+/// via a dummy `GROK_DEPLOYMENT_KEY`.
+fn install_urls_on_fake_host(script: &str, host: FakeHost) -> Option<String> {
+    let script_file = script_path(script)?;
+    let fakedir = tempfile::tempdir().unwrap();
+    write_fake_curl(fakedir.path());
+    write_fake_macos_x86_host(fakedir.path(), host);
+    let url_log = fakedir.path().join("urls.log");
+
+    let home = tempfile::tempdir().unwrap();
+    let path_env = format!("{}:/usr/bin:/bin", fakedir.path().display());
+    let status = Command::new("/bin/bash")
+        .arg(&script_file)
+        .arg("0.1.181")
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", path_env)
+        .env("SHELL", "/bin/bash")
+        .env("GROK_BIN_DIR", home.path().join(".grok").join("bin"))
+        .env("GROK_CHANNEL", "stable")
+        .env("GROK_DEPLOYMENT_KEY", "test-deployment-key")
+        .env("FAKE_MODE", "full")
+        .env("FAKE_URL_LOG", &url_log)
+        .status()
+        .expect("spawn bash install script");
+    assert!(status.success(), "{script} must succeed");
+    Some(std::fs::read_to_string(&url_log).unwrap_or_default())
+}
+
+const INSTALL_SCRIPTS: [&str; 2] = ["install.sh", "install-enterprise.sh"];
+
+/// A Rosetta shell (uname says macos/x86_64, sysctl says Apple Silicon) must
+/// download the native arm64 artifact; a genuine Intel Mac (sysctl key
+/// missing) must keep x86_64. Both installer scripts carry the probe.
+#[test]
+fn install_scripts_rosetta_shell_installs_arm64() {
+    for script in INSTALL_SCRIPTS {
+        let Some(urls) = install_urls_on_fake_host(script, FakeHost::AppleSiliconRosetta) else {
+            eprintln!("skipping: {script} not found relative to crate; run under cargo");
+            return;
+        };
+        assert!(
+            urls.contains("grok-0.1.181-macos-aarch64"),
+            "{script}: Rosetta shell must request the arm64 artifact, urls:\n{urls}"
+        );
+        assert!(
+            !urls.contains("macos-x86_64"),
+            "{script}: Rosetta shell must not request the x86_64 artifact, urls:\n{urls}"
+        );
+    }
+}
+
+#[test]
+fn install_scripts_intel_mac_keeps_x86_64() {
+    for script in INSTALL_SCRIPTS {
+        let Some(urls) = install_urls_on_fake_host(script, FakeHost::IntelMac) else {
+            eprintln!("skipping: {script} not found relative to crate; run under cargo");
+            return;
+        };
+        assert!(
+            urls.contains("grok-0.1.181-macos-x86_64"),
+            "{script}: Intel Mac must keep the x86_64 artifact, urls:\n{urls}"
+        );
     }
 }
 

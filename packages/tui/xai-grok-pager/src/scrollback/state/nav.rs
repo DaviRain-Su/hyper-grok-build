@@ -1090,8 +1090,14 @@ impl ScrollbackState {
             .get_cached_entry_height(entry_idx)
             .unwrap_or(0)
             .saturating_sub(1);
+        let header_rows = self
+            .layout_cache
+            .as_ref()
+            .and_then(|cache| cache.entries.get(entry_idx))
+            .map_or(0, |info| u16::from(info.is_expanded_verb_header()));
         let row_offset = self
             .rendered_row_offset_within_entry(entry_idx, line_in_entry)
+            .saturating_add(header_rows)
             .min(max_row_offset);
         let max_offset = self
             .total_height
@@ -1930,6 +1936,36 @@ mod tests {
             delta > 1,
             "revealing the line after a wrapped line must scroll past its \
              wrapped rows (delta {delta} should exceed 1)"
+        );
+    }
+
+    #[test]
+    fn reveal_offsets_expanded_verb_head_past_group_header() {
+        crate::appearance::cache::set_group_tool_verbs(true);
+        let mut state = ScrollbackState::new();
+        for i in 0..20 {
+            state.push_block(RenderBlock::agent_message(format!("pre {i}")));
+        }
+        let head_idx = state.len();
+        for i in 0..3 {
+            state.push_block(RenderBlock::read(format!("f{i}.rs"), None));
+        }
+        for i in 0..20 {
+            state.push_block(RenderBlock::agent_message(format!("post {i}")));
+        }
+        state.prepare_layout(80, 6);
+        state.set_selected(Some(head_idx));
+        assert!(state.toggle_group_expansion());
+        state.prepare_layout(80, 6);
+        assert!(state.layout_cache.as_ref().unwrap().entries[head_idx].is_expanded_verb_header());
+
+        state.scroll_to_entry_center(head_idx);
+        let header_row_offset = state.scroll_offset();
+        state.reveal_entry_line(head_idx, 0);
+        assert_eq!(
+            state.scroll_offset(),
+            header_row_offset + 1,
+            "logical member row 0 starts below the synthetic group header"
         );
     }
 

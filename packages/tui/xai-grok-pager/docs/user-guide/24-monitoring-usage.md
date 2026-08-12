@@ -177,8 +177,12 @@ process; `outcome` = `timeout` or `error` means startup ended without one.
 (`ok` | `timeout` | `cancelled` | `error`) so truncated samples do not skew
 `ok` percentiles. The later `app_init`
 and `session_create` phases appear in the log timeline and the summary
-strings, not in this metric. `stuck_in` on a timeout names the step that did
-not finish. `auth_mode` is `personal`, `team`, `deployment`, or `unknown`:
+strings, not in this metric. `stuck_in` on a timeout names the step that had
+not finished. That is often not the step that took the longest, because a step
+that runs without pausing finishes before the timeout is recorded. The error
+message Grok prints names the longest step instead, so the two can name
+different steps for the same timeout. Use `phase_duration` to compare them.
+`auth_mode` is `personal`, `team`, `deployment`, or `unknown`:
 startup cost differs by kind, so split by it before comparing.
 
 There is no `cost.usage` metric: join `grok_code.token.usage` with your own

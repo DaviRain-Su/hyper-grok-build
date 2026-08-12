@@ -85,9 +85,10 @@ use crate::tools::ToolContext;
 use crate::upload::manifest::write_error_manifest;
 use crate::upload::trace::{
     GCS_SCHEMA_VERSION, PromptMetadata, TurnResultMetadata,
-    build_chat_history_session_state, local_sandbox_telemetry, upload_full_prompt_txt,
-    upload_harness_session_archive, upload_images, upload_metadata, upload_plugin_state,
-    upload_session_state, upload_turn_messages, upload_turn_result, upload_unified_log,
+    build_chat_history_then_move_capture, local_sandbox_telemetry,
+    upload_full_prompt_txt, upload_harness_session_archive, upload_images,
+    upload_metadata, upload_plugin_state, upload_session_state, upload_turn_messages,
+    upload_turn_result, upload_unified_log,
 };
 use crate::upload::turn::{
     PromptTraceContext, UploadWait, complete_prompt_trace, spawn_upload_task,

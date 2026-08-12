@@ -308,53 +308,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_monitor_tool_renders_watch_section() {
-        let tools: HashMap<ToolKind, String> = [
-            (ToolKind::Execute, "run_command".to_string()),
-            (ToolKind::BackgroundTaskAction, "get_output".to_string()),
-            (ToolKind::KillTaskAction, "kill_task".to_string()),
-            (ToolKind::Monitor, "monitor".to_string()),
-        ]
-        .into_iter()
-        .collect();
-        let r = TemplateRenderer::new(tools, HashMap::new());
-        let prompt = render_base(&r, &default_placeholders());
-        assert!(
-            prompt.contains("For watch processes"),
-            "monitor section should render when Monitor tool is present"
-        );
-        assert!(
-            prompt.contains("streams each stdout line back as a chat notification"),
-            "monitor section should describe streaming stdout as notifications"
-        );
-        assert!(
-            prompt.contains("Use the `monitor` tool"),
-            "monitor section should resolve the Monitor tool name"
-        );
-    }
-
-    #[test]
-    fn test_no_monitor_tool_omits_watch_section() {
-        let tools: HashMap<ToolKind, String> = [
-            (ToolKind::Execute, "run_command".to_string()),
-            (ToolKind::BackgroundTaskAction, "get_output".to_string()),
-            (ToolKind::KillTaskAction, "kill_task".to_string()),
-        ]
-        .into_iter()
-        .collect();
-        let r = TemplateRenderer::new(tools, HashMap::new());
-        let prompt = render_base(&r, &default_placeholders());
-        assert!(
-            !prompt.contains("For watch processes"),
-            "monitor section should NOT render without Monitor tool"
-        );
-        assert!(
-            !prompt.contains("<background_tasks>"),
-            "background_tasks section is gated on the Monitor tool and is omitted without it"
-        );
-    }
-
     // ── Required sections regression ────────────────────────────────
 
     #[test]

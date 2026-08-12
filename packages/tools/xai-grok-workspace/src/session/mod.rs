@@ -131,9 +131,9 @@ pub struct WorkspaceSession {
     #[allow(dead_code)]
     pending_notif_rx:
         tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ToolNotification>>>,
-    /// Spawned forwarder handle; aborted on teardown. Sync mutex so the sync
-    /// teardown path can abort without an await.
-    system_notify_forwarder: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Spawned system-notify producers (forwarder, preview-state watcher).
+    /// Sync mutex so the sync teardown path can abort without an await.
+    system_notify_producers: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 struct WorkspaceSessionInner {
     effective_tool_config: Arc<ToolServerConfig>,
@@ -209,7 +209,7 @@ impl WorkspaceSession {
             system_notify_handle,
             #[allow(dead_code)]
             pending_notif_rx: tokio::sync::Mutex::new(pending_notif_rx),
-            system_notify_forwarder: std::sync::Mutex::new(None),
+            system_notify_producers: std::sync::Mutex::new(Vec::new()),
         }
     }
     /// Whether this session opted into `BackgroundTaskCompleted` system
@@ -231,24 +231,35 @@ impl WorkspaceSession {
     ) -> Option<tokio::sync::mpsc::UnboundedReceiver<ToolNotification>> {
         self.pending_notif_rx.lock().await.take()
     }
-    /// Store the spawned forwarder handle, aborting any previous one.
+    /// True once a producer set has been tracked; finalize spawns at most one
+    /// (a re-finalize must not abort a forwarder it cannot respawn).
     #[allow(dead_code)]
-    pub(crate) fn set_system_notify_forwarder(&self, handle: tokio::task::JoinHandle<()>) {
-        let mut guard = self
-            .system_notify_forwarder
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(old) = guard.replace(handle) {
-            old.abort();
-        }
-    }
-    /// Abort the per-session system-notify forwarder on teardown.
-    pub(crate) fn abort_system_notify_forwarder(&self) {
-        if let Some(handle) = self
-            .system_notify_forwarder
+    pub(crate) fn has_system_notify_producers(&self) -> bool {
+        !self
+            .system_notify_producers
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take()
+            .is_empty()
+    }
+    /// Track the spawned system-notify producers, aborting any previous set.
+    #[allow(dead_code)]
+    pub(crate) fn set_system_notify_producers(&self, handles: Vec<tokio::task::JoinHandle<()>>) {
+        let mut guard = self
+            .system_notify_producers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for old in guard.drain(..) {
+            old.abort();
+        }
+        *guard = handles;
+    }
+    /// Abort every tracked system-notify producer on teardown.
+    pub(crate) fn abort_system_notify_producers(&self) {
+        for handle in self
+            .system_notify_producers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
         {
             handle.abort();
         }
@@ -913,8 +924,11 @@ pub(crate) fn get_or_open_session_writer(
     if let Some(existing) = writers.get(session_id) {
         return existing.value().clone();
     }
-    let dir = workspace_home.join("sessions").join(session_id);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
+    let sessions_root = workspace_home.join("sessions");
+    let dir = sessions_root.join(session_id);
+    let create = xai_grok_config::create_dir_all_owner_only(&dir);
+    xai_grok_config::set_dir_owner_only(&sessions_root);
+    if let Err(e) = create {
         tracing::warn!(
             session_id = %session_id,
             dir = %dir.display(),
@@ -955,6 +969,26 @@ mod tests {
             !sess_dir.exists(),
             "flag-off must not create the session dir or events.jsonl"
         );
+    }
+    /// Session-derived content outside ~/.grok/sessions: same owner-only rule,
+    /// including healing a loose pre-existing root from older builds.
+    #[cfg(unix)]
+    #[test]
+    fn flag_on_creates_owner_only_session_event_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let writers: DashMap<String, EventWriter> = DashMap::new();
+        let root = home.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = get_or_open_session_writer(true, &writers, home.path(), "sess-perm");
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode(&root.join("sess-perm")),
+            0o700,
+            "session event dir must be 0700"
+        );
+        assert_eq!(mode(&root), 0o700, "loose sessions root must heal to 0700");
     }
     #[test]
     fn flag_on_opens_and_writes_real_content() {

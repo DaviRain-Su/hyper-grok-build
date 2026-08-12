@@ -1830,6 +1830,14 @@ impl AgentDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Pins the `spawn_subagent` rename to the shared predicate.
+    #[test]
+    fn task_tool_rename_matches_task_tool_id_predicate() {
+        let name = task_tool_config()
+            .name_override
+            .expect("task tool is renamed");
+        assert!(xai_grok_tools::is_task_tool_id(&name));
+    }
     /// Native presets only.
     #[test]
     fn toolset_for_preset_resolves_known_names() {

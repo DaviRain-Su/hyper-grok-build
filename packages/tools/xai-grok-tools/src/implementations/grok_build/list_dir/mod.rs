@@ -451,6 +451,54 @@ fn render_truncated_root(root: &DirNode, max_chars: usize, top_k: usize, notice:
     out.push_str(notice);
     out
 }
+/// Walk inputs captured before `spawn_blocking`. The Resources mutex is
+/// async and cannot be locked on the blocking thread.
+enum ListDirWalk {
+    Legacy {
+        max_output_bytes: usize,
+    },
+    Current {
+        max_output_chars: usize,
+        respect_gitignore: bool,
+        truncation_notice: String,
+    },
+}
+fn map_list_dir_join_error(
+    err: tokio::task::JoinError,
+    display_path: &Path,
+) -> xai_tool_runtime::ToolError {
+    let tool_id = xai_tool_protocol::ToolId::new("list_dir").expect("valid tool id");
+    let path = display_path.display();
+    if err.is_cancelled() {
+        tracing::debug!(error = %err, "list_dir walk task cancelled");
+        xai_tool_runtime::ToolError::cancelled(
+            tool_id,
+            format!("Directory listing was cancelled for {path}."),
+        )
+    } else {
+        tracing::warn!(error = %err, "list_dir walk task panicked");
+        xai_tool_runtime::ToolError::execution(
+            tool_id,
+            format!(
+                "Directory listing failed unexpectedly for {path}; retry or narrow the target directory."
+            ),
+        )
+    }
+}
+/// Offload a sync directory walk. A panic on the blocking thread becomes a
+/// tool error so it cannot abort the session's current-thread runtime.
+async fn spawn_list_dir_walk<T, F>(
+    display_path: &Path,
+    walk: F,
+) -> Result<T, xai_tool_runtime::ToolError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(walk)
+        .await
+        .map_err(|err| map_list_dir_join_error(err, display_path))
+}
 impl xai_tool_runtime::Tool for ListDirTool {
     type Args = ListDirInput;
     type Output = ListDirOutput;
@@ -534,34 +582,51 @@ impl xai_tool_runtime::Tool for ListDirTool {
                 )),
             });
         }
-        let body = if is_legacy {
+        let walk = if is_legacy {
             let max_output_bytes = resources
                 .lock()
                 .await
                 .get::<Params<ListDirParams>>()
                 .and_then(|p| p.0.max_output_chars)
                 .unwrap_or(crate::DEFAULT_TOOL_OUTPUT_BYTES);
-            versions::legacy_0_4_10::render_legacy(&path, max_output_bytes)
+            ListDirWalk::Legacy { max_output_bytes }
         } else {
-            let (max_output_chars, respect_gitignore, truncation_notice) = {
-                let res = resources.lock().await;
-                let max_output_chars = res
-                    .get::<Params<ListDirParams>>()
-                    .and_then(|p| p.0.max_output_chars)
-                    .unwrap_or(DEFAULT_MAX_OUTPUT_CHARS);
-                let respect_gitignore = res.get::<RespectGitignore>().is_none_or(|r| r.0);
-                let truncation_notice = root_truncation_notice(res.get::<TemplateRenderer>());
-                (max_output_chars, respect_gitignore, truncation_notice)
-            };
-            let (mut tree, truncated) = build_tree(&path, respect_gitignore);
-            budget_expand(
-                &mut tree,
+            let res = resources.lock().await;
+            let max_output_chars = res
+                .get::<Params<ListDirParams>>()
+                .and_then(|p| p.0.max_output_chars)
+                .unwrap_or(DEFAULT_MAX_OUTPUT_CHARS);
+            let respect_gitignore = res.get::<RespectGitignore>().is_none_or(|r| r.0);
+            let truncation_notice = root_truncation_notice(res.get::<TemplateRenderer>());
+            ListDirWalk::Current {
                 max_output_chars,
-                TOP_K_EXTENSIONS,
-                truncated,
-                &truncation_notice,
-            )
+                respect_gitignore,
+                truncation_notice,
+            }
         };
+        let (body, path) = spawn_list_dir_walk(&display_path, move || {
+            let body = match walk {
+                ListDirWalk::Legacy { max_output_bytes } => {
+                    versions::legacy_0_4_10::render_legacy(&path, max_output_bytes)
+                }
+                ListDirWalk::Current {
+                    max_output_chars,
+                    respect_gitignore,
+                    truncation_notice,
+                } => {
+                    let (mut tree, truncated) = build_tree(&path, respect_gitignore);
+                    budget_expand(
+                        &mut tree,
+                        max_output_chars,
+                        TOP_K_EXTENSIONS,
+                        truncated,
+                        &truncation_notice,
+                    )
+                }
+            };
+            (body, path)
+        })
+        .await?;
         let trimmed_body = body.trim_end();
         let output = if trimmed_body.is_empty() && is_legacy {
             format!("- {}/\n  no children found", display_path.display())
@@ -1330,6 +1395,233 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_run_matches_direct_budget_expand() {
+        const BUDGET: usize = 200;
+        let tmp = TempDir::new().unwrap();
+        let listed = tmp.path().join("proj");
+        fs::create_dir(&listed).unwrap();
+        init_minimal_git_worktree(&listed);
+        File::create(listed.join("README.md")).unwrap();
+        File::create(listed.join("aaa_ignored.log")).unwrap();
+        fs::write(listed.join(".gitignore"), "*.log\n").unwrap();
+        let src = listed.join("src");
+        fs::create_dir(&src).unwrap();
+        File::create(src.join("main.rs")).unwrap();
+        for i in 0..20 {
+            let subdir = listed.join(format!("dir_{i:02}"));
+            fs::create_dir(&subdir).unwrap();
+            for j in 0..8 {
+                File::create(subdir.join(format!("file_{j}.rs"))).unwrap();
+            }
+        }
+        let tools: HashMap<ToolKind, String> = [
+            (ToolKind::List, "my_ls".to_string()),
+            (ToolKind::Search, "my_grep".to_string()),
+            (ToolKind::Execute, "my_bash".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let renderer = TemplateRenderer::new(tools, HashMap::new());
+        let notice = root_truncation_notice(Some(&renderer));
+        let (mut tree_on, trunc_on) = build_tree(&listed, true);
+        let body_on = budget_expand(&mut tree_on, BUDGET, TOP_K_EXTENSIONS, trunc_on, &notice);
+        assert!(
+            !body_on.contains("aaa_ignored.log"),
+            "fixture must hide gitignored name under respect_gitignore=true: {body_on}"
+        );
+        let (mut tree, trunc) = build_tree(&listed, false);
+        let direct = budget_expand(&mut tree, BUDGET, TOP_K_EXTENSIONS, trunc, &notice);
+        let expected = format!("- {}/\n{}", listed.display(), direct.trim_end());
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        resources.insert(RespectGitignore(false));
+        resources.insert(Params(ListDirParams {
+            max_output_chars: Some(BUDGET),
+        }));
+        resources.insert(renderer);
+        let output = xai_tool_runtime::Tool::run(
+            &ListDirTool,
+            test_ctx(resources.into_shared()),
+            ListDirInput {
+                target_directory: "proj".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        match output {
+            ListDirOutput::Content(c) => {
+                assert_eq!(c.content, expected);
+                assert_eq!(c.absolute_root_path, listed);
+                assert!(
+                    c.content.contains("my_ls"),
+                    "rendered truncation notice must flow through spawn_blocking: {}",
+                    c.content
+                );
+                assert!(
+                    c.content.contains("aaa_ignored.log"),
+                    "RespectGitignore(false) must surface gitignored names: {}",
+                    c.content
+                );
+                assert!(
+                    c.content.contains("too large to list fully"),
+                    "tight budget must truncate: {}",
+                    c.content
+                );
+            }
+            other => panic!("expected Content, got: {other:?}"),
+        }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_run_matches_direct_render_legacy() {
+        let tmp = TempDir::new().unwrap();
+        let listed = tmp.path().join("proj");
+        let src = listed.join("src");
+        fs::create_dir_all(src.join("util")).unwrap();
+        File::create(src.join("main.rs")).unwrap();
+        File::create(src.join("lib.rs")).unwrap();
+        File::create(src.join("util").join("helpers.rs")).unwrap();
+        let tests_dir = listed.join("tests");
+        fs::create_dir(&tests_dir).unwrap();
+        File::create(tests_dir.join("test_main.rs")).unwrap();
+        File::create(listed.join("README.md")).unwrap();
+        File::create(listed.join("Cargo.toml")).unwrap();
+        let direct =
+            versions::legacy_0_4_10::render_legacy(&listed, crate::DEFAULT_TOOL_OUTPUT_BYTES);
+        let expected = format!("- {}/\n{}", listed.display(), direct.trim_end());
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        let mut ctx = test_ctx(resources.into_shared());
+        ctx.extensions.insert(xai_tool_runtime::BehaviorVersion(
+            "legacy-0.4.10".to_string(),
+        ));
+        let output = xai_tool_runtime::Tool::run(
+            &ListDirTool,
+            ctx,
+            ListDirInput {
+                target_directory: "proj".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        match output {
+            ListDirOutput::Content(c) => {
+                assert_eq!(c.content, expected);
+                assert_eq!(c.absolute_root_path, listed);
+            }
+            other => panic!("expected Content, got: {other:?}"),
+        }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_run_matches_direct_render_legacy_with_byte_budget() {
+        const BUDGET: usize = 80;
+        let tmp = TempDir::new().unwrap();
+        let listed = tmp.path().join("proj");
+        fs::create_dir(&listed).unwrap();
+        File::create(listed.join("README.md")).unwrap();
+        for name in ["aaa", "bbb", "ccc"] {
+            let dir = listed.join(name);
+            fs::create_dir(&dir).unwrap();
+            for i in 0..10 {
+                File::create(dir.join(format!("f{i}.rs"))).unwrap();
+            }
+        }
+        let direct = versions::legacy_0_4_10::render_legacy(&listed, BUDGET);
+        assert!(
+            direct.contains("listing exceeds size limit"),
+            "fixture must trip legacy byte fallback: {direct}"
+        );
+        let expected = format!("- {}/\n{}", listed.display(), direct.trim_end());
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        resources.insert(Params(ListDirParams {
+            max_output_chars: Some(BUDGET),
+        }));
+        let mut ctx = test_ctx(resources.into_shared());
+        ctx.extensions.insert(xai_tool_runtime::BehaviorVersion(
+            "legacy-0.4.10".to_string(),
+        ));
+        let output = xai_tool_runtime::Tool::run(
+            &ListDirTool,
+            ctx,
+            ListDirInput {
+                target_directory: "proj".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        match output {
+            ListDirOutput::Content(c) => {
+                assert_eq!(c.content, expected);
+                assert!(
+                    c.content.contains("listing exceeds size limit"),
+                    "Params.max_output_chars must reach render_legacy: {}",
+                    c.content
+                );
+            }
+            other => panic!("expected Content, got: {other:?}"),
+        }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_run_empty_dir_adds_no_children_found() {
+        let tmp = TempDir::new().unwrap();
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        let mut ctx = test_ctx(resources.into_shared());
+        ctx.extensions.insert(xai_tool_runtime::BehaviorVersion(
+            "legacy-0.4.10".to_string(),
+        ));
+        let output = xai_tool_runtime::Tool::run(
+            &ListDirTool,
+            ctx,
+            ListDirInput {
+                target_directory: ".".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let expected = format!("- {}/\n  no children found", tmp.path().display());
+        match output {
+            ListDirOutput::Content(c) => assert_eq!(c.content, expected),
+            other => panic!("expected Content, got: {other:?}"),
+        }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_list_dir_walk_panic_is_tool_error() {
+        let listed = Path::new("/tmp/listed");
+        let err = spawn_list_dir_walk(listed, || -> String {
+            panic!("list_dir walk test panic");
+        })
+        .await
+        .expect_err("walk panic must surface as Err, not abort the runtime");
+        assert_eq!(err.kind, xai_tool_runtime::ToolErrorKind::Execution);
+        assert_eq!(
+            err.detail,
+            "Directory listing failed unexpectedly for /tmp/listed; retry or narrow the target directory."
+        );
+        assert!(
+            !err.detail.contains("list_dir walk test panic"),
+            "must not leak panic payload into model-visible text: {}",
+            err.detail
+        );
+        let ok = spawn_list_dir_walk(listed, || "ok".to_string())
+            .await
+            .unwrap();
+        assert_eq!(ok, "ok");
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_dir_join_error_cancel_is_cancelled() {
+        let handle = tokio::spawn(std::future::pending::<()>());
+        handle.abort();
+        let join_err = handle.await.expect_err("aborted task");
+        assert!(join_err.is_cancelled());
+        let err = map_list_dir_join_error(join_err, Path::new("/tmp/listed"));
+        assert_eq!(err.kind, xai_tool_runtime::ToolErrorKind::Cancelled);
+        assert_eq!(
+            err.detail,
+            "Directory listing was cancelled for /tmp/listed."
+        );
     }
     #[test]
     fn tool_name_and_description() {

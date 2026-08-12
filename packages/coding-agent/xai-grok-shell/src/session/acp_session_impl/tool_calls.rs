@@ -906,17 +906,14 @@ impl SessionActor {
             let _span = tracing::info_span!("tool.register").entered();
             let early_raw_input =
                 serde_json::from_str::<serde_json::Value>(&call.function.arguments).ok();
-            let subagent_background = matches!(
-                call.function.name.as_str(),
-                "task" | "Task" | "spawn_subagent"
-            )
-            .then(|| {
-                early_raw_input
-                    .as_ref()
-                    .and_then(|v| v.get("run_in_background").or_else(|| v.get("background")))
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(true)
-            });
+            let subagent_background =
+                xai_grok_tools::is_task_tool_id(&call.function.name).then(|| {
+                    early_raw_input
+                        .as_ref()
+                        .and_then(|v| v.get("run_in_background").or_else(|| v.get("background")))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true)
+                });
             let mut meta = self.stamp_tool_meta(None, &call.function.name, None);
             if let Some(bg) = subagent_background {
                 meta.get_or_insert_with(serde_json::Map::new).insert(
@@ -1243,15 +1240,6 @@ impl SessionActor {
                 !self.session_info.id.0.is_empty(),
                 "permission reverse-request must carry a non-empty sessionId (design §5.4)"
             );
-            if !self.permissions.is_yolo_mode() {
-                self.dispatch_notification_hook(
-                    "permission_prompt",
-                    Some("Tool permission requested".into()),
-                    None,
-                    Some("info".into()),
-                )
-                .await;
-            }
             if self.permissions.is_auto_mode() {
                 let conv = self.chat_state_handle.get_conversation().await;
                 let turns = super::build_classifier_turns(&conv, super::CLASSIFIER_REFRESH_TURNS);
@@ -1576,13 +1564,8 @@ impl SessionActor {
                 .expect("ExitPlanModeExtRequest serialization should not fail")
                 .into(),
         );
-        self.dispatch_notification_hook(
-            "permission_prompt",
-            Some("Plan approval requested".into()),
-            None,
-            Some("info".into()),
-        )
-        .await;
+        self.dispatch_permission_prompt_notification("Plan approval requested")
+            .await;
         self.plan_mode.lock().set_awaiting_plan_approval(true);
         self.persist_plan_mode_state();
         let clear_awaiting = AwaitingApprovalGuard(self);

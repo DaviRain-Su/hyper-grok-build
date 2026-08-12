@@ -498,8 +498,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
         // sits above member 0's own content, which stays mapped (selectable
         // like every other member row) one row below.
         let is_group_header = entry_layout_info.is_group_header();
-        let verb_expanded_slot =
-            entry_layout_info.verb_group_header && entry_layout_info.group_collapse_header;
+        let verb_expanded_slot = entry_layout_info.is_expanded_verb_header();
 
         let mapped_lines = if is_group_header && !verb_expanded_slot {
             &[][..]
@@ -1578,6 +1577,120 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rendered_verb_group_header_aggregates_hook_outcomes_and_keeps_compact_members() {
+        use crate::scrollback::ScrollbackState;
+        use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
+
+        crate::appearance::cache::set_group_tool_verbs(true);
+        crate::appearance::cache::set_show_thinking_blocks(false);
+        let mut state = ScrollbackState::new();
+        let first = state.push_block(RenderBlock::read("a.rs", None));
+        let second = state.push_block(RenderBlock::list_dir_with_output("src", "a.rs"));
+        let third = state.push_block(RenderBlock::search("TODO", 1, Vec::new()));
+        let elapsed = std::time::Duration::from_millis(1);
+        state.attach_hooks(
+            first,
+            HookPhase::Post,
+            vec![HookRunEntry {
+                name: "ok-hook".to_owned(),
+                status: HookRunStatus::Success { elapsed },
+                output: None,
+            }],
+        );
+        state.attach_hooks(
+            second,
+            HookPhase::Post,
+            vec![HookRunEntry {
+                name: "blocked-hook".to_owned(),
+                status: HookRunStatus::Blocked {
+                    detail: "denied".to_owned(),
+                    elapsed,
+                },
+                output: None,
+            }],
+        );
+        state.attach_hooks(
+            third,
+            HookPhase::Post,
+            vec![HookRunEntry {
+                name: "failed-hook".to_owned(),
+                status: HookRunStatus::Failed {
+                    error: "exit 1".to_owned(),
+                    elapsed,
+                },
+                output: None,
+            }],
+        );
+        let narrow_viewport = Rect::new(0, 0, 80, 24);
+        state.prepare_layout(narrow_viewport.width, narrow_viewport.height);
+        let (narrow_buf, _) = render_state(&state, narrow_viewport, true);
+        let narrow_header = buffer_row_text(&narrow_buf, 0);
+        assert!(
+            narrow_header.contains("1 failed]"),
+            "narrow headers must reserve the complete outcome suffix: {narrow_header:?}"
+        );
+
+        let viewport = Rect::new(0, 0, 120, 24);
+        state.prepare_layout(viewport.width, viewport.height);
+        let (buf, _) = render_state(&state, viewport, true);
+        let header_row = buffer_row_text(&buf, 0);
+        assert!(
+            header_row.contains(
+                "Read 1 file, Listed 1 dir, Searched 1 pattern  [hooks: 1 ok, 1 blocked, 1 failed]"
+            ),
+            "collapsed header must show every hidden hook outcome: {header_row:?}"
+        );
+        assert_eq!(
+            buf[(0, 0)].fg,
+            Theme::current().accent_error,
+            "failed hook marks the group header as errored"
+        );
+
+        state.set_selected(Some(0));
+        assert!(state.toggle_group_expansion());
+        state.prepare_layout(viewport.width, viewport.height);
+        let layouts = state.get_cached_entry_layouts().expect("layout cache");
+        let member_width = HorizontalLayout::new(viewport, &state.appearance().scrollback.layout)
+            .entry_content_area()
+            .width;
+        for (idx, layout) in layouts[..3].iter().enumerate() {
+            let member_height = EntryRenderer::new(state.entry(idx).unwrap(), &Theme::current())
+                .with_appearance_ref(state.appearance())
+                .with_cwd(state.cwd())
+                .desired_height(member_width);
+            assert_eq!(
+                layout.height,
+                member_height.saturating_add(u16::from(idx == 0)),
+                "expanded member {idx} keeps its ordinary collapsed row height"
+            );
+        }
+        let (buf, _) = render_state(&state, viewport, true);
+        let rows: Vec<String> = (0..viewport.height)
+            .map(|y| buffer_row_text(&buf, y))
+            .collect();
+        let hook_rows: Vec<_> = rows.iter().filter(|row| row.contains("[hooks:")).collect();
+        assert_eq!(
+            hook_rows.len(),
+            4,
+            "the group header and each member carry one compact hook summary: {rows:?}"
+        );
+        assert_eq!(
+            hook_rows
+                .iter()
+                .filter(|row| row.contains("[hooks: 1]"))
+                .count(),
+            3,
+            "each expanded member keeps one standalone compact suffix: {rows:?}"
+        );
+        assert!(
+            ["ok-hook", "blocked-hook", "failed-hook", "post_tool_use"]
+                .iter()
+                .all(|detail| rows.iter().all(|row| !row.contains(detail))),
+            "expanded groups must not reveal per-hook detail sections: {rows:?}"
+        );
+    }
+
     /// A hidden thinking entry inside a folded run stays transparent through
     /// the whole production path: the layout fold spans it AND the rendered
     /// header label counts the members on both sides — pinning the
@@ -2651,6 +2764,47 @@ mod tests {
             "each visual row gets one region"
         );
         assert!(rows.windows(2).all(|w| w[1] == w[0] + 1));
+    }
+
+    #[test]
+    fn two_autolink_documents_with_restarted_ids_stay_separate_hits() {
+        // Each agent message is its own markdown document, so both autolinks
+        // get id=0. Consecutive same-id overlay entries must not merge when
+        // the URLs differ (Apple Terminal Cmd+hover/click).
+        let entries = vec![
+            make_markdown_entry("<https://example.com/aaa>\n"),
+            make_markdown_entry("<https://example.com/bbb>\n"),
+        ];
+        let viewport = Rect::new(0, 0, 80, 20);
+        let result = render_with_scratch(&entries, viewport, 0, None);
+        let overlay = &result.link_overlay;
+        assert!(
+            overlay.links().iter().all(|l| l.id == Some(0)),
+            "each document restarts at id=0: {:?}",
+            overlay.links().iter().map(|l| l.id).collect::<Vec<_>>()
+        );
+
+        let mut map = crate::scrollback::VisibleLinkMap::default();
+        map.rebuild(1, overlay, vec![]);
+        assert_eq!(map.len(), 2, "colliding source ids must stay two hits");
+
+        let second = overlay
+            .links()
+            .iter()
+            .find(|l| {
+                resolve_link_target(&l.target)
+                    .and_then(|resolved| resolved.osc8_url)
+                    .is_some_and(|url| url.as_ref() == "https://example.com/bbb")
+            })
+            .expect("second autolink in overlay");
+        let col = second.col_start + (second.col_end - second.col_start) / 2;
+        assert_eq!(
+            map.link_at(col, second.screen_row)
+                .and_then(|hit| resolve_link_target(&hit.target))
+                .and_then(|resolved| resolved.osc8_url)
+                .as_deref(),
+            Some("https://example.com/bbb")
+        );
     }
 
     #[test]

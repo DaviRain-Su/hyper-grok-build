@@ -2270,6 +2270,7 @@ async fn promoter_clears_committed_flag_and_handle_prompt_sets_it() {
                         /* client_identifier */ None,
                         /* screen_mode */ None,
                         /* verbatim */ true,
+                        /* send_now */ false,
                         /* json_schema */ None,
                         Some(ack_tx),
                         /* parsed_prompt_tx */ None,

@@ -4,7 +4,7 @@ use super::common::*;
 
 /// With two mid-turn queued rows, empty Enter sends the **top** (first) row
 /// now — not the most recently typed one. Cancel-and-send: the running turn
-/// is cancelled silently, alpha runs as its own next turn (no interjection
+/// is cancelled silently, alpha runs as its own next turn (with the interjection
 /// preamble), and bravo stays queued to promote afterwards.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
@@ -97,12 +97,12 @@ async fn empty_enter_sends_top_not_last_of_two() {
         .find(|u| u.contains("queue-alpha-top"))
         .unwrap_or_else(|| panic!("top row never on wire: {users:#?}"));
     assert!(
-        !alpha.contains(INTERJECTION_WIRE_PREFIX),
-        "send-now must not use the interjection preamble: {alpha}"
+        alpha.contains(INTERJECTION_WIRE_PREFIX),
+        "send-now must use the interjection preamble: {alpha}"
     );
     assert!(
         alpha.contains("<user_query>"),
-        "send-now must arrive as a standard user_query prompt: {alpha}"
+        "send-now must wrap the steered text in user_query: {alpha}"
     );
 
     // The final request's user sequence proves the order: prompt, then the
@@ -128,8 +128,8 @@ async fn empty_enter_sends_top_not_last_of_two() {
         "second must be the TOP row: {finals:#?}"
     );
     assert!(
-        finals[2].contains("queue-bravo-later"),
-        "third must be bravo: {finals:#?}"
+        finals[2].contains("queue-bravo-later") && !finals[2].contains(INTERJECTION_WIRE_PREFIX),
+        "third must be the naturally drained bravo with no send-now preamble: {finals:#?}"
     );
 
     assert!(

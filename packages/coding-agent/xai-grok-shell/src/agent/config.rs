@@ -1653,10 +1653,10 @@ pub struct Config {
     /// Resolved by [`crate::config::ToolsConfig::resolve`].
     #[serde(skip)]
     pub respect_gitignore: bool,
-    /// When `true`, `MvpAgent::prepare_video_gen_config` returns
-    /// `VideoGenConfig::Disabled`, dropping `video_gen` (and any
-    /// future ZDR-incompatible tools) from the model's tool set.
-    /// Resolved by [`crate::config::ToolsConfig::resolve`].
+    /// When `true` (and no valid `zdr_video_output_s3` bucket is set),
+    /// `MvpAgent::prepare_video_gen_config` marks the video tools
+    /// zdr-restricted: they stay advertised but short-circuit at call time
+    /// with setup guidance. Resolved by [`crate::config::ToolsConfig::resolve`].
     #[serde(skip)]
     pub disable_zdr_incompatible_tools: bool,
     /// S3 config for ZDR video output (presigned upload to team bucket).

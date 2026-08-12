@@ -4,7 +4,7 @@
 //! *queues*; a second bare Enter on the empty prompt is cancel-and-send — the
 //! running turn is cancelled (silently: no "Turn cancelled by user" marker)
 //! and the queued row runs as the next turn, arriving on the wire as a
-//! standard `<user_query>` prompt with no interjection preamble.
+//! standard `<user_query>` prompt with the interjection preamble.
 
 use std::time::Duration;
 
@@ -15,7 +15,6 @@ use crate::{ContentController, PtyHarness, pager_binary};
 
 const DEFAULT_ROWS: u16 = 50;
 const DEFAULT_COLS: u16 = 120;
-/// The interjection-merge preamble: send-now must never produce it.
 const INTERJECTION_WIRE_PREFIX: &str = "The user sent a message while you were working";
 
 fn slow_turn_text(sentinel: &str) -> String {
@@ -118,11 +117,11 @@ pub async fn assert_empty_enter_force_sends_top_queued() -> Result<()> {
     else {
         bail!("queued follow-up never reached the wire: {users:#?}");
     };
-    if promoted.contains(INTERJECTION_WIRE_PREFIX) {
-        bail!("send-now must not use the interjection preamble: {promoted}");
+    if !promoted.contains(INTERJECTION_WIRE_PREFIX) {
+        bail!("send-now must use the interjection preamble: {promoted}");
     }
     if !promoted.contains("<user_query>") {
-        bail!("send-now must arrive as a standard user_query prompt: {promoted}");
+        bail!("send-now must wrap the steered text in user_query: {promoted}");
     }
     if harness.contains_text("panicked") {
         bail!("pager panicked\n{}", harness.screen_contents());

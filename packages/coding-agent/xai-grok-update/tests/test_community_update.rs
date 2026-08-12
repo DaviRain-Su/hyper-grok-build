@@ -19,7 +19,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::{make_update_config, reset_home, set_test_version, test_home};
-use xai_grok_update::auto_update::{check_update_status, run_update};
+use xai_grok_update::auto_update::{CliUpdateTrigger, check_update_status, run_update};
 
 #[allow(unreachable_code)]
 fn platform_triple() -> &'static str {
@@ -341,7 +341,7 @@ async fn community_update_installs_verified_archive_with_bundle() {
     env.use_server(&server);
 
     let mut config = make_update_config("stable");
-    let installed = run_update(false, None, None, &mut config)
+    let installed = run_update(false, None, None, &mut config, CliUpdateTrigger::UserCommand)
         .await
         .expect("community update should install");
     assert_eq!(installed.as_deref(), Some("0.2.113"));
@@ -392,7 +392,7 @@ async fn binary_only_archive_preserves_existing_bundle() {
 
     let mut config = make_update_config("stable");
     assert_eq!(
-        run_update(false, None, None, &mut config)
+        run_update(false, None, None, &mut config, CliUpdateTrigger::UserCommand)
             .await
             .unwrap()
             .as_deref(),
@@ -427,7 +427,7 @@ async fn concurrent_updaters_download_and_activate_archive_once() {
 
     let updates = (0..10).map(|_| async {
         let mut config = make_update_config("stable");
-        run_update(false, None, None, &mut config).await
+        run_update(false, None, None, &mut config, CliUpdateTrigger::UserCommand).await
     });
     for result in futures::future::join_all(updates).await {
         assert_eq!(result.unwrap().as_deref(), Some("0.2.113"));
@@ -483,7 +483,7 @@ async fn same_semver_digest_change_updates_once_then_converges() {
     for _ in 0..2 {
         let mut config = make_update_config("stable");
         assert_eq!(
-            run_update(false, None, None, &mut config)
+            run_update(false, None, None, &mut config, CliUpdateTrigger::UserCommand)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -589,7 +589,7 @@ async fn checksum_failure_preserves_both_active_hyper_and_official_grok() {
     env.use_server(&server);
 
     let mut config = make_update_config("stable");
-    let error = run_update(false, None, None, &mut config)
+    let error = run_update(false, None, None, &mut config, CliUpdateTrigger::UserCommand)
         .await
         .expect_err("bad checksum must fail closed");
     assert!(format!("{error:#}").contains("SHA-256 mismatch"));
@@ -634,7 +634,7 @@ async fn state_commit_failpoint_rolls_back_binary_bundle_and_state() {
 
     xai_grok_update::set_install_failpoint(Some("before_state_write"));
     let mut config = make_update_config("stable");
-    let error = run_update(false, None, None, &mut config)
+    let error = run_update(false, None, None, &mut config, CliUpdateTrigger::UserCommand)
         .await
         .expect_err("failpoint must abort commit");
     assert!(
@@ -694,7 +694,7 @@ async fn bundle_activation_failpoint_rolls_back_before_binary_swap() {
 
     xai_grok_update::set_install_failpoint(Some("after_bundle_activation"));
     let mut config = make_update_config("stable");
-    let error = run_update(false, None, None, &mut config)
+    let error = run_update(false, None, None, &mut config, CliUpdateTrigger::UserCommand)
         .await
         .expect_err("failpoint after bundle activation must abort");
     assert!(
@@ -741,7 +741,7 @@ async fn state_symlink_preflight_fails_before_activation() {
     env.use_server(&server);
 
     let mut config = make_update_config("stable");
-    let error = run_update(false, None, None, &mut config)
+    let error = run_update(false, None, None, &mut config, CliUpdateTrigger::UserCommand)
         .await
         .expect_err("symlinked update state must fail closed");
     let msg = format!("{error:#}");
@@ -789,7 +789,7 @@ async fn state_directory_preflight_fails_before_activation() {
     env.use_server(&server);
 
     let mut config = make_update_config("stable");
-    let error = run_update(false, None, None, &mut config)
+    let error = run_update(false, None, None, &mut config, CliUpdateTrigger::UserCommand)
         .await
         .expect_err("directory update state must fail closed");
     let msg = format!("{error:#}");
@@ -867,7 +867,7 @@ async fn system_tar_producer_archive_installs_successfully() {
     env.use_server(&server);
 
     let mut config = make_update_config("stable");
-    let installed = run_update(false, None, None, &mut config)
+    let installed = run_update(false, None, None, &mut config, CliUpdateTrigger::UserCommand)
         .await
         .expect("system-tar archive must install");
     assert_eq!(installed.as_deref(), Some("0.2.113"));

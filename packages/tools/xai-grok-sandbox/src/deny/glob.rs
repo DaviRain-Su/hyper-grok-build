@@ -17,15 +17,9 @@ use std::path::{Path, PathBuf};
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 use std::sync::Mutex;
 // macOS regex translation reuses the parent module's alias + write-deny helpers.
+use super::is_glob;
 #[cfg(all(feature = "enforce", target_os = "macos"))]
 use super::{emit_seatbelt_deny, macos_deny_aliases};
-
-/// Whether a raw deny entry is a glob pattern rather than an exact path. True iff
-/// it contains a gitignore-style metacharacter (`*`, `?`, `[`).
-#[cfg(all(feature = "enforce", unix))]
-pub(crate) fn is_glob(entry: &str) -> bool {
-    entry.contains(['*', '?', '['])
-}
 
 /// Split a profile's raw deny entries into exact paths (handled by the literal /
 /// subpath kernel-deny flow) and glob patterns. Non-glob entries are returned

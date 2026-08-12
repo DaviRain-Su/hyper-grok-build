@@ -121,9 +121,7 @@ pub struct EntryLayoutInfo {
     pub group_header_count: u16,
     /// When true, this entry renders as an expanded-group collapse header.
     /// Set on the first entry of a manually-expanded group. N-more headers
-    /// replace the entry's content with the "N tool calls" line; expanded
-    /// verb-group headers stack the header line ABOVE the entry's own row
-    /// (slot height 2), so every member stays visible.
+    /// replace the entry's content; verb-group headers stack above member 0.
     pub group_collapse_header: bool,
     /// When true, this entry heads a verb-group run: it renders the aggregated
     /// "Verb N noun" label instead of its own content (collapsed state) or
@@ -142,5 +140,15 @@ impl EntryLayoutInfo {
     /// [`Self::group_header_count`]).
     pub fn is_group_header(&self) -> bool {
         self.group_header_count > 0 || self.group_collapse_header
+    }
+
+    /// Whether the slot stacks an expanded verb-run header above member 0.
+    pub fn is_expanded_verb_header(&self) -> bool {
+        self.verb_group_header && self.group_collapse_header
+    }
+
+    /// Add the synthetic verb-run header row to a member's own measured height.
+    pub fn with_verb_header_row(&self, member_height: u16) -> u16 {
+        member_height.saturating_add(u16::from(self.is_expanded_verb_header()))
     }
 }

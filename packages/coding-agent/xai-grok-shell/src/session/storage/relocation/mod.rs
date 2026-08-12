@@ -590,9 +590,13 @@ impl RelocationStorage {
     fn ensure_target_parent(&self, cwd: &str) -> Result<PathBuf> {
         let sessions = self.grok_home.join("sessions");
         fs::create_dir_durable(&sessions)?;
+        xai_grok_config::set_dir_owner_only(&sessions);
         let encoded = xai_grok_config::encode_cwd_dirname(cwd);
         let dir = self.target_parent(cwd);
         fs::create_dir_durable(&dir)?;
+        // Owner-only root + parent shield the dirs beneath (the staged copy
+        // preserves source modes).
+        xai_grok_config::set_dir_owner_only(&dir);
         if encoded != urlencoding::encode(cwd).as_ref() {
             let path = dir.join(".cwd");
             match std_fs::read_to_string(&path) {

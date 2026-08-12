@@ -218,10 +218,15 @@ pub(super) fn dispatch_open_history_search(app: &mut AppView) -> Vec<Effect> {
     with_active_agent(app, |agent| {
         let history = agent.combined_prompt_history();
         let current_text = agent.prompt.text().to_string();
-        agent
+        let opened = agent
             .prompt
             .history_search
             .activate(&history, &current_text);
+        if !opened {
+            // Matcher thread didn't start: the overlay stays closed on
+            // purpose (nothing could ever populate it).
+            tracing::debug!("history search unavailable: matcher spawn failed");
+        }
     });
     vec![]
 }

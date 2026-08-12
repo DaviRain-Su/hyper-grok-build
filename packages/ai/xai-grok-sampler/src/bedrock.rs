@@ -845,6 +845,7 @@ pub async fn converse_stream(
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         })?;
     let mut receiver = output.stream;
     Ok(stream! {

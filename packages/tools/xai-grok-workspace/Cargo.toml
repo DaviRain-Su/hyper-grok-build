@@ -131,6 +131,7 @@ path = "src/bin/workspace_server_probe.rs"
 default = ["sandbox-enforce"]
 compression = []
 test-support = []
+test-util = []
 sandbox-enforce = ["xai-grok-sandbox/enforce"]
 default-bazel = [
     "sandbox-enforce",

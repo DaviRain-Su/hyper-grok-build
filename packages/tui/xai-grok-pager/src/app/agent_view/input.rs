@@ -453,17 +453,29 @@ impl AgentView {
         prompt_paging: bool,
     ) -> InputOutcome {
         if self.scrollback_drag_latched() {
-            let live_drag_event = matches!(
-                ev,
+            match ev {
                 Event::Mouse(MouseEvent {
-                    kind: MouseEventKind::Drag(MouseButton::Left)
-                        | MouseEventKind::Moved
-                        | MouseEventKind::Up(MouseButton::Left),
+                    kind:
+                        MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left),
                     ..
-                })
-            );
-            if !live_drag_event {
-                self.clear_stuck_scrollback_drag();
+                }) => {}
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Moved | MouseEventKind::Up(_),
+                    ..
+                }) if self.left_mouse_down => {
+                    self.finish_stuck_drag_as_lost_up();
+                    self.reset_wedged_mouse_reporting();
+                    return InputOutcome::Changed;
+                }
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Moved | MouseEventKind::Drag(_),
+                    ..
+                }) => {}
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(_),
+                    ..
+                }) => self.finish_stuck_drag_as_lost_up(),
+                _ => self.clear_stuck_scrollback_drag(),
             }
         }
         if let Some(ref child_sid) = self.active_subagent.clone() {
@@ -1596,10 +1608,10 @@ mod background_and_tasks_shortcut_tests {
                 text: "earlier prompt".into(),
             }];
             if browse {
-                agent.prompt.history_search.activate_browse(&history, "");
+                assert!(agent.prompt.history_search.activate_browse(&history, ""));
                 agent.prompt.set_text("earlier prompt");
             } else {
-                agent.prompt.history_search.activate(&history, "query");
+                assert!(agent.prompt.history_search.activate(&history, "query"));
                 agent.prompt.set_text("query");
             }
             let text = agent.prompt.text().to_string();
@@ -1629,10 +1641,10 @@ mod background_and_tasks_shortcut_tests {
                 let mut agent = make_agent();
                 agent.set_active_pane(AgentPane::Prompt, true);
                 if browse {
-                    agent.prompt.history_search.activate_browse(&history, "");
+                    assert!(agent.prompt.history_search.activate_browse(&history, ""));
                     agent.prompt.set_text("earlier prompt");
                 } else {
-                    agent.prompt.history_search.activate(&history, "query");
+                    assert!(agent.prompt.history_search.activate(&history, "query"));
                     agent.prompt.set_text("query");
                 }
                 let out = agent.handle_prompt_key_with_registry_for_test(&key, &registry);

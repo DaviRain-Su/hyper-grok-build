@@ -157,6 +157,56 @@
         );
     }
 
+    /// Thread-leak regression: every `SubagentSpawned` creates a child
+    /// `AgentView` whose `PromptWidget` owns a `HistorySearchState`, and the
+    /// matcher thread used to spawn eagerly per view — one leaked thread per
+    /// subagent ever spawned, for the process lifetime.
+    ///
+    /// Drives the real handler with spawn+finish pairs and asserts the exact
+    /// invariant on every platform: no child view ever builds a matcher
+    /// daemon (each daemon owns exactly one named thread).
+    #[test]
+    fn subagent_spawn_storm_spawns_no_matcher_daemons() {
+        const SUBAGENTS: usize = 50;
+
+        let mut app = make_app_with_agent("sess-parent");
+        for i in 0..SUBAGENTS {
+            let child_sid = format!("child-storm-{i}");
+            handle(
+                make_ext_session_notification_with_method(
+                    "sess-parent",
+                    "x.ai/session/update",
+                    test_subagent_spawned("sess-parent", &child_sid),
+                ),
+                &mut app,
+            );
+            handle(
+                make_ext_session_notification_with_method(
+                    "sess-parent",
+                    "x.ai/session/update",
+                    test_subagent_finished(&child_sid),
+                ),
+                &mut app,
+            );
+        }
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.subagent_views.len(),
+            SUBAGENTS,
+            "every spawn must have created a child view (the leak's unit)"
+        );
+        let daemons = agent
+            .subagent_views
+            .values()
+            .filter(|v| v.prompt.history_search.daemon_built())
+            .count();
+        assert_eq!(
+            daemons, 0,
+            "subagent child views must never spawn history-search matcher threads"
+        );
+    }
+
     /// Regression: replay from `updates.jsonl` emits `x.ai/session/update` (not
     /// `session_notification`). Subagent lifecycle events must still populate
     /// `subagent_sessions` and the parent scrollback `SubagentBlock`.

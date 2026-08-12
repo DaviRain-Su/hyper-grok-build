@@ -224,6 +224,15 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
 /// Apply current telemetry config + auth identity. Tears down the client
 /// when telemetry is disabled, so it's safe to call repeatedly.
 pub fn update_telemetry_config(config: &AgentConfig, auth_manager: &AuthManager) {
+    // shared_client() aborts (panic = "abort") on an invalid user agent,
+    // and that string comes from the GROK_CLIENT_NAME env var. Telemetry
+    // init must never take down its caller — `grok update` is a repair
+    // command — so validate the one user-controlled input first.
+    let user_agent = crate::http::process_user_agent_string();
+    if reqwest::header::HeaderValue::from_str(&user_agent).is_err() {
+        tracing::warn!("telemetry init skipped: GROK_CLIENT_NAME yields an invalid user agent");
+        return;
+    }
     let grok_auth = auth_manager.current().filter(|a| a.is_xai_auth());
     let user_id = grok_auth.as_ref().map(|a| a.user_id.clone());
     let team_id = grok_auth.as_ref().and_then(|a| a.team_id.clone());

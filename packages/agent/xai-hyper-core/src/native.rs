@@ -462,6 +462,7 @@ mod sampling_error_map_tests {
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
             credential,
+            error_code: None,
         }
     }
 

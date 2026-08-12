@@ -385,7 +385,7 @@ const PREVIEW_ACTIVITY_PATH: &str = "/__control/activity";
 
 /// Effective proxy `--control-port` when the supervisor didn't pin one (mirrors
 /// the default in `xai-grok-preview-proxy/src/cli.rs`).
-const DEFAULT_PREVIEW_CONTROL_PORT: u16 = 6015;
+pub(crate) const DEFAULT_PREVIEW_CONTROL_PORT: u16 = 6015;
 
 /// Per-scrape budget. The endpoint is loopback and trivial, so a small bound is
 /// ample and a wedged proxy can't stall the scraper.

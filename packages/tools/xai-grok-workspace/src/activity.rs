@@ -2,7 +2,7 @@
 //! lifecycle status reporting.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use dashmap::DashMap;
@@ -32,6 +32,11 @@ pub(crate) const PREVIEW_ACTIVITY_WINDOW_MS: u64 = 60_000;
 /// sandbox stays alive while mutations keep arriving and the normal idle grace
 /// starts once they stop. `0` disables the withhold entirely (kill switch).
 pub(crate) const RPC_ACTIVITY_WINDOW_MS: u64 = PREVIEW_ACTIVITY_WINDOW_MS;
+
+/// How long a client-presence note (`workspace.presence.note`) withholds
+/// `idle_since_ms`; `0` disables the withhold entirely (kill switch).
+pub(crate) const PRESENCE_ACTIVITY_WINDOW_MS: u64 =
+    xai_grok_workspace_types::rpc::presence::PRESENCE_ACTIVITY_WINDOW_MS;
 
 struct SessionActivity {
     active_tool_calls: AtomicU32,
@@ -111,6 +116,15 @@ pub struct ActivityTracker {
     /// withholds idle within
     /// [`rpc_activity_window_ms`](Self::rpc_activity_window_ms).
     last_client_rpc_ms: AtomicU64,
+    /// Window (ms) a client-presence note withholds idle for; `0` disables.
+    presence_activity_window_ms: u64,
+    /// Epoch ms a visible client-presence note was last received (`0` = none).
+    last_presence_ms: AtomicU64,
+    /// Highest presence-note `seq` applied (`0` = none). Guards against a
+    /// slow superseded visible note landing after a newer hidden note and
+    /// re-arming the withhold. A mutex (not an atomic) so the seq gate and
+    /// the visible stamp commit as one decision under concurrent applies.
+    last_presence_seq: Mutex<u64>,
     /// Open preview WebSocket (HMR) tunnels as of the last scrape. Nonzero ⇒ a
     /// client is attached, which no activity stamp would reveal.
     preview_ws_tunnels_open: AtomicU64,
@@ -201,6 +215,9 @@ impl ActivityTracker {
             last_preview_routed_ms: AtomicU64::new(0),
             rpc_activity_window_ms: RPC_ACTIVITY_WINDOW_MS,
             last_client_rpc_ms: AtomicU64::new(0),
+            presence_activity_window_ms: PRESENCE_ACTIVITY_WINDOW_MS,
+            last_presence_ms: AtomicU64::new(0),
+            last_presence_seq: Mutex::new(0),
             preview_ws_tunnels_open: AtomicU64::new(0),
             preview_routed_in_flight: AtomicU64::new(0),
             started_at_ms: now_ms(),
@@ -230,6 +247,13 @@ impl ActivityTracker {
     /// WorkspaceServer sources it from `StatusConfig`.
     pub fn with_rpc_activity_window_ms(mut self, window_ms: u64) -> Self {
         self.rpc_activity_window_ms = window_ms;
+        self
+    }
+
+    /// Override the client-presence withhold window (`0` disables); the
+    /// WorkspaceServer sources it from `StatusConfig`.
+    pub fn with_presence_activity_window_ms(mut self, window_ms: u64) -> Self {
+        self.presence_activity_window_ms = window_ms;
         self
     }
 
@@ -286,6 +310,28 @@ impl ActivityTracker {
     pub fn note_client_rpc_activity(&self) {
         self.last_client_rpc_ms.store(now_ms(), Ordering::Relaxed);
         self.notify.notify_waiters();
+    }
+
+    /// Apply a presence note. Only a visible note stamps (a hide must never
+    /// cut an existing withhold short), and a note whose `seq` is not newer
+    /// than the last applied one is dropped — reordering protection for the
+    /// gateway's fire-and-forget sends. `seq: None` (old gateway) always
+    /// applies.
+    pub fn apply_presence_note(&self, visible: bool, seq: Option<u64>) {
+        // Gate and stamp under one lock: split across two atomics, a slow
+        // older visible note racing a newer hidden one could pass the seq
+        // check and stamp after the hidden note, re-arming the withhold.
+        let mut last_seq = self.last_presence_seq.lock().unwrap();
+        if let Some(seq) = seq {
+            if *last_seq >= seq {
+                return;
+            }
+            *last_seq = seq;
+        }
+        if visible {
+            self.last_presence_ms.store(now_ms(), Ordering::Relaxed);
+            self.notify.notify_waiters();
+        }
     }
 
     /// Mirror the proxy's attached-client counters. Absolute values, not edges,
@@ -431,7 +477,7 @@ impl ActivityTracker {
     ///
     /// Returns `(withhold, reason, anchor)`, where the anchor is the epoch-ms
     /// the current hold is measured from. Tiers are checked strongest first;
-    /// all four withhold identically today, only the accounting differs.
+    /// all five withhold identically today, only the accounting differs.
     fn client_withholds_idle(&self, now: u64) -> (bool, Option<IdleWithholdReason>, u64) {
         // Including process start means a young or freshly-restored workspace
         // can never look long-idle — the process restarts on restore, so this
@@ -472,6 +518,15 @@ impl ActivityTracker {
             // Holds, but never advances the anchor: a poll must not reset a
             // clock meant to measure real use.
             return (true, Some(IdleWithholdReason::PreviewStatusOnly), anchor);
+        }
+        if activity_stamp_withholds_idle(
+            now,
+            self.last_presence_ms.load(Ordering::Relaxed),
+            self.presence_activity_window_ms,
+        ) {
+            // Same anchor rule as the status poll: presence is not use, so
+            // the hub's ceiling genuinely bounds an attached-but-idle client.
+            return (true, Some(IdleWithholdReason::ClientPresence), anchor);
         }
         (false, None, anchor)
     }
@@ -1571,6 +1626,60 @@ mod tests {
         assert!(
             s.idle_since_ms.is_some(),
             "window 0 is the kill switch: the stamp must never withhold"
+        );
+        assert_eq!(s.withhold_reason, None);
+    }
+
+    #[test]
+    fn client_presence_withholds_without_advancing_the_anchor() {
+        let t = ActivityTracker::new();
+        let started = t.started_at_ms;
+        t.apply_presence_note(true, Some(1));
+
+        let s = t.snapshot();
+        assert!(
+            s.idle_since_ms.is_none(),
+            "a recent presence note withholds idle"
+        );
+        assert_eq!(s.withhold_reason, Some(IdleWithholdReason::ClientPresence));
+        assert_eq!(
+            s.withhold_since_ms,
+            Some(started),
+            "presence never advances the anchor past process start"
+        );
+
+        t.note_client_rpc_activity();
+        assert_eq!(
+            t.snapshot().withhold_reason,
+            Some(IdleWithholdReason::ClientRpc),
+            "any stronger tier outranks presence"
+        );
+    }
+
+    /// A slow superseded visible note landing after a newer hidden note must
+    /// not re-arm the withhold.
+    #[test]
+    fn stale_presence_seq_is_dropped() {
+        let t = ActivityTracker::new();
+        t.apply_presence_note(false, Some(2));
+        t.apply_presence_note(true, Some(1));
+        assert_eq!(t.snapshot().withhold_reason, None);
+
+        t.apply_presence_note(true, Some(3));
+        assert_eq!(
+            t.snapshot().withhold_reason,
+            Some(IdleWithholdReason::ClientPresence)
+        );
+    }
+
+    #[test]
+    fn zero_presence_window_disables_the_client_presence_withhold() {
+        let t = ActivityTracker::new().with_presence_activity_window_ms(0);
+        t.apply_presence_note(true, Some(1));
+        let s = t.snapshot();
+        assert!(
+            s.idle_since_ms.is_some(),
+            "window 0 is the kill switch (and the dark default): the stamp must never withhold"
         );
         assert_eq!(s.withhold_reason, None);
     }

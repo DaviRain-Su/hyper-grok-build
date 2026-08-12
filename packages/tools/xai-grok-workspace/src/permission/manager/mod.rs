@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use parking_lot::Mutex;
+
 use agent_client_protocol as acp;
 use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
@@ -82,6 +84,8 @@ pub enum PermissionHandle {
         /// Concurrent in-flight permission requests. Shared across handle clones
         /// (subagents), so the actor can gauge overlapping requests for telemetry.
         in_flight: Arc<AtomicUsize>,
+        /// Prompt-start only; auto-allow paths never send.
+        user_prompt_notify: Arc<Mutex<Option<mpsc::UnboundedSender<()>>>>,
     },
     AllowAll,
 }
@@ -825,6 +829,23 @@ impl PermissionHandle {
         }
     }
 
+    /// First writer wins so a cloned (subagent) handle cannot replace the owner.
+    /// A closed sender is treated as vacant: the owner listener holds a `Weak`
+    /// and drops `rx` when the session dies, so a later owner can re-wire.
+    pub fn set_user_prompt_notify(&self, tx: mpsc::UnboundedSender<()>) {
+        if let PermissionHandle::Actor {
+            user_prompt_notify, ..
+        } = self
+        {
+            let mut slot = user_prompt_notify.lock();
+            if slot.as_ref().is_some_and(|existing| !existing.is_closed()) {
+                tracing::debug!("user_prompt_notify already set; first writer wins");
+                return;
+            }
+            *slot = Some(tx);
+        }
+    }
+
     pub fn is_yolo_mode(&self) -> bool {
         match self {
             PermissionHandle::AllowAll => true,
@@ -1293,6 +1314,8 @@ fn spawn_permission_manager_with_pin(
     let side_query_wired = Arc::new(AtomicBool::new(false));
     let in_flight = Arc::new(AtomicUsize::new(0));
     let in_flight_actor = in_flight.clone();
+    let user_prompt_notify = Arc::new(Mutex::new(None::<mpsc::UnboundedSender<()>>));
+    let user_prompt_notify_actor = user_prompt_notify.clone();
 
     let _task = tokio::task::spawn_local(async move {
         let client_id_ref = client_identifier.as_deref();
@@ -2235,6 +2258,12 @@ fn spawn_permission_manager_with_pin(
                         );
                         continue;
                     }
+                    {
+                        let slot = user_prompt_notify_actor.lock();
+                        if let Some(tx) = slot.as_ref() {
+                            let _ = tx.send(());
+                        }
+                    }
                     let (decision, outcome_str, user_prompted) = match &access {
                         AccessKind::Bash(cmd) => {
                             // Segment evaluation above still auto-allows fully-safe
@@ -2499,6 +2528,7 @@ fn spawn_permission_manager_with_pin(
             yolo_pin,
             deny_read_globs: Arc::new(deny_read_globs),
             in_flight,
+            user_prompt_notify,
         },
         event_rx,
     )
@@ -3750,6 +3780,7 @@ mod tests {
             yolo_pin: None,
             deny_read_globs: Arc::new(vec![]),
             in_flight: Arc::new(AtomicUsize::new(0)),
+            user_prompt_notify: Arc::new(Mutex::new(None)),
         }
     }
 

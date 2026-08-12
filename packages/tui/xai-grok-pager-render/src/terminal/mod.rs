@@ -127,6 +127,16 @@ impl TerminalName {
         )
     }
 
+    /// Terminals that embed xterm.js (Zed's terminal is alacritty-based and
+    /// is NOT one). The boundary for xterm.js-specific quirks, e.g. the
+    /// wedged button tracker that eats mouse releases.
+    pub fn is_xtermjs_embed(self) -> bool {
+        matches!(
+            self,
+            Self::VsCode | Self::Cursor | Self::Windsurf | Self::GrokDesktop
+        )
+    }
+
     /// Brands whose capabilities are not positively classified — share
     /// [`Self::Unknown`]'s fail-closed posture (no KKP probe, conservative
     /// hyperlinks/notifications/focus, etc.).

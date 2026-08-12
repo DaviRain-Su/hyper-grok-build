@@ -124,7 +124,8 @@ impl SessionSearchIndex {
     /// opens a fresh empty index (see [`super::search_recovery::heal_unusable`]).
     pub fn open_or_create(db_path: &Path) -> Result<Self, rusqlite::Error> {
         if let Some(parent) = db_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            // The parent is usually the sessions root — never (re)create it loose.
+            let _ = crate::util::grok_home::create_dir_all_owner_only(parent);
         }
 
         let journal_mode = JournalMode::for_db_path(db_path);

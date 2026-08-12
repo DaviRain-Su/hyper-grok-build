@@ -2,7 +2,7 @@
 use super::*;
 use crate::session::info::Info;
 use crate::session::persistence::default_model_id;
-use crate::session::storage::SessionUpdate;
+use crate::session::storage::{CopySessionOptions, SessionUpdate};
 use crate::tools::todo::TodoState;
 use agent_client_protocol as acp;
 use tempfile::TempDir;
@@ -2424,5 +2424,90 @@ async fn load_session_without_updates_survives_merged_chat_line() {
             user_text(&loaded.chat_history),
             vec!["real turn"],
             "resume succeeds; only the merged record is dropped"
+        );
+}
+#[cfg(unix)]
+use crate::test_support::{set_unix_mode, unix_mode};
+#[tokio::test]
+#[cfg(unix)]
+async fn init_session_creates_owner_only_session_and_parent_dirs() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let session_dir = temp_dir
+        .path()
+        .join("sessions")
+        .join(crate::util::grok_home::encode_cwd_dirname(&info.cwd))
+        .join(info.id.to_string());
+    assert_eq!(unix_mode(&session_dir), 0o700, "session dir must be 0700");
+    assert_eq!(
+            unix_mode(session_dir.parent().unwrap()),
+            0o700,
+            "<encoded-cwd> parent must be 0700"
+        );
+    assert_eq!(
+            unix_mode(&temp_dir.path().join("sessions")),
+            0o700,
+            "sessions root must be 0700"
+        );
+}
+/// Dirs loosened on disk (e.g. by an older grok) re-tighten on next touch.
+#[tokio::test]
+#[cfg(unix)]
+async fn init_session_retightens_loosened_existing_dirs() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let session_dir = temp_dir
+        .path()
+        .join("sessions")
+        .join(crate::util::grok_home::encode_cwd_dirname(&info.cwd))
+        .join(info.id.to_string());
+    set_unix_mode(&session_dir, 0o755);
+    set_unix_mode(session_dir.parent().unwrap(), 0o755);
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    assert_eq!(unix_mode(&session_dir), 0o700);
+    assert_eq!(unix_mode(session_dir.parent().unwrap()), 0o700);
+}
+#[tokio::test]
+#[cfg(unix)]
+async fn copy_session_data_creates_owner_only_target_dir() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source = create_test_info();
+    adapter.init_session(&source, default_model_id()).await.unwrap();
+    let target = Info {
+        id: acp::SessionId::new("forked-session-456"),
+        cwd: source.cwd.clone(),
+    };
+    adapter
+        .copy_session_data(&source, &target, CopySessionOptions::default())
+        .await
+        .unwrap();
+    let target_dir = temp_dir
+        .path()
+        .join("sessions")
+        .join(crate::util::grok_home::encode_cwd_dirname(&target.cwd))
+        .join(target.id.to_string());
+    assert_eq!(unix_mode(&target_dir), 0o700);
+}
+/// Explicit-mode parents are caller-owned (temp roots in tests): never chmod'd.
+#[tokio::test]
+#[cfg(unix)]
+async fn explicit_session_dir_does_not_tighten_parent() {
+    let temp_dir = TempDir::new().unwrap();
+    let parent = temp_dir.path().join("caller-owned");
+    std::fs::create_dir(&parent).unwrap();
+    set_unix_mode(&parent, 0o755);
+    let child = parent.join("child-session");
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(child.clone());
+    adapter.init_session(&create_test_info(), default_model_id()).await.unwrap();
+    assert_eq!(unix_mode(&child), 0o700, "explicit dir must be tightened");
+    assert_eq!(
+            unix_mode(&parent),
+            0o755,
+            "caller-owned parent must not be chmod'd in Explicit mode"
         );
 }

@@ -5,8 +5,8 @@ use super::common::*;
 /// 19. **Send-now chord delivers the composer text as its own next turn.**
 /// (Historical name: the chord used to interject into the SAME turn.)
 /// Ctrl+Enter with text mid-stream is cancel-and-send: the running turn is
-/// cancelled silently and the text runs as the next turn — a standard
-/// `<user_query>` prompt with no interjection preamble, rendered as a "❯ "
+/// cancelled silently and the text runs as the next turn with the
+/// interjection preamble, rendered as a "❯ "
 /// user block via the turn-start adoption.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
@@ -88,12 +88,12 @@ async fn interjection_reaches_model_in_same_turn() {
         .find(|u| u.contains("please also check the logs"))
         .unwrap_or_else(|| panic!("sent-now message never reached the wire: {users:#?}"));
     assert!(
-        !sent.contains(INTERJECTION_WIRE_PREFIX),
-        "send-now must not use the interjection preamble: {sent}"
+        sent.contains(INTERJECTION_WIRE_PREFIX),
+        "send-now must use the interjection preamble: {sent}"
     );
     assert!(
         sent.contains("<user_query>"),
-        "send-now must arrive as a standard user_query prompt: {sent}"
+        "send-now must wrap the steered text in user_query: {sent}"
     );
 
     assert!(

@@ -636,9 +636,7 @@ impl ScrollbackState {
         self.layout_cache
             .as_ref()
             .and_then(|c| c.entries.get(sel))
-            .is_some_and(|e| {
-                e.is_group_header() && !(e.verb_group_header && e.group_collapse_header)
-            })
+            .is_some_and(|e| e.is_group_header() && !e.is_expanded_verb_header())
     }
 
     /// "expand" / "collapse" when the selected entry is a group header, else
@@ -648,7 +646,7 @@ impl ScrollbackState {
     pub fn selected_group_header_fold_label(&self) -> Option<&'static str> {
         let sel = self.selected?;
         let info = self.layout_cache.as_ref()?.entries.get(sel)?;
-        if info.verb_group_header && info.group_collapse_header {
+        if info.is_expanded_verb_header() {
             // Expanded verb slot: the selection acts as member 0, so the
             // footer advertises the member's own fold, not the group's.
             None
@@ -1696,46 +1694,38 @@ mod tests {
             cached_height_at(&state, 2) > 0,
             "members stay expanded across Ctrl+E on the anchoring thought"
         );
+        let cache = state.layout_cache.as_ref().unwrap();
+        let tool_height =
+            EntryRenderer::new(state.entries.get_index(1).unwrap().1, &Theme::current())
+                .with_appearance_ref(&state.appearance)
+                .desired_height(state.entry_area_width(80));
+        assert_eq!(
+            cache.entries[1].height,
+            tool_height.saturating_add(1),
+            "re-anchored expanded header reserves its synthetic row"
+        );
         crate::appearance::cache::set_show_thinking_blocks(false);
     }
 
-    /// Post-layout group queries read the fold's spans: an entry mutation
-    /// between rebuilds (hook chrome landing on a member) must not change
-    /// what toggle/selection operate on until the refold actually runs —
-    /// the user is acting on the rendered fold.
     #[test]
-    fn group_range_follows_rendered_fold_until_refold() {
+    fn group_range_keeps_hooked_members_in_rendered_fold() {
         let mut state = verb_state();
         let ids = push_reads(&mut state, 2);
         state.prepare_layout(80, 40);
         assert!(verb_header_at(&state, 0));
         assert_eq!(state.group_range_of(0, true), 0..2);
 
-        // Chrome lands on the second member after the fold. The spans are
-        // authoritative until the next rebuild, so the query still matches
-        // the on-screen fold.
         state.attach_hooks(
             ids[1],
             crate::scrollback::blocks::tool::HookPhase::Post,
             Vec::new(),
         );
-        assert_eq!(
-            state.group_range_of(0, true),
-            0..2,
-            "pre-refold queries keep the rendered fold"
-        );
+        assert_eq!(state.group_range_of(0, true), 0..2);
 
-        // The refold splits the run (chrome rows stay standalone) and the
-        // query follows: the first read folds alone, the hooked read is its
-        // own group.
         state.prepare_layout(80, 40);
         assert!(verb_header_at(&state, 0));
-        assert!(!verb_header_at(&state, 1));
-        assert_eq!(state.group_range_of(0, true), 0..1);
-        assert!(
-            cached_height_at(&state, 1) > 0,
-            "hooked member surfaces with its chrome"
-        );
+        assert_eq!(state.group_range_of(1, true), 0..2);
+        assert_eq!(cached_height_at(&state, 1), 0, "hooked member stays folded");
     }
 
     #[test]
@@ -1866,7 +1856,7 @@ mod tests {
     }
 
     #[test]
-    fn verb_group_excludes_pending_input_and_hooked_entries() {
+    fn verb_group_excludes_pending_input() {
         let mut state = verb_state();
         push_reads(&mut state, 3);
         state.entry_mut(1).unwrap().is_pending_user_input = true;
@@ -1879,17 +1869,6 @@ mod tests {
         for i in 0..3 {
             assert!(cached_height_at(&state, i) > 0);
         }
-
-        let mut state = verb_state();
-        push_reads(&mut state, 3);
-        state.entry_mut(2).unwrap().hook_data =
-            Some(crate::scrollback::blocks::tool::ToolCallHookData::default());
-        state.prepare_layout(80, 40);
-        // Hooked entry excluded; remaining run of 2 still folds.
-        assert!(verb_header_at(&state, 0));
-        assert_eq!(header_count_at(&mut state, 0), 2);
-        assert!(!verb_header_at(&state, 2), "hooked row never claims");
-        assert!(cached_height_at(&state, 2) > 0, "hooked row stays visible");
     }
 
     #[test]
@@ -1939,7 +1918,7 @@ mod tests {
     }
 
     #[test]
-    fn verb_group_unfolds_on_attach_hooks() {
+    fn verb_group_stays_folded_on_attach_hooks() {
         use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
 
         let mut state = verb_state();
@@ -1947,8 +1926,6 @@ mod tests {
         state.prepare_layout(80, 40);
         assert_eq!(cached_height_at(&state, 2), 0);
 
-        // Hooks attach to an already-hidden member: the run must re-run its
-        // folds so the `[hooks: N/M]` row surfaces.
         state.attach_hooks(
             ids[2],
             HookPhase::Post,
@@ -1960,13 +1937,11 @@ mod tests {
                 output: None,
             }],
         );
+        assert!(state.gaps_may_be_dirty, "hook attachment reapplies folds");
         state.prepare_layout(80, 40);
-        assert!(verb_header_at(&state, 0), "remaining run of 2 still folds");
-        assert_eq!(header_count_at(&mut state, 0), 2);
-        assert!(
-            cached_height_at(&state, 2) > 0,
-            "hooked row must surface out of the fold"
-        );
+        assert!(verb_header_at(&state, 0));
+        assert_eq!(header_count_at(&mut state, 0), 3);
+        assert_eq!(cached_height_at(&state, 2), 0, "hooked row remains folded");
     }
 
     #[test]
@@ -2252,8 +2227,10 @@ mod tests {
         state.prepare_layout(80, 40);
 
         // The expanded slot acts as member 0: no header semantics, no
-        // re-toggle — Expand/ToggleFold/Enter fall through to the block.
+        // re-toggle — Expand/ToggleFold/Enter fall through to the block, and
+        // copy/fullscreen still see member 0's visible content.
         assert!(!state.is_selected_group_header());
+        assert!(!state.entry_content_hidden_by_group(0));
         assert_eq!(state.selected_group_header_fold_label(), None);
         assert!(!state.toggle_group_expansion());
 
@@ -2637,14 +2614,14 @@ mod tests {
             "out-of-range index is not hidden"
         );
 
-        // Expanded group: the collapse header still replaces its own content;
-        // all members below are visible.
+        // Expanded generic group: the collapse header still replaces its own
+        // content; all members below are visible.
         state.selected = Some(1);
         state.toggle_group_expansion();
         state.prepare_layout(80, 40);
         assert!(
             state.entry_content_hidden_by_group(1),
-            "collapse header's own content stays replaced when expanded"
+            "generic collapse header's own content stays replaced when expanded"
         );
         for i in 2..7 {
             assert!(

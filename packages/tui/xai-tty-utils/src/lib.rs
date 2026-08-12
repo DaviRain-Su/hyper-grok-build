@@ -39,6 +39,9 @@
 use std::collections::HashMap;
 use std::io;
 
+mod child_wait;
+pub use child_wait::{is_child_wait_identity_uncertain, spawn_child_reaper, wait_child_bounded};
+
 mod process_resources;
 pub use process_resources::{ProcessResources, sample_process_memory, sample_process_resources};
 
@@ -521,10 +524,29 @@ impl ProcessGroup {
         self.attach_pid(pid)
     }
 
-    /// Attach a `std::process::Child` (rather than tokio's). The PID is read via
-    /// `Child::id()`, which is valid until the child is reaped with `wait()`.
+    /// Attach a `std::process::Child` (rather than tokio's). The process must be
+    /// (or lead) its own group/job — e.g. spawned via [`new_process_group`] (Unix
+    /// `setpgid`) or a `detach_*` helper (Unix `setsid`) — otherwise `kill`
+    /// would signal the wrong group.
+    ///
+    /// Unix still goes through [`attach_pid`]. Windows uses the child's stable
+    /// process handle (`AsHandle`) rather than `OpenProcess` by PID.
     pub fn attach_std(&mut self, child: &std::process::Child) -> io::Result<()> {
-        self.attach_pid(child.id())
+        #[cfg(unix)]
+        {
+            self.attach_pid(child.id())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::{AsHandle, AsRawHandle};
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::System::JobObjects::AssignProcessToJobObject;
+
+            let process_handle = HANDLE(child.as_handle().as_raw_handle());
+            // SAFETY: both handles are valid and borrowed for the duration of the call.
+            unsafe { AssignProcessToJobObject(self.job, process_handle) }
+                .map_err(|e| io::Error::other(format!("AssignProcessToJobObject: {e}")))
+        }
     }
 
     /// Attach an already-spawned process by raw PID. The process must be (or

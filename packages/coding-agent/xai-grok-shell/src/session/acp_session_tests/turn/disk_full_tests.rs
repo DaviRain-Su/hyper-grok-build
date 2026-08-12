@@ -139,6 +139,7 @@ async fn run_prompt(
             None,
             None,
             true,
+            /* send_now */ false,
             None,
             None,
             None,

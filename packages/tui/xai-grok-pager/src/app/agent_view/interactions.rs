@@ -1470,26 +1470,19 @@ mod cancel_turn_mouse_tests {
         assert!(matches!(outcome, InputOutcome::Unchanged));
     }
     #[test]
-    fn esc_confirm_refreshes_expired_rewind_grace() {
+    fn esc_dismisses_the_panel_without_cancelling_the_turn() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use std::time::Instant;
         let mut agent = make_agent();
         agent.session.state = AgentState::TurnRunning;
         setup_panel(&mut agent);
-        agent.rewind_suppress_deadline = Some(Instant::now());
         let outcome =
             agent.handle_cancel_turn_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(
-                outcome,
-                InputOutcome::Action(Action::CancelTurnChoice(CancelTurnChoice::ContinueToRun))
-            ),
-            "panel Esc must confirm the parent-turn cancel, got {outcome:?}"
+            matches!(outcome, InputOutcome::Changed),
+            "panel Esc must keep the turn running, got {outcome:?}"
         );
-        assert!(
-            agent.rewind_arm_suppressed(Instant::now()),
-            "the Esc-confirmed cancel must refresh the post-cancel grace"
-        );
+        assert!(agent.cancel_turn_view.is_none());
+        assert!(agent.session.state.is_turn_running());
     }
 }
 #[cfg(test)]

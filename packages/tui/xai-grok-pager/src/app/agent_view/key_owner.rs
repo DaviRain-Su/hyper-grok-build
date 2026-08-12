@@ -11,9 +11,7 @@
 //! neither can quietly rank itself above the other.
 
 use super::{AgentPane, AgentView};
-use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
-use crate::views::modal::CancelTurnChoice;
 use crate::views::permission_view::{PermissionFocus, PermissionViewState};
 use crate::views::question_view::{QuestionFocus, QuestionViewState};
 use crate::views::shortcuts_bar::HintItem;
@@ -92,7 +90,7 @@ pub(crate) enum EscStep {
     BackOutOverlay,
     /// Hand the keyboard to the scrollback with the card still drawn.
     ParkFocus,
-    /// Resolve the cancel-turn panel by keeping everything running.
+    /// Dismiss the cancel-turn panel and leave the turn (and subagents) running.
     KeepRunning,
 }
 
@@ -197,8 +195,8 @@ impl AgentView {
                 PermissionFocus::PatternEdit => EscStep::DiscardPatternEdit,
                 PermissionFocus::Options => EscStep::ParkFocus,
             },
-            // Never a dead end, so it never needs to park: "keep running"
-            // resolves the panel outright.
+            // Never a dead end: Esc closes the panel and keeps the turn
+            // running. Enter / 1–4 still pick a cancel-and-subagent choice.
             BlockingCard::CancelTurn => EscStep::KeepRunning,
             BlockingCard::Question => {
                 let qv = self.question_view.as_ref()?;
@@ -255,12 +253,11 @@ impl AgentView {
             EscStep::BackOutOverlay => {}
             EscStep::ParkFocus => self.park_focused_card(),
             EscStep::KeepRunning => {
-                // An Esc-fired cancel: refresh the post-cancel grace so a
-                // mashed Esc cannot go on to arm the rewind picker.
-                self.suppress_rewind_arm(std::time::Instant::now());
-                return InputOutcome::Action(Action::CancelTurnChoice(
-                    CancelTurnChoice::ContinueToRun,
-                ));
+                // The bar promises "keep running". Mapping this to
+                // ContinueToRun would still cancel the parent turn (only
+                // the subagents would survive). Close the panel instead.
+                self.cancel_turn_view = None;
+                self.cancel_turn_buttons.clear();
             }
         }
         InputOutcome::Changed

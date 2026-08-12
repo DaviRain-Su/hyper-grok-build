@@ -59,7 +59,8 @@ pub(super) fn map_tool_outcome(
 ///
 /// Internal/high-frequency updates (hook scrollback, retry progress, config
 /// changes) are excluded so migrated hooks only fire on user-attention
-/// events — not on every tool call or session tick.
+/// events — not on every tool call or session tick. `DiffReview` always waits
+/// on the user, so it is safe to fire `permission_prompt` here.
 #[allow(clippy::type_complexity)]
 pub(super) fn notification_hook_for_update(
     update: &XaiSessionUpdate,

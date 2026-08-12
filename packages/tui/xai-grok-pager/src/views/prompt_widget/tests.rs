@@ -527,12 +527,12 @@
             chrome: false,
             ..Default::default()
         };
-        pw.history_search.activate_browse(
+        assert!(pw.history_search.activate_browse(
             &[crate::views::history_search::HistoryEntry {
                 text: "line1\nline2\nline3".into(),
             }],
             "",
-        );
+        ));
         pw.set_text("line1\nline2\nline3"); // populated multi-line entry
         assert_eq!(
             pw.desired_height(80, &style, true, 20),

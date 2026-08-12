@@ -5,7 +5,7 @@ use crate::common::*;
 /// Minimal + Apple Terminal: Ctrl+O is the send-now chord. With an empty
 /// composer and a mid-turn queued follow-up it must send that row now —
 /// cancel-and-send: turn 1 is cancelled silently and the row runs as its own
-/// next turn (no interjection preamble) — not open the transcript pager remap.
+/// next turn (with the interjection preamble) — not open the transcript pager remap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_ctrl_o_send_now_queued_apple_terminal() {
@@ -92,8 +92,8 @@ async fn minimal_ctrl_o_send_now_queued_apple_terminal() {
         .find(|u| u.contains("minimal send-now payload"))
         .unwrap_or_else(|| panic!("queued follow-up never on wire: {users:#?}"));
     assert!(
-        !sent.contains(INTERJECTION_WIRE_PREFIX),
-        "send-now must not use the interjection preamble: {sent}"
+        sent.contains(INTERJECTION_WIRE_PREFIX),
+        "send-now must use the interjection preamble: {sent}"
     );
     assert!(
         sent.contains("<user_query>"),

@@ -164,8 +164,15 @@ impl ModelState {
         self.context_window_override = Some(tokens);
     }
 
-    /// Replace the available models, preserving current selection if still valid.
-    pub fn update_catalog(
+    /// Replace the available-model list. Leaves `current` and
+    /// `reasoning_effort` alone — those change only via `/model` / create / load.
+    pub fn update_catalog(&mut self, new_available: IndexMap<acp::ModelId, acp::ModelInfo>) {
+        self.available = new_available;
+    }
+
+    /// Replace the available-model list and re-resolve `current` against a
+    /// fallback when the catalog drops it (Hyper config-catalog reload path).
+    pub fn update_catalog_with_fallback(
         &mut self,
         new_available: IndexMap<acp::ModelId, acp::ModelInfo>,
         fallback_current: Option<acp::ModelId>,
@@ -539,63 +546,6 @@ mod tests {
         assert!(state.is_empty());
         assert!(state.current_model_name().is_none());
         assert!(state.next_model().is_none());
-    }
-
-    fn model_with_effort(id: &str, name: &str, effort: &str) -> acp::ModelInfo {
-        acp::ModelInfo::new(acp::ModelId::new(Arc::from(id)), name.to_string()).meta(
-            serde_json::json!({
-                "supportsReasoningEffort": true,
-                "reasoningEffort": effort,
-            })
-            .as_object()
-            .cloned(),
-        )
-    }
-
-    #[test]
-    fn update_catalog_preserves_user_effort_when_model_unchanged() {
-        let id = acp::ModelId::new(Arc::from("grok-build"));
-        let mut state = ModelState::default();
-        state.available.insert(
-            id.clone(),
-            model_with_effort("grok-build", "Grok Build", "high"),
-        );
-        state.set_current(id.clone(), Some(ReasoningEffort::Xhigh));
-        assert_eq!(state.reasoning_effort, Some(ReasoningEffort::Xhigh));
-
-        // The broadcast carries the model's static default (high) for the same model.
-        let mut refreshed = IndexMap::new();
-        refreshed.insert(
-            id.clone(),
-            model_with_effort("grok-build", "Grok Build", "high"),
-        );
-        state.update_catalog(refreshed, Some(id.clone()));
-
-        assert_eq!(
-            state.reasoning_effort,
-            Some(ReasoningEffort::Xhigh),
-            "catalog refresh must not clobber a user-set per-session effort"
-        );
-    }
-
-    #[test]
-    fn update_catalog_rederives_effort_when_current_model_changes() {
-        let id_a = acp::ModelId::new(Arc::from("model-a"));
-        let mut state = ModelState::default();
-        state.available.insert(
-            id_a.clone(),
-            model_with_effort("model-a", "Model A", "high"),
-        );
-        state.set_current(id_a.clone(), Some(ReasoningEffort::Xhigh));
-
-        // Refresh drops model-a; fall back to model-b whose default is low.
-        let id_b = acp::ModelId::new(Arc::from("model-b"));
-        let mut refreshed = IndexMap::new();
-        refreshed.insert(id_b.clone(), model_with_effort("model-b", "Model B", "low"));
-        state.update_catalog(refreshed, Some(id_b.clone()));
-
-        assert_eq!(state.current, Some(id_b));
-        assert_eq!(state.reasoning_effort, Some(ReasoningEffort::Low));
     }
 
     fn state_with_meta(meta: Option<serde_json::Value>) -> ModelState {

@@ -122,8 +122,7 @@ impl RelaySyncState {
     /// Writes to a temporary file then renames to avoid corruption on crash.
     /// Creates the session directory if it doesn't exist.
     pub fn save(&self, session_dir: &std::path::Path) -> std::io::Result<()> {
-        // Ensure session directory exists
-        std::fs::create_dir_all(session_dir)?;
+        crate::util::grok_home::create_dir_all_owner_only(session_dir)?;
 
         let path = Self::state_path(session_dir);
         let tmp_path = path.with_extension("json.tmp");
@@ -795,6 +794,17 @@ mod tests {
         assert_eq!(loaded.last_synced_event_id, Some("test-event".to_string()));
         assert_eq!(loaded.relay_session_id, Some("test-session".to_string()));
         assert_eq!(loaded.synced_count, 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_relay_sync_state_save_creates_owner_only_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let session_dir = temp_dir.path().join("session-abc");
+
+        RelaySyncState::default().save(&session_dir).unwrap();
+
+        assert_eq!(crate::test_support::unix_mode(&session_dir), 0o700);
     }
 
     #[test]

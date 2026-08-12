@@ -300,6 +300,51 @@ impl AgentView {
         self.last_drag_mouse = None;
     }
 
+    /// Finish a latched gesture whose `Up(Left)` was lost, as that release
+    /// would have: an active text/block drag delivers its copy (unlike
+    /// [`Self::clear_stuck_scrollback_drag`], which discards the gesture).
+    /// A sub-threshold press just drops its latches: a synthesized release
+    /// must not fabricate a click or leave click/link arms dangling.
+    pub(super) fn finish_stuck_drag_as_lost_up(&mut self) {
+        self.left_mouse_down = false;
+        self.scrollbar_dragging = false;
+        self.deferred_text_press = None;
+        self.pending_scrollback_click = None;
+        self.pending_link_click = None;
+        if self.drag_selection.is_some() {
+            self.finish_text_drag();
+        } else if self.block_drag_selection.is_some() {
+            self.finish_block_drag();
+        }
+        self.pending_text_drag = None;
+        self.pending_block_drag = None;
+        self.drag_autoscroll = None;
+        self.last_drag_mouse = None;
+    }
+
+    /// On xterm.js embeds a lost release can also mean the terminal's own
+    /// button tracker is wedged and will eat every release from now on
+    /// (VS Code after a context-menu gesture). Toggling reporting off and on
+    /// resets the tracker so the next gesture gets clean reports. Callers
+    /// must know the button is UP (bare `Moved`, an unpaired release): the
+    /// toggle clears xterm.js's tracking of a press in flight, so firing it
+    /// mid-press would break that gesture. Gated to xterm.js embeds: other
+    /// terminals don't have the wedge, and some (VTE) emit spurious events
+    /// on mouse-mode churn.
+    pub(super) fn reset_wedged_mouse_reporting(&self) {
+        if crate::terminal::terminal_context().brand.is_xtermjs_embed()
+            && crate::app::MOUSE_CAPTURE_ENABLED.load(std::sync::atomic::Ordering::Acquire)
+        {
+            xai_grok_shell::util::with_locked_stderr(|stderr| {
+                let _ = crossterm::execute!(
+                    stderr,
+                    crossterm::event::DisableMouseCapture,
+                    crossterm::event::EnableMouseCapture
+                );
+            });
+        }
+    }
+
     /// Update [`Self::plan_prompt_mouse_drag`] for a left-button mouse event
     /// during plan feedback and report whether the event should be forwarded
     /// to the feedback prompt (for cursor placement / text selection).

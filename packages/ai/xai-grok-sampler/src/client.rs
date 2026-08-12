@@ -25,7 +25,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::pi_messages::PiMessagesEvent;
-use xai_grok_sampling_types::error::{try_parse_stream_error, user_facing_api_error_message};
+use xai_grok_sampling_types::error::{
+    parse_error_code, try_parse_stream_error, user_facing_api_error_message,
+};
 use xai_grok_sampling_types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
     ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MaxTokensField,
@@ -311,6 +313,7 @@ fn codex_terminal_error(data: &str) -> Option<SamplingError> {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: Some(true),
+            error_code: None,
         });
     }
     if event.kind != "response.failed" {
@@ -371,6 +374,7 @@ fn codex_terminal_error(data: &str) -> Option<SamplingError> {
         message,
         model_metadata: None,
         should_retry,
+        error_code: None,
     })
 }
 
@@ -2481,6 +2485,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -2674,6 +2679,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -2910,6 +2916,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -3138,6 +3145,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -3372,6 +3380,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -3513,6 +3522,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -3690,6 +3700,7 @@ impl SamplingClient {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: None,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
         let identity =
@@ -3789,6 +3800,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
         let events = response
@@ -4094,6 +4106,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
         if let (Some(key), Some(turn_state)) = (codex_turn_key.as_ref(), response_turn_state) {
@@ -4303,6 +4316,7 @@ fn stream_collect_error(info: SamplingErrorInfo) -> SamplingError {
         model_metadata: info.model_metadata,
         retry_after_secs: info.retry_after_secs,
         should_retry: info.should_retry,
+        error_code: info.error_code,
     }
 }
 
@@ -4310,6 +4324,7 @@ fn stream_collect_error(info: SamplingErrorInfo) -> SamplingError {
 mod tests {
     use super::*;
     use indexmap::IndexMap;
+    use xai_grok_sampling_types::ApiErrorCode;
     use xai_grok_sampling_types::types::ChatRequestMessage;
 
     #[test]
@@ -4321,6 +4336,7 @@ mod tests {
             is_retryable: true,
             retry_after_secs: Some(3),
             should_retry: Some(false),
+            error_code: Some(ApiErrorCode::InvalidImage),
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
@@ -4335,6 +4351,7 @@ mod tests {
             model_metadata,
             retry_after_secs,
             should_retry,
+            error_code,
         } = stream_collect_error(info)
         else {
             panic!("expected Api");
@@ -4346,8 +4363,16 @@ mod tests {
                 model_metadata.is_none(),
                 retry_after_secs,
                 should_retry,
+                error_code,
             ),
-            (529, "Overloaded", true, Some(3), Some(false)),
+            (
+                529,
+                "Overloaded",
+                true,
+                Some(3),
+                Some(false),
+                Some(ApiErrorCode::InvalidImage)
+            ),
         );
     }
 

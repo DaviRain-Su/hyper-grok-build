@@ -535,6 +535,9 @@ pub enum EnqueueOutcome {
     Failed { reason: String },
     /// An identical `gcs_path` was already in flight, so this enqueue was skipped.
     Deduplicated,
+    /// The caller skipped enqueue on purpose (e.g. collect deadline). Not a
+    /// queue failure; after-turn reduction must not treat this as `Failed`.
+    Skipped { reason: String },
 }
 /// Internal outcome of [`UploadQueue::enqueue_core`], the shared body behind
 /// [`UploadQueue::enqueue`] and [`UploadQueue::enqueue_bytes_blocking`].

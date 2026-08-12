@@ -36,8 +36,9 @@ impl ResourceSnapshot {
         }
     }
 
-    /// RSS only, skipping the thread and descriptor scans. For sampling loops
-    /// that read just `rss`.
+    /// RSS from the cheap sampler, skipping the Linux descriptor scan (the
+    /// thread gauge rides that sample either way and is dropped here). For
+    /// sampling loops that read just `rss`.
     pub fn capture_rss() -> Option<usize> {
         xai_tty_utils::sample_process_memory()
             .rss_bytes

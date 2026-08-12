@@ -26,7 +26,7 @@ use xai_grok_sampler::{
 };
 use xai_grok_sampling_types::{
     BackendToolCallItem, BackendToolKind, ConversationItem, ConversationRequest,
-    DoomLoopRecoveryPolicy, ReasoningModelIdentity, UserItem,
+    DoomLoopRecoveryPolicy, INVALID_IMAGE_ERROR_CODE, ReasoningModelIdentity, UserItem,
 };
 use xai_grok_test_support::{SseEvent, sse};
 
@@ -461,6 +461,133 @@ async fn retries_on_500_then_accepts_chunk_without_response_id() {
     assert!(
         counter.load(Ordering::SeqCst) >= 2,
         "server hit at least twice"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Invalid-image 400 strips images and retries
+// ---------------------------------------------------------------------------
+
+/// The semantic `error.code` drives the strip recovery end-to-end: reject
+/// once with a coded 400, then expect a retry without the image and a
+/// Completed turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_image_code_strips_and_retries() {
+    const IMAGE_URI: &str = "data:image/png;base64,cG9pc29uZWQ=";
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let bodies_handler = Arc::clone(&bodies);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |body: String| {
+            let bodies = Arc::clone(&bodies_handler);
+            async move {
+                let n = {
+                    let mut b = bodies.lock().unwrap();
+                    b.push(body);
+                    b.len()
+                };
+                if n == 1 {
+                    // The FLAT envelope the xAI API's non-stream rejections
+                    // actually use; the message alone must not matter.
+                    Err::<Sse<_>, (StatusCode, String)>((
+                        StatusCode::BAD_REQUEST,
+                        json!({
+                            "code": INVALID_IMAGE_ERROR_CODE,
+                            "error": "some future wording without the legacy phrase",
+                        })
+                        .to_string(),
+                    ))
+                } else {
+                    let events = sse::chat_completion_events("recovered", "test-model");
+                    Ok(Sse::new(stream::iter(
+                        events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                    )))
+                }
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        test_config(server.base_url(), "test-model"),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let mut request = user_request("what is in this image?");
+    if let Some(ConversationItem::User(u)) = request.items.first_mut() {
+        u.add_image(IMAGE_URI);
+    }
+    handle.submit(RequestId::from("req-image-code-strip"), request);
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Completed { .. })),
+        "expected Completed after strip-retry, got {events:?}"
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "one rejection, one strip-retry");
+    assert!(bodies[0].contains(IMAGE_URI), "first attempt sends image");
+    assert!(
+        !bodies[1].contains(IMAGE_URI),
+        "strip-retry must not resend the image"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn image_400_with_nothing_left_to_strip_is_fatal_after_one_cycle() {
+    // The `stripped == 0` upgrade to Fatal is the only bound on the
+    // strip-retry loop: strip once, and if the server still answers an
+    // image 400, fail rather than spin.
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<Sse<futures_util::stream::Empty<Result<Event, std::convert::Infallible>>>, _>(
+                    (
+                        StatusCode::BAD_REQUEST,
+                        json!({
+                            "code": INVALID_IMAGE_ERROR_CODE,
+                            "error": "Base64 string of provided image cannot be decoded.",
+                        })
+                        .to_string(),
+                    ),
+                )
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        test_config(server.base_url(), "test-model"),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let mut request = user_request("what is in this image?");
+    if let Some(ConversationItem::User(u)) = request.items.first_mut() {
+        u.add_image("data:image/png;base64,cG9pc29uZWQ=");
+    }
+    handle.submit(RequestId::from("req-strip-exhausted"), request);
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Failed { .. })),
+        "second image 400 with nothing left to strip must be fatal, got {events:?}"
+    );
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "one rejection, one strip-retry, then stop"
     );
 }
 

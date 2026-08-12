@@ -13,6 +13,13 @@ use std::path::{Path, PathBuf};
 // expansion) live in a submodule; re-exported so call sites use `deny::…`.
 #[cfg(all(feature = "enforce", unix))]
 mod glob;
+
+/// Whether a raw config entry is a glob pattern rather than an exact path. True
+/// iff it contains a gitignore-style metacharacter (`*`, `?`, `[`). The single
+/// classifier for both `deny` entries and `read_only`/`read_write` allow paths.
+pub(crate) fn is_glob(entry: &str) -> bool {
+    entry.contains(['*', '?', '['])
+}
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 pub(crate) use glob::{DENY_GLOB_CAPS, expand_deny_globs};
 #[cfg(all(feature = "enforce", unix))]

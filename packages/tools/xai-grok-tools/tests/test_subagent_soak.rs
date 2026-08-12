@@ -82,8 +82,11 @@ impl Metric {
         }
     }
 
-    /// RSS is sampled on every unix; thread and open-file counts are Linux-only.
-    fn expected_on_this_platform(self) -> bool {
+    /// Where a metric must be present and within budget. RSS everywhere;
+    /// threads and open files only on Linux — macOS now samples threads too,
+    /// but the budgets are tuned against Linux nightlies, so a macOS sample
+    /// lands in the summary without being enforced.
+    fn budgeted_on_this_platform(self) -> bool {
         match self {
             Metric::Rss => true,
             Metric::Threads | Metric::Fds => cfg!(target_os = "linux"),
@@ -507,20 +510,24 @@ async fn measure(
     }
 }
 
-/// Takes `expected` as a parameter so the skip arm is testable on any platform.
+/// Takes `budgeted` as a parameter so both arms are testable on any platform.
+/// An unbudgeted metric never fails: missing is fine, and a present value
+/// (macOS thread counts) is informational, not measured against a bound
+/// tuned for another platform.
 fn metric_failure(
     metric: Metric,
     value: Option<usize>,
-    expected: bool,
+    budgeted: bool,
     bounds: &Bounds,
 ) -> Option<String> {
+    if !budgeted {
+        return None;
+    }
     let Some(raw) = value else {
-        return expected.then(|| {
-            format!(
-                "{}: growth sample unavailable; the soak cannot bound it",
-                metric.label()
-            )
-        });
+        return Some(format!(
+            "{}: growth sample unavailable; the soak cannot bound it",
+            metric.label()
+        ));
     };
     let growth = metric.growth_in_budget_unit(raw);
     let budget = metric.budget(bounds);
@@ -565,8 +572,8 @@ fn check_bounds(bounds: &Bounds, m: &Measurement) -> Vec<String> {
     }
 
     for metric in Metric::iter() {
-        let expected = metric.expected_on_this_platform();
-        if let Some(f) = metric_failure(metric, m.growth.value_of(metric), expected, bounds) {
+        let budgeted = metric.budgeted_on_this_platform();
+        if let Some(f) = metric_failure(metric, m.growth.value_of(metric), budgeted, bounds) {
             failures.push(f);
         }
     }
@@ -803,9 +810,12 @@ mod tests {
     }
 
     #[test]
-    fn metric_failure_covers_expected_missing_unexpected_missing_and_budget() {
+    fn metric_failure_covers_unbudgeted_missing_and_budget_arms() {
         let b = generous_bounds();
         assert!(metric_failure(Metric::Threads, None, false, &b).is_none());
+        // An unbudgeted metric with a present, over-budget value stays
+        // informational (macOS thread counts against Linux-tuned bounds).
+        assert!(metric_failure(Metric::Threads, Some(usize::MAX), false, &b).is_none());
         assert!(
             metric_failure(Metric::Rss, None, true, &b)
                 .unwrap()
@@ -904,22 +914,28 @@ mod tests {
         );
     }
 
+    /// Thread and open-file budgets only bite on Linux; elsewhere the same
+    /// over-budget growth is informational and must not fail the soak.
     #[test]
-    fn check_bounds_flags_thread_and_open_files_over_budget() {
+    fn check_bounds_flags_thread_and_open_files_over_budget_on_linux_only() {
         let growth = ResourceGrowth {
             rss: Some(0),
             threads: Some(200),
             open_files: Some(200),
         };
         let failures = check_bounds(&generous_bounds(), &drained(growth, None));
-        assert!(
-            failures.iter().any(|f| f.starts_with("threads:")),
-            "{failures:?}"
-        );
-        assert!(
-            failures.iter().any(|f| f.starts_with("open_files:")),
-            "{failures:?}"
-        );
+        if cfg!(target_os = "linux") {
+            assert!(
+                failures.iter().any(|f| f.starts_with("threads:")),
+                "{failures:?}"
+            );
+            assert!(
+                failures.iter().any(|f| f.starts_with("open_files:")),
+                "{failures:?}"
+            );
+        } else {
+            assert!(failures.is_empty(), "{failures:?}");
+        }
     }
 
     #[test]

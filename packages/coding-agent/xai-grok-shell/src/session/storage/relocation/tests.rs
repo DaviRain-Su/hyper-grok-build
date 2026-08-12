@@ -239,6 +239,33 @@ fn create_valid_target(root: &Path, journal: &RelocationJournal) -> PathBuf {
 }
 
 #[test]
+fn stage_and_publish_creates_owner_only_target_parent() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = RelocationStorage::new(temp.path().into());
+    create_source(temp.path(), "/source", "perm", 0);
+    let lease = storage.acquire("perm").unwrap();
+    storage
+        .stage_and_publish(&lease, request("perm", "/source", "/target", 1))
+        .unwrap();
+
+    let parent = session_dir(temp.path(), "/target", "perm")
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    use crate::test_support::unix_mode;
+    assert_eq!(
+        unix_mode(&parent),
+        0o700,
+        "<encoded-cwd> target parent must be 0700"
+    );
+    assert_eq!(
+        unix_mode(&temp.path().join("sessions")),
+        0o700,
+        "sessions root must be 0700"
+    );
+}
+
+#[test]
 fn commit_and_rollback_terminal_proofs_allow_retries_and_second_relocation() {
     let temp = tempfile::tempdir().unwrap();
     let storage = RelocationStorage::new(temp.path().into());

@@ -444,16 +444,20 @@ impl AgentView {
         {
             let history = self.combined_prompt_history();
             let current_text = self.prompt.text().to_string();
-            // Without a matcher thread the panel can never populate, and filling
-            // the composer would only be undone by the next Down/Enter.
-            if !history.is_empty() && self.prompt.history_search.is_available() {
-                self.prompt
+            if !history.is_empty() {
+                // Activation fails when the matcher thread can't start; then
+                // the panel can never populate, and filling the composer
+                // would only be undone by the next Down/Enter.
+                let opened = self
+                    .prompt
                     .history_search
                     .activate_browse(&history, &current_text);
-                // The daemon fills the panel async; fill the newest
-                // entry deterministically from the input slice.
-                let newest = history[0].text.clone();
-                self.populate_prompt_from_history(&newest);
+                if opened {
+                    // The daemon fills the panel async; fill the newest
+                    // entry deterministically from the input slice.
+                    let newest = history[0].text.clone();
+                    self.populate_prompt_from_history(&newest);
+                }
             }
             // Consumed even with empty history (Up on an empty composer
             // has no cursor motion to fall back to).

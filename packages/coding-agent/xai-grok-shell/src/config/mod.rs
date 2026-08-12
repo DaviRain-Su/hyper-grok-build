@@ -889,8 +889,10 @@ pub struct ToolsConfig {
     /// When `true`, all tools (including `read_file`) filter gitignored
     /// files. When `false` (default), each tool picks its own default.
     pub respect_gitignore: bool,
-    /// Drop tools whose xAI API requires server-side artifact storage
-    /// (currently just `video_gen`). Intended for ZDR-bound teams via
+    /// Restrict tools whose xAI API requires server-side artifact storage
+    /// (currently just the video tools): without a valid
+    /// `[tools.zdr_video_output_s3]` bucket they stay advertised but return
+    /// setup guidance at call time. Intended for ZDR-bound teams via
     /// `~/.grok/managed_config.toml`. Defaults to `false`.
     pub disable_zdr_incompatible_tools: bool,
     /// Optional S3 bucket config for ZDR video output. When present (and

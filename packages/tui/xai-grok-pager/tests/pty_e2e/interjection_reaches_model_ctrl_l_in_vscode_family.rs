@@ -5,7 +5,7 @@ use super::common::*;
 /// 19b. **VS Code family: Ctrl+L (form feed) is the send-now chord** with the
 /// same cancel-and-send semantics as the default Ctrl+Enter binding: the
 /// running turn is cancelled silently and the composer text runs as its own
-/// next turn (standard `<user_query>` prompt, no interjection preamble).
+/// next turn (with the interjection preamble).
 /// Harness strips `TERM_PROGRAM` then applies env — pass `vscode` so
 /// defaults bind the chord to Ctrl+L.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -80,8 +80,8 @@ async fn interjection_reaches_model_ctrl_l_in_vscode_family() {
         .find(|u| u.contains("please also check the logs"))
         .unwrap_or_else(|| panic!("sent-now message never reached the wire: {users:#?}"));
     assert!(
-        !sent.contains(INTERJECTION_WIRE_PREFIX),
-        "send-now must not use the interjection preamble: {sent}"
+        sent.contains(INTERJECTION_WIRE_PREFIX),
+        "send-now must use the interjection preamble: {sent}"
     );
     assert!(
         sent.contains("<user_query>"),

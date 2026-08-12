@@ -78,6 +78,9 @@ pub(super) fn apply(
     expanded_groups: &HashSet<EntryId>,
 ) -> Vec<GroupSpan> {
     for info in layout_cache.iter_mut() {
+        if info.is_expanded_verb_header() {
+            info.height = info.height.saturating_sub(1);
+        }
         info.group_header_count = 0;
         info.group_collapse_header = false;
         info.verb_group_header = false;
@@ -281,17 +284,11 @@ pub(super) fn project_to_layout(
     }
 }
 
-/// Collapsed: header renders the aggregated label at `height=1`; other
-/// claimed entries fold to `height=0`. Expanded: the header slot is an
-/// absolute `height=2` — the header line plus entry 0's own row — so ALL
-/// members, including the first, reveal below it (unlike the N-more
-/// expanded shape, which replaces entry 0's content); members keep their
-/// normal heights. Gaps zero only WITHIN the run: `virtual_y` accumulates
-/// `gap_after` even for height-0 entries, so the LAST claimed entry keeps
-/// the pairwise boundary gap `recompute_gap_after` computed against the
-/// entry after the run — zeroing it glued the folded header to whatever
-/// followed. Transparent entries (live/opened thinking, opened members)
-/// keep their rows but donate their trailing gap while collapsed.
+/// Collapsed: the header is `height=1`; other claimed entries are `height=0`.
+/// Expanded: every member keeps its measured rows while the header stacks
+/// above member 0. Gaps zero only within the run; the last claimed entry keeps
+/// the boundary gap to the following entry. Transparent entries keep their
+/// rows but donate their gap while collapsed.
 fn project_verb_run(
     span: &GroupSpan,
     members: usize,
@@ -319,7 +316,11 @@ fn project_verb_run(
             cached.verb_group_header = true;
             cached.group_collapse_header = span.expanded;
             cached.group_header_count = members.min(u16::MAX as usize) as u16;
-            cached.height = if span.expanded { 2 } else { 1 };
+            if span.expanded {
+                cached.height = cached.with_verb_header_row(cached.height);
+            } else {
+                cached.height = 1;
+            }
             // A singleton run's header is also its last claimed entry: it
             // keeps the pairwise boundary gap, else the header glues to what
             // follows.
@@ -517,11 +518,15 @@ mod tests {
         let entries = map(vec![skill_read(), skill_read()]);
         let mut layout = seeded_layout(entries.len());
         let expanded: HashSet<EntryId> = [EntryId::new(0)].into();
-        let spans = scan_and_project(&entries, &mut layout, 10, &expanded);
+        let spans = apply(&entries, &mut layout, 10, &expanded);
         assert!(spans[0].expanded);
         assert!(layout[0].group_collapse_header);
-        assert_eq!(layout[0].height, 2);
+        assert_eq!(layout[0].height, 6, "header stacks above measured rows");
         assert_eq!(layout[1].height, 5, "expanded members keep their rows");
+
+        apply(&entries, &mut layout, 10, &expanded);
+        assert_eq!(layout[0].height, 6, "reapplying the fold is idempotent");
+        assert_eq!(layout[1].height, 5, "member height stays stable");
     }
 
     #[test]

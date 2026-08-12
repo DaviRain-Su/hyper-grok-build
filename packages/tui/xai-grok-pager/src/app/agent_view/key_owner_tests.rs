@@ -596,6 +596,7 @@ fn the_permission_esc_ladder_steps_out_one_rung_at_a_time() {
 #[test]
 fn the_cancel_turn_panel_resolves_instead_of_parking() {
     let mut agent = make_agent();
+    agent.session.state = crate::app::agent::AgentState::TurnRunning;
     open_cancel_turn(&mut agent);
 
     assert_eq!(agent.card_esc(), Some(EscStep::KeepRunning));
@@ -603,19 +604,46 @@ fn the_cancel_turn_panel_resolves_instead_of_parking() {
 
     let outcome = agent.handle_cancel_turn_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
-        matches!(
-            outcome,
-            crate::app::app_view::InputOutcome::Action(
-                crate::app::actions::Action::CancelTurnChoice(CancelTurnChoice::ContinueToRun)
-            )
-        ),
-        "Esc confirms 'keep everything running', got {outcome:?}"
+        matches!(outcome, crate::app::app_view::InputOutcome::Changed),
+        "Esc must dismiss the panel without cancelling the turn, got {outcome:?}"
+    );
+    assert!(
+        agent.cancel_turn_view.is_none(),
+        "keep-running closes the panel"
+    );
+    assert!(
+        agent.session.state.is_turn_running(),
+        "dismissing is not a cancel"
     );
     assert_eq!(
         agent.active_pane,
         AgentPane::Prompt,
         "resolving is the way out, so the panel never parks"
     );
+}
+
+#[test]
+fn esc_on_the_cancel_turn_panel_does_not_cancel_the_turn() {
+    let mut agent = make_agent();
+    agent.session.state = crate::app::agent::AgentState::TurnRunning;
+    open_cancel_turn(&mut agent);
+
+    let outcome = agent.handle_input(
+        &crossterm::event::Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        !matches!(
+            outcome,
+            crate::app::app_view::InputOutcome::Action(
+                crate::app::actions::Action::CancelTurn
+                    | crate::app::actions::Action::CancelTurnChoice(_)
+            )
+        ),
+        "the bar's 'keep running' must not cancel the turn, got {outcome:?}"
+    );
+    assert!(agent.cancel_turn_view.is_none());
+    assert!(agent.session.state.is_turn_running());
 }
 
 /// Inside the dashboard overlay the ladder's last rung is the dashboard, and

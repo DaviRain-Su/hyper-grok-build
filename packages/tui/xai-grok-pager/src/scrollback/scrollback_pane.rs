@@ -8,6 +8,7 @@ use std::ops::Range;
 
 use crate::render::SafeBuf;
 use crate::render::color::{blend_color, fade_region};
+use crate::scrollback::EntryLayoutInfo;
 use crate::scrollback::block::{BlockContent, RenderBlock};
 use crate::scrollback::entry::ScrollbackEntry;
 use crate::scrollback::layout::HorizontalLayout;
@@ -315,7 +316,7 @@ impl ScrollbackPane {
         let verb_expanded = state
             .get_cached_entry_layouts()
             .and_then(|l| l.get(hover_idx))
-            .is_some_and(|i| i.verb_group_header && i.group_collapse_header);
+            .is_some_and(EntryLayoutInfo::is_expanded_verb_header);
         paint_expandable_indicator(
             buf,
             area,
@@ -1169,7 +1170,7 @@ impl ScrollbackPane {
                 let verb_expanded = state
                     .get_cached_entry_layouts()
                     .and_then(|l| l.get(selected_abs))
-                    .is_some_and(|i| i.verb_group_header && i.group_collapse_header);
+                    .is_some_and(EntryLayoutInfo::is_expanded_verb_header);
                 // Bottom-clip that cuts the member row off is handled by the
                 // paint fn's bounds guard (the offset row is simply skipped).
                 paint_expandable_indicator(

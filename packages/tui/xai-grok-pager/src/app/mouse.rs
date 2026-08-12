@@ -9,8 +9,8 @@
 use super::actions::Action;
 use super::agent_view::{
     AgentPane, AgentView, CONTEXT_CLICK_DEBOUNCE_MS, CtaPhase, MULTI_CLICK_TIMEOUT_MS,
-    PromptInputMode, PromptMode, TextClickState, app_should_open_link_on_click,
-    has_native_link_hover, is_link_modifier_held, is_text_selection_on_double_click,
+    PromptInputMode, PromptMode, TextClickState, is_link_modifier_held,
+    is_text_selection_on_double_click,
 };
 use super::app_view::InputOutcome;
 use crate::scrollback::block::BlockContent;
@@ -446,13 +446,9 @@ impl AgentView {
                 {
                     self.set_active_pane(AgentPane::Prompt, false);
                     self.btw_focused = true;
-                    if !has_native_link_hover()
-                        && is_link_modifier_held(mouse.modifiers)
-                        && !self.pos_occluded(mouse.column, mouse.row)
-                        && let Some(link) = self.visible_link_map.link_at(mouse.column, mouse.row)
+                    if is_link_modifier_held(mouse.modifiers)
+                        && self.try_arm_link_click(mouse.column, mouse.row)
                     {
-                        self.pending_link_click = app_should_open_link_on_click(link)
-                            .then(|| (mouse.column, mouse.row, link.target.clone()));
                         self.pending_scrollback_click = None;
                         return InputOutcome::Changed;
                     }
@@ -733,14 +729,9 @@ impl AgentView {
                         self.persistent_text_selection = None;
                         self.table_selection_geometry = None;
                         self.selection_created_at = None;
-                        if !has_native_link_hover()
-                            && is_link_modifier_held(mouse.modifiers)
-                            && !self.pos_occluded(mouse.column, mouse.row)
-                            && let Some(link) =
-                                self.visible_link_map.link_at(mouse.column, mouse.row)
+                        if is_link_modifier_held(mouse.modifiers)
+                            && self.try_arm_link_click(mouse.column, mouse.row)
                         {
-                            self.pending_link_click = app_should_open_link_on_click(link)
-                                .then(|| (mouse.column, mouse.row, link.target.clone()));
                             self.pending_scrollback_click = None;
                             return InputOutcome::Changed;
                         }
@@ -938,9 +929,9 @@ impl AgentView {
                                     .scrollback
                                     .get_cached_entry_layouts()
                                     .and_then(|l| l.get(idx))
-                                    .is_some_and(|i| {
-                                        i.verb_group_header && i.group_collapse_header
-                                    })
+                                    .is_some_and(
+                                        crate::scrollback::EntryLayoutInfo::is_expanded_verb_header,
+                                    )
                                     && self
                                         .scrollback
                                         .entry_screen_area(idx, self.pane_areas.scrollback)
@@ -1007,19 +998,6 @@ impl AgentView {
                     left_mouse_down = self.left_mouse_down,
                     "scrollback mouse moved"
                 );
-                if self.left_mouse_down
-                    && (self.pending_text_drag.is_some()
-                        || self.drag_selection.is_some()
-                        || self.pending_block_drag.is_some()
-                        || self.block_drag_selection.is_some()
-                        || self.deferred_text_press.is_some())
-                {
-                    self.pending_link_click = None;
-                    let outcome = self.handle_scrollback_drag_motion(mouse);
-                    if !matches!(outcome, InputOutcome::Unchanged) {
-                        return outcome;
-                    }
-                }
                 let suppress_scrollback_hover = self.pending_text_drag.is_some()
                     || self.drag_selection.is_some()
                     || self.pending_block_drag.is_some()

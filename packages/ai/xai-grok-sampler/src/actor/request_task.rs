@@ -405,6 +405,11 @@ async fn apply_retry_decision(
                 send_completion(completion_tx, Err(clone_error(err)));
                 return false;
             }
+            tracing::warn!(
+                stripped,
+                error = %err,
+                "stripped {stripped} image(s) after server rejection; retrying without them"
+            );
             *retry_count += 1;
             emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
             true
@@ -862,6 +867,7 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
                 model_metadata: info.model_metadata.clone(),
                 retry_after_secs: info.retry_after_secs,
                 should_retry: info.should_retry,
+                error_code: info.error_code.clone(),
             }
         }
         SamplingErrorKind::EmptyResponse => {
@@ -979,6 +985,7 @@ fn handle_cancellation(
         is_retryable: false,
         retry_after_secs: None,
         should_retry: None,
+        error_code: None,
         model_metadata: None,
         empty_response_context: None,
         doom_loop_triggers: None,
@@ -1008,6 +1015,7 @@ fn send_completion(
 mod tests {
     use super::*;
     use futures_util::stream;
+    use xai_grok_sampling_types::ApiErrorCode;
 
     #[test]
     fn synthesize_idle_timeout_extracts_elapsed_secs() {
@@ -1018,6 +1026,7 @@ mod tests {
             is_retryable: false,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
@@ -1040,6 +1049,7 @@ mod tests {
             is_retryable: true,
             retry_after_secs: None,
             should_retry: Some(false),
+            error_code: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
@@ -1062,6 +1072,54 @@ mod tests {
         }
     }
 
+    /// A coded invalid-image error must survive the info round trip: the
+    /// message alone would not classify, so losing the code would silently
+    /// disable strip recovery on synthesized failures.
+    #[test]
+    fn synthesize_preserves_error_code_and_image_classification() {
+        let original = SamplingError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            message: "some future wording without the legacy phrase".to_string(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: Some(ApiErrorCode::InvalidImage),
+        };
+        assert!(original.is_image_processing_error());
+
+        let info = SamplingErrorInfo::from(&original);
+        assert_eq!(info.error_code, Some(ApiErrorCode::InvalidImage));
+
+        let round_tripped = synthesize_from_info(&info);
+        assert!(
+            round_tripped.is_image_processing_error(),
+            "round-tripped error must still classify: {round_tripped:?}"
+        );
+    }
+
+    /// A StreamError-sourced info has `status_code: None`; synthesis falls
+    /// back to a 500 Api error. That fallback must stay inside the
+    /// classifier's 400|500 gate, or coded mid-stream image rejections
+    /// silently stop stripping after the round trip.
+    #[test]
+    fn synthesize_stream_sourced_info_still_classifies_for_strip() {
+        let original = SamplingError::StreamError {
+            error_type: "invalid_request_error".into(),
+            message: "bad image".into(),
+            code: Some(ApiErrorCode::InvalidImage),
+        };
+        assert!(original.is_image_processing_error());
+
+        let info = SamplingErrorInfo::from(&original);
+        assert_eq!(info.status_code, None, "stream errors carry no status");
+
+        let round_tripped = synthesize_from_info(&info);
+        assert!(
+            round_tripped.is_image_processing_error(),
+            "stream-sourced round trip must still classify: {round_tripped:?}"
+        );
+    }
+
     #[test]
     fn synthesize_rate_limited_preserves_retry_after() {
         let info = SamplingErrorInfo {
@@ -1071,6 +1129,7 @@ mod tests {
             is_retryable: true,
             retry_after_secs: Some(7),
             should_retry: None,
+            error_code: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
@@ -1193,6 +1252,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: Some(false),
+            error_code: None,
         };
 
         let should_continue = apply_retry_decision(

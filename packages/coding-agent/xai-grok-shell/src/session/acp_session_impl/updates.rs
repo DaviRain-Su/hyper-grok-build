@@ -865,6 +865,37 @@ impl SessionActor {
         )
         .await;
     }
+    pub(super) async fn dispatch_permission_prompt_notification(&self, message: &str) {
+        self.dispatch_notification_hook(
+            "permission_prompt",
+            Some(message.to_owned()),
+            None,
+            Some("info".into()),
+        )
+        .await;
+    }
+    /// Wire the manager's prompt-start signal to `permission_prompt`.
+    ///
+    /// Call only from the session that owns the manager (`owns_permission_manager`
+    /// at spawn). Inherited/cloned handles must not call this; first-writer-wins
+    /// on the handle is the backstop. A subagent that spawned its own manager
+    /// should wire — the user waits on that prompt. `Weak` so the listener
+    /// cannot keep a dropped session alive.
+    pub(super) fn wire_permission_prompt_notification(self: &std::sync::Arc<Self>) {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        self.permissions.set_user_prompt_notify(tx);
+        let session = std::sync::Arc::downgrade(self);
+        tokio::task::spawn_local(async move {
+            while rx.recv().await.is_some() {
+                let Some(session) = session.upgrade() else {
+                    break;
+                };
+                session
+                    .dispatch_permission_prompt_notification("Tool permission requested")
+                    .await;
+            }
+        });
+    }
     /// Send an xAI extension notification to the client
     #[tracing::instrument(skip_all)]
     pub(super) async fn send_xai_notification(&self, update: XaiSessionUpdate) {

@@ -59,9 +59,11 @@ impl VisibleLinkMap {
 
     /// Rebuild the link map from a `LinkOverlay` and citation URLs.
     ///
-    /// Consecutive `OverlayLink`s with the same `id` (e.g. a single link
-    /// that word-wrapped across rows) are merged into one `VisibleLink`
-    /// with multiple `rects`.
+    /// Consecutive `OverlayLink`s with the same `id` **and** target (a
+    /// single link that word-wrapped across rows) are merged into one
+    /// `VisibleLink` with multiple `rects`. Same `id` alone is not enough:
+    /// markdown ids restart per document, so two visible messages can both
+    /// carry `id=0` for different URLs.
     pub fn rebuild(
         &mut self,
         generation: u64,
@@ -102,12 +104,13 @@ impl VisibleLinkMap {
 
     /// Append overlay links (e.g. `/btw`) without changing generation.
     ///
-    /// Same-`id` merge applies only *within this append* — markdown link ids
-    /// are per-document, so they will not merge with anything appended
-    /// earlier this frame (whether that is the scrollback prefix from
-    /// [`Self::rebuild`] or a previous [`Self::append_from_overlay`] call
-    /// from another overlay source). Wrapped segments of the same logical
-    /// link inside `overlay` still merge correctly.
+    /// Same-id+same-target merge applies only *within this append* —
+    /// markdown link ids are per-document, so they will not merge with
+    /// anything appended earlier this frame (whether that is the scrollback
+    /// prefix from [`Self::rebuild`] or a previous
+    /// [`Self::append_from_overlay`] call from another overlay source).
+    /// Wrapped segments of the same logical link inside `overlay` still
+    /// merge correctly.
     ///
     /// Callers that re-append the same source every frame must
     /// [`Self::truncate`] back to the desired prefix length first, otherwise
@@ -117,8 +120,8 @@ impl VisibleLinkMap {
         self.push_overlay_links(overlay, start_len, crate::terminal::terminal_context());
     }
 
-    /// Push overlay segments, merging same-`id` only with entries at
-    /// indices `>= merge_from` (0 for rebuild; map length for append).
+    /// Push overlay segments, merging same-id+same-target only with entries
+    /// at indices `>= merge_from` (0 for rebuild; map length for append).
     fn push_overlay_links(
         &mut self,
         overlay: &LinkOverlay,
@@ -144,6 +147,7 @@ impl VisibleLinkMap {
                 && self.links.len() > merge_from
                 && let Some(prev) = self.links.last_mut()
                 && prev.id == Some(id)
+                && prev.target == target
             {
                 prev.rects.push(rect);
             } else {
@@ -533,6 +537,43 @@ mod tests {
         map.rebuild(1, &overlay, vec![]);
 
         assert_eq!(map.links().len(), 2);
+    }
+
+    #[test]
+    fn same_id_different_url_stays_separate() {
+        let mut map = VisibleLinkMap::default();
+        let overlay = make_overlay(vec![
+            (3, 0, 10, "https://first.com", Some(0)),
+            (4, 0, 10, "https://second.com", Some(0)),
+            (5, 0, 10, "https://third.com", Some(0)),
+        ]);
+        map.rebuild(1, &overlay, vec![]);
+
+        assert_eq!(map.links().len(), 3);
+        assert_eq!(
+            &*resolve_link_target(&map.link_at(5, 3).unwrap().target)
+                .unwrap()
+                .osc8_url
+                .unwrap(),
+            "https://first.com"
+        );
+        assert_eq!(
+            &*resolve_link_target(&map.link_at(5, 4).unwrap().target)
+                .unwrap()
+                .osc8_url
+                .unwrap(),
+            "https://second.com"
+        );
+        assert_eq!(
+            &*resolve_link_target(&map.link_at(5, 5).unwrap().target)
+                .unwrap()
+                .osc8_url
+                .unwrap(),
+            "https://third.com"
+        );
+        assert_eq!(map.links()[0].rects.len(), 1);
+        assert_eq!(map.links()[1].rects.len(), 1);
+        assert_eq!(map.links()[2].rects.len(), 1);
     }
 
     #[test]

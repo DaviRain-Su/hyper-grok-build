@@ -26,6 +26,7 @@ pub struct LinkSpan {
     pub col_start: u16,
     pub col_end: u16,
     pub url: Arc<str>,
+    /// Source grouping key (markdown / overlay id), not the emitted OSC 8 `id=`.
     pub id: Option<u32>,
 }
 
@@ -34,7 +35,14 @@ pub struct LinkSpan {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LinkRef {
     url: Arc<str>,
+    /// Reminted OSC 8 `id=`, not [`LinkSpan::id`].
     id: Option<u32>,
+}
+
+struct LastNamedOsc8 {
+    source_id: u32,
+    url: Arc<str>,
+    osc8_id: u32,
 }
 
 /// Resolve a per-cell link id (`0` = none) to its [`LinkRef`].
@@ -68,6 +76,32 @@ fn write_osc8_open<W: Write>(w: &mut W, url: &str, id: Option<u32>) -> io::Resul
 /// Emit an OSC 8 hyperlink close sequence.
 fn write_osc8_close<W: Write>(w: &mut W) -> io::Result<()> {
     w.write_all(b"\x1b]8;;\x07")
+}
+
+/// Markdown ids restart per document; OSC 8 `id=` is terminal-global.
+/// Consecutive wrap segments of the same source id+URL reuse the last emitted id.
+fn next_osc8_id(
+    span: &LinkSpan,
+    last_named: &mut Option<LastNamedOsc8>,
+    next: &mut u32,
+) -> Option<u32> {
+    let Some(source_id) = span.id else {
+        *last_named = None;
+        return None;
+    };
+    if let Some(last) = last_named.as_ref()
+        && last.source_id == source_id
+        && last.url.as_ref() == span.url.as_ref()
+    {
+        return Some(last.osc8_id);
+    }
+    *next = next.saturating_add(1);
+    *last_named = Some(LastNamedOsc8 {
+        source_id,
+        url: Arc::clone(&span.url),
+        osc8_id: *next,
+    });
+    Some(*next)
 }
 
 #[derive(Debug, Hash)]
@@ -324,6 +358,9 @@ where
     /// [`flush_with_links`]. Passing an empty slice clears the frame's links
     /// (so links from the previous frame are diffed away).
     ///
+    /// [`LinkSpan::id`] is a source grouping key. Consecutive spans with the
+    /// same id and URL share one reminted OSC 8 `id=` starting at 1.
+    ///
     /// [`flush_with_links`]: Self::flush_with_links
     pub fn set_frame_links(&mut self, spans: &[LinkSpan]) {
         let area = self.viewport_area;
@@ -336,6 +373,9 @@ where
         let table = &mut self.link_tables[self.current];
         table.clear();
 
+        let mut next = 0u32;
+        let mut last_named: Option<LastNamedOsc8> = None;
+
         for span in spans {
             if span.row < area.y || span.row >= area.bottom() {
                 continue;
@@ -345,10 +385,11 @@ where
             if start >= end {
                 continue;
             }
+            let osc8_id = next_osc8_id(span, &mut last_named, &mut next);
             let id = (table.len() + 1) as u32;
             table.push(LinkRef {
                 url: span.url.clone(),
-                id: span.id,
+                id: osc8_id,
             });
             let row = (span.row - area.y) as usize;
             for col in start..end {

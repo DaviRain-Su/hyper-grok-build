@@ -10,7 +10,8 @@ use super::search_recovery;
 pub(super) fn search_db_path(root_dir: &Path) -> PathBuf {
     let sessions = root_dir.join("sessions");
     // Best-effort: the journal-mode classifier statfs's the parent dir.
-    let _ = std::fs::create_dir_all(&sessions);
+    // Owner-only root: the index duplicates session text into the db file.
+    let _ = crate::util::grok_home::create_dir_all_owner_only(&sessions);
     let path = sessions.join("session_search.sqlite");
     // Pre-resolve the per-host sibling so raw file ops target the same file
     // the index opens.

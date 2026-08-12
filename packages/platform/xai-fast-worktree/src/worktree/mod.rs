@@ -1218,6 +1218,324 @@ mod tests {
         assert!(result.ignored_copy.is_some());
     }
 
+    #[test]
+    fn test_standalone_worktree_narrows_origin_fetch() {
+        xai_test_utils::require_git!();
+        let temp = TempDir::new().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        std::fs::write(repo_path.join("file.txt"), "content").unwrap();
+        git_commit_all(&repo_path, "initial");
+        let branch =
+            xai_test_utils::git::run_git(&repo_path, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        xai_test_utils::git::run_git(
+            &repo_path,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/xai-org/xai.git",
+            ],
+        );
+        xai_test_utils::git::run_git(
+            &repo_path,
+            &[
+                "config",
+                "--replace-all",
+                "remote.origin.fetch",
+                "+refs/heads/*",
+            ],
+        );
+        assert_eq!(
+            xai_test_utils::git::run_git(&repo_path, &["config", "--get", "remote.origin.fetch"]),
+            "+refs/heads/*"
+        );
+
+        let worktree_path = temp.path().join("standalone");
+        WorktreeBuilder::new(repo_path.clone(), worktree_path.clone())
+            .standalone(true)
+            .create()
+            .unwrap();
+
+        assert_eq!(
+            xai_test_utils::git::run_git(
+                &worktree_path,
+                &["config", "--get-all", "remote.origin.fetch"]
+            ),
+            format!("+refs/heads/{branch}:refs/remotes/origin/{branch}")
+        );
+        assert_eq!(
+            xai_test_utils::git::run_git(&worktree_path, &["config", "--get", "remote.origin.url"]),
+            "https://github.com/xai-org/xai.git"
+        );
+    }
+
+    #[test]
+    fn test_standalone_worktree_drops_inconsistent_shallow() {
+        xai_test_utils::require_git!();
+        let temp = TempDir::new().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        std::fs::write(repo_path.join("a.txt"), "a").unwrap();
+        git_commit_all(&repo_path, "A");
+        let a = xai_test_utils::git::run_git(&repo_path, &["rev-parse", "HEAD"]);
+        std::fs::write(repo_path.join("b.txt"), "b").unwrap();
+        git_commit_all(&repo_path, "B");
+        let b = xai_test_utils::git::run_git(&repo_path, &["rev-parse", "HEAD"]);
+        xai_test_utils::git::run_git(&repo_path, &["checkout", "-b", "feature", &a]);
+        std::fs::write(repo_path.join("d.txt"), "d").unwrap();
+        git_commit_all(&repo_path, "D");
+        xai_test_utils::git::run_git(&repo_path, &["update-ref", "refs/heads/main", &b]);
+        xai_test_utils::git::run_git(&repo_path, &["update-ref", "refs/remotes/origin/main", &b]);
+        std::fs::write(repo_path.join(".git/shallow"), format!("{b}\n")).unwrap();
+
+        let worktree_path = temp.path().join("standalone");
+        WorktreeBuilder::new(repo_path, worktree_path.clone())
+            .standalone(true)
+            .create()
+            .unwrap();
+
+        assert!(!worktree_path.join(".git/shallow").exists());
+        assert_eq!(
+            xai_test_utils::git::run_git(&worktree_path, &["rev-parse", "--is-shallow-repository"]),
+            "false"
+        );
+        assert_eq!(
+            xai_test_utils::git::run_git(&worktree_path, &["rev-parse", "HEAD^"]),
+            a
+        );
+    }
+
+    #[test]
+    fn test_standalone_worktree_sanitizes_after_checkout_ref() {
+        xai_test_utils::require_git!();
+        let temp = TempDir::new().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        std::fs::write(repo_path.join("a.txt"), "a").unwrap();
+        git_commit_all(&repo_path, "A");
+        let a = xai_test_utils::git::run_git(&repo_path, &["rev-parse", "HEAD"]);
+        std::fs::write(repo_path.join("b.txt"), "b").unwrap();
+        git_commit_all(&repo_path, "B");
+        let b = xai_test_utils::git::run_git(&repo_path, &["rev-parse", "HEAD"]);
+        std::fs::write(repo_path.join("c.txt"), "c").unwrap();
+        git_commit_all(&repo_path, "C");
+        let source_branch =
+            xai_test_utils::git::run_git(&repo_path, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        xai_test_utils::git::run_git(&repo_path, &["checkout", "-b", "feature", &a]);
+        std::fs::write(repo_path.join("d.txt"), "d").unwrap();
+        git_commit_all(&repo_path, "D");
+        xai_test_utils::git::run_git(&repo_path, &["checkout", &source_branch]);
+        assert_ne!(source_branch, "feature");
+        xai_test_utils::git::run_git(
+            &repo_path,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/xai-org/xai.git",
+            ],
+        );
+        xai_test_utils::git::run_git(
+            &repo_path,
+            &[
+                "config",
+                "--replace-all",
+                "remote.origin.fetch",
+                "+refs/heads/*",
+            ],
+        );
+        xai_test_utils::git::run_git(&repo_path, &["update-ref", "refs/remotes/origin/main", &b]);
+        xai_test_utils::git::run_git(
+            &repo_path,
+            &["update-ref", "refs/remotes/origin/feature", &a],
+        );
+        xai_test_utils::git::run_git(&repo_path, &["update-ref", "refs/remotes/origin/noise", &b]);
+        std::fs::write(repo_path.join(".git/shallow"), format!("{b}\n")).unwrap();
+
+        let worktree_path = temp.path().join("standalone");
+        WorktreeBuilder::new(repo_path, worktree_path.clone())
+            .standalone(true)
+            .git_ref("feature")
+            .create()
+            .unwrap();
+
+        assert_eq!(
+            xai_test_utils::git::run_git(&worktree_path, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature"
+        );
+        assert_eq!(
+            xai_test_utils::git::run_git(
+                &worktree_path,
+                &["rev-parse", "refs/remotes/origin/feature"]
+            ),
+            a,
+            "checkout dest-branch origin ref must survive source-HEAD CoW prune"
+        );
+        let noise = std::process::Command::new("git")
+            .current_dir(&worktree_path)
+            .args(["show-ref", "--verify", "refs/remotes/origin/noise"])
+            .output()
+            .unwrap();
+        assert!(
+            !noise.status.success(),
+            "unrelated origin/noise must still be pruned after checkout sanitize"
+        );
+        assert_eq!(
+            xai_test_utils::git::run_git(
+                &worktree_path,
+                &["config", "--get-all", "remote.origin.fetch"]
+            ),
+            "+refs/heads/feature:refs/remotes/origin/feature"
+        );
+        assert!(
+            !worktree_path.join(".git/shallow").exists(),
+            "after checkout, graft B is unused and its parent is in the ODB"
+        );
+        assert_eq!(
+            xai_test_utils::git::run_git(&worktree_path, &["rev-parse", "--is-shallow-repository"]),
+            "false"
+        );
+        assert_eq!(
+            xai_test_utils::git::run_git(&worktree_path, &["rev-parse", "HEAD^"]),
+            a
+        );
+    }
+
+    #[test]
+    fn test_standalone_worktree_keeps_origin_ref_after_detached_checkout() {
+        xai_test_utils::require_git!();
+        let temp = TempDir::new().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        std::fs::write(repo_path.join("a.txt"), "a").unwrap();
+        git_commit_all(&repo_path, "A");
+        let a = xai_test_utils::git::run_git(&repo_path, &["rev-parse", "HEAD"]);
+        std::fs::write(repo_path.join("b.txt"), "b").unwrap();
+        git_commit_all(&repo_path, "B");
+        let b = xai_test_utils::git::run_git(&repo_path, &["rev-parse", "HEAD"]);
+        xai_test_utils::git::run_git(&repo_path, &["branch", "feature", &a]);
+        xai_test_utils::git::run_git(
+            &repo_path,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/xai-org/xai.git",
+            ],
+        );
+        xai_test_utils::git::run_git(
+            &repo_path,
+            &["update-ref", "refs/remotes/origin/feature", &a],
+        );
+        xai_test_utils::git::run_git(&repo_path, &["update-ref", "refs/remotes/origin/noise", &b]);
+
+        let worktree_path = temp.path().join("standalone");
+        WorktreeBuilder::new(repo_path, worktree_path.clone())
+            .standalone(true)
+            .git_ref("origin/feature")
+            .create()
+            .unwrap();
+
+        assert_eq!(
+            xai_test_utils::git::run_git(&worktree_path, &["rev-parse", "HEAD"]),
+            a
+        );
+        assert_eq!(
+            xai_test_utils::git::run_git(
+                &worktree_path,
+                &["rev-parse", "refs/remotes/origin/feature"]
+            ),
+            a,
+            "detached origin/feature checkout must keep that remote-tracking ref"
+        );
+        let noise = std::process::Command::new("git")
+            .current_dir(&worktree_path)
+            .args(["show-ref", "--verify", "refs/remotes/origin/noise"])
+            .output()
+            .unwrap();
+        assert!(
+            !noise.status.success(),
+            "unrelated origin/noise must still be pruned"
+        );
+    }
+
+    #[test]
+    fn test_standalone_worktree_skips_extra_origin_remotes() {
+        xai_test_utils::require_git!();
+        let temp = TempDir::new().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        std::fs::write(repo_path.join("file.txt"), "content").unwrap();
+        git_commit_all(&repo_path, "initial");
+        let head = xai_test_utils::git::run_git(&repo_path, &["rev-parse", "HEAD"]);
+        let branch =
+            xai_test_utils::git::run_git(&repo_path, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        xai_test_utils::git::run_git(
+            &repo_path,
+            &["update-ref", "refs/remotes/origin/main", &head],
+        );
+        xai_test_utils::git::run_git(
+            &repo_path,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{branch}"),
+                &head,
+            ],
+        );
+        for i in 0..40 {
+            xai_test_utils::git::run_git(
+                &repo_path,
+                &[
+                    "update-ref",
+                    &format!("refs/remotes/origin/branch-{i}"),
+                    &head,
+                ],
+            );
+        }
+
+        let worktree_path = temp.path().join("standalone");
+        WorktreeBuilder::new(repo_path, worktree_path.clone())
+            .standalone(true)
+            .create()
+            .unwrap();
+
+        assert_eq!(
+            xai_test_utils::git::run_git(
+                &worktree_path,
+                &["rev-parse", "refs/remotes/origin/main"]
+            ),
+            head
+        );
+        assert_eq!(
+            xai_test_utils::git::run_git(
+                &worktree_path,
+                &["rev-parse", &format!("refs/remotes/origin/{branch}")]
+            ),
+            head
+        );
+        for i in 0..40 {
+            let show = std::process::Command::new("git")
+                .current_dir(&worktree_path)
+                .args([
+                    "show-ref",
+                    "--verify",
+                    &format!("refs/remotes/origin/branch-{i}"),
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                !show.status.success(),
+                "standalone dest must not have origin/branch-{i}"
+            );
+        }
+    }
+
     // ─── Cancellation / partial-creation cleanup tests ───────────────────
 
     #[test]

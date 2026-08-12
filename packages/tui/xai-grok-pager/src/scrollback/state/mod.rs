@@ -811,9 +811,8 @@ impl ScrollbackState {
                 super::blocks::tool::HookPhase::Post => data.post_hooks = hook_entries,
             }
             entry.invalidate_cache();
-            // Structural, not just a height change: hook chrome removes the
-            // row from verb-group membership (`run_step`), so a folded run
-            // must re-run its folds to surface the `[hooks: N/M]` row.
+            // A height remeasure would revive a folded member whose cached
+            // height is zero; reapplying folds keeps hidden members hidden.
             self.mark_structurally_dirty(id);
         }
     }
@@ -1827,7 +1826,7 @@ impl ScrollbackState {
         let Some(info) = cache.entries.get(idx) else {
             return false;
         };
-        info.is_group_header() || info.height == 0
+        (info.is_group_header() && !info.is_expanded_verb_header()) || info.height == 0
     }
 
     /// Whether entry `idx` overlaps the current viewport (cached offsets + the

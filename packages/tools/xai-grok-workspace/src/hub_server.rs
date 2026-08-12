@@ -371,6 +371,7 @@ impl WorkspaceRpcHandler {
         use crate::workspace_ops::*;
         use crate::worktree::{ApplyWorktreeRequest, CreateWorktreeRequest, RemoveWorktreeRequest};
         use xai_grok_workspace_types::rpc::git::{GitBranchInfoReq, GitMetadataReq};
+        use xai_grok_workspace_types::rpc::presence::PresenceNoteReq;
         use xai_grok_workspace_types::rpc::search::FuzzyStatusReq;
         use xai_grok_workspace_types::rpc::skills::DiscoverPluginsReq;
         use xai_grok_workspace_types::rpc::workspace::{
@@ -930,6 +931,18 @@ impl WorkspaceRpcHandler {
                     .await;
                 serde_json::to_value(points).map_err(|e| WorkspaceError::HubError(e.to_string()))
             }
+            <PresenceNoteReq as WorkspaceRpc>::METHOD => {
+                let req: PresenceNoteReq = serde_json::from_value(params).map_err(|e| {
+                    WorkspaceError::HubError(format!("invalid params for presence.note: {e}"))
+                })?;
+                self.workspace
+                    .session(&req.session_id)
+                    .ok_or_else(|| WorkspaceError::SessionNotFound(req.session_id.clone()))?;
+                self.workspace
+                    .activity_tracker()
+                    .apply_presence_note(req.visible, req.seq);
+                Ok(Value::Null)
+            }
             <RewindToReq as WorkspaceRpc>::METHOD => {
                 note_mutation::<RewindToReq>(&self.workspace);
                 let req: RewindToReq = serde_json::from_value(params).map_err(|e| {
@@ -1145,7 +1158,7 @@ impl ToolServerHandler for WorkspaceRpcHandler {
         let (became_empty, start_drain) = {
             let mut sessions = self.workspace.shared.sessions.write();
             if let Some(session) = sessions.remove(sid) {
-                session.abort_system_notify_forwarder();
+                session.abort_system_notify_producers();
                 session.shutdown_terminal_backend();
                 session.shutdown_browser_service();
                 session.cancel_hunk_tracker();
@@ -3268,6 +3281,7 @@ mod tests {
             <EndPromptReq as WorkspaceRpc>::METHOD,
             <GetRewindPointsReq as WorkspaceRpc>::METHOD,
             <RewindToReq as WorkspaceRpc>::METHOD,
+            <xai_grok_workspace_types::rpc::presence::PresenceNoteReq as WorkspaceRpc>::METHOD,
             <HookRegistryReq as WorkspaceRpc>::METHOD,
             <LoadProjectConfigReq as WorkspaceRpc>::METHOD,
             <LoadPermissionsReq as WorkspaceRpc>::METHOD,
@@ -3343,6 +3357,80 @@ mod tests {
             tracker.snapshot().withhold_reason,
             Some(IdleWithholdReason::ClientRpc),
             "a mutation stamps"
+        );
+    }
+    #[tokio::test]
+    async fn presence_note_stamps_only_visible_notes_for_live_sessions() {
+        use xai_grok_workspace_types::rpc::presence::PresenceNoteReq;
+        use xai_tool_protocol::IdleWithholdReason;
+        let handle = crate::handle::tests::make_handle_with_status_config(crate::StatusConfig {
+            presence_keepalive_enabled: true,
+            ..crate::StatusConfig::default()
+        });
+        handle.create_session("sess-1").expect("create session");
+        let tracker = handle.activity_tracker().clone();
+        let handler = WorkspaceRpcHandler::new(handle);
+        let method = <PresenceNoteReq as WorkspaceRpc>::METHOD;
+        let err = handler
+            .dispatch(
+                method,
+                serde_json::json!({"session_id": "ghost", "visible": true, "seq": 1}),
+                None,
+            )
+            .await
+            .expect_err("unknown session is an error");
+        assert!(matches!(err, WorkspaceError::SessionNotFound(_)));
+        assert_eq!(
+            tracker.snapshot().withhold_reason,
+            None,
+            "an unknown session must not stamp"
+        );
+        handler
+            .dispatch(
+                method,
+                serde_json::json!({"session_id": "sess-1", "visible": false, "seq": 2}),
+                None,
+            )
+            .await
+            .expect("hidden note is acked");
+        assert_eq!(
+            tracker.snapshot().withhold_reason,
+            None,
+            "a hidden note stamps nothing"
+        );
+        handler
+            .dispatch(
+                method,
+                serde_json::json!({"session_id": "sess-1", "visible": true, "seq": 3}),
+                None,
+            )
+            .await
+            .expect("visible note is acked");
+        assert_eq!(
+            tracker.snapshot().withhold_reason,
+            Some(IdleWithholdReason::ClientPresence),
+            "a visible note stamps the presence tier"
+        );
+    }
+    #[tokio::test]
+    async fn presence_note_is_inert_while_dark() {
+        use xai_grok_workspace_types::rpc::presence::PresenceNoteReq;
+        let handle = make_handle();
+        handle.create_session("sess-1").expect("create session");
+        let tracker = handle.activity_tracker().clone();
+        let handler = WorkspaceRpcHandler::new(handle);
+        handler
+            .dispatch(
+                <PresenceNoteReq as WorkspaceRpc>::METHOD,
+                serde_json::json!({"session_id": "sess-1", "visible": true, "seq": 1}),
+                None,
+            )
+            .await
+            .expect("visible note is acked even while dark");
+        assert_eq!(
+            tracker.snapshot().withhold_reason,
+            None,
+            "dark default: the note must not withhold idle"
         );
     }
 }

@@ -621,18 +621,25 @@ impl WorkspaceHandle {
         let session_event_writers: Arc<
             dashmap::DashMap<String, xai_file_utils::events::EventWriter>,
         > = Arc::new(dashmap::DashMap::new());
-        let activity_tracker = Arc::new(
-            crate::activity::ActivityTracker::with_prune_window(
-                config.status_config.session_idle_prune,
-            )
-            .with_idle_ignores_background(config.status_config.idle_ignores_background)
-            .with_preview_activity_window_ms(
-                config.status_config.preview_activity_window.as_millis() as u64,
-            )
-            .with_rpc_activity_window_ms(
-                config.status_config.rpc_activity_window.as_millis() as u64,
-            ),
-        );
+        let activity_tracker =
+            Arc::new(
+                crate::activity::ActivityTracker::with_prune_window(
+                    config.status_config.session_idle_prune,
+                )
+                .with_idle_ignores_background(config.status_config.idle_ignores_background)
+                .with_preview_activity_window_ms(
+                    config.status_config.preview_activity_window.as_millis() as u64,
+                )
+                .with_rpc_activity_window_ms(
+                    config.status_config.rpc_activity_window.as_millis() as u64
+                )
+                .with_presence_activity_window_ms(
+                    config
+                        .status_config
+                        .effective_presence_activity_window()
+                        .as_millis() as u64,
+                ),
+            );
         activity_tracker.set_event_writers(session_event_writers.clone());
         if let Some(queue) = &upload_queue {
             activity_tracker.set_upload_queue_stats(queue.stats_arc());
@@ -2917,7 +2924,7 @@ impl WorkspaceHandle {
             return Err(WorkspaceError::SessionNotFound(session_id.to_owned()));
         };
         drop(sessions);
-        session.abort_system_notify_forwarder();
+        session.abort_system_notify_producers();
         session.shutdown_terminal_backend();
         session.shutdown_browser_service();
         session.cancel_hunk_tracker();
@@ -4186,7 +4193,8 @@ async fn enqueue_workspace_tool_definitions(
     match &outcome {
         EnqueueOutcome::Enqueued
         | EnqueueOutcome::FellBackToInline
-        | EnqueueOutcome::Deduplicated => {
+        | EnqueueOutcome::Deduplicated
+        | EnqueueOutcome::Skipped { .. } => {
             tracing::info!(
                 %session_id,
                 object_path = %object_path,
@@ -4283,8 +4291,9 @@ async fn await_enqueue_outcome(
 /// Reduce the two per-phase [`EnqueueOutcome`]s to the wire ack triple.
 /// `artifact_count` counts only durably-spilled phases (`FellBackToInline` is
 /// a success for `status` but not durable, so it does not count); any `Failed`
-/// wins the `status`, carrying the first failure reason. `Skipped` is never
-/// produced here — the no-queue case is handled by [`resolve_after_turn_ack`].
+/// wins the `status`, carrying the first failure reason. [`EnqueueOutcome::Skipped`]
+/// (e.g. collect deadline) is a non-failure and not a durable enqueue. The
+/// no-handle case is handled by [`resolve_after_turn_ack`].
 fn reduce_enqueue_outcomes(
     before: &EnqueueOutcome,
     after: &EnqueueOutcome,
@@ -4293,7 +4302,10 @@ fn reduce_enqueue_outcomes(
     let artifact_count = durable(before) as u32 + durable(after) as u32;
     let first_failure = [before, after].into_iter().find_map(|o| match o {
         EnqueueOutcome::Failed { reason } => Some(reason.clone()),
-        _ => None,
+        EnqueueOutcome::Enqueued
+        | EnqueueOutcome::FellBackToInline
+        | EnqueueOutcome::Deduplicated
+        | EnqueueOutcome::Skipped { .. } => None,
     });
     match first_failure {
         Some(reason) => (AfterTurnAckStatus::Failed, artifact_count, Some(reason)),
@@ -4629,6 +4641,12 @@ pub(crate) mod tests {
             Default::default(),
             false,
         )
+    }
+    /// [`make_handle`] with an explicit [`crate::StatusConfig`].
+    pub(crate) fn make_handle_with_status_config(
+        status_config: crate::StatusConfig,
+    ) -> WorkspaceHandle {
+        make_handle_inner(false, false, status_config, false)
     }
     fn make_handle_inner(
         rewind_all_outcomes: bool,
@@ -9012,6 +9030,11 @@ pub(crate) mod tests {
             reason: reason.to_owned(),
         }
     }
+    fn skipped(reason: &str) -> EnqueueOutcome {
+        EnqueueOutcome::Skipped {
+            reason: reason.to_owned(),
+        }
+    }
     /// Both archives durably enqueued → `Enqueued`, `artifact_count == 2`.
     #[test]
     fn reduce_outcomes_both_enqueued() {
@@ -9037,6 +9060,19 @@ pub(crate) mod tests {
         assert_eq!(status, AfterTurnAckStatus::Failed);
         assert_eq!(count, 0);
         assert_eq!(msg.as_deref(), Some("before boom"));
+    }
+    /// A deliberate collect-deadline skip is not an after-turn failure.
+    #[test]
+    fn reduce_outcomes_collect_deadline_skip_is_not_failure() {
+        let (status, count, msg) =
+            reduce_enqueue_outcomes(&skipped("collect_deadline"), &skipped("collect_deadline"));
+        assert_eq!(status, AfterTurnAckStatus::Enqueued);
+        assert_eq!(count, 0);
+        assert_eq!(msg, None);
+        let (status, count, msg) = reduce_enqueue_outcomes(&enq(), &skipped("collect_deadline"));
+        assert_eq!(status, AfterTurnAckStatus::Enqueued);
+        assert_eq!(count, 1);
+        assert_eq!(msg, None);
     }
     /// Inline fallback is a success for the status but is NOT on the durable
     /// spill, so it does not add to `artifact_count`.

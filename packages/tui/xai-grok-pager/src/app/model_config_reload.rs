@@ -89,7 +89,7 @@ impl ConfigModelProjection {
             .or_else(|| available.first().map(|(id, _)| id.clone()));
 
         let mut refreshed = state.clone();
-        refreshed.update_catalog(available, fallback);
+        refreshed.update_catalog_with_fallback(available, fallback);
         refreshed
     }
 }

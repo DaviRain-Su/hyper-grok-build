@@ -563,6 +563,10 @@ pub(crate) fn stream_responses_tracked<'a>(
                         model_metadata: None,
                         retry_after_secs: None,
                         should_retry: None,
+                        error_code: response
+                            .error
+                            .as_ref()
+                            .map(|e| xai_grok_sampling_types::ApiErrorCode::parse(&e.code)),
                     };
                     for event in fail_active_backend_tools(
                         &mut active_backend_tools,
@@ -580,14 +584,22 @@ pub(crate) fn stream_responses_tracked<'a>(
                 }
 
                 ResponseStreamEvent::ResponseError(error_event) => {
-                    let code = error_event.code.unwrap_or_else(|| "error".to_string());
-                    let error_message = format!("{}: {}", code, error_event.message);
+                    let error_message = format!(
+                        "{}: {}",
+                        error_event.code.as_deref().unwrap_or("error"),
+                        error_event.message
+                    );
                     let err = SamplingError::Api {
                         status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                         message: error_message.clone(),
                         model_metadata: None,
                         retry_after_secs: None,
                         should_retry: None,
+                        // The wire code, absent when the event carried none.
+                        error_code: error_event
+                            .code
+                            .as_deref()
+                            .map(xai_grok_sampling_types::ApiErrorCode::parse),
                     };
                     for event in fail_active_backend_tools(
                         &mut active_backend_tools,
@@ -760,6 +772,8 @@ pub(crate) fn stream_responses_tracked<'a>(
                     model_metadata: None,
                     retry_after_secs: None,
                     should_retry: None,
+                    // Synthesized client-side; no wire envelope to read.
+                    error_code: None,
                 };
                 for event in fail_active_backend_tools(
                     &mut active_backend_tools,
@@ -1384,6 +1398,46 @@ mod tests {
                 assert_eq!(error.kind, crate::events::SamplingErrorKind::Api);
                 assert_eq!(error.status_code, Some(500));
                 assert!(error.message.contains("boom"));
+                // The wire code passes through verbatim — dropping it here
+                // would disable strip recovery for coded Responses failures.
+                assert_eq!(
+                    error.error_code,
+                    Some(xai_grok_sampling_types::ApiErrorCode::Other(
+                        "server_error".into()
+                    ))
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// A coded `error` event must carry its code into the Failed info —
+    /// this is the whole mid-stream strip-recovery chain for the Responses
+    /// backend (the synthesized 500 + code classifies as an image error).
+    #[tokio::test]
+    async fn response_error_event_carries_code_into_failed() {
+        let error_event = rs::ResponseStreamEvent::ResponseError(rs_types::ResponseErrorEvent {
+            sequence_number: 0,
+            code: Some(xai_grok_sampling_types::INVALID_IMAGE_ERROR_CODE.into()),
+            message: "could not decode image".into(),
+            param: None,
+        });
+        let raw = raw_events(vec![Ok(error_event)]);
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Failed { error, .. } => {
+                assert_eq!(
+                    error.error_code,
+                    Some(xai_grok_sampling_types::ApiErrorCode::InvalidImage)
+                );
             }
             other => panic!("expected Failed, got {other:?}"),
         }

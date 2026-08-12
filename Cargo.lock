@@ -16291,7 +16291,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager"
-version = "1.0.0-r2"
+version = "1.0.1-r1"
 dependencies = [
  "agent-client-protocol",
  "ansi-to-tui",
@@ -16389,7 +16389,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager-bin"
-version = "1.0.0-r2"
+version = "1.0.1-r1"
 dependencies = [
  "anyhow",
  "clap",
@@ -16402,6 +16402,7 @@ dependencies = [
  "semver",
  "serde_json",
  "serial_test",
+ "tempfile",
  "tikv-jemalloc-ctl",
  "tikv-jemalloc-sys",
  "tikv-jemallocator",
@@ -16542,7 +16543,6 @@ dependencies = [
  "thiserror 2.0.18",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
- "wait-timeout",
  "xai-grok-agent",
  "xai-grok-config",
  "xai-hooks-plugins-types",
@@ -16670,7 +16670,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-shell"
-version = "1.0.0-r2"
+version = "1.0.1-r1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -17072,6 +17072,7 @@ dependencies = [
  "fs2",
  "futures",
  "indicatif",
+ "libc",
  "reqwest 0.12.24",
  "semver",
  "serde",
@@ -17084,8 +17085,10 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "url",
  "wiremock",
  "xai-grok-shell",
+ "xai-grok-telemetry",
  "xai-grok-tools",
  "xai-grok-version",
  "zip",
@@ -17093,7 +17096,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-version"
-version = "1.0.0-r2"
+version = "1.0.1-r1"
 dependencies = [
  "semver",
 ]

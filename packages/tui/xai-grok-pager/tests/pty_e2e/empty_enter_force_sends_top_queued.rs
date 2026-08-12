@@ -5,7 +5,7 @@ use super::common::*;
 /// Mid-turn: queue a follow-up with Enter, then bare Enter on the empty
 /// composer sends that top row now — cancel-and-send: the running turn is
 /// cancelled silently and the row runs as its own next turn, arriving on the
-/// wire as a standard `<user_query>` prompt with no interjection preamble.
+/// wire as a standard `<user_query>` prompt with the interjection preamble.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn empty_enter_force_sends_top_queued() {
@@ -78,12 +78,12 @@ async fn empty_enter_force_sends_top_queued() {
         .find(|u| u.contains("please also check the logs"))
         .unwrap_or_else(|| panic!("queued follow-up never reached the wire: {users:#?}"));
     assert!(
-        !promoted.contains(INTERJECTION_WIRE_PREFIX),
-        "send-now must not use the interjection preamble: {promoted}"
+        promoted.contains(INTERJECTION_WIRE_PREFIX),
+        "send-now must use the interjection preamble: {promoted}"
     );
     assert!(
         promoted.contains("<user_query>"),
-        "send-now must arrive as a standard user_query prompt: {promoted}"
+        "send-now must wrap the steered text in user_query: {promoted}"
     );
 
     assert!(

@@ -5,8 +5,8 @@ use super::common::*;
 /// 22. **Send-now delivery vs. explicit cancel.** (Historical name: the chord
 /// used to buffer a same-turn interjection that a cancel could discard.)
 /// The chord is now cancel-and-send: text + Ctrl+Enter mid-stream silently
-/// cancels the running turn and delivers the text as its OWN next turn (no
-/// interjection preamble on the wire). A later explicit Ctrl+C still renders
+/// cancels the running turn and delivers the text as its OWN next turn (with
+/// the interjection preamble). A later explicit Ctrl+C still renders
 /// its "Turn cancelled by user" marker — the consumed send-now expectation
 /// must never suppress a real user cancel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -85,12 +85,12 @@ async fn cancel_discards_buffered_interjection() {
     );
     for s in &steers {
         assert!(
-            !s.contains(INTERJECTION_WIRE_PREFIX),
-            "send-now must not use the interjection preamble: {s}"
+            s.contains(INTERJECTION_WIRE_PREFIX),
+            "send-now must use the interjection preamble: {s}"
         );
         assert!(
             s.contains("<user_query>"),
-            "send-now must arrive as a standard user_query prompt: {s}"
+            "send-now must wrap the steered text in user_query: {s}"
         );
     }
 

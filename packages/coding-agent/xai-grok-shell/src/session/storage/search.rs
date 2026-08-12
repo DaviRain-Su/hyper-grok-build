@@ -438,6 +438,20 @@ mod tests {
     use super::*;
     use crate::session::storage::search_content::test_summary;
 
+    #[test]
+    #[cfg(unix)]
+    fn search_db_path_tightens_sessions_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let _ = search_db_path(tmp.path());
+
+        assert_eq!(
+            crate::test_support::unix_mode(&tmp.path().join("sessions")),
+            0o700,
+            "sessions root must be 0700"
+        );
+    }
+
     #[tokio::test]
     async fn test_execute_search_empty_query() {
         let tmp = tempfile::TempDir::new().unwrap();

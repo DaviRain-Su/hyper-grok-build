@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager-bin"
-version = "1.0.0-r2"
+version = "1.0.1-r1"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -84,6 +84,7 @@ serial_test = { workspace = true }
 # `PagerArgs::try_parse_from` in the CLI-parsing unit tests (needs the
 # `clap::Parser` trait in scope).
 clap = { workspace = true, features = ["derive"] }
+tempfile = { workspace = true }
 
 [features]
 default = [
