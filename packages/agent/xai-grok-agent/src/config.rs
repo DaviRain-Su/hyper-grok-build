@@ -2190,6 +2190,8 @@ Agent.
             ToolConfig::from(&grok_build::ReadFileTool).id,
             ToolConfig::from(&grok_build::ListDirTool).id,
             ToolConfig::from(&grok_build::GrepTool).id,
+            // Peer messaging among Main + live subagents (read-only coordination).
+            ToolConfig::from(&grok_build::AgentHubTool).id,
         ];
         assert_eq!(
             actual,

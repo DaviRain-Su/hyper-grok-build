@@ -4,6 +4,63 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.1-r1] — 2026-08-12
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `be71313`
+  (monorepo `SOURCE_REV` `5d08d7e…`), rebasing Hyper on upstream **1.0.1**.
+  Notable upstream:
+  - Breaking: `/rewind` only truncates conversation history (asks for
+    confirmation); managed MCP servers only via the gateway catalog
+  - Presence protocol end-to-end: live presence updates through the gateway
+    to client presence tiers
+  - Subagent spawning bounded; wide fan-outs queue instead of exhausting
+    file descriptors
+  - New `grok du` disk-usage command; tools report read-only-ness for safer
+    restricted agents
+  - Invalid-image rejections recognized by the server's error code
+    (`parse_error_code` / `ApiErrorCode`)
+  - Signal-based child process waits replaced; stuck D-state children no
+    longer hang tool timeouts
+  - Grouped hooked read-only tool calls in the pager; Apple Terminal
+    Cmd+click autolinks; Esc on the cancel-subagents panel keeps the turn
+    running; pager startup timeout explained
+  - Displayed session model retained when the model catalog refreshes
+  - CLI update telemetry for install attempts; channel-aware reinstall hints
+    (incl. enterprise bootstrap)
+  - Background-task log dirs tightened to owner-only permissions
+  - System prompt `<output_efficiency>` renamed to `<response_guidelines>`;
+    new `<work_policy>` section strengthens agent work discipline
+  - Video-tool ZDR restriction explained instead of dropping the tools
+  - Typed Automations tool-usage card variant; worktree standalone fetch
+    narrowed and inconsistent shallow clones dropped
+
+### Fixed
+- Kept Hyper's `is_model_bound_history_error` and FastAPI `{"detail": …}`
+  error parsing alongside upstream's `ParsedError` / `lenient_code` /
+  `parse_error_code` refactor in `xai-grok-sampling-types`; the detail arm
+  now returns `ParsedError`.
+- Kept Hyper's `PiMessagesEvent` import in the sampler client while stamping
+  upstream's `error_code: parse_error_code(...)` on API errors.
+- Kept community-build updater behavior (community installer URLs,
+  `community-github` reinstall hint, `run_install_target` early return) on
+  upstream's channel-aware `manual_install_cmd` / `reinstall_hint`
+  signatures and the new update-telemetry preamble; `xai-grok-update` gains
+  upstream's `url` / `xai-grok-telemetry` deps and macOS `libc`.
+- Kept `get_task_output_path`'s unsafe-id rejection (`Result` API) on
+  upstream's owner-only directory tightening; ported upstream's
+  owner-only-permissions test to the `Result` API.
+- Kept Hyper's subagent briefing line and `{oracle_section}` in the Task
+  tool description alongside upstream's "incorporate results before
+  concluding" line.
+- Base prompt template keeps Hyper's `<action_safety>` section and response
+  bullets while picking up upstream's `<work_policy>` section, the
+  `<background_tasks>` rewrite, and the `<response_guidelines>` rename;
+  encrypted prompt templates regenerated from `templates/*.md`.
+- ACP models-update tests keep Hyper's config-reload-capability coverage;
+  the per-agent catalog test adopts upstream's
+  `models_update_preserves_each_agent_model_independently` semantics.
+
 ## [1.0.0-r2] — 2026-08-11
 
 ### Changed
