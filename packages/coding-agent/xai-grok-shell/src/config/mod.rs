@@ -1173,6 +1173,38 @@ fn apply_managed_settings_features_inner(
     }
     enforced
 }
+/// Display text naming the setting that turned session search off, or `None` while it is on.
+/// One source of truth: the latch records the setting that closed it, which a later resolve of a
+/// lower tier cannot change.
+pub fn session_search_turned_off_by() -> Option<&'static str> {
+    let source = crate::session::storage::search_gate::closed_by()?;
+    Some(crate::session::storage::search_gate::session_search_off_reason(source))
+}
+/// Resolve the session search setting and latch it for the process. Call after every rewrite of
+/// `remote_settings`, and before anything can reach the index.
+pub fn apply_session_search_gate(config: &crate::agent::config::Config) {
+    crate::session::storage::search_gate::apply_gate(&config.resolve_session_search());
+}
+/// Load the on-disk config for a one-shot command and clamp it with policy. Without the clamp a
+/// pinned value reads as an ordinary config value, which the environment outranks.
+pub fn load_agent_config_disk_only() -> Result<crate::agent::config::Config, String> {
+    let effective = load_effective_config_disk_only().map_err(|e| e.to_string())?;
+    let mut config = crate::agent::config::Config::new_from_toml_cfg(&effective)?;
+    apply_policy(&mut config);
+    Ok(config)
+}
+/// Clamp a config with managed settings and then requirements pins, logging each field a policy
+/// took over. Requirements run second so a pin wins a conflict.
+pub(crate) fn apply_policy(config: &mut crate::agent::config::Config) {
+    let managed = apply_managed_settings_features(config);
+    let pinned = apply_requirements(config);
+    for field in managed.iter().chain(&pinned) {
+        tracing::info!(
+            field = %field.path, value = %field.value, source = %field.source,
+            "policy override"
+        );
+    }
+}
 /// Clamp `AgentConfig` fields per `requirements.toml`. No-op if absent.
 /// System pins win over user pins on conflict.
 pub(crate) fn apply_requirements(config: &mut crate::agent::config::Config) -> Vec<EnforcedField> {
@@ -1267,6 +1299,7 @@ fn apply_requirements_inner(
     pin_feature!(video_gen);
     pin_feature!(write_file);
     pin_feature!(voice_mode);
+    pin_feature!(session_search);
     pin_requirement_only!(remote_fetch);
     if let Some(val) = req_bool(req, "telemetry", "trace_upload") {
         config.requirements.trace_upload.pin(val, source.clone());

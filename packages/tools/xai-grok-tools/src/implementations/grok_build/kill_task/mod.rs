@@ -6,7 +6,7 @@
 pub mod terminal_command;
 pub use terminal_command::KillTerminalCommandTool;
 
-use crate::computer::types::KillOutcome;
+use crate::computer::types::{KillOutcome, KillSource};
 use crate::implementations::grok_build::task::TaskTool;
 use crate::implementations::grok_build::task::backend::SubagentBackendResource;
 use crate::implementations::grok_build::task::types::SubagentCancelOutcome;
@@ -202,7 +202,10 @@ impl xai_tool_runtime::Tool for KillTaskTool {
             terminal = res.require::<Terminal>()?.0.clone();
         }
 
-        match terminal.kill_task(&input.task_id).await {
+        match terminal
+            .kill_task_with_source(&input.task_id, KillSource::ModelTool)
+            .await
+        {
             KillOutcome::Killed => Ok(KillTaskOutput::Result(KillTaskResult {
                 task_id: input.task_id.clone(),
                 outcome: "killed".to_string(),

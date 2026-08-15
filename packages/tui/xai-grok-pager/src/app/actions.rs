@@ -288,6 +288,20 @@ pub enum Action {
         /// live on [`Effect::QueueInterject`].
         new_text: Option<String>,
     },
+    /// A queued-row edit whose saved text is a complete pager builtin invocation: drop the row,
+    /// then run the command through the normal slash dispatch. The view only classifies; dispatch
+    /// stays the sole execution owner, and it removes the row only after its own guards pass, so a
+    /// failed run leaves the row queued.
+    RunEditedQueuedCommand {
+        /// `PromptMode::EditingQueued.id`: the local `pending_prompts` id, or the synthesized
+        /// selection id for a server row (unused there).
+        local_id: u64,
+        /// `Some` for a server-authoritative row. `None` covers both a local row and a server row
+        /// that vanished from the mirror before Enter: with nothing to remove, no versioned
+        /// `x.ai/queue/remove` request is sent.
+        server: Option<SharedQueueTarget>,
+        text: String,
+    },
     /// Focus the prompt pane.
     FocusPrompt,
     /// Focus the scrollback pane (leave prompt).
@@ -593,6 +607,9 @@ pub enum Action {
     /// drain site) and persists to `[ui].combine_queued_prompts` via
     /// `Effect::PersistSetting`.
     SetCombineQueuedPrompts(bool),
+    /// Mid-turn follow-up routing (`queue` | `steer`).
+    /// SHARED-owned: `[ui].follow_up_behavior`.
+    SetFollowUpBehavior(crate::appearance::FollowUpBehavior),
     /// Set simple mode (ASCII / minimal glyphs). Persists via `Effect::PersistSetting`.
     SetSimpleMode(bool),
     /// Set the per-tip contextual-hint user config (`[ui.contextual_hints]`).
@@ -1082,6 +1099,12 @@ pub enum Action {
     /// Close the picker and restore the stashed viewport.
     JumpDismiss,
 }
+/// A server-authoritative queue row plus the version its removal is checked against.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SharedQueueTarget {
+    pub id: String,
+    pub expected_version: u64,
+}
 /// Persist-and-notify semantics for [`Effect::PersistPermissionMode`].
 ///
 /// Both variants write to `~/.grok/config.toml` and route ACP
@@ -1536,7 +1559,7 @@ pub enum Effect {
     /// Scan enabled foreign session stores without delaying the native list.
     ScanForeignSessions {
         cwd: std::path::PathBuf,
-        compat: xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources,
+        compat: xai_grok_foreign_sessions::EnabledForeignSessionSources,
         grok_home: std::path::PathBuf,
         coordinator: crate::app::ForeignScanCoordinator,
         seq: u64,
@@ -1549,7 +1572,7 @@ pub enum Effect {
     /// Detect the newest resumable foreign session without delaying first paint.
     DetectForeignResumeHint {
         canonical_cwd: std::path::PathBuf,
-        compat: xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources,
+        compat: xai_grok_foreign_sessions::EnabledForeignSessionSources,
         grok_home: std::path::PathBuf,
         launch_token: u64,
     },
@@ -1657,6 +1680,7 @@ pub enum Effect {
     KillBgTask {
         session_id: acp::SessionId,
         task_id: String,
+        source: xai_grok_shell::extensions::task::TaskKillSource,
     },
     /// Cancel a subagent via `x.ai/subagent/cancel`.
     KillSubagent {
@@ -2503,7 +2527,7 @@ pub enum TaskResult {
     ForeignResumeHintDetected {
         canonical_cwd: std::path::PathBuf,
         launch_token: u64,
-        hint: Option<xai_grok_workspace::foreign_sessions::RecentForeignSession>,
+        hint: Option<xai_grok_foreign_sessions::RecentForeignSession>,
     },
     /// Session list fetch failed.
     SessionListFailed {
@@ -2800,7 +2824,10 @@ pub enum TaskResult {
         agent_id: AgentId,
         session_id: acp::SessionId,
         info: Box<xai_grok_shell::session::SessionInfoResponse>,
+        /// Plain-text block for minimal-mode scrollback.
         text: String,
+        /// Structured rows for the modal (built upstream from typed data).
+        fields: Vec<crate::views::usage_modal::SessionInfoField>,
         nonce: u64,
     },
     /// Session info fetch failed.

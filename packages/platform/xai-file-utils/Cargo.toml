@@ -3,7 +3,7 @@ license = "Apache-2.0"
 name = "xai-file-utils"
 version = "0.1.0"
 edition.workspace = true
-description = "Local data collection: per-turn event tracking"
+description = "Local data collection: upload queueing and blob storage"
 authors = ["xAI"]
 
 [dependencies]
@@ -24,7 +24,6 @@ aws-smithy-http-client = { version = "1", features = ["rustls-ring"] }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-strum = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }

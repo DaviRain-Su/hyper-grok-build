@@ -51,6 +51,8 @@ dunce = { workspace = true }
 semver = { workspace = true }
 rpassword = "7"
 xai-tty-utils = { workspace = true }
+# `collect_crashed()` for the startup crash notice.
+xai-grok-active-sessions = { workspace = true }
 xai-grok-config = { workspace = true }
 xai-grok-sandbox = { path = "../../tools/xai-grok-sandbox", default-features = false }
 rustls = { version = "0.23", default-features = false, features = [

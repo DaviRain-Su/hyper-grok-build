@@ -25,6 +25,24 @@ impl PlainCommand {
     pub fn words(&self) -> &[String] {
         &self.words
     }
+
+    /// Whether this command's highlighted span covers the entire script
+    /// (ignoring surrounding whitespace). Only then can the dequoted word join
+    /// stand in for the raw script string: a leading `FOO=…` assignment or a
+    /// chained sibling would otherwise be silently dropped from the compare,
+    /// letting an env-injected or extended script match a narrower grant.
+    ///
+    /// The spans were taken from the script this command was parsed from;
+    /// `get` keeps a mismatched or shorter `script` panic-safe, and `false`
+    /// is the conservative answer for one.
+    pub(crate) fn spans_whole_script(&self, script: &str) -> bool {
+        let (Some(before), Some(after)) =
+            (script.get(..self.span_start), script.get(self.span_end..))
+        else {
+            return false;
+        };
+        before.trim().is_empty() && after.trim().is_empty()
+    }
 }
 
 /// Parse the provided bash source using tree-sitter-bash, returning a Tree on
@@ -908,14 +926,34 @@ pub fn primary_command_from_script(script: &str) -> Option<BashCommandHighlights
     let tree = try_parse_shell(script)?;
     let commands = try_parse_word_only_commands_sequence(&tree, script)?;
 
-    let primary = commands.into_iter().find(|c| !is_setup_command(&c.words))?;
+    // Peel wrappers before the setup check and before choosing the highlight:
+    // enforcement matches grants against wrapper-peeled words (`evaluate_bash`
+    // calls `unwrap_wrappers`), so an "Always allow" saved from unpeeled words
+    // (`env FOO=1 …`) could never match. Peeling first also gives a script
+    // that is only `timeout 30 cargo test` a primary command, so its prompt
+    // keeps the always-allow rows.
+    let primary = commands.into_iter().find_map(|c| {
+        let peeled = unwrap_wrappers(&c.words);
+        if peeled.is_empty() || is_setup_command(peeled) {
+            return None;
+        }
+        let peeled_off = c.words.len() - peeled.len();
+        let peeled_words = c.words[peeled_off..].to_vec();
+        Some((c, peeled_off, peeled_words))
+    });
+    let (primary, peeled_off, peeled_words) = primary?;
 
     let prefix_str = &script[..primary.span_start];
     let suffix_str = &script[primary.span_end..];
 
+    // Peeled wrapper words stay visible as prefix context so the rendered
+    // command is still the full invocation; only the grant scope narrows.
+    let mut prefix = sh_split_simple(prefix_str);
+    prefix.extend_from_slice(&primary.words[..peeled_off]);
+
     Some(BashCommandHighlights {
-        prefix: sh_split_simple(prefix_str),
-        highlighted_words: primary.words,
+        prefix,
+        highlighted_words: peeled_words,
         suffix: sh_split_simple(suffix_str),
     })
 }
@@ -1594,16 +1632,17 @@ mod tests {
             })
         );
 
-        // timeout with wrapped command: timeout 60 cargo test
-        // Here timeout is the first command with args [60, cargo, test]
-        // Since we skip timeout, we should look for the next command, but there isn't one
-        // So this would return None or timeout as primary - let's see the actual behavior
+        // Wrapped command: the wrapper peels into the prefix and the inner
+        // program is the primary (see `primary_command_peels_wrappers_into_prefix`).
         let timeout_wrapped = "timeout 60 cargo test";
-        let result = primary_command_from_script(timeout_wrapped);
-        // timeout is the only command here, so if we skip it, there's nothing else
-        // The parsing treats "timeout 60 cargo test" as a single command
-        // Since timeout is a setup command, it gets skipped, and there's no next command
-        assert_eq!(result, None);
+        assert_eq!(
+            primary_command_from_script(timeout_wrapped),
+            Some(BashCommandHighlights {
+                prefix: vec!["timeout".to_owned(), "60".to_owned()],
+                highlighted_words: vec!["cargo".to_owned(), "test".to_owned()],
+                suffix: vec![],
+            })
+        );
 
         // But if we chain it properly with &&, we can extract the real command
         let timeout_chained = "timeout 60 && cargo test";
@@ -1619,6 +1658,31 @@ mod tests {
         // Test sleep with no following command just returns None (no primary command)
         let sleep_only = "sleep 5";
         assert_eq!(primary_command_from_script(sleep_only), None);
+    }
+
+    /// The highlighted words must be the wrapper-peeled form — the exact words
+    /// `evaluate_bash` compares grants against — or an "Always allow" saved
+    /// from the highlight could never match at enforcement time.
+    #[test]
+    fn primary_command_peels_wrappers_into_prefix() {
+        assert_eq!(
+            primary_command_from_script("env FOO=1 cargo test"),
+            Some(BashCommandHighlights {
+                prefix: vec!["env".to_owned(), "FOO=1".to_owned()],
+                highlighted_words: vec!["cargo".to_owned(), "test".to_owned()],
+                suffix: vec![],
+            })
+        );
+        assert_eq!(
+            primary_command_from_script("nice -n 5 make -j8"),
+            Some(BashCommandHighlights {
+                prefix: vec!["nice".to_owned(), "-n".to_owned(), "5".to_owned()],
+                highlighted_words: vec!["make".to_owned(), "-j8".to_owned()],
+                suffix: vec![],
+            })
+        );
+        // A bare wrapper with nothing inside is not a primary command.
+        assert_eq!(primary_command_from_script("timeout 30"), None);
     }
 
     // ── soft_break_offsets_after_operators ────────────────────────────

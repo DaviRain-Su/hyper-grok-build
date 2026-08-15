@@ -1,6 +1,6 @@
 //! Feedback, remember-note, btw, and recap dispatchers.
 
-use super::ctx::with_active_agent;
+use super::ctx::{NO_SESSION_NOTICE, with_active_agent};
 use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
 use crate::app::agent_view::{AgentView, PromptInputMode};
@@ -22,9 +22,6 @@ fn next_rewrite_nonce() -> u64 {
 
 /// Bare `/feedback` pane label (first paragraph of the question chrome).
 pub(crate) const FEEDBACK_QUESTION_LABEL: &str = "How can we improve Grok Build?";
-
-/// Shared by the pane guard and the send path so both say the same thing.
-const NO_SESSION_NOTICE: &str = "No active session";
 
 /// Minimal mode has no toast surface, so the notice goes to the transcript instead.
 fn feedback_notice(app: &mut AppView, message: &str) {
@@ -362,15 +359,17 @@ pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effe
                 agent
                     .scrollback
                     .push_block(crate::scrollback::block::RenderBlock::system(
-                        "No active session",
+                        NO_SESSION_NOTICE,
                     ));
             } else {
-                agent.show_toast("No active session");
+                agent.show_toast(NO_SESSION_NOTICE);
             }
             return vec![];
         };
 
-        agent.prompt.set_text("");
+        // Composer clearing belongs to the submit funnel: `dispatch_send_prompt_inner` clears it
+        // when `consume_input` is set, so draft-preserving callers (palette, edited
+        // queue row) keep theirs.
         let minimal_request_id = if minimal {
             Some(crate::minimal_api::start_minimal_btw(
                 agent,
@@ -445,7 +444,7 @@ pub(super) fn dispatch_send_recap(app: &mut AppView, auto: bool) -> Vec<Effect> 
 
     let Some(session_id) = agent.session.session_id.clone() else {
         if !auto {
-            agent.show_toast("No active session");
+            agent.show_toast(NO_SESSION_NOTICE);
         }
         return vec![];
     };

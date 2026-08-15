@@ -108,6 +108,8 @@ mod auth_retry;
 pub(crate) use auth_retry::{
     AuthRetryDecision, AuthRetrySchedule, human_duration, pace_uncharged_resubmit,
 };
+#[path = "acp_session_impl/image_strip.rs"]
+mod image_strip;
 #[path = "acp_session_impl/interjection.rs"]
 mod interjection;
 #[path = "acp_session_impl/tool_calls.rs"]
@@ -175,6 +177,12 @@ pub(crate) use goal_support::*;
 #[path = "acp_session_impl/hook_dispatch.rs"]
 mod hook_dispatch;
 use hook_dispatch::*;
+#[path = "acp_session_impl/turn_report_slot.rs"]
+mod turn_report_slot;
+use turn_report_slot::{CommitOutcome, TurnEpoch, TurnReportClaim};
+#[path = "acp_session_impl/turn_end_hooks.rs"]
+mod turn_end_hooks;
+use turn_end_hooks::TurnEnd;
 #[path = "acp_session_impl/stop_gate.rs"]
 mod stop_gate;
 pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;
@@ -289,6 +297,26 @@ struct GoalContinuationPlan {
     /// directive is committed for delivery.
     strategy_rec: Option<String>,
 }
+/// Maximum age of a queue-edit hold before the promoter discards it.
+///
+/// Bounds leaked holds after a client crash or dropped `release_edit`. Expiry
+/// runs during the next promote attempt (`maybe_start_running_task`), not on a
+/// timer. A repeat `hold_edit` inserts a fresh stamp so re-entering edit after
+/// a dropped release does not inherit an aged bound.
+pub(crate) const EDIT_HOLD_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+fn expire_older_than(holds: &mut HashMap<String, std::time::Instant>, ttl: std::time::Duration) {
+    holds.retain(|_, since| since.elapsed() < ttl);
+}
+#[cfg(test)]
+fn backdate_edit_hold(
+    holds: &mut HashMap<String, std::time::Instant>,
+    id: &str,
+    age: std::time::Duration,
+) {
+    if let Some(since) = holds.get_mut(id) {
+        *since = std::time::Instant::now() - age;
+    }
+}
 /// Task scheduling state — the only fields that remain behind `TokioMutex`.
 ///
 /// All chat state (conversation, tokens, timing, prompt_index, prompt_texts,
@@ -300,8 +328,9 @@ pub(crate) struct State {
     pub(crate) running_task: Option<AgentTask>,
     pub(crate) pending_inputs: VecDeque<InputItem>,
     pub(crate) pending_notifications: Vec<PendingNotification>,
-    /// Prompt ids held out of combine-on-promote (composer edit in progress).
-    pub(crate) combine_edit_holds: std::collections::HashSet<String>,
+    /// Prompt ids under composer edit, stamped (and re-stamped) by `hold_edit`.
+    /// Held followers are skipped by combine; a live held front blocks promote.
+    pub(crate) edit_holds: HashMap<String, std::time::Instant>,
     /// When true, notifications are buffered but not drained until genuine
     /// user re-engagement. Set by an interactive stop, cleared by a user
     /// prompt.
@@ -373,14 +402,14 @@ impl State {
     }
 }
 /// Canonical "session is idle and safe to inject a synthetic turn"
-/// predicate. The post-turn idle consumers — `maybe_drain_notifications`
-/// (notification batching), `maybe_fire_laziness_check` (Layer 3 classifier),
-/// and `arm_idle_notification` (idle-notification debounce) — all consult this
-/// so they share one definition of idleness, with no drift between them.
+/// predicate. Two post-turn idle consumers share it so they cannot drift:
+/// `maybe_drain_notifications` (notification batching) and
+/// `maybe_fire_laziness_check` (the Layer 3 classifier).
 ///
 /// Returns `true` exactly when: no turn is running, no user prompt is
 /// queued, and an interactive stop has not suppressed notifications pending
-/// genuine user re-engagement.
+/// genuine user re-engagement. Idle *reporting* uses `state_is_busy` instead,
+/// because after an interrupt the session really is idle.
 pub(crate) fn is_session_idle_for_injection(state: &State) -> bool {
     state.running_task.is_none()
         && state.pending_inputs.is_empty()
@@ -388,7 +417,8 @@ pub(crate) fn is_session_idle_for_injection(state: &State) -> bool {
 }
 /// Predicate behind `SessionCommand::IsBusy`: the session has work in flight
 /// when a turn is running **or** inputs are queued. Consulted by the leader's
-/// idle-unload decision on client disconnect. Kept as a free function so
+/// idle-unload decision on client disconnect, and by
+/// `emit_session_idle_if_idle`. Kept as a free function so
 /// it can be unit-tested directly against a `State` without spawning a full
 /// actor + leader.
 pub(crate) fn state_is_busy(state: &State) -> bool {
@@ -969,6 +999,14 @@ pub(crate) struct SessionActor {
     /// Safe: session actor is single-threaded (LocalSet), no concurrent access.
     pub(crate) hook_registry:
         std::cell::RefCell<Option<Arc<xai_grok_hooks::discovery::HookRegistry>>>,
+    /// The turn's single end-of-turn hook report. Actor-scoped rather than turn-local because the
+    /// gate runs on the turn task while a cancel runs on the command loop.
+    pub(crate) turn_report: turn_report_slot::TurnReportSlot,
+    /// Keyed on the same turn epoch as `turn_report`: a turn announces its abort at most once.
+    pub(crate) turn_abort: turn_report_slot::AbortAnnouncement,
+    /// Set once by [`turn_end_hooks::TurnEndQueue::spawn`]; `None` before the loop starts.
+    pub(crate) turn_end_tx:
+        std::cell::RefCell<Option<tokio::sync::mpsc::UnboundedSender<turn_end_hooks::QueueItem>>>,
     /// Client hooks from `session/new` `_meta["x.ai/hooks"]`; gated in
     /// [`crate::session::acp_session::hooks`]. `RefCell` so `load_session` reconnect can
     /// replace the set on the live actor (see `SessionCommand::SetClientHooks`).
@@ -1080,6 +1118,12 @@ pub(crate) struct SessionActor {
     /// terminal `SamplingEvent::Completed` (every text/thought chunk has been
     /// `send_update`d by then). `None` between turns.
     pub(crate) turn_stream_drained: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// A server-confirmed image strip awaiting proof that the stripped retry
+    /// helped: URLs buffered by request id on `ImagesStripped`, persisted to
+    /// stored history only when that request's `Completed` arrives, dropped
+    /// on `Failed`. See `acp_session_impl/image_strip.rs`.
+    pub(crate) pending_image_strip:
+        parking_lot::Mutex<Option<(xai_grok_sampler::RequestId, Vec<std::sync::Arc<str>>)>>,
     /// Handle to the per-session `xai-grok-sampler` actor.
     ///
     /// Live sessions get a real handle from `spawn_session_actor`;
@@ -1146,6 +1190,9 @@ pub(crate) struct SessionActor {
     /// session spawn; concurrent appends rely on `O_APPEND`'s atomic
     /// guarantee for writes under `PIPE_BUF` (JSONL lines fit).
     pub(crate) laziness_debug_log: Option<std::sync::Arc<std::path::Path>>,
+    /// Last live-orphan disk scan. SessionActor is `!Send`, so a `Cell` is
+    /// enough to throttle mid-turn ticks without a lock.
+    pub(crate) last_live_orphan_reconcile: std::cell::Cell<Option<std::time::Instant>>,
 }
 /// Template for building trace configs on synthetic auto-wake turns.
 ///
@@ -1927,6 +1974,9 @@ mod feedback_turn_lookup_tests;
 #[path = "acp_session_tests/idle_resume_tests.rs"]
 mod idle_resume_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/image_strip_tests.rs"]
+mod image_strip_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/inline_auto_compact_flow_tests.rs"]
 mod inline_auto_compact_flow_tests;
 #[cfg(test)]
@@ -1965,6 +2015,9 @@ mod tool_layer_images_bridge_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/turn_end_guard_tests.rs"]
 mod turn_end_guard_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn_end_reporting_tests.rs"]
+mod turn_end_reporting_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/wait_for_mcp_prefix_tests.rs"]
 mod wait_for_mcp_prefix_tests;

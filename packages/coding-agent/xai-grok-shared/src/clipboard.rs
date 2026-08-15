@@ -1849,6 +1849,10 @@ mod platform {
         Ok((status, stdout))
     }
 
+    /// Capture CLI stdout. Non-zero exit → empty bytes (typed MIME absent), not Err.
+    /// Spawn/timeout failures still return Err. Prefer this over
+    /// [`run_capture_out_checked`] for content reads where a missing type is
+    /// normal (image-only board + text probe, or the reverse).
     #[cfg(target_os = "linux")]
     fn run_capture_out(argv: &[&str], deadline: std::time::Duration) -> anyhow::Result<Vec<u8>> {
         let (status, stdout) = run_capture_out_with_status(argv, deadline)?;
@@ -1858,6 +1862,8 @@ mod platform {
         Ok(stdout)
     }
 
+    /// Capture CLI stdout; non-zero exit is Err. Use for paths that must
+    /// distinguish tool failure from emptiness (e.g. PRIMARY multi-tool scan).
     #[cfg(target_os = "linux")]
     fn run_capture_out_checked(
         argv: &[&str],
@@ -2002,7 +2008,8 @@ mod platform {
         };
         #[cfg(target_os = "linux")]
         if let Some(spec) = linux_tool_spec() {
-            let bytes = run_capture_out_checked(spec.read_text, CLI_READ_WAIT)?;
+            // Not checked: `wl-paste -t text` exits non-zero on image-only boards.
+            let bytes = run_capture_out(spec.read_text, CLI_READ_WAIT)?;
             return Ok(if bytes.is_empty() {
                 None
             } else {
@@ -2116,7 +2123,8 @@ mod platform {
         if let Some(spec) = linux_tool_spec()
             && let Some(argv) = spec.read_png
         {
-            let bytes = run_capture_out_checked(argv, CLI_READ_WAIT)?;
+            // Not checked: typed image MIME miss is Ok(None), not probe failure.
+            let bytes = run_capture_out(argv, CLI_READ_WAIT)?;
             if !bytes.is_empty() {
                 let mime = super::mime_from_bytes(&bytes);
                 return Ok(Some(ImageData {
@@ -2200,7 +2208,15 @@ mod platform {
     }
 
     pub fn get_attachments() -> anyhow::Result<super::ClipboardAttachments> {
-        let file_urls = get_file_urls()?;
+        // `ContentNotAvailable` is already Ok(None); other file_list errors must
+        // not skip get_image when a raster is still present.
+        let file_urls = match get_file_urls() {
+            Ok(urls) => urls,
+            Err(e) => {
+                tracing::debug!("clipboard file_urls read failed: {e}");
+                None
+            }
+        };
         let image = if file_urls.is_none() {
             get_image()?
         } else {
@@ -2454,11 +2470,15 @@ mod platform {
             assert!(!wayland_tool_selected(None));
         }
 
-        /// Typed text read: image-only clipboards must map to None, not raw bytes.
+        /// Typed text/image argv: missing MIME must not dump raw bytes (non-zero
+        /// exit → empty via `run_capture_out`, not a hard probe failure).
         #[test]
-        fn wl_paste_text_read_is_typed() {
+        fn wl_paste_content_reads_are_typed() {
             assert!(WL_SPEC.read_text.contains(&"-t"));
             assert!(WL_SPEC.read_text.contains(&"text"));
+            let png = WL_SPEC.read_png.expect("wl-paste image read");
+            assert!(png.contains(&"-t"));
+            assert!(png.contains(&"image/png"));
         }
 
         #[test]

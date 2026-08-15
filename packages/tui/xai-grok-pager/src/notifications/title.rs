@@ -242,6 +242,7 @@ fn write_activity(buf: &mut String, activity: &TurnActivity) {
         } => {
             let _ = write!(buf, "Retrying ({}/{})", attempt, max_retries);
         }
+        TurnActivity::WritingToolCall(writing) => buf.push_str(&writing.label()),
         TurnActivity::Waiting(reason) => buf.push_str(&reason.label()),
     }
 }

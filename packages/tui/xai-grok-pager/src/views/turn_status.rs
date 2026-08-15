@@ -188,7 +188,7 @@ pub fn is_sendable_wait(activity: &Option<TurnActivity>) -> bool {
             WaitingReason::TaskOutput { waits: true, .. }
                 | WaitingReason::TasksComplete
                 | WaitingReason::Sleep
-                | WaitingReason::Subagent
+                | WaitingReason::Subagent { .. }
         ))
     )
 }
@@ -715,6 +715,11 @@ fn compute_activity(
             format!("Retrying (attempt {attempt})…"),
             false,
         ),
+        (AgentState::TurnRunning, Some(TurnActivity::WritingToolCall(writing))) => (
+            Style::default().fg(theme.text_secondary),
+            writing.label(),
+            false,
+        ),
         (AgentState::TurnRunning, Some(TurnActivity::Waiting(reason))) => (
             // Explicit wait reason (model / subagent / task output / tasks /
             // sleep): name what the agent is blocked on instead of a generic
@@ -901,7 +906,7 @@ mod tests {
             WaitingReason::Model
         ))));
         assert!(
-            is_sendable_wait(&Some(TurnActivity::Waiting(WaitingReason::Subagent))),
+            is_sendable_wait(&Some(TurnActivity::Waiting(WaitingReason::subagent()))),
             "the shell aborts a blocked foreground subagent await on send-now, \
              so Enter during it must read as sendable"
         );
@@ -974,7 +979,13 @@ mod tests {
         let theme = Theme::current();
         let cases = [
             (WaitingReason::Model, "Waiting for response…"),
-            (WaitingReason::Subagent, "Waiting on subagent…"),
+            (WaitingReason::subagent(), "Waiting on subagent…"),
+            (
+                WaitingReason::Subagent {
+                    display: Some("fix flaky test: Running: cargo test".into()),
+                },
+                "fix flaky test: Running: cargo test…",
+            ),
             (WaitingReason::task_output(), "Waiting on task output…"),
             (
                 WaitingReason::TaskOutput {
@@ -1555,7 +1566,7 @@ mod tests {
 
     #[test]
     fn queued_hint_renders_after_phase_timer() {
-        let activity = Some(TurnActivity::Waiting(WaitingReason::Subagent));
+        let activity = Some(TurnActivity::Waiting(WaitingReason::subagent()));
         let mut args = idle_args(Watchers::default());
         args.state = &AgentState::TurnRunning;
         args.activity = &activity;

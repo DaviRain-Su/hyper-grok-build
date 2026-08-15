@@ -8,8 +8,8 @@ use crate::permission::{
 };
 use agent_client_protocol::{self as acp, Client as _};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
-use xai_file_utils::events::{Event, EventWriter, PermissionDecision};
 use xai_grok_mcp::servers::parse_mcp_qualified_name;
+use xai_grok_session_events::{Event, EventWriter, PermissionDecision};
 use xai_grok_tools::implementations::grok_build::web_fetch::domain_from_url;
 
 const REJECT_ONCE_LABEL: &str = "No, and tell Grok what to do differently";
@@ -503,7 +503,9 @@ impl AcpPrompter {
             acp::PermissionOptionId::new("reject-always"),
             acp::PermissionOption::new(
                 "reject-always",
-                "No, and don't run bash commands".to_owned(),
+                // Persists a deny for the command's primary invocation; see
+                // `map_selected_outcome`.
+                "No, and don't ask again for this command".to_owned(),
                 acp::PermissionOptionKind::RejectAlways,
             ),
         );
@@ -658,8 +660,18 @@ impl AcpPrompter {
                         > = IndexMap::new();
                         // Ordering: the always-allow row leads for discoverability; the
                         // persistent deny trails so it never sits between safe options.
+                        //
+                        // The allow row is offered only when accepting it can
+                        // actually stop this script from prompting again — a
+                        // row that saves a grant which never matches is the
+                        // "always allow keeps asking" bug. The deny row stays:
+                        // deny prefixes bind unconditionally.
                         let primary_command = primary_command_from_script(bash_command);
-                        if let Some(primary_command) = &primary_command {
+                        if let Some(primary_command) = &primary_command
+                            && crate::permission::manager::always_allow_row_is_effective(
+                                bash_command,
+                            )
+                        {
                             let (id, option) = bash_scope_option(
                                 "allow-always-command",
                                 "Always allow:",
@@ -703,7 +715,9 @@ impl AcpPrompter {
                     acp::PermissionOptionId::new("allow-always-domain"),
                     acp::PermissionOption::new(
                         "allow-always-domain",
-                        format!("Yes, always allow {domain} this session"),
+                        // The grant persists per project across sessions; the
+                        // label must not promise narrower session scope.
+                        format!("Yes, always allow {domain} for this project"),
                         acp::PermissionOptionKind::AllowAlways,
                     ),
                 );
@@ -1029,7 +1043,11 @@ fn map_selected_outcome(
                 PromptOutcome::RejectOnce
             }
             acp::PermissionOptionKind::RejectAlways => {
-                if option_id.to_string() == "reject-always-command" {
+                // `reject-always` is the generic clients' persistent-deny row;
+                // it carries no selection meta, so it falls through to the
+                // primary-command deny.
+                let id = option_id.to_string();
+                if id == "reject-always-command" || id == "reject-always" {
                     if let Some(bash_selected_commands) = meta.and_then(|m| {
                         serde_json::from_value::<BashCommandSelectedTerms>(
                             serde_json::Value::Object(m.clone()),
@@ -1040,12 +1058,15 @@ fn map_selected_outcome(
                             bash_selected_commands.command_parts.join(" "),
                         )
                     } else if let AccessKind::Bash(cmd) = access {
-                        if let Some(primary) = primary_command_from_script(cmd) {
-                            PromptOutcome::RejectAlwaysBashCommand(
+                        // Unparseable scripts persist the raw text: segment
+                        // matching never runs for them, but the raw-deny check
+                        // does, so "don't ask again" still sticks instead of
+                        // silently degrading to a one-shot reject.
+                        match primary_command_from_script(cmd) {
+                            Some(primary) => PromptOutcome::RejectAlwaysBashCommand(
                                 primary.highlighted_words.join(" "),
-                            )
-                        } else {
-                            PromptOutcome::RejectOnce
+                            ),
+                            None => PromptOutcome::RejectAlwaysBashCommand(cmd.clone()),
                         }
                     } else {
                         PromptOutcome::RejectOnce
@@ -1271,6 +1292,66 @@ mod tests {
         );
     }
 
+    /// The generic clients' `reject-always` row is labeled "don't ask again";
+    /// it must persist a deny for the primary command, not degrade to a silent
+    /// one-shot reject.
+    #[test]
+    fn generic_reject_always_persists_primary_command_deny() {
+        let p = prompter(ClientType::Generic);
+        let access = AccessKind::Bash("cargo test --workspace".to_owned());
+        let opts = p.build_options(&access);
+        let outcome = outcome_for(&opts, "reject-always", None, &access);
+        assert!(
+            matches!(
+                outcome,
+                PromptOutcome::RejectAlwaysBashCommand(ref w) if w == "cargo test --workspace"
+            ),
+            "generic reject-always must map to a persistent command deny, got {outcome:?}"
+        );
+
+        // Unparseable scripts deny by raw text — never a one-shot reject.
+        const OPAQUE: &str = "deploy $(git rev-parse HEAD)";
+        let access = AccessKind::Bash(OPAQUE.to_owned());
+        let opts = p.build_options(&access);
+        let outcome = outcome_for(&opts, "reject-always", None, &access);
+        assert!(
+            matches!(
+                outcome,
+                PromptOutcome::RejectAlwaysBashCommand(ref w) if w == OPAQUE
+            ),
+            "unparseable reject-always must persist the raw script, got {outcome:?}"
+        );
+    }
+
+    /// A wrapped/chained dangerous command can never produce the exact grant
+    /// it requires, so the allow row is suppressed — offering it would save a
+    /// rule that keeps prompting. The deny row stays (denies bind by prefix).
+    #[test]
+    fn unhonorable_always_allow_row_is_suppressed() {
+        let p = prompter(ClientType::GrokPager);
+        for script in [
+            "env FOO=1 git push origin main",
+            "git status && git push origin main",
+            // No findings at all, but the primary-scoped grant cannot stop
+            // the second segment from prompting — the loop in the reports.
+            "ls && npm publish",
+            "ls /tmp && ./bazelw test //hw-tests/integration/...",
+        ] {
+            let opts = p.build_options(&AccessKind::Bash(script.to_owned()));
+            assert!(
+                !has_option(&opts, "allow-always-command"),
+                "must not offer an allow row it cannot honor: {script:?}"
+            );
+            assert!(
+                has_option(&opts, "reject-always-command"),
+                "persistent deny stays available: {script:?}"
+            );
+        }
+        // Plain dangerous command: full-scope grant matches, row offered.
+        let opts = p.build_options(&AccessKind::Bash("git push origin main".to_owned()));
+        assert!(has_option(&opts, "allow-always-command"));
+    }
+
     #[test]
     fn parseable_scripts_offer_scoped_rows_and_meta() {
         let p = prompter(ClientType::GrokPager);
@@ -1279,7 +1360,6 @@ mod tests {
             "cd /tmp && cargo test --workspace",
             "# build first\n# then test\ncargo test --workspace",
             "ps aux | grep process",
-            "ls /tmp && ./bazelw test //hw-tests/integration/...",
         ] {
             let access = AccessKind::Bash(script.to_owned());
             let opts = p.build_options(&access);
@@ -1329,8 +1409,12 @@ mod tests {
         }
     }
 
+    /// A dump script whose dangerous/floored siblings guarantee re-prompting
+    /// gets no allow row — its "Always allow: ls" could never stop this
+    /// script, which is exactly the "always allow keeps asking" complaint.
+    /// The deny row, selection meta, and the one-shot options all remain.
     #[test]
-    fn dump_script_with_redirects_still_offers_scoped_rows() {
+    fn dump_script_with_unhonorable_grant_keeps_only_the_deny_row() {
         let script = "# Probe the outputs dir\n\
                       ls /tmp/hw-test-outputs 2>/dev/null\n\
                       \n\
@@ -1340,7 +1424,7 @@ mod tests {
         let p = prompter(ClientType::GrokPager);
         let access = AccessKind::Bash(script.to_owned());
         let opts = p.build_options(&access);
-        assert!(has_option(&opts, "allow-always-command"));
+        assert!(!has_option(&opts, "allow-always-command"));
         assert!(has_option(&opts, "reject-always-command"));
         assert!(p.bash_selection_meta(&access).is_some());
         assert!(has_option(&opts, "allow-once"));
@@ -1837,7 +1921,7 @@ mod tests {
     /// the Error→Deny decision mapping.
     #[tokio::test]
     async fn request_emits_permission_requested_and_resolved() {
-        use xai_file_utils::events::EventWriter;
+        use xai_grok_session_events::EventWriter;
 
         let dir = tempfile::tempdir().unwrap();
         let writer = EventWriter::open(dir.path());

@@ -222,12 +222,14 @@ impl SessionHandle {
     pub(crate) async fn kill_background_task(
         &self,
         task_id: &str,
+        source: xai_grok_tools::types::KillSource,
     ) -> Result<xai_grok_tools::types::KillOutcome, String> {
         let (tx, rx) = oneshot::channel();
         if self
             .cmd_tx
             .send(SessionCommand::KillBackgroundTask {
                 task_id: task_id.to_string(),
+                source,
                 respond_to: tx,
             })
             .is_err()

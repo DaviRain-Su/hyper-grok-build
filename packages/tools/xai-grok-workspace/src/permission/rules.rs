@@ -137,6 +137,14 @@ impl std::error::Error for RuleParseError {}
 ///   - `"Bash"` → `{ Allow, Bash, None }` (matches all bash commands)
 ///   - `"Edit"` → `{ Allow, Edit, None }` (matches all edit operations)
 ///
+/// Bare-name MCP rules in the `mcp__…` spelling used by `.claude/settings.json`
+/// map onto `ToolFilter::Mcp` patterns over Grok's qualified `<server>__<tool>`
+/// names (no `mcp__` prefix):
+///   - `"mcp__*"` → `{ Mcp, None }` (every MCP tool)
+///   - `"mcp__github"` → `{ Mcp, "github__*" }` (every tool on that server)
+///   - `"mcp__github__get_issue"` → `{ Mcp, "github__get_issue" }` (exact tool)
+///   - `"mcp__github__*"` → `{ Mcp, "github__*" }` (wildcard form)
+///
 /// Examples:
 ///   - `Ok`: `"Bash(npm run build)"` → `{ Allow, Bash, "npm run build" }`
 ///   - `Ok`: `"Read(src/*.rs)"` → `{ Allow, Read, "src/*.rs" }`
@@ -228,6 +236,35 @@ pub fn parse_permission_rule(
             });
         }
 
+        // `mcp__<server>[__<tool>]` rule (the `.claude/settings.json`
+        // spelling). Grok qualifies MCP tools as `<server>__<tool>` with no
+        // `mcp__` prefix, so strip it and rewrite into a glob over the
+        // qualified name; the literal rule string would otherwise fall through
+        // to `ToolFilter::Any` and match nothing. A degenerate bare `mcp__`
+        // keeps the old fall-through.
+        if let Some(rest) = rule.strip_prefix("mcp__")
+            && !rest.is_empty()
+        {
+            let pattern = if rest == "*" {
+                // Matches every MCP tool, so a tool-wide rule (no pattern).
+                None
+            } else if rest.contains("__") {
+                // Already `<server>__<tool>` (or `<server>__*`): the Grok
+                // qualified name verbatim. Server names may contain single
+                // underscores, but `__` only ever separates server from tool.
+                Some(rest.to_string())
+            } else {
+                // Server-only rule: cover every tool on that server.
+                Some(format!("{rest}__*"))
+            };
+            return Ok(PermissionRule {
+                action,
+                tool: ToolFilter::Mcp,
+                pattern,
+                pattern_mode: PatternMode::Glob,
+            });
+        }
+
         let pattern_opt = if rule.is_empty() {
             None
         } else {
@@ -311,5 +348,28 @@ pub(crate) fn strip_bash_colon_wildcard(pattern: String) -> String {
     match pattern.strip_suffix(":*") {
         Some(prefix) => prefix.to_string(),
         None => pattern,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `mcp__…` rule spellings (the `.claude/settings.json` form) map onto
+    /// `ToolFilter::Mcp` globs over Grok's qualified `<server>__<tool>` names.
+    #[test]
+    fn parse_claude_mcp_rule_forms() {
+        for (rule_str, expected_pattern) in [
+            ("mcp__github", Some("github__*")),
+            ("mcp__github__get_issue", Some("github__get_issue")),
+            ("mcp__github__*", Some("github__*")),
+            ("mcp__*", None),
+        ] {
+            let rule = parse_permission_rule(rule_str, RuleAction::Deny).unwrap();
+            assert_eq!(rule.action, RuleAction::Deny, "{rule_str}");
+            assert_eq!(rule.tool, ToolFilter::Mcp, "{rule_str}");
+            assert_eq!(rule.pattern.as_deref(), expected_pattern, "{rule_str}");
+            assert_eq!(rule.pattern_mode, PatternMode::Glob, "{rule_str}");
+        }
     }
 }

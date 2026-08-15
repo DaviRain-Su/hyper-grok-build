@@ -28,6 +28,15 @@ use xai_tool_types::SubagentCompletedOutput;
 use xai_tool_types::TaskOutputOutput;
 /// Default tool name used in auto-wake completion messages.
 pub const DEFAULT_TASK_OUTPUT_TOOL: &str = "get_task_output";
+/// UI/Stop kill with no live waiter: tell the model not to relaunch the task.
+const USER_KILLED_NOTICE: &str = "This task was killed by the user — do not restart it.\n";
+fn user_killed_notice(task: &TaskSnapshot) -> &'static str {
+    if task.explicitly_killed && !task.kill_result_delivered {
+        USER_KILLED_NOTICE
+    } else {
+        ""
+    }
+}
 /// Inline preview cap applied ONLY to bash completion reminders that ship
 /// with a disk-pointer footer. Subagent completions (which have no
 /// disk-backed output file) are never truncated -- the inline branch is
@@ -127,9 +136,11 @@ pub fn format_bash_completion(
             format!("exit code: {exit_code_str}")
         }
     };
+    let notice = user_killed_notice(task);
     let mut msg = format!(
         "Background task \"{}\" completed ({}).\n\
-         Command: {} | Duration: {:.1}s\n",
+         Command: {} | Duration: {:.1}s\n\
+         {notice}",
         task.task_id, status_str, command, duration_secs,
     );
     if task.signal.is_some() && duration_secs < 1.0 {
@@ -178,12 +189,14 @@ pub fn format_monitor_completion(task: &TaskSnapshot, task_output_name: Option<&
         .and_then(|d| d.strip_prefix("[monitor] "))
         .unwrap_or("monitor");
     let tool = task_output_name.unwrap_or(DEFAULT_TASK_OUTPUT_TOOL);
+    let notice = user_killed_notice(task);
     format!(
         "Monitor \"{id}\" ended: [monitor ended: {reason}].\n\
          Description: {description}\n\
          Command: {cmd}\n\
          Duration: {dur:.1}s\n\
-         Use {tool}(\"{id}\") for full output.",
+         Use {tool}(\"{id}\") for full output.\n\
+         {notice}",
         id = task.task_id,
         cmd = task.command,
         dur = task.duration_secs(),
@@ -811,6 +824,7 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
             is_backgrounded: false,
@@ -821,6 +835,46 @@ mod tests {
         assert!(msg.contains("exit code: 0"));
         assert!(msg.contains("cargo test"));
         assert!(msg.contains("get_command_or_subagent_output(\"abc-123\")"));
+        assert!(
+            !msg.contains("killed by the user"),
+            "natural completion must not carry the UI-kill notice: {msg}"
+        );
+    }
+    #[test]
+    fn format_bash_completion_ui_kill_says_do_not_restart() {
+        let mut task = TaskSnapshot {
+            task_id: "ui-kill".into(),
+            command: "sleep 60".into(),
+            display_command: None,
+            cwd: String::new(),
+            start_time: std::time::SystemTime::now(),
+            end_time: Some(std::time::SystemTime::now()),
+            output: String::new(),
+            output_file: std::path::PathBuf::new(),
+            truncated: false,
+            exit_code: None,
+            signal: Some("SIGKILL".into()),
+            completed: true,
+            kind: Default::default(),
+            block_waited: false,
+            explicitly_killed: true,
+            kill_result_delivered: false,
+            owner_session_id: None,
+            description: None,
+            is_backgrounded: true,
+            output_total_bytes: 0,
+        };
+        let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
+        assert!(
+            msg.contains("killed by the user — do not restart it"),
+            "UI-kill wake must include the do-not-restart line: {msg}"
+        );
+        task.kill_result_delivered = true;
+        let model_msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
+        assert!(
+            !model_msg.contains("killed by the user"),
+            "model-tool kill must not tell the model the user killed it: {model_msg}"
+        );
     }
     #[test]
     fn format_monitor_completion_exit_zero() {
@@ -840,6 +894,7 @@ mod tests {
             kind: crate::computer::types::TaskKind::Monitor,
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
             is_backgrounded: false,
@@ -875,6 +930,7 @@ mod tests {
             kind: crate::computer::types::TaskKind::Monitor,
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
             is_backgrounded: false,
@@ -886,6 +942,42 @@ mod tests {
             "expected signal wording: {msg}"
         );
         assert!(msg.contains("get_task_output(\"mon-sig\")"), "{msg}");
+    }
+    #[test]
+    fn format_monitor_completion_ui_kill_says_do_not_restart() {
+        let mut task = TaskSnapshot {
+            task_id: "mon-ui".into(),
+            command: "tail -f app.log".into(),
+            display_command: Some("[monitor] app".into()),
+            cwd: String::new(),
+            start_time: std::time::SystemTime::now(),
+            end_time: Some(std::time::SystemTime::now()),
+            output: String::new(),
+            output_file: std::path::PathBuf::new(),
+            truncated: false,
+            exit_code: None,
+            signal: Some("SIGKILL".into()),
+            completed: true,
+            kind: crate::computer::types::TaskKind::Monitor,
+            block_waited: false,
+            explicitly_killed: true,
+            kill_result_delivered: false,
+            owner_session_id: None,
+            description: None,
+            is_backgrounded: true,
+            output_total_bytes: 0,
+        };
+        let msg = format_monitor_completion(&task, None);
+        assert!(
+            msg.contains("\nThis task was killed by the user — do not restart it.\n"),
+            "UI-killed monitor notice must be on its own line: {msg}"
+        );
+        task.kill_result_delivered = true;
+        let model_msg = format_monitor_completion(&task, None);
+        assert!(
+            !model_msg.contains("killed by the user"),
+            "model-tool monitor kill must not carry the UI-kill notice: {model_msg}"
+        );
     }
     #[test]
     fn format_bash_completion_prefers_display_command() {
@@ -905,6 +997,7 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
             is_backgrounded: false,
@@ -932,6 +1025,7 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
             is_backgrounded: false,
@@ -962,6 +1056,7 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
             is_backgrounded: false,
@@ -1003,6 +1098,7 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
             is_backgrounded: false,
@@ -1043,6 +1139,7 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
             is_backgrounded: false,
@@ -1206,6 +1303,7 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
             is_backgrounded: false,
@@ -1254,6 +1352,7 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
             is_backgrounded: false,

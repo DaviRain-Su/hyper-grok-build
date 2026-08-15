@@ -318,6 +318,20 @@ impl WorkspaceHandle {
                 self.shared
                     .activity_tracker
                     .turn_completed(session_id, turn_number, duration_ms);
+                if let Some(session) = self.session(session_id) {
+                    let roots = match crate::workspace_ops::materialized_git_roots(self).await {
+                        Ok(r) if !r.is_empty() => r,
+                        _ => vec![session.cwd().to_path_buf()],
+                    };
+                    for root in roots {
+                        let on_conv_branch = git::get_branch(&root)
+                            .await
+                            .is_some_and(|b| b.starts_with("conv/"));
+                        if on_conv_branch {
+                            git::commit_turn_if_dirty(&root, turn_number).await;
+                        }
+                    }
+                }
                 let handle = {
                     let _ = written;
                     None

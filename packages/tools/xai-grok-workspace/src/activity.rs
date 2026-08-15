@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use dashmap::DashMap;
-use xai_file_utils::events::{Event, EventWriter, ToolCompletedSource, ToolOutcome};
 use xai_file_utils::queue::UploadQueueStats;
+use xai_grok_session_events::{Event, EventWriter, ToolCompletedSource, ToolOutcome};
 use xai_tool_protocol::{IdleWithholdReason, ToolServerLifecycleStatus, ToolServerStatusPayload};
 
 const LIFECYCLE_NONE: u8 = 0;

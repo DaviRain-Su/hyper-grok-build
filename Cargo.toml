@@ -13,19 +13,25 @@ members = [
     "packages/agent/xai-agent-lifecycle",
     "packages/agent/xai-chat-state",
     "packages/platform/xai-codebase-graph",
+    "packages/agent/xai-compaction-transcript",
     "packages/platform/xai-crash-handler",
     "packages/platform/xai-fast-worktree",
     "packages/platform/xai-file-utils",
     "packages/platform/xai-fsnotify",
+    "packages/platform/xai-fuzzy-file-search",
     "packages/platform/xai-gix-status",
+    "packages/coding-agent/xai-grok-active-sessions",
     "packages/agent/xai-grok-agent",
     "packages/coding-agent/xai-grok-announcements",
     "packages/ai/xai-grok-auth",
+    "packages/coding-agent/xai-grok-bundle",
     "packages/coding-agent/xai-grok-config",
     "packages/coding-agent/xai-grok-config-types",
     "packages/coding-agent/xai-grok-dashboard",
+    "packages/tools/xai-grok-diag-server",
     "packages/platform/xai-grok-env",
     "packages/platform/xai-grok-extra-ca",
+    "packages/tools/xai-grok-foreign-sessions",
     "packages/coding-agent/xai-grok-hooks",
     "packages/extensions/xai-grok-extension-api",
     "packages/extensions/xai-grok-extension-macros",
@@ -40,6 +46,7 @@ members = [
     "packages/ai/xai-grok-models",
     "packages/tui/xai-grok-pager",
     "packages/coding-agent/xai-grok-pager-bin",
+    "packages/tui/xai-grok-pager-diff",
     "packages/tui/xai-grok-pager-minimal",
     "packages/tui/xai-grok-pager-pty-harness",
     "packages/tui/xai-grok-pager-render",
@@ -49,6 +56,8 @@ members = [
     "packages/ai/xai-grok-sampling-types",
     "packages/tools/xai-grok-sandbox",
     "packages/platform/xai-grok-secrets",
+    "packages/platform/xai-grok-session-events",
+    "packages/coding-agent/xai-grok-session-search",
     "packages/coding-agent/xai-grok-shared",
     "packages/coding-agent/xai-grok-shell",
     "packages/coding-agent/xai-grok-shell-base",
@@ -63,6 +72,7 @@ members = [
     "packages/ai/xai-grok-voice",
     "packages/tools/xai-grok-workspace",
     "packages/tools/xai-grok-workspace-client",
+    "packages/tools/xai-grok-workspace-daemon",
     "packages/tools/xai-grok-workspace-types",
     "packages/coding-agent/xai-hooks-plugins-types",
     "packages/agent/xai-hyper-core",
@@ -311,20 +321,26 @@ wl-clipboard-rs = "0.9"
 xai-acp-lib = { path = "packages/coding-agent/xai-acp-lib" }
 xai-agent-lifecycle = { path = "packages/agent/xai-agent-lifecycle" }
 xai-circuit-breaker = { path = "packages/platform/xai-circuit-breaker" }
+xai-compaction-transcript = { path = "packages/agent/xai-compaction-transcript" }
 xai-computer-hub-core = { path = "packages/tools/xai-computer-hub-core" }
 xai-computer-hub-sdk = { path = "packages/tools/xai-computer-hub-sdk" }
+xai-fuzzy-file-search = { path = "packages/platform/xai-fuzzy-file-search" }
 xai-gix-status = { path = "packages/platform/xai-gix-status" }
+xai-grok-active-sessions = { path = "packages/coding-agent/xai-grok-active-sessions" }
 xai-grok-agent = { path = "packages/agent/xai-grok-agent" }
 xai-grok-announcements = { path = "packages/coding-agent/xai-grok-announcements" }
 xai-grok-auth = { path = "packages/ai/xai-grok-auth" }
+xai-grok-bundle = { path = "packages/coding-agent/xai-grok-bundle" }
 xai-grok-config = { path = "packages/coding-agent/xai-grok-config" }
 xai-grok-config-types = { path = "packages/coding-agent/xai-grok-config-types" }
+xai-grok-diag-server = { path = "packages/tools/xai-grok-diag-server" }
 xai-grok-env = { path = "packages/platform/xai-grok-env" }
 xai-grok-extension-api = { path = "packages/extensions/xai-grok-extension-api" }
 xai-grok-extension-macros = { path = "packages/extensions/xai-grok-extension-macros" }
 xai-grok-extension-runtime = { path = "packages/extensions/xai-grok-extension-runtime" }
 xai-grok-extension-sdk = { path = "packages/extensions/xai-grok-extension-sdk" }
 xai-grok-extra-ca = { path = "packages/platform/xai-grok-extra-ca" }
+xai-grok-foreign-sessions = { path = "packages/tools/xai-grok-foreign-sessions" }
 xai-grok-http = { path = "packages/ai/xai-grok-http" }
 xai-grok-markdown = { path = "packages/tui/xai-grok-markdown" }
 xai-grok-markdown-core = { path = "packages/tui/xai-grok-markdown-core" }
@@ -332,8 +348,11 @@ xai-grok-mcp = { path = "packages/coding-agent/xai-grok-mcp" }
 xai-grok-memory = { path = "packages/coding-agent/xai-grok-memory" }
 xai-grok-mermaid = { path = "packages/tui/xai-grok-mermaid" }
 xai-grok-models = { path = "packages/ai/xai-grok-models" }
+xai-grok-pager-diff = { path = "packages/tui/xai-grok-pager-diff" }
 xai-grok-sampler = { path = "packages/ai/xai-grok-sampler" }
 xai-grok-secrets = { path = "packages/platform/xai-grok-secrets" }
+xai-grok-session-events = { path = "packages/platform/xai-grok-session-events" }
+xai-grok-session-search = { path = "packages/coding-agent/xai-grok-session-search" }
 xai-grok-shared = { path = "packages/coding-agent/xai-grok-shared" }
 xai-grok-shell = { path = "packages/coding-agent/xai-grok-shell" }
 xai-grok-shell-base = { path = "packages/coding-agent/xai-grok-shell-base" }
@@ -344,6 +363,7 @@ xai-grok-tools = { path = "packages/tools/xai-grok-tools" }
 xai-grok-tools-api = { path = "packages/tools/xai-grok-tools-api" }
 xai-grok-version = { path = "packages/platform/xai-grok-version" }
 xai-grok-workspace = { path = "packages/tools/xai-grok-workspace" }
+xai-grok-workspace-daemon = { path = "packages/tools/xai-grok-workspace-daemon" }
 xai-grok-workspace-types = { path = "packages/tools/xai-grok-workspace-types" }
 xai-hooks-plugins-types = { path = "packages/coding-agent/xai-hooks-plugins-types" }
 xai-hyper-core = { path = "packages/agent/xai-hyper-core" }

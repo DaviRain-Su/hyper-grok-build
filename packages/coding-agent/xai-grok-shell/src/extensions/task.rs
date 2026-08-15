@@ -1,6 +1,6 @@
 use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
-use xai_grok_tools::types::{KillOutcome, TaskSnapshot};
+use xai_grok_tools::types::{KillOutcome, KillSource, TaskSnapshot};
 
 use xai_grok_tools::implementations::grok_build::task::types::{
     SubagentCancelOutcome, SubagentInspection, SubagentProvenance, SubagentSnapshot,
@@ -22,6 +22,29 @@ type ExtResult = Result<acp::ExtResponse, acp::Error>;
 pub struct KillTaskRequest {
     pub session_id: String,
     pub task_id: String,
+    /// Single-task UI `[×]` omits this (defaults to [`TaskKillSource::ClientUi`]).
+    /// Bulk teardown (dashboard stop-all, session delete, headless reap)
+    /// must send [`TaskKillSource::Teardown`].
+    #[serde(default)]
+    pub source: TaskKillSource,
+}
+
+/// Client-facing kill reason on `x.ai/task/kill`. Older clients omit it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TaskKillSource {
+    #[default]
+    ClientUi,
+    Teardown,
+}
+
+impl From<TaskKillSource> for KillSource {
+    fn from(source: TaskKillSource) -> Self {
+        match source {
+            TaskKillSource::ClientUi => Self::ClientUi,
+            TaskKillSource::Teardown => Self::Teardown,
+        }
+    }
 }
 
 /// Wire DTO for the `x.ai/task/kill` ext response payload (nested under
@@ -349,7 +372,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "x.ai/task/kill" => {
             let req: KillTaskRequest = parse(args)?;
             let result = agent
-                .kill_background_task(&req.session_id, &req.task_id)
+                .kill_background_task(&req.session_id, &req.task_id, req.source.into())
                 .await
                 .map(|outcome| KillTaskResponse {
                     task_id: req.task_id,
@@ -474,6 +497,17 @@ mod tests {
         let req: DeleteScheduledTaskRequest = serde_json::from_str(json).expect("should parse");
         assert_eq!(req.session_id, "sess-1");
         assert_eq!(req.task_id, "task-42");
+    }
+
+    #[test]
+    fn kill_task_request_source_defaults_to_client_ui() {
+        let req: KillTaskRequest =
+            serde_json::from_str(r#"{"sessionId":"s","taskId":"t"}"#).expect("legacy kill");
+        assert_eq!(req.source, TaskKillSource::ClientUi);
+        let teardown: KillTaskRequest =
+            serde_json::from_str(r#"{"sessionId":"s","taskId":"t","source":"teardown"}"#)
+                .expect("teardown kill");
+        assert_eq!(teardown.source, TaskKillSource::Teardown);
     }
 
     #[test]

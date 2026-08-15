@@ -72,6 +72,8 @@ pub(super) fn default_actions(
     let in_vscode_family = ctx.brand.is_vscode_family();
     let in_vscode = in_vscode_family;
     let in_apple_terminal = ctx.brand == TerminalName::AppleTerminal;
+    // Shared by ToggleQueue (Ctrl+4 primary) and OpenDashboard (omit Ctrl+4 alt).
+    let local_mac_vscode = in_vscode_family && !ctx.is_ssh && cfg!(target_os = "macos");
     let ctrl_dot_unreliable = ctrl_dot_unreliable();
     let send_to_background_help = if screen_mode.is_minimal() {
         "Detaches the running foreground Execute so it keeps working in the background while you read, queue prompts, or start something else.\nTrack background work with /tasks.\nOnly meaningful while a foreground Execute is actually running."
@@ -555,14 +557,14 @@ pub(super) fn default_actions(
             // Local macOS VS Code family only: ; / ' often never arrive (saw
             // Ctrl+4 in input-debug). SSH and non-Mac keep ; (+ ' alt). Win/Linux
             // VS maps Ctrl+4 to focusFourthEditorGroup.
-            default_key: if in_vscode_family && !ctx.is_ssh && cfg!(target_os = "macos") {
+            default_key: if local_mac_vscode {
                 key!('4', CONTROL)
             } else {
                 key!(';', CONTROL)
             },
             // Apostrophe alt for consoles that drop Ctrl on `;`. Local Mac VS
             // also keeps ; / ' as alts alongside primary Ctrl+4.
-            alt_keys: if in_vscode_family && !ctx.is_ssh && cfg!(target_os = "macos") {
+            alt_keys: if local_mac_vscode {
                 vec![key!(';', CONTROL), key!('\'', CONTROL)]
             } else {
                 vec![key!('\'', CONTROL)]
@@ -922,7 +924,13 @@ pub(super) fn default_actions(
             label: "dashboard",
             description: "Open the Agent Dashboard",
             default_key: key!('\\', CONTROL),
-            alt_keys: vec![],
+            // Classic C0 FS (0x1c): without KKP, Ctrl+\ arrives as Char('4')+CONTROL
+            // (e.g. Apple Terminal). Omit when ToggleQueue already owns Ctrl+4.
+            alt_keys: if local_mac_vscode {
+                vec![]
+            } else {
+                vec![key!('4', CONTROL)]
+            },
             category: Category::Dashboard,
             context: When::Always,
             hint_priority: None,

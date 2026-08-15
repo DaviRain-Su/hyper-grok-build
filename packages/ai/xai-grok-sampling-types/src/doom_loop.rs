@@ -22,6 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Request header whose presence enables the server-side check.
+/// Value is the detector window (decimal token count).
 pub const DOOM_LOOP_CHECK_HEADER: &str = "x-grok-doom-loop-check";
 
 /// `type` of the non-standard mid-stream SSE event — also its SSE `event:`
@@ -61,6 +62,9 @@ pub struct DoomLoopRecoveryPolicy {
     /// Resample budget per turn before accepting the response as-is.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// Detector window sent as the value of [`DOOM_LOOP_CHECK_HEADER`].
+    #[serde(default = "default_window_tokens")]
+    pub window_tokens: u32,
 }
 
 fn default_max_threshold() -> u32 {
@@ -69,6 +73,10 @@ fn default_max_threshold() -> u32 {
 
 fn default_max_retries() -> u32 {
     DoomLoopRecoveryPolicy::DEFAULT_MAX_RETRIES
+}
+
+fn default_window_tokens() -> u32 {
+    DoomLoopRecoveryPolicy::DEFAULT_RECOVERY_WINDOW_TOKENS
 }
 
 /// Channel label of the model's thinking stream — the only channel recovery
@@ -80,11 +88,12 @@ impl DoomLoopRecoveryPolicy {
     pub const MAX_THRESHOLD_RANGE: std::ops::RangeInclusive<u32> = 2..=64;
     /// Clamp range for `max_retries`.
     pub const MAX_RETRIES_RANGE: std::ops::RangeInclusive<u32> = 0..=5;
-    /// Default `max_threshold` (lowest common threshold across the backtest
-    /// corpus of confirmed loops).
-    pub const DEFAULT_MAX_THRESHOLD: u32 = 8;
+    pub const DEFAULT_MAX_THRESHOLD: u32 = 32;
     /// Default `max_retries`.
     pub const DEFAULT_MAX_RETRIES: u32 = 2;
+    pub const DEFAULT_RECOVERY_WINDOW_TOKENS: u32 = 1024;
+    /// Inclusive range of `window_tokens` values honored on the wire.
+    pub const WINDOW_TOKENS_RANGE: std::ops::RangeInclusive<u32> = 512..=4096;
 
     /// Clamp a configured `max_threshold` into [`Self::MAX_THRESHOLD_RANGE`].
     pub fn clamp_max_threshold(value: u32) -> u32 {
@@ -100,6 +109,15 @@ impl DoomLoopRecoveryPolicy {
             *Self::MAX_RETRIES_RANGE.start(),
             *Self::MAX_RETRIES_RANGE.end(),
         )
+    }
+
+    /// Out-of-range values fail closed to 4096, not the range floor.
+    pub fn clamp_window_tokens(value: u32) -> u32 {
+        if Self::WINDOW_TOKENS_RANGE.contains(&value) {
+            value
+        } else {
+            4096
+        }
     }
 
     /// A signal this policy treats as a real loop worth acting on: tail
@@ -128,6 +146,7 @@ impl Default for DoomLoopRecoveryPolicy {
         Self {
             max_threshold: Self::DEFAULT_MAX_THRESHOLD,
             max_retries: Self::DEFAULT_MAX_RETRIES,
+            window_tokens: Self::DEFAULT_RECOVERY_WINDOW_TOKENS,
         }
     }
 }
@@ -337,8 +356,9 @@ mod tests {
     #[test]
     fn policy_default_matches_documented_tunables() {
         let p = DoomLoopRecoveryPolicy::default();
-        assert_eq!(p.max_threshold, 8);
+        assert_eq!(p.max_threshold, 32);
         assert_eq!(p.max_retries, 2);
+        assert_eq!(p.window_tokens, 1024);
     }
 
     /// Per-field serde defaults: payloads written before a field existed (or
@@ -350,9 +370,23 @@ mod tests {
         let p: DoomLoopRecoveryPolicy = serde_json::from_str(r#"{"max_threshold":4}"#).unwrap();
         assert_eq!(p.max_threshold, 4);
         assert_eq!(p.max_retries, DoomLoopRecoveryPolicy::DEFAULT_MAX_RETRIES);
+        assert_eq!(
+            p.window_tokens,
+            DoomLoopRecoveryPolicy::DEFAULT_RECOVERY_WINDOW_TOKENS
+        );
         let p: DoomLoopRecoveryPolicy =
             serde_json::from_str(r#"{"max_retries":1,"future_knob":true}"#).unwrap();
         assert_eq!(p.max_retries, 1);
+        assert_eq!(
+            p.window_tokens,
+            DoomLoopRecoveryPolicy::DEFAULT_RECOVERY_WINDOW_TOKENS
+        );
+        let p: DoomLoopRecoveryPolicy = serde_json::from_str(r#"{"window_tokens":4096}"#).unwrap();
+        assert_eq!(p.window_tokens, 4096);
+        assert_eq!(
+            p.max_threshold,
+            DoomLoopRecoveryPolicy::DEFAULT_MAX_THRESHOLD
+        );
     }
 
     /// Pin the server's exact wire bytes (not a paraphrase): the
@@ -443,7 +477,8 @@ mod tests {
         let policy = DoomLoopRecoveryPolicy::default();
         assert!(policy.is_confident(&DoomLoopSignal::parse("tail_repetition:8@thinking")));
         assert!(policy.is_confident(&DoomLoopSignal::parse("tail_repetition:2@thinking")));
-        assert!(!policy.is_confident(&DoomLoopSignal::parse("tail_repetition:9@thinking")));
+        assert!(policy.is_confident(&DoomLoopSignal::parse("tail_repetition:32@thinking")));
+        assert!(!policy.is_confident(&DoomLoopSignal::parse("tail_repetition:33@thinking")));
         assert!(!policy.is_confident(&DoomLoopSignal::parse("tail_repetition:2@response")));
         assert!(!policy.is_confident(&DoomLoopSignal::parse("low_logprob@thinking")));
         assert!(!policy.is_confident(&DoomLoopSignal::parse("novel_detector:2@thinking")));

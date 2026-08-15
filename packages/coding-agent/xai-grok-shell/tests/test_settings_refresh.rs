@@ -183,6 +183,7 @@ async fn test_doom_loop_recovery_settings_round_trip() {
                 enabled: Some(true),
                 max_threshold: Some(16),
                 max_retries: Some(1),
+                ..Default::default()
             }),
             ..Default::default()
         });
@@ -196,6 +197,7 @@ async fn test_doom_loop_recovery_settings_round_trip() {
         assert_eq!(recovery.enabled, Some(true));
         assert_eq!(recovery.max_threshold, Some(16));
         assert_eq!(recovery.max_retries, Some(1));
+        assert_eq!(recovery.window_tokens, None);
 
         // Partial object: only the set field comes through; the rest stay
         // None so the resolver falls through per-field.
@@ -216,6 +218,7 @@ async fn test_doom_loop_recovery_settings_round_trip() {
         assert_eq!(recovery.enabled, None);
         assert_eq!(recovery.max_threshold, Some(32));
         assert_eq!(recovery.max_retries, None);
+        assert_eq!(recovery.window_tokens, None);
     })
     .await;
 }

@@ -482,12 +482,18 @@ fn refresh_retry_policy() -> backon::ExponentialBuilder {
         .with_max_delay(StdDuration::from_secs(2))
         .with_jitter()
 }
+/// `exchange_probe` is the caller's [`ProbeScope::Exchange`] suspend probe,
+/// shared with its possibly-consumed-RT decision so the in-call retry
+/// suppression and the sentinel gate cannot drift.
+///
+/// [`ProbeScope::Exchange`]: super::refresh::ProbeScope::Exchange
 pub(super) async fn refresh_tokens(
     token_endpoint: &str,
     refresh_token: &str,
     client_id: &str,
     principal_type: Option<&str>,
     principal_id: Option<&str>,
+    exchange_probe: &super::refresh::SuspendProbe,
 ) -> anyhow::Result<TokenResponse> {
     refresh_tokens_with_timeout(
         token_endpoint,
@@ -495,6 +501,7 @@ pub(super) async fn refresh_tokens(
         client_id,
         principal_type,
         principal_id,
+        exchange_probe,
         REFRESH_REQUEST_TIMEOUT,
     )
     .await
@@ -506,6 +513,7 @@ async fn refresh_tokens_with_timeout(
     client_id: &str,
     principal_type: Option<&str>,
     principal_id: Option<&str>,
+    exchange_probe: &super::refresh::SuspendProbe,
     request_timeout: StdDuration,
 ) -> anyhow::Result<TokenResponse> {
     use backon::Retryable;
@@ -515,7 +523,7 @@ async fn refresh_tokens_with_timeout(
         principal_id = ?principal_id,
         "OIDC: refreshing token"
     );
-    let probe = super::refresh::SuspendProbe::start();
+    let probe = exchange_probe;
     (|| {
         refresh_tokens_once_with_timeout(
             token_endpoint,
@@ -1251,6 +1259,9 @@ mod tests {
         });
         let token_endpoint = format!("http://127.0.0.1:{port}/token");
 
+        let probe = crate::auth::oidc::refresh::SuspendProbe::start(
+            crate::auth::oidc::refresh::ProbeScope::Exchange,
+        );
         let err = tokio::time::timeout(
             StdDuration::from_secs(2),
             refresh_tokens_with_timeout(
@@ -1259,6 +1270,7 @@ mod tests {
                 "client",
                 None,
                 None,
+                &probe,
                 StdDuration::from_millis(500),
             ),
         )
@@ -1314,7 +1326,10 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None)
+        let probe = crate::auth::oidc::refresh::SuspendProbe::start(
+            crate::auth::oidc::refresh::ProbeScope::Exchange,
+        );
+        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None, &probe)
             .await
             .expect("transient 5xx must be retried until success");
         assert_eq!(resp.access_token, "new-at");
@@ -1352,7 +1367,10 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let err = refresh_tokens(&token_endpoint, "rt", "client", None, None)
+        let probe = crate::auth::oidc::refresh::SuspendProbe::start(
+            crate::auth::oidc::refresh::ProbeScope::Exchange,
+        );
+        let err = refresh_tokens(&token_endpoint, "rt", "client", None, None, &probe)
             .await
             .expect_err("invalid_grant is terminal");
         assert!(
@@ -1399,7 +1417,10 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None)
+        let probe = crate::auth::oidc::refresh::SuspendProbe::start(
+            crate::auth::oidc::refresh::ProbeScope::Exchange,
+        );
+        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None, &probe)
             .await
             .expect("a non-terminal coded 4xx must be retried until success");
         assert_eq!(resp.access_token, "new-at");

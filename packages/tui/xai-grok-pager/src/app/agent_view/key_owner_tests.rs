@@ -462,12 +462,11 @@ fn plan_approval_takes_the_bar_wherever_it_takes_the_keys() {
 }
 
 /// The open plan preview is the state a plan approval spends most of its life
-/// in, and the line viewer's intercept sits ahead of *every* card in the
-/// router. The viewer also paints its own hints over the bar's row, so the
-/// bar has nothing left to say there — what it must not do is speak for the
-/// card behind it.
+/// in. The line viewer ranks above Question/CancelTurn (not Permission) and
+/// paints its own hints over the bar's row; what the bar must not do is speak
+/// for the card behind the viewer.
 #[test]
-fn a_card_under_the_open_plan_viewer_does_not_take_the_bar() {
+fn a_question_under_the_open_plan_viewer_does_not_take_the_bar() {
     let mut agent = make_agent();
     open_question(&mut agent);
     agent.plan_approval_view =
@@ -490,6 +489,20 @@ fn a_card_under_the_open_plan_viewer_does_not_take_the_bar() {
         hint_labels(&agent).is_empty(),
         "the viewer paints its own hints over the row, so the bar stays quiet"
     );
+}
+
+#[test]
+fn permission_interrupts_open_plan_viewer() {
+    let mut agent = make_agent();
+    agent.plan_approval_view =
+        Some(crate::app::agent_view::test_fixtures::make_plan_approval_view_state());
+    agent.reopen_plan_approval();
+    assert!(agent.line_viewer.is_some());
+
+    open_permission(&mut agent);
+
+    assert_eq!(agent.key_owner(), KeyOwner::Card(BlockingCard::Permission),);
+    assert_eq!(agent.focused_card(), Some(BlockingCard::Permission));
 }
 
 /// A file preview from the prompt is the same shape as the plan preview: it

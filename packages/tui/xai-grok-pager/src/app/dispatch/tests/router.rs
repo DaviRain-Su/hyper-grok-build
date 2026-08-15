@@ -354,15 +354,14 @@ fn config_editor_action_still_uses_typed_request() {
 }
 fn seed_foreign_resume_hint(
     app: &mut AppView,
-    tool: xai_grok_workspace::foreign_sessions::ForeignSessionTool,
+    tool: xai_grok_foreign_sessions::ForeignSessionTool,
 ) {
-    app.foreign_session_compat =
-        xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources {
-            claude: true,
-            codex: true,
-            cursor: true,
-            omp: true,
-        };
+    app.foreign_session_compat = xai_grok_foreign_sessions::EnabledForeignSessionSources {
+        claude: true,
+        codex: true,
+        cursor: true,
+        omp: true,
+    };
     let Effect::CanonicalizeForeignResumeCwd {
         requested_cwd,
         launch_token,
@@ -379,7 +378,7 @@ fn seed_foreign_resume_hint(
     app.apply_foreign_resume_detection(
         launch_token,
         &canonical_cwd,
-        Some(xai_grok_workspace::foreign_sessions::RecentForeignSession {
+        Some(xai_grok_foreign_sessions::RecentForeignSession {
             tool,
             native_id: "native-id".into(),
             age: std::time::Duration::from_secs(60),
@@ -428,7 +427,7 @@ fn quit_returns_quit_effect() {
 }
 #[test]
 fn resume_foreign_session_consumes_hint_and_uses_each_tools_prompt() {
-    use xai_grok_workspace::foreign_sessions::ForeignSessionTool;
+    use xai_grok_foreign_sessions::ForeignSessionTool;
     for (tool, prompt) in [
         (ForeignSessionTool::Claude, "/resume-claude native-id"),
         (ForeignSessionTool::Codex, "/resume-codex native-id"),
@@ -464,7 +463,7 @@ fn resume_foreign_session_without_hint_is_noop() {
 }
 #[test]
 fn resume_foreign_session_stashes_prompt_behind_trust_and_auth() {
-    use xai_grok_workspace::foreign_sessions::ForeignSessionTool;
+    use xai_grok_foreign_sessions::ForeignSessionTool;
     for (tool, prompt, auth_pending) in [
         (ForeignSessionTool::Codex, "/resume-codex native-id", false),
         (ForeignSessionTool::Cursor, "/resume-cursor native-id", true),

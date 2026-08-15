@@ -84,7 +84,7 @@ use crate::terminal::{AcpTerminalRunner, TerminalRunner};
 use crate::tools::ToolContext;
 use crate::upload::manifest::write_error_manifest;
 use crate::upload::trace::{
-    GCS_SCHEMA_VERSION, PromptMetadata, TurnResultMetadata,
+    GCS_SCHEMA_VERSION, PromptMetadata, PromptMetadataParams, TurnResultMetadata,
     build_chat_history_then_move_capture, local_sandbox_telemetry,
     upload_full_prompt_txt, upload_harness_session_archive, upload_images,
     upload_metadata, upload_plugin_state, upload_session_state, upload_turn_messages,
@@ -717,6 +717,10 @@ struct ResidentResources {
 struct RetainedResources {
     turn_number: Option<u64>,
     dispatch_lock: Option<std::rc::Rc<tokio::sync::Mutex<()>>>,
+    /// Serializes tray `list_running` and the actor's live-orphan tick.
+    /// Same `Arc` is cloned onto `ToolContext` at spawn. Released by
+    /// `remove_session`.
+    live_orphan_heal_lock: Option<std::sync::Arc<tokio::sync::Mutex<()>>>,
     permission_event_receiver: Option<
         tokio::sync::mpsc::UnboundedReceiver<PermissionEvent>,
     >,
@@ -1521,6 +1525,7 @@ impl MvpAgent {
                 kind: xai_grok_tools::computer::types::TaskKind::Bash,
                 block_waited: false,
                 explicitly_killed: false,
+                kill_result_delivered: false,
                 owner_session_id: None,
                 description: None,
                 is_backgrounded: true,
@@ -1715,6 +1720,7 @@ impl MvpAgent {
                 .refresh_chain(
                     crate::auth::token_type::TokenType::OidcSession,
                     crate::auth::manager::RefreshReason::ServerRejected,
+                    crate::auth::manager::RefreshUrgency::UserFacing,
                 )
                 .await
             {
@@ -2114,17 +2120,14 @@ async fn handle_synthetic_turn_trace(
         return;
     };
     let before_ctx = ctx.clone();
-    let metadata = PromptMetadata {
+    let metadata = PromptMetadata::new(PromptMetadataParams {
         schema_version: GCS_SCHEMA_VERSION.to_string(),
         session_id: ctx.session_info.id.0.to_string(),
         turn_number: ctx.turn_number,
         request_id: request.prompt_id.clone(),
         turn_started_at,
-        repo_root: None,
-        remote_url: None,
         user_id,
         user_email,
-        team_id: None,
         client_source,
         client_version,
         model: model.clone(),
@@ -2132,18 +2135,16 @@ async fn handle_synthetic_turn_trace(
             .session_handle
             .reasoning_effort
             .map(|e| e.as_str().to_string()),
-        experiment_id: None,
         host_os: std::env::consts::OS.to_string(),
         host_arch: std::env::consts::ARCH.to_string(),
         prompt_has_image: Some(false),
         prompt_was_truncated: Some(false),
         prompt_verbatim: Some(true),
         cwd: Some(info.cwd.clone()),
-        agent_type: None,
         shell_version: Some(xai_grok_version::VERSION.to_string()),
-        workspace_type: None,
         sandbox: local_sandbox_telemetry(),
-    };
+        ..Default::default()
+    });
     spawn_upload_task(
         "synthetic_before_uploads",
         async move {
@@ -2364,6 +2365,7 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
                             .refresh_chain(
                                 crate::auth::token_type::TokenType::OidcSession,
                                 crate::auth::manager::RefreshReason::ServerRejected,
+                                crate::auth::manager::RefreshUrgency::Background,
                             )
                             .await;
                         let jwt_claim = auth_manager

@@ -51,7 +51,7 @@ async fn write_compaction_segment_numbers_and_indexes_resume_safely() {
     adapter.write_compaction_segment(&info, &seg("second")).await.unwrap();
     let base = adapter
         .session_dir(&info)
-        .join(xai_chat_state::compaction_transcript::COMPACTION_DIR);
+        .join(xai_compaction_transcript::COMPACTION_DIR);
     let read = |p: &str| std::fs::read_to_string(base.join(p)).unwrap();
     assert!(read("segment_000.md").contains("# HISTORICAL -- DO NOT EDIT"));
     assert!(read("segment_001.md").contains("second"));
@@ -2042,6 +2042,73 @@ fn read_chat_history_quarantines_original_on_image_strip() {
             std::fs::read_to_string(&quarantine).unwrap(),
             raw,
             "pre-strip original must be preserved for recovery"
+        );
+}
+/// The pre-strip backup copies the live file once; the first copy wins
+/// so a later strip cannot overwrite the earliest (fullest) backup.
+#[tokio::test]
+async fn backup_chat_history_before_strip_copies_once() {
+    let original = r#"{"type":"user","content":[{"type":"text","text":"with image"}]}"#;
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    let chat_path = adapter.chat_file(&info);
+    std::fs::create_dir_all(chat_path.parent().unwrap()).unwrap();
+    std::fs::write(&chat_path, original).unwrap();
+    adapter.backup_chat_history_before_strip(&info).await.unwrap();
+    let backup = chat_path.with_extension("jsonl.pre-strip");
+    assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            original,
+            "backup must capture the pre-strip file"
+        );
+    std::fs::write(&chat_path, "stripped").unwrap();
+    adapter.backup_chat_history_before_strip(&info).await.unwrap();
+    assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            original,
+            "first backup wins; a later strip must not overwrite it"
+        );
+}
+/// The gate itself: when the backup cannot be written, the destructive
+/// rewrite must not run: the live file keeps its images and the error
+/// surfaces to the caller.
+#[tokio::test]
+async fn strip_rewrite_gated_skips_rewrite_when_backup_fails() {
+    let original = r#"{"type":"user","content":[{"type":"text","text":"with image"}]}"#;
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    let chat_path = adapter.chat_file(&info);
+    std::fs::create_dir_all(chat_path.parent().unwrap()).unwrap();
+    std::fs::write(&chat_path, original).unwrap();
+    std::fs::create_dir(chat_path.with_extension("jsonl.pre-strip.tmp")).unwrap();
+    let result = crate::session::storage::strip_rewrite_gated(
+            &adapter,
+            &info,
+            &[ConversationItem::user("stripped")],
+        )
+        .await;
+    assert!(result.is_err(), "a failed backup must fail the strip");
+    assert_eq!(
+            std::fs::read_to_string(&chat_path).unwrap(),
+            original,
+            "the rewrite must not run when the backup failed"
+        );
+}
+/// A missing chat file (fresh session, strip before first write) must
+/// not error or create a backup.
+#[tokio::test]
+async fn backup_chat_history_before_strip_noops_without_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.backup_chat_history_before_strip(&info).await.unwrap();
+    assert!(
+            !adapter
+                .chat_file(&info)
+                .with_extension("jsonl.pre-strip")
+                .exists()
         );
 }
 /// The exact incident shape: a partial record with the next record

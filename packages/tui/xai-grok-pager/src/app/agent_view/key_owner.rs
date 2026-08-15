@@ -53,12 +53,12 @@ impl BlockingCard {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeyOwner {
     /// An open line viewer: the plan preview, or a file preview from the
-    /// prompt. It swallows keys ahead of every card, and forwards them to the
-    /// plan-approval prompt when that has focus.
+    /// prompt. Ranks below Permission (so followup can type) and above other
+    /// cards; forwards keys to the plan-approval prompt when that has focus.
     LineViewer,
     BlockViewer,
-    /// A blocking card with the keyboard. Permission outranks the plan
-    /// approval below it; the other two rank under it.
+    /// A blocking card with the keyboard. Permission outranks the line viewer
+    /// and plan approval; Question/CancelTurn rank under the line viewer.
     Card(BlockingCard),
     /// The plan-approval prompt with its preview closed.
     PlanApproval,
@@ -134,12 +134,12 @@ impl AgentView {
     /// learn who the keyboard would come back to.
     fn key_owner_when_parked(&self, parked: bool) -> KeyOwner {
         let card = self.blocking_card().filter(|_| !parked);
-        if self.line_viewer.is_some() {
+        if card == Some(BlockingCard::Permission) {
+            KeyOwner::Card(BlockingCard::Permission)
+        } else if self.line_viewer.is_some() {
             KeyOwner::LineViewer
         } else if self.block_viewer.is_some() {
             KeyOwner::BlockViewer
-        } else if card == Some(BlockingCard::Permission) {
-            KeyOwner::Card(BlockingCard::Permission)
         } else if self.plan_approval_view.is_some() && !parked {
             KeyOwner::PlanApproval
         } else if let Some(card) = card {

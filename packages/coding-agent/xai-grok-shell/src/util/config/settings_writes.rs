@@ -1,10 +1,89 @@
 use super::persist::update_config;
 use anyhow::Result;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::time::UNIX_EPOCH;
 
 // ---------------------------------------------------------------------------
 // Settings helpers — typed disk-write wrappers for each setting.
 // All route through `update_config` → `merge_section` → `save_config`.
 // ---------------------------------------------------------------------------
+
+// Process-wide cache for `[ui].follow_up_behavior == "steer"`.
+//
+// The shell agent is a separate process from the pager, so an in-process
+// atomic updated in the pager never reaches the turn loop. Key the cache on
+// config.toml mtime instead. A live settings write invalidates on the next
+// safe-point drain (cheap stat; full parse only when the file changed).
+//
+// 0 = unknown, 1 = queue, 2 = steer.
+const FOLLOW_UP_CACHE_UNKNOWN: u8 = 0;
+const FOLLOW_UP_CACHE_QUEUE: u8 = 1;
+const FOLLOW_UP_CACHE_STEER: u8 = 2;
+static FOLLOW_UP_STEER_CACHE: AtomicU8 = AtomicU8::new(FOLLOW_UP_CACHE_UNKNOWN);
+static FOLLOW_UP_STEER_MTIME_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Nanoseconds since epoch for the user `config.toml` mtime, or 0 if missing.
+fn follow_up_config_mtime_ns() -> u64 {
+    let path = crate::util::grok_home::grok_home().join("config.toml");
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// Update the hot-path Steer cache (same-process tests / after a local write).
+pub fn set_follow_up_steer_cache(steer: bool) {
+    FOLLOW_UP_STEER_CACHE.store(
+        if steer {
+            FOLLOW_UP_CACHE_STEER
+        } else {
+            FOLLOW_UP_CACHE_QUEUE
+        },
+        Ordering::Relaxed,
+    );
+    FOLLOW_UP_STEER_MTIME_NS.store(follow_up_config_mtime_ns(), Ordering::Relaxed);
+}
+
+/// Whether Steer is enabled in this process.
+///
+/// Hits disk only when the cache is cold or `config.toml` mtime has changed
+/// since the last resolve, so the pager can toggle Follow-up behavior live
+/// without restarting the shell agent. A failed effective-config load does
+/// not pin Queue: previous cache is kept, or cold failure returns false for
+/// this call only without writing QUEUE+mtime.
+pub async fn follow_up_steer_enabled() -> bool {
+    let mtime = follow_up_config_mtime_ns();
+    let cached_mtime = FOLLOW_UP_STEER_MTIME_NS.load(Ordering::Relaxed);
+    let cached = FOLLOW_UP_STEER_CACHE.load(Ordering::Relaxed);
+    if cached != FOLLOW_UP_CACHE_UNKNOWN && mtime != 0 && mtime == cached_mtime {
+        return cached == FOLLOW_UP_CACHE_STEER;
+    }
+    let root = match crate::config::load_effective_config() {
+        Ok(root) => root,
+        Err(_) => {
+            // Transient load failure: do not cache Queue against this mtime.
+            if cached != FOLLOW_UP_CACHE_UNKNOWN {
+                return cached == FOLLOW_UP_CACHE_STEER;
+            }
+            return false;
+        }
+    };
+    let enabled = super::load::load_config_from_toml(&root)
+        .ui
+        .follow_up_steer_enabled();
+    FOLLOW_UP_STEER_CACHE.store(
+        if enabled {
+            FOLLOW_UP_CACHE_STEER
+        } else {
+            FOLLOW_UP_CACHE_QUEUE
+        },
+        Ordering::Relaxed,
+    );
+    FOLLOW_UP_STEER_MTIME_NS.store(mtime, Ordering::Relaxed);
+    enabled
+}
 
 /// Persist `[ui].compact_mode` via `update_config`.
 pub async fn set_compact_mode(value: bool) -> Result<()> {
@@ -34,6 +113,13 @@ pub async fn set_confirm_before_rewind(value: bool) -> Result<()> {
 /// Persist `[ui].combine_queued_prompts` via `update_config`.
 pub async fn set_combine_queued_prompts(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.combine_queued_prompts = Some(value)).await
+}
+
+/// Persist `[ui].follow_up_behavior` (`"queue"` | `"steer"`).
+pub async fn set_follow_up_behavior(value: String) -> Result<()> {
+    // Keep the hot-path cache in sync before the disk write returns.
+    set_follow_up_steer_cache(value == "steer");
+    update_config(|cfg| cfg.ui.follow_up_behavior = Some(value)).await
 }
 
 /// Persist `[ui].simple_mode` via `update_config`. Same `Option<bool>`

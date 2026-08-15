@@ -27,6 +27,7 @@ struct Counts {
     resident_resources: usize,
     retained_resources: usize,
     dispatch_locks: usize,
+    live_orphan_heal_locks: usize,
     session_turn_numbers: usize,
     permission_event_receivers: usize,
     model_unavailable_sessions: usize,

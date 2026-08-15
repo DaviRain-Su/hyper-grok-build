@@ -501,6 +501,195 @@ pub(crate) fn resolve_ask_user_question_params_from_disk(
     }
 }
 
+/// `[toolset.web_search]` domain keys. Read here from the raw config layers, not
+/// through `ShellToolsetConfig::web_search` (a `SamplerConfig`, which has no such
+/// fields), so they must be exempt from the unrecognized-key scan.
+pub const WEB_SEARCH_DOMAIN_CONFIG_PATHS: &[&str] = &[
+    "toolset.web_search.allowed_domains",
+    "toolset.web_search.excluded_domains",
+];
+
+/// Read a `[toolset.web_search] <key>` string array from the already-merged
+/// section. Empty or absent yields `None` (unbounded). For a security-flavored
+/// setting a silent typo must not disable the policy, so a present-but-malformed
+/// value is warned (not just dropped): a non-array value yields `None` with a
+/// warning, and any non-string array entry is skipped with a warning.
+fn read_domain_array(section: &TomlValue, key: &str) -> Option<Vec<String>> {
+    let value = section.get(key)?;
+    let Some(arr) = value.as_array() else {
+        tracing::warn!(
+            key,
+            "[toolset.web_search] {key} must be an array of strings; ignoring it"
+        );
+        return None;
+    };
+    let mut domains = Vec::with_capacity(arr.len());
+    for entry in arr {
+        match entry.as_str() {
+            Some(s) => domains.push(s.to_owned()),
+            None => tracing::warn!(
+                key,
+                "[toolset.web_search] {key} entry is not a string; skipping it"
+            ),
+        }
+    }
+    (!domains.is_empty()).then_some(domains)
+}
+
+/// Cap a config-sourced domain list to the web-search API's maximum, logging a
+/// warning on truncation. Config degrades rather than failing the session (the
+/// repo convention for `[toolset.*]`); authored inputs (frontmatter / per-turn)
+/// instead hard-error via `WebSearchOptions`'s deserialize validation.
+fn cap_web_search_domains(list: Option<Vec<String>>, field: &str) -> Option<Vec<String>> {
+    const MAX: usize = xai_grok_sampling_types::MAX_WEB_SEARCH_DOMAINS;
+    list.map(|mut domains| {
+        if domains.len() > MAX {
+            tracing::warn!(
+                field,
+                count = domains.len(),
+                max = MAX,
+                "[toolset.web_search] {field} has {} domains but the web-search API allows at \
+                 most {MAX}; using the first {MAX}",
+                domains.len()
+            );
+            domains.truncate(MAX);
+        }
+        domains
+    })
+}
+
+/// Resolve `[toolset.web_search]` domain filters into a [`WebSearchOptions`].
+///
+/// Layer precedence and the allow/exclude atomicity are handled **upstream** by
+/// `ConfigLayers` (per-layer normalization couples the two keys, then the normal
+/// `deep_merge_toml` picks the whole policy from the winning layer). So this just
+/// reads the already-merged `[toolset.web_search]` section and shapes it: caps
+/// each list to the API max, and defensively drops `excluded_domains` if a
+/// single layer set both (warns). Returns `None` when neither filter is set.
+///
+/// [`WebSearchOptions`]: xai_grok_sampling_types::WebSearchOptions
+pub(crate) fn resolve_web_search_domains_from_disk()
+-> Option<xai_grok_sampling_types::WebSearchOptions> {
+    let effective = match crate::config::load_effective_config() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "web_search: failed to load effective config");
+            return None;
+        }
+    };
+    let section = effective.get("toolset")?.get("web_search")?;
+    web_search_options_from_section(section)
+}
+
+/// Shape a merged `[toolset.web_search]` section into [`WebSearchOptions`]
+/// (unit-testable core of [`resolve_web_search_domains_from_disk`]).
+fn web_search_options_from_section(
+    section: &TomlValue,
+) -> Option<xai_grok_sampling_types::WebSearchOptions> {
+    let allowed = cap_web_search_domains(
+        read_domain_array(section, "allowed_domains"),
+        "allowed_domains",
+    );
+    let excluded = cap_web_search_domains(
+        read_domain_array(section, "excluded_domains"),
+        "excluded_domains",
+    );
+    let opts = xai_grok_sampling_types::WebSearchOptions {
+        allowed_domains: allowed,
+        excluded_domains: excluded,
+    };
+    if opts.is_empty() {
+        return None;
+    }
+    match opts.validate() {
+        Ok(()) => Some(opts),
+        // Defensive: normalization should make a both-set section impossible, but
+        // a single layer that set both survives the merge, so degrade here too.
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "[toolset.web_search] sets both allowed_domains and excluded_domains; \
+                 dropping excluded_domains (allowlist wins)"
+            );
+            Some(xai_grok_sampling_types::WebSearchOptions {
+                allowed_domains: opts.allowed_domains,
+                excluded_domains: None,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod web_search_domains_tests {
+    use super::*;
+
+    // Cross-layer precedence + allow/exclude atomicity live in ConfigLayers
+    // (see `xai_grok_config::loader` normalization tests). These cover only the
+    // section-shaping this module still owns: extraction, the max-5 cap, and the
+    // defensive both-set degrade.
+    fn section(body: &str) -> TomlValue {
+        let full: TomlValue = toml::from_str(&format!("[toolset.web_search]\n{body}\n")).unwrap();
+        full.get("toolset")
+            .unwrap()
+            .get("web_search")
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn none_when_unset_or_empty() {
+        let empty: TomlValue = toml::from_str("").unwrap();
+        assert!(web_search_options_from_section(&empty).is_none());
+        assert!(web_search_options_from_section(&section("allowed_domains = []")).is_none());
+    }
+
+    #[test]
+    fn allowlist_parsed() {
+        let got = web_search_options_from_section(&section(
+            r#"allowed_domains = ["docs.x.ai", "arxiv.org"]"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            got.allowed_domains,
+            Some(vec!["docs.x.ai".to_string(), "arxiv.org".to_string()])
+        );
+        assert!(got.excluded_domains.is_none());
+    }
+
+    #[test]
+    fn blocklist_parsed() {
+        let got = web_search_options_from_section(&section(r#"excluded_domains = ["reddit.com"]"#))
+            .unwrap();
+        assert!(got.allowed_domains.is_none());
+        assert_eq!(got.excluded_domains, Some(vec!["reddit.com".to_string()]));
+    }
+
+    #[test]
+    fn caps_to_the_max_instead_of_failing() {
+        let got = web_search_options_from_section(&section(
+            r#"allowed_domains = ["1", "2", "3", "4", "5", "6", "7"]"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            got.allowed_domains.map(|d| d.len()),
+            Some(5),
+            "config should degrade (cap to 5), not fail"
+        );
+    }
+
+    #[test]
+    fn both_set_degrades_to_allowlist() {
+        // Normalization prevents this across layers; this is the in-one-layer
+        // defensive path.
+        let got = web_search_options_from_section(&section(
+            "allowed_domains = [\"docs.x.ai\"]\nexcluded_domains = [\"reddit.com\"]",
+        ))
+        .unwrap();
+        assert_eq!(got.allowed_domains, Some(vec!["docs.x.ai".to_string()]));
+        assert!(got.excluded_domains.is_none());
+    }
+}
+
 #[cfg(test)]
 mod ask_user_question_timeout_tests {
     use super::*;

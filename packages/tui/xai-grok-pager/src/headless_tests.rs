@@ -120,6 +120,7 @@ fn reap_request_for_task_kills_with_session_scope() {
     let params: serde_json::Value = serde_json::from_str(request.params.get()).unwrap();
     assert_eq!(params["sessionId"], "sess-1");
     assert_eq!(params["taskId"], "task-42");
+    assert_eq!(params["source"], "teardown");
 }
 
 /// A numeric `task_id` is coerced to its string form, tracked, and reaped on exit.
@@ -151,6 +152,7 @@ fn numeric_task_id_is_decoded_tracked_and_reaped() {
     let params: serde_json::Value = serde_json::from_str(request.params.get()).unwrap();
     assert_eq!(params["taskId"], "4242");
     assert_eq!(params["sessionId"], "sess-1");
+    assert_eq!(params["source"], "teardown");
 }
 
 #[test]

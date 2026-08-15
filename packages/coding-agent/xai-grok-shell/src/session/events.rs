@@ -1,10 +1,10 @@
 //! Re-exports of the crate-internal event types that live in
-//! `xai-file-utils`. The orphan-rule items (`From<&permission::Decision>`
+//! `xai-grok-session-events`. The orphan-rule items (`From<&permission::Decision>`
 //! and the doom-loop categorizer) stay here since they need shell-local
 //! types.
 
-pub(crate) use xai_file_utils::events::tracker::EventTracker;
-pub(crate) use xai_file_utils::events::types::{
+pub(crate) use xai_grok_session_events::tracker::EventTracker;
+pub(crate) use xai_grok_session_events::types::{
     CancellationCategory, EVENT_SCHEMA_VERSION, Event, GoalClassifierVerdictTelemetry,
     GoalPauseReasonTelemetry, InterjectionSource, Phase, RedirectKind, SessionRelationship,
     ToolCompletedSource, ToolOutcome, TurnOutcomeLabel,

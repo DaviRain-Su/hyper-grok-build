@@ -4,10 +4,10 @@
 use agent_client_protocol as acp;
 
 use super::replay::{
-    ReplayPathHint, ReplayToolCollapser, collect_unfinished_subagents, filter_delta_replay_lines,
-    for_each_replay_update_in_file, line_is_available_commands_update, line_is_dropped_on_replay,
-    line_is_in_progress_tool_call_update, prepare_replay_lines, resolve_replay_updates_path,
-    stream_replay_updates_at, stream_replay_updates_at_hinted,
+    ReplayLookupFallback, ReplayPathHint, ReplayToolCollapser, collect_unfinished_subagents,
+    filter_delta_replay_lines, for_each_replay_update_in_file, line_is_available_commands_update,
+    line_is_dropped_on_replay, line_is_in_progress_tool_call_update, prepare_replay_lines,
+    resolve_replay_updates_path, stream_replay_updates_at, stream_replay_updates_at_hinted,
 };
 use super::{
     PromptExtractEvent, ReplayEmission, SUMMARY_FILE, SessionUpdate, SessionUpdateEnvelope,
@@ -961,6 +961,7 @@ fn stream_replay_forwards_completed_tool_call_update_without_base() {
         ReplayPathHint {
             parent_cwd: Some(std::path::Path::new(cwd)),
             child_cwd: None,
+            ..Default::default()
         },
         |u| updates.push(u),
     )
@@ -985,6 +986,7 @@ fn child_fast_path_finds_updates_under_parent_encoded_cwd() {
         ReplayPathHint {
             parent_cwd: Some(std::path::Path::new(cwd)),
             child_cwd: None,
+            ..Default::default()
         },
     )
     .unwrap()
@@ -1009,6 +1011,7 @@ fn child_fast_path_finds_updates_under_child_cwd() {
         ReplayPathHint {
             parent_cwd: Some(std::path::Path::new(parent_cwd)),
             child_cwd: Some(std::path::Path::new(child_cwd)),
+            ..Default::default()
         },
     )
     .unwrap()
@@ -1035,6 +1038,7 @@ fn child_lookup_falls_back_when_fast_path_misses() {
         ReplayPathHint {
             parent_cwd: Some(std::path::Path::new("/parent/cwd")),
             child_cwd: None,
+            ..Default::default()
         },
         |_| count += 1,
     )
@@ -1043,6 +1047,37 @@ fn child_lookup_falls_back_when_fast_path_misses() {
     assert_eq!(
         count, 1,
         "RelocationView fallback must still stream the child"
+    );
+}
+
+#[test]
+fn child_lookup_hinted_only_skips_scan_when_fast_path_misses() {
+    let home = tempfile::tempdir().unwrap();
+    let other = xai_grok_config::encode_cwd_dirname("/other/cwd");
+    let sid = "relocated-child-hinted";
+    let dir = home.path().join("sessions").join(&other).join(sid);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(SUMMARY_FILE), "{}").unwrap();
+    let line = acp_envelope(
+        r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"}}"#,
+    );
+    std::fs::write(dir.join(UPDATES_FILE), format!("{line}\n")).unwrap();
+    let hint = ReplayPathHint {
+        parent_cwd: Some(std::path::Path::new("/parent/cwd")),
+        child_cwd: None,
+        fallback: ReplayLookupFallback::HintedOnly,
+    };
+    let path = resolve_replay_updates_path(sid, home.path(), hint).unwrap();
+    assert!(
+        path.is_none(),
+        "HintedOnly must not scan when cwd hints miss"
+    );
+    let mut count = 0usize;
+    let emission = stream_replay_updates_at_hinted(sid, home.path(), hint, |_| count += 1).unwrap();
+    assert_eq!(emission, ReplayEmission::Empty);
+    assert_eq!(
+        count, 0,
+        "HintedOnly miss must not stream a foreign-cwd file"
     );
 }
 
@@ -1056,6 +1091,7 @@ fn child_lookup_missing_session_is_empty() {
         ReplayPathHint {
             parent_cwd: Some(std::path::Path::new("/tmp")),
             child_cwd: None,
+            ..Default::default()
         },
     )
     .unwrap();

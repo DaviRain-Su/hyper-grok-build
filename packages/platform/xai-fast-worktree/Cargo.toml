@@ -28,6 +28,7 @@ bytes = { workspace = true }
 clap = { workspace = true }
 crossbeam = { workspace = true }
 dashmap = { workspace = true }
+dirs = { workspace = true }
 dunce = { workspace = true }
 gix = { workspace = true, features = ["status", "parallel"] }
 gix-status = { version = "0.30.0" }

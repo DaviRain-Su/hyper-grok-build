@@ -177,6 +177,11 @@ pub struct UiConfig {
     /// Combine consecutive queued follow-ups into one turn. `None` = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combine_queued_prompts: Option<bool>,
+    /// Mid-turn follow-up routing: `"queue"` (default) or `"steer"`. `None`
+    /// behaves as queue. Steer promotes server-queued follow-ups as
+    /// interjections at the next tool or model safe point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up_behavior: Option<String>,
     /// Display-refresh probe + auto-cadence (`[ui.display_refresh]`). Per-field
     /// `None` inherits remote/default; skipped when untouched.
     #[serde(default, skip_serializing_if = "DisplayRefreshSettings::is_default")]
@@ -302,6 +307,7 @@ impl Default for UiConfig {
             double_click_action: None,
             contextual_hints: ContextualHints::default(),
             combine_queued_prompts: None,
+            follow_up_behavior: None,
             display_refresh: DisplayRefreshSettings::default(),
         }
     }
@@ -340,6 +346,23 @@ impl UiConfig {
     pub fn confirm_before_rewind_enabled(&self) -> bool {
         self.confirm_before_rewind
             .unwrap_or(Self::CONFIRM_BEFORE_REWIND_DEFAULT)
+    }
+
+    /// Canonical default for `[ui].follow_up_behavior`.
+    pub const FOLLOW_UP_BEHAVIOR_DEFAULT: &'static str = "queue";
+
+    /// Resolved follow-up behavior: `"queue"` or `"steer"`.
+    /// Unknown values fall back to queue.
+    pub fn follow_up_behavior(&self) -> &'static str {
+        match self.follow_up_behavior.as_deref() {
+            Some("steer") => "steer",
+            _ => Self::FOLLOW_UP_BEHAVIOR_DEFAULT,
+        }
+    }
+
+    /// True when mid-turn follow-ups should promote as interjections (Steer).
+    pub fn follow_up_steer_enabled(&self) -> bool {
+        self.follow_up_behavior() == "steer"
     }
 
     /// True when the highlight should not timer-dismiss (`hold` / `word_select`,

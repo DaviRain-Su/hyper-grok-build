@@ -6,6 +6,7 @@
 mod queries;
 mod schema;
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -466,15 +467,16 @@ pub fn now_epoch_secs() -> i64 {
         .as_secs() as i64
 }
 
+/// Resolve the grok home: `$GROK_HOME`, else `<home>/.grok`.
 pub fn resolve_grok_home() -> Result<PathBuf> {
-    if let Ok(v) = std::env::var("GROK_HOME") {
+    resolve_grok_home_from(std::env::var_os("GROK_HOME"), dirs::home_dir())
+}
+
+fn resolve_grok_home_from(grok_home: Option<OsString>, home: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(v) = grok_home.filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(v));
     }
-    let home = PathBuf::from(std::env::var("HOME").context("neither $GROK_HOME nor $HOME is set")?);
-    // Canonicalize the home dir so worktree paths share the same physical .grok
-    // tree as trust/hooks even when it is symlinked. The dunce canonicalization
-    // must stay in sync with xai_grok_config::default_grok_home();
-    // home resolution deliberately differs ($HOME here vs std::env::home_dir()).
+    let home = home.context("neither $GROK_HOME nor a home directory could be resolved")?;
     Ok(dunce::canonicalize(&home).unwrap_or(home).join(".grok"))
 }
 

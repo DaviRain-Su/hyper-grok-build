@@ -7,11 +7,13 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
+use xai_grok_diag_server::{self as diag_server, DiagHandle, ErrorClass};
 use xai_grok_workspace::config::WorkspaceServerMetadata;
-use xai_grok_workspace::daemonize;
-use xai_grok_workspace::diag_server::{self, DiagHandle, ErrorClass};
 use xai_grok_workspace::error::WorkspaceError;
-use xai_grok_workspace::preview_supervisor::{self, PreviewArgs, PreviewVisibility};
+use xai_grok_workspace_daemon::daemonize;
+use xai_grok_workspace_daemon::preview_supervisor::{
+    self, PreviewActivitySink, PreviewArgs, PreviewVisibility,
+};
 /// OTLP `service.name` for this binary's exported traces/logs/metrics and
 /// direct-OTLP fastrace export. Single source so the call sites can't drift.
 const SERVICE_NAME: &str = "prod_grok_workspace";
@@ -155,6 +157,12 @@ struct Args {
     /// without `--daemonize`.
     #[arg(long, default_value = daemonize::DEFAULT_PIDFILE_PATH)]
     pid_file: PathBuf,
+    /// Record `workspace_oom_protect_applied`, lower or recheck `oom_score_adj`
+    /// to -900, and force `GROK_TOOLS_RESET_CHILD_OOM` so shell/pty children
+    /// reset to 0. Complements always-on self-protect after pre-unshare
+    /// inheritance; arms child reset even if the early write failed. Off by default.
+    #[arg(long)]
+    oom_protect: bool,
     #[command(flatten)]
     preview: PreviewCliArgs,
 }
@@ -208,6 +216,26 @@ impl PreviewCliArgs {
         }
     }
 }
+/// Binds the preview-activity scraper to the workspace `ActivityTracker`.
+///
+/// `xai-grok-workspace-daemon` deliberately does not depend on
+/// `xai-grok-workspace`, so this binary owns the one adapter between them.
+struct TrackerSink(std::sync::Arc<xai_grok_workspace::activity::ActivityTracker>);
+impl PreviewActivitySink for TrackerSink {
+    fn note_preview_routed_activity(&self) {
+        self.0.note_preview_routed_activity();
+    }
+    fn note_preview_status_activity(&self) {
+        self.0.note_preview_status_activity();
+    }
+    fn set_preview_attached(&self, ws_tunnels_open: u64, routed_in_flight: u64) {
+        self.0
+            .set_preview_attached(ws_tunnels_open, routed_in_flight);
+    }
+    fn preview_activity_window_ms(&self) -> u64 {
+        self.0.preview_activity_window_ms()
+    }
+}
 /// Capability manifest printed by `--capabilities`, consumed by the sandbox
 /// launcher to pick a launch protocol. Additions are backward-compatible.
 #[derive(Debug, serde::Serialize)]
@@ -230,6 +258,7 @@ fn main() -> anyhow::Result<()> {
         Some(ref p) => dunce::canonicalize(p)?,
         None => std::env::current_dir()?,
     };
+    let oom_protection = xai_tty_utils::protect_from_oom_kill();
     let _pidfile_guard = if args.daemonize {
         let anchor = |p: PathBuf| if p.is_absolute() { p } else { cwd.join(p) };
         args.log_file = anchor(std::mem::take(&mut args.log_file));
@@ -247,14 +276,44 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    let oom_protect_applied = if args.oom_protect {
+        Some(daemonize::apply_workspace_oom_protect())
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    if should_set_reset_child_oom(oom_protection.is_ok(), args.oom_protect) {
+        unsafe { std::env::set_var(xai_tty_utils::RESET_CHILD_OOM_ENV, "1") };
+    }
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder
         .worker_threads(xai_tty_utils::runtime::capped_worker_threads().get())
         .enable_all();
     let rt = xai_tty_utils::runtime::build_with_blocking_pool(&mut builder)?;
-    rt.block_on(run(args, cwd))
+    rt.block_on(run(args, cwd, oom_protection, oom_protect_applied))
 }
-async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
+/// Whether to arm `GROK_TOOLS_RESET_CHILD_OOM` after the always-on protect attempt.
+///
+/// Always-on success must arm so children do not inherit -900. `--oom-protect`
+/// forces the env even when the early write failed (pre-unshare may still have
+/// left the score at -900).
+fn should_set_reset_child_oom(early_protect_ok: bool, oom_protect_flag: bool) -> bool {
+    early_protect_ok || oom_protect_flag
+}
+/// Whether the startup log should report OOM protection as active.
+///
+/// Prefer the `--oom-protect` apply outcome when present (already-at-target after
+/// pre-unshare counts as active even if the early write failed). Without the
+/// flag, report the always-on write only.
+fn oom_protect_log_active(applied: Option<bool>, early_ok: bool) -> bool {
+    applied.unwrap_or(early_ok)
+}
+async fn run(
+    args: Args,
+    cwd: PathBuf,
+    oom_protection: std::io::Result<()>,
+    oom_protect_applied: Option<bool>,
+) -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
@@ -266,6 +325,13 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .with(donating.clone())
         .init();
+    if oom_protect_log_active(oom_protect_applied, oom_protection.is_ok()) {
+        tracing::info!("kernel OOM-kill protection active");
+    } else if let (None, Err(e)) = (oom_protect_applied, &oom_protection) {
+        tracing::info!(error = %e, "kernel OOM-kill protection not active");
+    } else {
+        tracing::info!("kernel OOM-kill protection not active");
+    }
     let direct_otlp = match std::env::var("GROK_WORKSPACE_OTLP_ENDPOINT") {
         Ok(endpoint) if !endpoint.is_empty() => {
             match xai_tracing::init_fastrace(endpoint.clone(), SERVICE_NAME.to_owned(), None) {
@@ -347,6 +413,10 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
     let diag_handle = diag_server::DiagHandle::new(launch_id);
+    {
+        let caps = xai_grok_workspace::image_capabilities::image_capabilities();
+        diag_handle.set_image_capabilities(caps.wire(), caps.is_declared());
+    }
     #[cfg(unix)]
     let diag_listener = diag_server::DiagListener::Unix(args.diag_socket);
     #[cfg(windows)]
@@ -412,7 +482,7 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
     if let Some((tx, control_port)) = &preview_shutdown {
         tokio::spawn(preview_supervisor::supervise_preview_activity(
             *control_port,
-            ws_handle.activity_tracker().clone(),
+            std::sync::Arc::new(TrackerSink(ws_handle.activity_tracker().clone())),
             preview_scrape_interval,
             tx.subscribe(),
         ));
@@ -753,12 +823,32 @@ mod tests {
     fn daemonize_defaults_are_inert() {
         let args = Args::try_parse_from(["xai-workspace-server"]).unwrap();
         assert!(!args.daemonize);
+        assert!(!args.oom_protect);
         assert_eq!(args.log_file, PathBuf::from(daemonize::DEFAULT_LOG_PATH));
         assert_eq!(
             args.pid_file,
             PathBuf::from(daemonize::DEFAULT_PIDFILE_PATH)
         );
         assert_eq!(args.ready_file, None);
+    }
+    #[test]
+    fn should_set_reset_child_oom_truth_table() {
+        assert!(!should_set_reset_child_oom(false, false));
+        assert!(should_set_reset_child_oom(true, false));
+        assert!(should_set_reset_child_oom(false, true));
+        assert!(should_set_reset_child_oom(true, true));
+    }
+    #[test]
+    fn oom_protect_log_active_truth_table() {
+        assert!(oom_protect_log_active(Some(true), false));
+        assert!(!oom_protect_log_active(Some(false), true));
+        assert!(oom_protect_log_active(None, true));
+        assert!(!oom_protect_log_active(None, false));
+    }
+    #[test]
+    fn oom_protect_flag_parses() {
+        let args = Args::try_parse_from(["xai-workspace-server", "--oom-protect"]).unwrap();
+        assert!(args.oom_protect);
     }
     #[test]
     fn ready_file_is_accepted_as_a_deprecated_no_op() {
@@ -876,5 +966,28 @@ mod tests {
         let cfg = args.preview.into_preview_args(PathBuf::from("/workspace"));
         assert_eq!(cfg.visibility, Some(PreviewVisibility::Owner));
         assert_eq!(cfg.to_argv(), vec!["--visibility", "owner"]);
+    }
+    /// The scraper reports through `PreviewActivitySink`, so this adapter is the
+    /// only place the preview signal meets the tracker's idle accounting. The
+    /// scraper's own behavior is tested in `xai-grok-workspace-daemon`, and the
+    /// tracker's in `xai_grok_workspace::activity`; this covers the seam.
+    #[test]
+    fn tracker_sink_forwards_every_signal_to_the_activity_tracker() {
+        use xai_grok_workspace::activity::ActivityTracker;
+        let tracker = std::sync::Arc::new(ActivityTracker::new());
+        let sink = TrackerSink(std::sync::Arc::clone(&tracker));
+        assert_eq!(
+            sink.preview_activity_window_ms(),
+            tracker.preview_activity_window_ms()
+        );
+        sink.set_preview_attached(2, 1);
+        assert_eq!(tracker.preview_ws_tunnels_open(), 2);
+        assert!(tracker.snapshot().idle_since_ms.is_none());
+        sink.set_preview_attached(0, 0);
+        assert_eq!(tracker.preview_ws_tunnels_open(), 0);
+        sink.note_preview_routed_activity();
+        assert!(tracker.snapshot().idle_since_ms.is_none());
+        sink.note_preview_status_activity();
+        assert!(tracker.snapshot().idle_since_ms.is_none());
     }
 }

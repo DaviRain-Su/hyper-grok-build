@@ -29,6 +29,19 @@ pub(crate) fn is_under_hidden_dir(path: &Path, cwd: &Path) -> bool {
     })
 }
 
+/// Hidden-dir filter against the longest matching materialized root.
+/// Multi-repo events under `/workspace/lib` must not use `/workspace/app` cwd.
+pub(crate) fn is_under_hidden_dir_any(path: &Path, roots: &[PathBuf]) -> bool {
+    let Some(root) = roots
+        .iter()
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.as_os_str().len())
+    else {
+        return is_under_hidden_dir(path, Path::new(""));
+    };
+    is_under_hidden_dir(path, root)
+}
+
 /// Forward an fs event to the hunk tracker. Hidden-directory paths
 /// (relative to `cwd`) are filtered out so the hunk tracker never
 /// sees `.git/`, `.grok/`, etc.
@@ -38,8 +51,22 @@ pub(crate) fn forward_to_hunk_tracker(
     handle: &HunkTrackerHandle,
     cwd: &Path,
 ) {
+    forward_to_hunk_tracker_roots(
+        paths,
+        kind,
+        handle,
+        std::slice::from_ref(&cwd.to_path_buf()),
+    );
+}
+
+pub(crate) fn forward_to_hunk_tracker_roots(
+    paths: &[PathBuf],
+    kind: FsEventKind,
+    handle: &HunkTrackerHandle,
+    roots: &[PathBuf],
+) {
     for path in paths {
-        if is_under_hidden_dir(path, cwd) {
+        if is_under_hidden_dir_any(path, roots) {
             continue;
         }
         match kind {
@@ -99,10 +126,28 @@ pub(crate) fn to_workspace_event_kind(kind: FsEventKind) -> xai_grok_workspace_t
 ///   receiver are gone), or
 /// - `cancel` is cancelled.
 pub(crate) fn spawn_fs_event_forwarder(
-    mut rx: tokio::sync::broadcast::Receiver<FsEvent>,
+    rx: tokio::sync::broadcast::Receiver<FsEvent>,
     hunk_tracker: HunkTrackerHandle,
     events_tx: tokio::sync::broadcast::Sender<xai_grok_workspace_types::WorkspaceEvent>,
     cwd: PathBuf,
+    cancel: tokio_util::sync::CancellationToken,
+    codebase_index: Option<std::sync::Arc<xai_codebase_graph::IndexManagerHandle>>,
+) {
+    spawn_fs_event_forwarder_roots(
+        rx,
+        hunk_tracker,
+        events_tx,
+        vec![cwd],
+        cancel,
+        codebase_index,
+    );
+}
+
+pub(crate) fn spawn_fs_event_forwarder_roots(
+    mut rx: tokio::sync::broadcast::Receiver<FsEvent>,
+    hunk_tracker: HunkTrackerHandle,
+    events_tx: tokio::sync::broadcast::Sender<xai_grok_workspace_types::WorkspaceEvent>,
+    roots: Vec<PathBuf>,
     cancel: tokio_util::sync::CancellationToken,
     codebase_index: Option<std::sync::Arc<xai_codebase_graph::IndexManagerHandle>>,
 ) {
@@ -114,8 +159,8 @@ pub(crate) fn spawn_fs_event_forwarder(
                 result = rx.recv() => {
                     match result {
                         Ok(FsEvent::FilesChanged { ref paths, kind }) => {
-                            // Forward to hunk tracker (hidden-dir filtered).
-                            forward_to_hunk_tracker(paths, kind, &hunk_tracker, &cwd);
+                            // Forward to hunk tracker (hidden-dir filtered per mount).
+                            forward_to_hunk_tracker_roots(paths, kind, &hunk_tracker, &roots);
                             // Forward to codebase graph for incremental
                             // index updates (hidden-dir paths are indexed
                             // -- the graph's own ignore logic handles them).
@@ -276,7 +321,7 @@ pub(crate) fn ws_event_to_codebase_graph_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn hidden_dir_positive() {
@@ -300,6 +345,26 @@ mod tests {
         assert!(!is_under_hidden_dir(
             &PathBuf::from("/workspace/./src/main.rs"),
             &PathBuf::from("/workspace"),
+        ));
+    }
+
+    #[test]
+    fn hidden_dir_any_uses_longest_mount_prefix() {
+        let roots = vec![
+            PathBuf::from("/workspace/app"),
+            PathBuf::from("/workspace/lib"),
+        ];
+        assert!(is_under_hidden_dir_any(
+            Path::new("/workspace/lib/.git/HEAD"),
+            &roots,
+        ));
+        assert!(!is_under_hidden_dir_any(
+            Path::new("/workspace/lib/src/lib.rs"),
+            &roots,
+        ));
+        assert!(!is_under_hidden_dir_any(
+            Path::new("/workspace/app/src/main.rs"),
+            &roots,
         ));
     }
 

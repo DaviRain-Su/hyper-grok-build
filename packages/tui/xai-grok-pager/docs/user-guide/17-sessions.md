@@ -188,6 +188,8 @@ This shows:
 - API backend and sandbox profile (when set)
 - Context window usage (used and total tokens, with the percentage used)
 
+On the Session info tab, click a value to copy it, or drag to select a range (same highlight as the tool viewer). `c` copies the session ID and `y` copies the whole block. Copy uses the same clipboard route as the rest of Grok, including `grok wrap`.
+
 ---
 
 ## Headless Session Management

@@ -460,7 +460,7 @@ fn instruction_scope(
         Path::new(file_path),
         grok_home,
         vendor_homes,
-        Some(workspace_root),
+        &[workspace_root],
     ) {
         Scope::Global
     } else {

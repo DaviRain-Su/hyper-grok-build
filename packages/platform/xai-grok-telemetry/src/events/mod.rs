@@ -1370,7 +1370,7 @@ pub struct ActionStationarityStop {
 #[derive(Serialize)]
 pub struct ToolCallCompleted {
     pub tool_name: String,
-    pub outcome: xai_file_utils::events::types::ToolOutcome,
+    pub outcome: xai_grok_session_events::types::ToolOutcome,
     pub duration_ms: u64,
     /// Primary file path of the call, for the external stream only
     /// (`#[serde(skip)]`: never serialized to product events/analytics). Always reduced to

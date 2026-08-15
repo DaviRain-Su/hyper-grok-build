@@ -12,12 +12,14 @@ pub const ENV_DISPLAY_REFRESH_AUTO_CADENCE: &str = "GROK_DISPLAY_REFRESH_AUTO_CA
 pub const DISPLAY_REFRESH_DEFAULT_CADENCE_MS: u64 = 16;
 
 /// Client defaults for [`DisplayRefreshPolicy`].
+/// Auto on + max_hz 240: `display_refresh_probe` telemetry showed ~0.4% error
+/// and common 120/144/165/180/240 Hz rates that clamp cleanly to 8–16 ms.
 pub const DISPLAY_REFRESH_DEFAULT_PROBE_ENABLED: bool = true;
-pub const DISPLAY_REFRESH_DEFAULT_AUTO_CADENCE_ENABLED: bool = false;
+pub const DISPLAY_REFRESH_DEFAULT_AUTO_CADENCE_ENABLED: bool = true;
 pub const DISPLAY_REFRESH_DEFAULT_FLOOR_MS: u32 = 8;
 pub const DISPLAY_REFRESH_DEFAULT_CEILING_MS: u32 = 16;
 pub const DISPLAY_REFRESH_DEFAULT_MIN_HZ: u32 = 55;
-pub const DISPLAY_REFRESH_DEFAULT_MAX_HZ: u32 = 165;
+pub const DISPLAY_REFRESH_DEFAULT_MAX_HZ: u32 = 240;
 
 /// Same band as env cadence knobs (`GROK_MIN_DRAW_MS` / `GROK_SCROLL_CADENCE_MS`).
 const CADENCE_MS_MIN: u32 = 1;
@@ -365,16 +367,16 @@ mod tests {
     }
 
     #[test]
-    fn defaults_probe_on_auto_off() {
+    fn defaults_probe_on_auto_on() {
         let _g = guard();
         let p = resolve_display_refresh(None, None, None, None);
         assert_eq!(p, DisplayRefreshPolicy::default());
         assert!(p.probe_enabled);
-        assert!(!p.auto_cadence_enabled);
+        assert!(p.auto_cadence_enabled);
         assert_eq!(p.floor_ms, 8);
         assert_eq!(p.ceiling_ms, 16);
         assert_eq!(p.min_hz, 55);
-        assert_eq!(p.max_hz, 165);
+        assert_eq!(p.max_hz, 240);
     }
 
     #[test]
@@ -517,7 +519,7 @@ mod tests {
 
     #[test]
     fn both_env_reports_env_override_without_probe_hz() {
-        let policy = policy_auto_on();
+        let policy = DisplayRefreshPolicy::default();
         let m = resolve_motion_cadence(&policy, None, Some(8), Some(8));
         assert_eq!(m.min_draw_ms, 8);
         assert_eq!(m.scroll_ms, 8);
@@ -525,24 +527,33 @@ mod tests {
         assert_eq!(m.reason, "env_override");
     }
 
-    fn policy_auto_on() -> DisplayRefreshPolicy {
+    fn policy_auto_off() -> DisplayRefreshPolicy {
         DisplayRefreshPolicy {
-            auto_cadence_enabled: true,
+            auto_cadence_enabled: false,
             ..DisplayRefreshPolicy::default()
         }
     }
 
     #[test]
-    fn decide_flag_off_by_default() {
+    fn decide_applied_by_default() {
         let d = decide_auto_cadence(&DisplayRefreshPolicy::default(), Some(120));
+        assert_eq!(d.ms, Some(8));
+        assert_eq!(d.reason, "applied");
+    }
+
+    #[test]
+    fn decide_flag_off_when_auto_disabled() {
+        let d = decide_auto_cadence(&policy_auto_off(), Some(120));
         assert_eq!(d.ms, None);
         assert_eq!(d.reason, "flag_off");
     }
 
     #[test]
     fn decide_disabled_when_probe_off() {
-        let mut p = policy_auto_on();
-        p.probe_enabled = false;
+        let p = DisplayRefreshPolicy {
+            probe_enabled: false,
+            ..DisplayRefreshPolicy::default()
+        };
         let d = decide_auto_cadence(&p, Some(120));
         assert_eq!(d.ms, None);
         assert_eq!(d.reason, "disabled");
@@ -550,32 +561,39 @@ mod tests {
 
     #[test]
     fn decide_probe_skip_without_hz() {
-        let d = decide_auto_cadence(&policy_auto_on(), None);
+        let d = decide_auto_cadence(&DisplayRefreshPolicy::default(), None);
         assert_eq!(d.ms, None);
         assert_eq!(d.reason, "probe_skip");
     }
 
     #[test]
     fn decide_hz_out_of_range() {
-        let d = decide_auto_cadence(&policy_auto_on(), Some(30));
+        let d = decide_auto_cadence(&DisplayRefreshPolicy::default(), Some(30));
         assert_eq!(d.ms, None);
         assert_eq!(d.reason, "hz_out_of_range");
-        let d = decide_auto_cadence(&policy_auto_on(), Some(200));
+        let d = decide_auto_cadence(&DisplayRefreshPolicy::default(), Some(360));
         assert_eq!(d.reason, "hz_out_of_range");
     }
 
     #[test]
     fn decide_applied_clamps_round_1000_over_hz() {
-        let d = decide_auto_cadence(&policy_auto_on(), Some(120));
+        let p = DisplayRefreshPolicy::default();
+        let d = decide_auto_cadence(&p, Some(120));
         assert_eq!(d.ms, Some(8));
         assert_eq!(d.reason, "applied");
-        let d = decide_auto_cadence(&policy_auto_on(), Some(60));
+        let d = decide_auto_cadence(&p, Some(60));
         assert_eq!(d.ms, Some(16));
-        let d = decide_auto_cadence(&policy_auto_on(), Some(144));
+        let d = decide_auto_cadence(&p, Some(144));
         assert_eq!(d.ms, Some(8));
-        let d = decide_auto_cadence(&policy_auto_on(), Some(55));
+        let d = decide_auto_cadence(&p, Some(55));
         assert_eq!(d.reason, "applied");
-        let d = decide_auto_cadence(&policy_auto_on(), Some(165));
+        let d = decide_auto_cadence(&p, Some(165));
+        assert_eq!(d.reason, "applied");
+        let d = decide_auto_cadence(&p, Some(180));
+        assert_eq!(d.ms, Some(8));
+        assert_eq!(d.reason, "applied");
+        let d = decide_auto_cadence(&p, Some(240));
+        assert_eq!(d.ms, Some(8));
         assert_eq!(d.reason, "applied");
     }
 
@@ -630,7 +648,7 @@ mod tests {
 
     #[test]
     fn resolve_motion_cadence_folds_decide_and_merge() {
-        let p = policy_auto_on();
+        let p = DisplayRefreshPolicy::default();
         let c = resolve_motion_cadence(&p, Some(120), None, None);
         assert_eq!(c.min_draw_ms, 8);
         assert_eq!(c.scroll_ms, 8);

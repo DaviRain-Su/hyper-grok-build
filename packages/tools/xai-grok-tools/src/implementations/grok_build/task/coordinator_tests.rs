@@ -1692,6 +1692,86 @@ async fn completion_drain_is_scoped_to_parent_session() {
 }
 
 #[tokio::test]
+async fn blocking_query_of_completed_child_returns_immediately() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("already-done", true)).await }
+    });
+    tokio::task::yield_now().await;
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    let _ = harness.completions.recv().await;
+
+    let started = std::time::Instant::now();
+    let snapshot = harness
+        .backend
+        .query("already-done", true, Some(600_000))
+        .await
+        .expect("completed child");
+    assert!(snapshot.status.is_terminal());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "already-completed query must not burn the 600s cap; elapsed {:?}",
+        started.elapsed()
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn blocking_query_of_cancelled_child_returns_immediately() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("already-killed", true)).await }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("already-killed")
+    );
+    assert!(matches!(
+        harness.backend.cancel("already-killed").await,
+        SubagentCancelOutcome::Cancelled
+    ));
+    assert!(spawn.await.unwrap().unwrap().cancelled);
+    let _ = harness.completions.recv().await;
+
+    let started = std::time::Instant::now();
+    let snapshot = harness
+        .backend
+        .query("already-killed", true, Some(600_000))
+        .await
+        .expect("cancelled child");
+    assert!(matches!(
+        snapshot.status,
+        SubagentSnapshotStatus::Cancelled { .. }
+    ));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "already-cancelled query must not burn the 600s cap; elapsed {:?}",
+        started.elapsed()
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn blocking_query_of_unknown_id_returns_immediately() {
+    let harness = harness(false, std::time::Duration::from_secs(60));
+    let started = std::time::Instant::now();
+    let snapshot = harness
+        .backend
+        .query("never-existed", true, Some(600_000))
+        .await;
+    assert!(snapshot.is_none());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "not-found query must not burn the 600s cap; elapsed {:?}",
+        started.elapsed()
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
 async fn session_backend_cannot_query_or_cancel_foreign_child() {
     let mut harness = harness(false, std::time::Duration::from_secs(60));
     let spawn = tokio::spawn({

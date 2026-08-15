@@ -5,8 +5,7 @@
     unreachable_code,
     dead_code
 )]
-//! Local data collection: per-turn event tracking, upload queueing, and
-//! S3-compatible blob storage.
+//! Local data collection: upload queueing and S3-compatible blob storage.
 pub(crate) mod circuit_breaker_observer;
 /// Wrap a raw client with [`xai_grok_auth::AuthRetryMiddleware`] for automatic 401 retry.
 pub fn with_auth_retry(
@@ -17,7 +16,6 @@ pub fn with_auth_retry(
         .with(xai_grok_auth::AuthRetryMiddleware::new(credentials, 1))
         .build()
 }
-pub mod events;
 pub mod gcs;
 pub mod queue;
 pub mod s3;

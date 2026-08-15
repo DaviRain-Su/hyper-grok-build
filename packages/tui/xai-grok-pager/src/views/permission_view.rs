@@ -223,11 +223,17 @@ pub struct PermissionViewState {
     /// permissions). Imported from `xai-grok-shell`, NOT duplicated locally.
     pub bash_highlights: Option<BashCommandHighlights>,
 
-    /// How many highlighted words are currently selected (1-indexed).
-    /// Starts at `default_always_allow_scope(highlighted_words)`: the safe
-    /// prefix for safe-listed commands, else first two words plus flags.
-    /// Right-arrow (or `>`) expands, Left-arrow (or `<`) contracts, minimum 1.
+    /// How many highlighted words the "Always allow" row selects (1-indexed).
+    /// Starts at `default_always_allow_scope(highlighted_words)`. ← contracts
+    /// down to `minimum_always_allow_scope` (pinned to the full command for
+    /// dangerous verbs, whose prefix grants never match), → expands.
     pub bash_selection_count: usize,
+
+    /// How many highlighted words the "Never allow" row selects (1-indexed).
+    /// Starts at `default_always_deny_scope(highlighted_words)` and narrows
+    /// freely to one word: deny prefixes bind for every command, so "Never
+    /// allow: git push" blocking all pushes is legitimate.
+    pub bash_deny_selection_count: usize,
 
     /// Raw bash command string for display when `bash_highlights` is `None`
     /// (complex commands that tree-sitter cannot decompose).
@@ -300,17 +306,23 @@ impl PermissionViewState {
     ///   those rows must not advertise arrows), OR
     /// - MCP: the tool name has a `__` separator, so server-scope is reachable.
     pub fn has_adjustable_scope(&self) -> bool {
-        let bash_words = self
-            .bash_highlights
-            .as_ref()
-            .is_some_and(|h| h.highlighted_words.len() > 1);
-        let scoped_rows = self.options.iter().any(|o| {
-            matches!(
-                o.option_id.0.as_ref(),
-                ALLOW_ALWAYS_COMMAND_OPTION_ID | REJECT_ALWAYS_COMMAND_OPTION_ID
-            )
+        // Each scoped row owns its range: the deny row narrows to one word for
+        // every command; the allow row can stop only on scopes that persist a
+        // working grant (`always_allow_scope_persists` — dangerous-command
+        // floor and argv-ambiguous joins excluded), so it is adjustable only
+        // when two or more such scopes exist.
+        let has_row = |id: &str| self.options.iter().any(|o| o.option_id.0.as_ref() == id);
+        let bash_adjustable = self.bash_highlights.as_ref().is_some_and(|h| {
+            let len = h.highlighted_words.len();
+            let allow_adjustable = has_row(ALLOW_ALWAYS_COMMAND_OPTION_ID)
+                && (1..=len)
+                    .filter(|&n| xai_grok_workspace::permission::always_allow_scope_persists(h, n))
+                    .nth(1)
+                    .is_some();
+            let deny_adjustable = has_row(REJECT_ALWAYS_COMMAND_OPTION_ID) && len > 1;
+            allow_adjustable || deny_adjustable
         });
-        (bash_words && scoped_rows)
+        bash_adjustable
             || self
                 .mcp_scope
                 .as_ref()
@@ -345,10 +357,27 @@ impl PermissionViewState {
         }
     }
 
-    /// Index of the row the ←/→ keys jump to from a neutral row: the exact
-    /// bash `allow-always-command` row, or `allow-always-mcp` on MCP prompts.
-    /// `None` when no such row exists (e.g. a reject-only option set) — the
-    /// cursor then stays where it is.
+    /// Row the ←/→ keys land on from a neutral row: the allow row when
+    /// present, else the bash `reject-always-command` row (the allow row may
+    /// be suppressed while the deny row stays adjustable). `None` when
+    /// neither exists — the arrows must then be inert.
+    pub fn scoped_row_jump_idx(&self) -> Option<usize> {
+        if let Some(idx) = self.scoped_allow_row_idx() {
+            return Some(idx);
+        }
+        if self.mcp_scope.is_some() {
+            return None;
+        }
+        self.options
+            .iter()
+            .position(|o| o.option_id.0.as_ref() == REJECT_ALWAYS_COMMAND_OPTION_ID)
+    }
+
+    /// The scoped *allow* row: `allow-always-command`, or `allow-always-mcp`
+    /// on MCP prompts. The MCP arrows jump here directly; bash arrows go
+    /// through [`Self::scoped_row_jump_idx`], which falls back to the deny
+    /// row when this one is suppressed. `None` when absent (e.g. a
+    /// reject-only option set).
     pub fn scoped_allow_row_idx(&self) -> Option<usize> {
         let target = if self.mcp_scope.is_some() {
             ALLOW_ALWAYS_MCP_OPTION_ID
@@ -366,6 +395,27 @@ impl PermissionViewState {
         self.options
             .iter()
             .position(|o| o.option_id.0.as_ref() == ALLOW_ALWAYS_COMMAND_OPTION_ID)
+    }
+
+    /// Next always-allow scope in the arrow's direction that persists a
+    /// working grant, skipping scopes that would save nothing
+    /// (dangerous-command floor, argv-ambiguous joins). Stays put when none
+    /// exists in that direction, or when the prompt carries no bash
+    /// highlights.
+    pub fn step_persisting_allow_scope(&self, right: bool) -> usize {
+        use xai_grok_workspace::permission::always_allow_scope_persists;
+        let current = self.bash_selection_count;
+        let Some(h) = self.bash_highlights.as_ref() else {
+            return current;
+        };
+        if right {
+            (current + 1..=h.highlighted_words.len()).find(|&n| always_allow_scope_persists(h, n))
+        } else {
+            (1..current)
+                .rev()
+                .find(|&n| always_allow_scope_persists(h, n))
+        }
+        .unwrap_or(current)
     }
 
     /// Whether the bash command body wraps past [`PERMISSION_COLLAPSED_ROWS`]
@@ -828,11 +878,21 @@ pub fn render_permission_view(
     let visible_bottom = area.y + area.height;
     let hover_bg = hovered_bg(theme);
 
-    // Precompute the selected words string for dynamic labels.
-    let selected_words: Option<String> = state
+    // Precompute the per-row selected words for dynamic labels: the allow and
+    // deny rows each own a selection count. The allow row shows the raw
+    // command for a full argv-ambiguous scope, where the persisted key is the
+    // raw script (see `allow_scope_label`), so the label equals what is saved.
+    let selected_words: Option<String> = state.bash_highlights.as_ref().map(|h| {
+        allow_scope_label(
+            h,
+            state.bash_command_raw.as_deref(),
+            state.bash_selection_count,
+        )
+    });
+    let deny_selected_words: Option<String> = state
         .bash_highlights
         .as_ref()
-        .map(|h| h.highlighted_words[..state.bash_selection_count].join(" "));
+        .map(|h| h.highlighted_words[..state.bash_deny_selection_count].join(" "));
 
     let mut inline_prompt_result: Option<InlinePromptArea> = None;
 
@@ -913,12 +973,17 @@ pub fn render_permission_view(
             theme.bg_light
         };
 
+        let row_words = if option.option_id.0.as_ref() == REJECT_ALWAYS_COMMAND_OPTION_ID {
+            deny_selected_words.as_deref()
+        } else {
+            selected_words.as_deref()
+        };
         let line = build_permission_option_line(
             option,
             i,
             is_cursor,
             row_bg,
-            selected_words.as_deref(),
+            row_words,
             state.mcp_scope.as_ref(),
             followup_text,
             content_width,
@@ -1012,6 +1077,8 @@ fn render_pattern_editor_line(
 /// Draw the live preview line under the pattern editor: whether the edited
 /// pattern still matches the command being approved (reuses the real evaluator
 /// so it can't drift), a non-blocking "very broad" warning, and the key hints.
+/// Catch-all patterns get a blocking notice instead — Enter refuses them, so
+/// the preview must not offer "save".
 fn render_pattern_preview_line(
     buf: &mut Buffer,
     content_x: u16,
@@ -1033,6 +1100,15 @@ fn render_pattern_preview_line(
                 "type a command pattern to allow (e.g. gh api repos/*)",
                 dim,
             ));
+        }
+        Some(pattern) if xai_grok_workspace::permission::bash_glob_is_catchall(pattern) => {
+            spans.push(Span::styled(
+                "\u{2717} matches everything \u{2014} won't be saved",
+                Style::default().fg(theme.accent_error),
+            ));
+            spans.push(sep);
+            spans.push(Span::styled("Esc", Style::default().fg(theme.accent_user)));
+            spans.push(Span::styled(" cancel", dim));
         }
         Some(pattern) => {
             if xai_grok_workspace::permission::bash_pattern_matches_command(pattern, command) {
@@ -1954,6 +2030,32 @@ fn dynamic_option_label(
     (option.name.clone(), None)
 }
 
+/// The allow row's label for scope `count`: the dequoted word join, except a
+/// full argv-ambiguous scope (a quoted arg with a space), which persists the
+/// raw script rather than the join — so the label shows the raw command and
+/// matches the saved key. `count == 0` yields an empty label.
+pub(crate) fn allow_scope_label(
+    h: &BashCommandHighlights,
+    raw_command: Option<&str>,
+    count: usize,
+) -> String {
+    let words = &h.highlighted_words;
+    let n = count.min(words.len());
+    // Mirror the persist raw-fallback condition exactly: full scope, a
+    // space-bearing word, and a single unwrapped command (empty prefix/suffix).
+    let uses_raw_key = n == words.len()
+        && n > 0
+        && h.prefix.is_empty()
+        && h.suffix.is_empty()
+        && words[..n]
+            .iter()
+            .any(|w| w.chars().any(char::is_whitespace));
+    match raw_command.filter(|_| uses_raw_key) {
+        Some(raw) => raw.to_owned(),
+        None => words[..n].join(" "),
+    }
+}
+
 /// Plain-string form of [`dynamic_option_label`] for surfaces without span
 /// styling (dashboard peek). Keeps every render surface on the one label
 /// source so what is shown always equals the scope the dispatch persists.
@@ -2062,6 +2164,7 @@ mod tests {
             active_idx: 0,
             bash_highlights: None,
             bash_selection_count: 0,
+            bash_deny_selection_count: 0,
             bash_command_raw: Some("cargo test --all".to_string()),
             mcp_scope: None,
             title: title.to_string(),
@@ -2217,6 +2320,7 @@ mod tests {
             active_idx: 0,
             bash_highlights: None,
             bash_selection_count: 0,
+            bash_deny_selection_count: 0,
             bash_command_raw: None,
             mcp_scope,
             title: String::new(),
@@ -2947,6 +3051,37 @@ mod tests {
         assert_eq!(
             option_label_for_selection(&plain, Some("cargo"), None),
             "Yes, proceed"
+        );
+    }
+
+    #[test]
+    fn allow_scope_label_shows_raw_for_full_ambiguous_scope() {
+        // `git commit -m "fix stuff"` → words[3] carries a space. At the full
+        // scope the persisted key is the raw script, so the label must show
+        // the raw command (matching what is saved), not the dequoted join.
+        let h = BashCommandHighlights {
+            prefix: vec![],
+            highlighted_words: vec![
+                "git".into(),
+                "commit".into(),
+                "-m".into(),
+                "fix stuff".into(),
+            ],
+            suffix: vec![],
+        };
+        let raw = r#"git commit -m "fix stuff""#;
+        assert_eq!(allow_scope_label(&h, Some(raw), 4), raw);
+        // A narrower unambiguous scope shows the plain join.
+        assert_eq!(allow_scope_label(&h, Some(raw), 3), "git commit -m");
+        // With no space-bearing word the join is faithful; raw is not used.
+        let plain = BashCommandHighlights {
+            prefix: vec![],
+            highlighted_words: vec!["cargo".into(), "test".into()],
+            suffix: vec![],
+        };
+        assert_eq!(
+            allow_scope_label(&plain, Some("cargo test"), 2),
+            "cargo test"
         );
     }
 

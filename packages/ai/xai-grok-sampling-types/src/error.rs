@@ -1344,6 +1344,37 @@ mod tests {
     }
 
     #[test]
+    fn is_likely_body_rejected_is_http_only() {
+        // Coded 413 / invalid_image are ServerRejected, not this heuristic.
+        let payload_too_large = SamplingError::Api {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: "too large".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        };
+        assert!(!payload_too_large.is_likely_body_rejected());
+        assert!(payload_too_large.is_payload_too_large());
+
+        let invalid_image = SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "nope".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: Some(ApiErrorCode::InvalidImage),
+        };
+        assert!(!invalid_image.is_likely_body_rejected());
+        assert!(invalid_image.is_image_processing_error());
+
+        assert!(
+            !SamplingError::EventStreamError("connection reset".into()).is_likely_body_rejected()
+        );
+        assert!(!SamplingError::IdleTimeout { elapsed_secs: 5 }.is_likely_body_rejected());
+    }
+
+    #[test]
     fn retry_after_returns_header_value() {
         let err = SamplingError::Api {
             status: StatusCode::TOO_MANY_REQUESTS,

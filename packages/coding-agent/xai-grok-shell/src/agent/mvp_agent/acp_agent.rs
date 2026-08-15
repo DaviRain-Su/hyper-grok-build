@@ -4,6 +4,7 @@
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
 use crate::auth::SilentRefresh;
+use crate::upload::trace::PromptMetadataParams;
 use crate::leader::protocol::InternalMethod;
 /// Which `x_search` sub-tools enforce the date cutoff, sent in `initialize`. `x_user_search` and
 /// `x_thread_fetch` are `false`: they don't honor it yet.
@@ -76,10 +77,9 @@ impl acp::Agent for MvpAgent {
         tokio::task::spawn_blocking(|| {
             crate::session::persistence::cleanup_stale_sessions(None);
         });
-        {
-            let root = crate::util::grok_home::grok_home();
-            crate::session::storage::search::SEARCH_INDEX_MANAGER.bootstrap_once(root);
-        }
+        self.apply_session_search_gate();
+        crate::session::storage::search::SEARCH_INDEX_MANAGER
+            .bootstrap_once(crate::util::grok_home::grok_home());
         const PERMISSION_CLEANUP_TTL_DAYS: u64 = 30;
         static CLEANUP_PERMISSIONS_ONCE: std::sync::Once = std::sync::Once::new();
         CLEANUP_PERMISSIONS_ONCE
@@ -1497,14 +1497,12 @@ impl acp::Agent for MvpAgent {
                     }
                 })
                 .collect();
-            let mut prompt_metadata = PromptMetadata {
+            let mut prompt_metadata = PromptMetadata::new(PromptMetadataParams {
                 schema_version: GCS_SCHEMA_VERSION.to_string(),
                 session_id: ctx.session_info.id.0.to_string(),
                 turn_number: ctx.turn_number,
                 request_id: prompt_id.clone(),
                 turn_started_at: turn_started_at.clone(),
-                repo_root: None,
-                remote_url: None,
                 user_id,
                 user_email,
                 team_id,
@@ -1524,9 +1522,9 @@ impl acp::Agent for MvpAgent {
                 cwd: Some(ctx.session_info.cwd.clone()),
                 agent_type: Some(ctx.session_handle.agent_name.clone()),
                 shell_version: Some(xai_grok_version::VERSION.to_string()),
-                workspace_type: None,
                 sandbox: local_sandbox_telemetry(),
-            };
+                ..Default::default()
+            });
             let (session_copy_tx, session_copy_rx) = oneshot::channel();
             let copy_sent = ctx
                 .session_handle

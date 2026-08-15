@@ -21,6 +21,29 @@ pub enum SamplingChannel {
     Reasoning,
 }
 
+/// Why the in-flight request was stripped. What to do about it (e.g. persist
+/// the strip to stored history) is the consumer's decision, not the sampler's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StripReason {
+    /// A 400 stamped with the invalid-image code: the server's
+    /// deterministic verdict on this exact payload.
+    ServerRejected,
+    /// A size/transport heuristic (413, connection reset on upload) or a
+    /// non-deterministic rejection (proxy-wrapped 500, legacy phrase match,
+    /// mid-stream error): may be transient, blames no particular image.
+    PayloadHeuristic,
+}
+
+impl StripReason {
+    /// snake_case label for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StripReason::ServerRejected => "server_rejected",
+            StripReason::PayloadHeuristic => "payload_heuristic",
+        }
+    }
+}
+
 /// Events emitted by the sampler for a single in-flight request.
 ///
 /// Sent on the shared event channel that callers subscribe to. The
@@ -91,6 +114,14 @@ pub enum SamplingEvent {
         request_id: RequestId,
         response: Box<ConversationResponse>,
         metrics: InferenceLatencyStats,
+    },
+
+    /// In-flight strip before retry. Persist on `ServerRejected`.
+    ImagesStripped {
+        request_id: RequestId,
+        /// URLs actually stripped from this request.
+        stripped_urls: Vec<std::sync::Arc<str>>,
+        reason: StripReason,
     },
 
     /// Request is being retried.

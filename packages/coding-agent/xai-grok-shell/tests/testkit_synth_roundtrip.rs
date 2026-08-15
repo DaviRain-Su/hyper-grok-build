@@ -61,14 +61,14 @@ async fn synth_replay_roundtrip_parses_every_persisted_update() {
 }
 
 /// The adapter-driven bench generator reaches its byte target and emits updates
-/// the production reader parses. Synchronous because `synthesize_to_target_bytes`
-/// drives the adapter on its own runtime.
+/// the production reader parses. Uses the blocking wrapper because this is a
+/// synchronous `#[test]` with no ambient runtime.
 #[test]
-fn synthesize_to_target_bytes_reaches_target_and_parses() {
+fn make_session_with_size_reaches_target_and_parses() {
     let root = TempDir::new().unwrap();
     let target: u64 = 8 * 1024;
 
-    let info = synth::synthesize_to_target_bytes(root.path(), target);
+    let info = synth::make_session_with_size_blocking(root.path(), target);
 
     let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
     let updates_path = adapter.updates_file_path(&info).expect("updates path");

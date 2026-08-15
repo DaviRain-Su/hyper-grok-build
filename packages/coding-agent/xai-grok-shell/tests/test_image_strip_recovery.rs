@@ -1,8 +1,5 @@
-//! A session whose stored history contains an image the server rejects
-//! (a 400 coded `invalid_image`) must recover within the failing turn —
-//! strip the image, retry, and finish — instead of failing every turn
-//! forever. The poisoned image is a *valid* PNG: client-side validation
-//! passes it, so the server's coded 400 is the only line of defense.
+//! Server-rejected (but client-valid) image recovers in-turn and persists
+//! so the next turn does not resend it.
 
 mod acp_harness;
 
@@ -17,7 +14,7 @@ use xai_grok_test_support::ScriptedResponse;
 
 const SESSION_ID: &str = "poisoned-image-session";
 
-/// A structurally valid, above-dimension-floor PNG as a base64 data URI.
+/// Valid PNG above the dimension floor, so only the server's 400 rejects it.
 fn poisoned_image_data_uri() -> String {
     let img: image::ImageBuffer<image::Rgb<u8>, Vec<u8>> =
         image::ImageBuffer::from_fn(32, 32, |x, y| image::Rgb([x as u8, y as u8, 0]));
@@ -31,13 +28,13 @@ fn poisoned_image_data_uri() -> String {
     )
 }
 
-/// Seed a session on disk whose history carries the poisoned image.
+/// Seed `chat_history.jsonl` with the poisoned image.
 async fn seed_poisoned_session(cwd: &std::path::Path, image_url: &str) -> Info {
     let info = Info {
         id: acp::SessionId::new(SESSION_ID),
         cwd: cwd.to_string_lossy().into_owned(),
     };
-    // Same GROK_HOME-rooted adapter the agent constructs on `session/load`.
+    // Same adapter `session/load` uses.
     let storage = JsonlStorageAdapter::new();
     storage
         .init_session(&info, acp::ModelId::new("test-model"))
@@ -61,9 +58,7 @@ async fn seed_poisoned_session(cwd: &std::path::Path, image_url: &str) -> Info {
     info
 }
 
-/// Main-turn chat-completion bodies only: side-calls (turn summary etc.) are
-/// disabled via env in the harness, and excluded here by request id as a
-/// second line of defense — they'd race the strict per-turn request counts.
+/// Main-turn `/v1/chat/completions` bodies, excluding turn-summary side-calls.
 fn chat_completion_bodies(server: &xai_grok_test_support::MockInferenceServer) -> Vec<String> {
     server
         .requests()
@@ -81,7 +76,6 @@ fn chat_completion_bodies(server: &xai_grok_test_support::MockInferenceServer) -
 fn poisoned_image_session_recovers_within_the_failing_turn() {
     run_agent_test(|cwd, server| async move {
         let image_url = poisoned_image_data_uri();
-        // Distinctive payload substring to track the image through request bodies.
         let image_marker = &image_url[image_url.len() - 48..];
         let info = seed_poisoned_session(&cwd, &image_url).await;
 
@@ -97,10 +91,7 @@ fn poisoned_image_session_recovers_within_the_failing_turn() {
         .expect("session/load timed out")
         .expect("session/load failed");
 
-        // First attempt of the next turn: the server rejects the image with
-        // the flat coded envelope the real server emits. The scripted
-        // response is one-shot; the strip-retry falls through to echo mode
-        // (= server accepts the cleaned request).
+        // One-shot 400; strip-retry falls through to echo.
         server.enqueue_response(
             "/v1/chat/completions",
             ScriptedResponse::json(
@@ -112,8 +103,6 @@ fn poisoned_image_session_recovers_within_the_failing_turn() {
             ),
         );
 
-        // Before the coded detection this turn was Fatal: no strip-retry
-        // happened and the prompt failed.
         prompt_turn(&conn, &info.id, "hi").await;
 
         let bodies = chat_completion_bodies(&server);
@@ -135,5 +124,52 @@ fn poisoned_image_session_recovers_within_the_failing_turn() {
             retry.contains("[image removed"),
             "strip-retry must carry the placeholder so the model knows an image was there"
         );
+
+        // Persist: next turn must not resend or strip-retry.
+        let turn_one_requests = chat_completion_bodies(&server).len();
+        prompt_turn(&conn, &info.id, "hi again").await;
+        let bodies = chat_completion_bodies(&server);
+        assert_eq!(
+            bodies.len(),
+            turn_one_requests + 1,
+            "second turn must succeed on its first attempt (no retry cycle)"
+        );
+        let second_turn = &bodies[bodies.len() - 1];
+        assert!(
+            !second_turn.contains(image_marker),
+            "second turn must not resend the stripped image"
+        );
+
+        // Persist is async; poll for the placeholder.
+        let chat_file = session_chat_jsonl();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let on_disk = loop {
+            let contents = tokio::fs::read_to_string(&chat_file)
+                .await
+                .expect("read session chat jsonl");
+            if contents.contains("[image removed") || tokio::time::Instant::now() >= deadline {
+                break contents;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert!(
+            !on_disk.contains(image_marker),
+            "persisted conversation must not retain the stripped image bytes"
+        );
+        assert!(
+            on_disk.contains("[image removed"),
+            "persisted conversation must carry the strip placeholder"
+        );
     });
+}
+
+/// Session `chat_history.jsonl`; cwd encoding is internal, so we scan.
+fn session_chat_jsonl() -> std::path::PathBuf {
+    let sessions = std::path::PathBuf::from(std::env::var("GROK_HOME").expect("GROK_HOME set"))
+        .join("sessions");
+    std::fs::read_dir(&sessions)
+        .expect("read sessions dir")
+        .filter_map(|e| Some(e.ok()?.path().join(SESSION_ID).join("chat_history.jsonl")))
+        .find(|p| p.exists())
+        .expect("session chat_history.jsonl not found")
 }

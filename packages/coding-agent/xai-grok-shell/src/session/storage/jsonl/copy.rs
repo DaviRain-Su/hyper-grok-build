@@ -418,12 +418,12 @@ impl JsonlStorageAdapter {
         let compaction_segments_copied = if options.copy_compaction_segments {
             let src_dir = self
                 .session_dir(source_info)
-                .join(xai_chat_state::compaction_transcript::COMPACTION_DIR);
+                .join(xai_compaction_transcript::COMPACTION_DIR);
             let mut copied = 0usize;
             if src_dir.is_dir() {
                 let dst_dir = self
                     .session_dir(target_info)
-                    .join(xai_chat_state::compaction_transcript::COMPACTION_DIR);
+                    .join(xai_compaction_transcript::COMPACTION_DIR);
                 std::fs::create_dir_all(&dst_dir)?;
                 for entry in std::fs::read_dir(&src_dir)? {
                     let entry = entry?;

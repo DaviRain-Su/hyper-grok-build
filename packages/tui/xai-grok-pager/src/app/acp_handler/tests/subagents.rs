@@ -157,6 +157,242 @@
         );
     }
 
+    /// NothingLive refreshes an existing terminal child without replacing its
+    /// real finish status, statistics, or error detail. The call default
+    /// (`completed`/`cancelled`) must not repaint a failed child.
+    #[test]
+    fn kill_refresh_preserves_existing_terminal_metrics() {
+        let mut app = make_app_with_agent("sess-1");
+        let spawn = make_ext_session_notification(
+            "sess-1",
+            test_subagent_spawned("sess-1", "child-1"),
+        );
+        assert!(handle(spawn, &mut app));
+        let finish = make_ext_session_notification(
+            "sess-1",
+            XaiSessionUpdate::SubagentFinished {
+                subagent_id: "child-1".into(),
+                child_session_id: "child-1".into(),
+                status: "failed".into(),
+                error: Some("real failure".into()),
+                tool_calls: 7,
+                turns: 3,
+                duration_ms: 9_876,
+                tokens_used: 543,
+                output: None,
+                will_wake: false,
+            },
+        );
+        assert!(handle(finish, &mut app));
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_sessions
+            .get_mut("child-1")
+            .unwrap()
+            .pending_kill = true;
+
+        assert!(finalize_killed_subagent(
+            &mut app,
+            &acp::SessionId::new("sess-1".to_owned()),
+            "child-1",
+            "cancelled",
+        ));
+
+        let info = &app.agents[&AgentId(0)].subagent_sessions["child-1"];
+        assert!(info.finished);
+        assert_eq!(
+            info.status.as_deref(),
+            Some("failed"),
+            "retained terminal status must win over the kill-call default"
+        );
+        assert_eq!(info.error.as_deref(), Some("real failure"));
+        assert_eq!(info.tool_calls, Some(7));
+        assert_eq!(info.turns, Some(3));
+        assert_eq!(info.duration_ms, Some(9_876));
+        assert_eq!(info.tokens_used, Some(543));
+        assert!(!info.pending_kill);
+        let entry_id = info.scrollback_entry_id.unwrap();
+        let entry = app.agents[&AgentId(0)].scrollback.get_by_id(entry_id).unwrap();
+        let RenderBlock::Subagent(sb) = &entry.block else {
+            panic!("expected subagent row");
+        };
+        assert!(
+            matches!(sb.kind, SubagentBlockKind::Failed { .. }),
+            "parent row must keep Failed, not repaint as Cancelled/Completed"
+        );
+    }
+
+    /// Re-finalizing an already-finished background child must refresh the
+    /// existing completed row, not append a second one.
+    #[test]
+    fn kill_refresh_does_not_duplicate_background_completed_row() {
+        let mut app = make_app_with_agent("sess-1");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .tracker
+            .task_tool_background
+            .insert("child-bg".into(), true);
+        assert!(handle(
+            make_ext_session_notification(
+                "sess-1",
+                test_subagent_spawned("sess-1", "child-bg"),
+            ),
+            &mut app,
+        ));
+        assert!(handle(
+            make_ext_session_notification("sess-1", test_subagent_finished("child-bg")),
+            &mut app,
+        ));
+        let terminal_rows = |app: &crate::app::app_view::AppView| {
+            (0..app.agents[&AgentId(0)].scrollback.len())
+                .filter(|&idx| {
+                    matches!(
+                        app.agents[&AgentId(0)].scrollback.entry(idx).map(|e| &e.block),
+                        Some(RenderBlock::Subagent(sb))
+                            if sb.child_session_id == "child-bg"
+                                && !matches!(sb.kind, SubagentBlockKind::Started)
+                    )
+                })
+                .count()
+        };
+        assert_eq!(terminal_rows(&app), 1);
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_sessions
+            .get_mut("child-bg")
+            .unwrap()
+            .pending_kill = true;
+
+        assert!(finalize_killed_subagent(
+            &mut app,
+            &acp::SessionId::new("sess-1".to_owned()),
+            "child-bg",
+            "completed",
+        ));
+
+        assert_eq!(terminal_rows(&app), 1);
+        let info = &app.agents[&AgentId(0)].subagent_sessions["child-bg"];
+        assert!(info.finished);
+        assert!(info.is_background);
+        assert_eq!(info.status.as_deref(), Some("completed"));
+    }
+
+    /// Kill reconciliation / late re-finalize must not append a second
+    /// `TurnCompleted` footer on the child transcript (parent-row count alone
+    /// misses this).
+    #[test]
+    fn kill_refresh_does_not_duplicate_child_transcript_footer() {
+        use crate::app::agent_view::test_fixtures::count_turn_markers;
+
+        let mut app = make_app_with_agent("sess-1");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .tracker
+            .task_tool_background
+            .insert("child-footer".into(), true);
+        assert!(handle(
+            make_ext_session_notification(
+                "sess-1",
+                test_subagent_spawned("sess-1", "child-footer"),
+            ),
+            &mut app,
+        ));
+        assert!(handle(
+            make_ext_session_notification("sess-1", test_subagent_finished("child-footer")),
+            &mut app,
+        ));
+        let footer_count = |app: &crate::app::app_view::AppView| {
+            count_turn_markers(&app.agents[&AgentId(0)].subagent_views["child-footer"])
+        };
+        assert_eq!(footer_count(&app), 1, "first finish must append one footer");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_sessions
+            .get_mut("child-footer")
+            .unwrap()
+            .pending_kill = true;
+
+        assert!(finalize_killed_subagent(
+            &mut app,
+            &acp::SessionId::new("sess-1".to_owned()),
+            "child-footer",
+            "cancelled",
+        ));
+        assert_eq!(
+            footer_count(&app),
+            1,
+            "re-finalize must not append a second child TurnCompleted footer"
+        );
+    }
+
+    /// An earlier turn's `TurnCompleted` deeper in the child transcript must
+    /// not suppress a later turn's trailing footer; only a trailing footer is
+    /// re-finalize-idempotent.
+    #[test]
+    fn multi_turn_child_keeps_second_footer_on_re_finalize() {
+        use crate::app::agent_view::test_fixtures::count_turn_markers;
+        use crate::app::subagent::finalize_finished_child_view;
+
+        let mut app = make_app_with_agent("sess-1");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .tracker
+            .task_tool_background
+            .insert("child-multi".into(), true);
+        assert!(handle(
+            make_ext_session_notification(
+                "sess-1",
+                test_subagent_spawned("sess-1", "child-multi"),
+            ),
+            &mut app,
+        ));
+        // Seed an intermediate turn marker, then later content, then finalize.
+        {
+            let child = app
+                .agents
+                .get_mut(&AgentId(0))
+                .unwrap()
+                .subagent_views
+                .get_mut("child-multi")
+                .unwrap();
+            child
+                .scrollback
+                .push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
+                    elapsed: Some(std::time::Duration::from_secs(1)),
+                }));
+            child
+                .scrollback
+                .push_block(RenderBlock::system("turn-2 content"));
+            assert_eq!(
+                count_turn_markers(child),
+                1,
+                "precondition: one earlier-turn footer exists"
+            );
+            finalize_finished_child_view(child, std::time::Duration::from_secs(2));
+            assert_eq!(
+                count_turn_markers(child),
+                2,
+                "second-turn finalize must append its own trailing footer"
+            );
+            // Re-finalize with no new content must stay idempotent on the tail.
+            finalize_finished_child_view(child, std::time::Duration::from_secs(3));
+            assert_eq!(
+                count_turn_markers(child),
+                2,
+                "re-finalize must not append a third footer"
+            );
+        }
+    }
+
     /// Thread-leak regression: every `SubagentSpawned` creates a child
     /// `AgentView` whose `PromptWidget` owns a `HistorySearchState`, and the
     /// matcher thread used to spawn eagerly per view — one leaked thread per
@@ -292,6 +528,367 @@
         );
     }
 
+    #[test]
+    fn late_unique_subagent_lifecycle_event_is_not_dropped() {
+        let mut app = make_app_with_agent("sess-parent");
+        let notification = |update: serde_json::Value, event_seq: u64| {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let payload = serde_json::json!({
+                "sessionId": "sess-parent",
+                "update": update,
+                "_meta": { "eventId": format!("sess-parent-{event_seq}") },
+            });
+            let raw = serde_json::value::to_raw_value(&payload).unwrap();
+            AcpClientMessage::ExtNotification(xai_acp_lib::AcpArgs {
+                request: acp::ExtNotification::new("x.ai/session_notification", raw.into()),
+                response_tx: tx,
+            })
+        };
+        let spawned = |child_sid: &str, event_seq: u64| {
+            notification(
+                serde_json::to_value(test_subagent_spawned("sess-parent", child_sid)).unwrap(),
+                event_seq,
+            )
+        };
+        let finished = |child_sid: &str, event_seq: u64| {
+            notification(
+                serde_json::to_value(test_subagent_finished(child_sid)).unwrap(),
+                event_seq,
+            )
+        };
+
+        for event_seq in 1..=7 {
+            assert!(handle(
+                spawned(&format!("child-{event_seq}"), event_seq),
+                &mut app,
+            ));
+        }
+
+        // A persisted active goal update can arrive ahead of a lower-ID spawn;
+        // it advances the xAI highwater without adding a scrollback block.
+        assert!(handle(
+            notification(
+                serde_json::json!({
+                    "sessionUpdate": "goal_updated",
+                    "goal_id": "goal-1",
+                    "objective": "track lifecycle events",
+                    "status": "active",
+                    "phase": "executing",
+                    "tokens_used": 0,
+                    "elapsed_ms": 0,
+                    "total_deliverables": 0,
+                    "completed_deliverables": 0,
+                    "total_worker_rounds": 0,
+                    "total_verify_rounds": 0,
+                    "token_baseline": 0,
+                    "finished_subagent_tokens": 0,
+                }),
+                100,
+            ),
+            &mut app,
+        ));
+        assert_eq!(
+            (
+                app.agents[&AgentId(0)].last_applied_xai_event_seq,
+                app.agents[&AgentId(0)].scrollback.len(),
+            ),
+            (Some(100), 7)
+        );
+
+        let _ = handle(finished("child-1", 50), &mut app);
+        assert!(app.agents[&AgentId(0)].subagent_sessions["child-1"].finished);
+        assert_eq!(
+            app.agents[&AgentId(0)].last_applied_xai_event_seq,
+            Some(100),
+            "a late lower-ID lifecycle event must not regress the scalar xAI highwater"
+        );
+
+        // A restarted producer can reuse an eventId for a different child.
+        let _ = handle(spawned("child-reused-id", 1), &mut app);
+        assert!(
+            app.agents[&AgentId(0)]
+                .subagent_sessions
+                .contains_key("child-reused-id"),
+            "raw eventId reuse must not suppress a new child lifecycle"
+        );
+
+        let _ = handle(spawned("child-8", 8), &mut app);
+        assert_eq!(
+            (
+                app.agents[&AgentId(0)].subagent_sessions.len(),
+                app.agents[&AgentId(0)].scrollback.len(),
+            ),
+            (9, 9),
+            "a unique late subagent lifecycle event must not be treated as a duplicate"
+        );
+        assert_eq!(
+            app.agents[&AgentId(0)].last_seen_event_id.as_deref(),
+            Some("sess-parent-100"),
+            "applied late lifecycle must not move the reconnect cursor backwards"
+        );
+
+        let _ = handle(finished("child-2", 9), &mut app);
+        let _ = handle(spawned("child-8", 8), &mut app);
+        let _ = handle(finished("child-2", 9), &mut app);
+        assert_eq!(
+            (
+                app.agents[&AgentId(0)].subagent_sessions.len(),
+                app.agents[&AgentId(0)].scrollback.len(),
+            ),
+            (9, 9),
+            "exact spawn and finish redeliveries must remain idempotent"
+        );
+        assert_eq!(
+            app.agents[&AgentId(0)].last_seen_event_id.as_deref(),
+            Some("sess-parent-100"),
+            "dropped duplicates and late lower-ID applies must not move the reconnect cursor"
+        );
+    }
+
+    /// xAI lifecycle lines can be delivered in persistence order rather than
+    /// event-id order. An early finish is buffered and applied when spawn lands,
+    /// even if an unrelated update has already moved the reconnect cursor.
+    #[test]
+    fn finish_before_spawn_is_applied_after_later_cursor_progress() {
+        let mut app = make_app_with_agent("sess-parent");
+        let notification = |update: XaiSessionUpdate, event_id: &str| {
+            let payload = SessionNotification {
+                session_id: acp::SessionId::new("sess-parent"),
+                update,
+                meta: Some(serde_json::json!({ "eventId": event_id })),
+            };
+            acp::ExtNotification::new(
+                "x.ai/session_notification",
+                serde_json::value::to_raw_value(&payload).unwrap().into(),
+            )
+        };
+
+        assert!(!handle_ext_notification(
+            &notification(test_subagent_finished("child-reordered"), "sess-parent-2"),
+            &mut app,
+        ));
+        assert!(app.agents[&AgentId(0)].subagent_sessions.is_empty());
+        assert_eq!(app.agents[&AgentId(0)].deferred_subagent_finishes.len(), 1);
+        assert_eq!(app.agents[&AgentId(0)].last_seen_event_id, None);
+
+        assert!(handle_ext_notification(
+            &notification(
+                test_subagent_progress("sess-parent", "unrelated-child"),
+                "sess-parent-3",
+            ),
+            &mut app,
+        ));
+        assert_eq!(
+            app.agents[&AgentId(0)].last_seen_event_id.as_deref(),
+            Some("sess-parent-3")
+        );
+
+        assert!(handle_ext_notification(
+            &notification(
+                test_subagent_spawned("sess-parent", "child-reordered"),
+                "sess-parent-1",
+            ),
+            &mut app,
+        ));
+
+        let agent = &app.agents[&AgentId(0)];
+        let info = &agent.subagent_sessions["child-reordered"];
+        assert!(info.finished);
+        assert_eq!(info.status.as_deref(), Some("completed"));
+        assert!(agent.deferred_subagent_finishes.is_empty());
+        assert_eq!(
+            agent.last_seen_event_id.as_deref(),
+            Some("sess-parent-3"),
+            "applying a late lower-ID spawn/finish must keep the higher reconnect cursor"
+        );
+    }
+
+    /// A retained terminal child can outlive the row discarded by reload. A
+    /// replay spawn rebuilds that row without reviving the child.
+    #[test]
+    fn replay_spawn_rebuild_preserves_retained_finish_without_current_row() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-finished-before-rebuild";
+        let spawn = subagent_ext_replay(
+            "sess-parent",
+            serde_json::to_value(test_subagent_spawned("sess-parent", child_sid)).unwrap(),
+            "sess-parent-1",
+        );
+        let finish = subagent_ext_replay(
+            "sess-parent",
+            serde_json::to_value(test_subagent_finished(child_sid)).unwrap(),
+            "sess-parent-2",
+        );
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .loading_replay = true;
+
+        assert!(handle_ext_notification(&spawn, &mut app));
+        let first_entry_id = app.agents[&AgentId(0)].subagent_sessions[child_sid]
+            .scrollback_entry_id
+            .unwrap();
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .scrollback
+            .remove_entry(first_entry_id);
+        assert!(handle_ext_notification(&finish, &mut app));
+        assert!(app.agents[&AgentId(0)].subagent_sessions[child_sid].finished);
+        assert!(app.agents[&AgentId(0)].scrollback.is_empty());
+
+        assert!(handle_ext_notification(&spawn, &mut app));
+
+        let agent = &app.agents[&AgentId(0)];
+        let info = &agent.subagent_sessions[child_sid];
+        assert!(info.finished, "replay rebuild must retain the terminal state");
+        assert_eq!(info.status.as_deref(), Some("completed"));
+        let rebuilt_entry_id = info
+            .scrollback_entry_id
+            .expect("replay spawn must rebuild the missing row");
+        assert_ne!(rebuilt_entry_id, first_entry_id);
+        let rebuilt_entry = agent.scrollback.get_by_id(rebuilt_entry_id).unwrap();
+        let RenderBlock::Subagent(block) = &rebuilt_entry.block else {
+            panic!("replay spawn must rebuild a subagent row");
+        };
+        assert!(matches!(block.kind, SubagentBlockKind::Completed { .. }));
+        assert!(!rebuilt_entry.is_running);
+        assert!(!agent.scrollback.needs_animation());
+    }
+
+    /// Reapplying a retained finish is part of a late replay row rebuild. It
+    /// must not masquerade as a live update and close the remaining grace.
+    #[test]
+    fn late_replay_terminal_rebuild_keeps_grace_for_following_updates() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-late-terminal-rebuild";
+        assert!(handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        ));
+        assert!(handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        ));
+        let entry_id = app.agents[&AgentId(0)].subagent_sessions[child_sid]
+            .scrollback_entry_id
+            .unwrap();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.scrollback.remove_entry(entry_id);
+        agent.arm_late_replay_grace();
+
+        let replay_spawn = subagent_ext_replay(
+            "sess-parent",
+            serde_json::to_value(test_subagent_spawned("sess-parent", child_sid)).unwrap(),
+            "sess-parent-1",
+        );
+        assert!(handle_ext_notification(&replay_spawn, &mut app));
+        assert!(
+            app.agents[&AgentId(0)].late_replay_until.is_some(),
+            "the retained finish must keep replay delivery semantics"
+        );
+
+        let replay_progress = subagent_ext_replay(
+            "sess-parent",
+            serde_json::to_value(test_subagent_progress("sess-parent", child_sid)).unwrap(),
+            "sess-parent-2",
+        );
+        assert!(
+            handle_ext_notification(&replay_progress, &mut app),
+            "the next replay update must still apply during late grace"
+        );
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(agent.subagent_sessions[child_sid].turn_count, Some(1));
+        assert_eq!(agent.last_seen_event_id.as_deref(), Some("sess-parent-2"));
+    }
+
+    /// A live duplicate spawn never replaces retained domain state when its row
+    /// is temporarily absent. Only accepted replay may rebuild such a row.
+    #[test]
+    fn live_spawn_without_current_row_stays_idempotent() {
+        let mut app = make_app_with_agent("sess-parent");
+        let spawn = make_ext_session_notification(
+            "sess-parent",
+            test_subagent_spawned("sess-parent", "child-live-duplicate"),
+        );
+        assert!(handle(spawn, &mut app));
+        let entry_id = app.agents[&AgentId(0)].subagent_sessions["child-live-duplicate"]
+            .scrollback_entry_id
+            .unwrap();
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .scrollback
+            .remove_entry(entry_id);
+        let first_view = app.agents[&AgentId(0)].subagent_views["child-live-duplicate"]
+            .as_ref() as *const AgentView;
+
+        let duplicate = make_ext_session_notification(
+            "sess-parent",
+            test_subagent_spawned("sess-parent", "child-live-duplicate"),
+        );
+        assert!(!handle(duplicate, &mut app));
+
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.scrollback.is_empty());
+        assert_eq!(
+            agent.subagent_views["child-live-duplicate"].as_ref() as *const AgentView,
+            first_view,
+            "live duplicate spawn must not replace the child view"
+        );
+        assert_eq!(
+            agent.subagent_sessions["child-live-duplicate"].scrollback_entry_id,
+            Some(entry_id),
+            "live duplicate spawn must preserve retained domain state"
+        );
+    }
+
+    /// Workflow children intentionally render through their workflow block,
+    /// so retained child state—not `scrollback_entry_id`—dedupes replay.
+    #[test]
+    fn replayed_workflow_spawn_is_idempotent_without_a_child_row() {
+        let mut app = make_app_with_agent("sess-parent");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .loading_replay = true;
+        let spawn = || {
+            subagent_ext_replay(
+                "sess-parent",
+                serde_json::to_value(test_subagent_spawned_for_workflow(
+                    "sess-parent",
+                    "workflow-child",
+                    Some("workflow-run".to_string()),
+                ))
+                .unwrap(),
+                "sess-parent-1",
+            )
+        };
+
+        assert!(handle_ext_notification(&spawn(), &mut app));
+        let first_view = app.agents[&AgentId(0)].subagent_views["workflow-child"]
+            .as_ref() as *const AgentView;
+        assert!(!handle_ext_notification(&spawn(), &mut app));
+
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.scrollback.is_empty());
+        assert_eq!(
+            agent.subagent_views["workflow-child"].as_ref() as *const AgentView,
+            first_view,
+            "duplicate replay must not replace the workflow child's AgentView"
+        );
+        assert_eq!(
+            agent.last_seen_event_id.as_deref(),
+            Some("sess-parent-1"),
+            "the duplicate replay must not consume the cursor again"
+        );
+    }
+
     /// The live activity label fans out to `SubagentInfo` (tasks pane /
     /// dashboard rows) alongside the scrollback block — from both the child
     /// session/update path and the `SubagentProgress` path — and
@@ -367,6 +964,205 @@
         assert!(
             sb.activity_label.is_none(),
             "finish must clear the block label"
+        );
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_stamps_writing_activity_label() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(changed, "first delta must request a redraw");
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        assert_eq!(info.activity_label.as_deref(), Some("Preparing write…"));
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_ignored_while_child_loading_replay() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-replay";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap()
+            .session
+            .loading_replay = true;
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(!changed);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .activity_label
+                .is_none()
+        );
+        assert_eq!(
+            agent
+                .subagent_views
+                .get(child_sid)
+                .unwrap()
+                .session
+                .tracker
+                .activity(),
+            None,
+            "reloading child tracker must not pick up the delta"
+        );
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_without_registry_row_reports_no_redraw() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-orphan";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_sessions
+            .remove(child_sid);
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(!changed, "no registry row → nothing visible → no redraw");
+    }
+
+    #[test]
+    fn subagent_acp_chunk_after_finish_does_not_restamp_label() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-acp-finished";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        );
+        // Simulate the racing child rail still looking live.
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap()
+            .session
+            .state = AgentState::TurnRunning;
+
+        let _ = handle(
+            make_agent_chunk_with_event(child_sid, "late text", "p-child", None),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .activity_label
+                .is_none(),
+            "finished row must not be re-stamped by the child ACP fan-out"
+        );
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_after_finish_does_not_restamp_label() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-finished";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        );
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(!changed);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .activity_label
+                .is_none(),
+            "finished row must keep its cleared label"
         );
     }
 
@@ -751,6 +1547,84 @@
                 1,
                 "open must not duplicate spawn replay when child_updates_replayed is set"
             );
+        });
+    }
+
+    #[test]
+    fn subagent_spawn_live_foreign_cwd_does_not_hydrate() {
+        with_replay_disk_home(|home| {
+            let child_sid = "child-foreign-cwd";
+            write_child_updates_jsonl_under_cwd(
+                home,
+                "/other/cwd",
+                child_sid,
+                &(child_tool_line(child_sid) + "\n"),
+            );
+
+            let mut app = make_app_with_agent("sess-parent");
+            spawn_subagent_with_optional_updates(&mut app, child_sid, None);
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(
+                child_scrollback_tool_call_count(agent, child_sid),
+                0,
+                "live spawn must not scan a foreign-cwd transcript"
+            );
+            assert!(
+                agent
+                    .subagent_sessions
+                    .get(child_sid)
+                    .is_some_and(|i| i.child_updates_replayed),
+                "live spawn must latch child_updates_replayed even on Empty"
+            );
+        });
+    }
+
+    #[test]
+    fn subagent_spawn_live_resume_hydrates_foreign_cwd() {
+        with_replay_disk_home(|home| {
+            let child_sid = "child-resume-foreign";
+            write_child_updates_jsonl_under_cwd(
+                home,
+                "/other/cwd",
+                child_sid,
+                &(child_tool_line(child_sid) + "\n"),
+            );
+
+            let mut app = make_app_with_agent("sess-parent");
+            let mut spawned = test_subagent_spawned("sess-parent", child_sid);
+            let XaiSessionUpdate::SubagentSpawned { resumed_from, .. } = &mut spawned else {
+                unreachable!();
+            };
+            *resumed_from = Some("orig-child".into());
+            let _ = handle(
+                make_ext_session_notification_with_method(
+                    "sess-parent",
+                    "x.ai/session/update",
+                    spawned,
+                ),
+                &mut app,
+            );
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let tools = child_scrollback_tool_call_count(agent, child_sid);
+            let replayed = agent
+                .subagent_sessions
+                .get(child_sid)
+                .is_some_and(|i| i.child_updates_replayed);
+            if tools != 1 {
+                assert!(
+                    !replayed,
+                    "live resume must hydrate now or leave first-open able to scan"
+                );
+                let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+                agent.open_subagent_fullscreen(child_sid.to_string());
+                assert_eq!(
+                    child_scrollback_tool_call_count(agent, child_sid),
+                    1,
+                    "opening after live resume must hydrate the dest transcript"
+                );
+            }
         });
     }
 

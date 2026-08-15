@@ -79,6 +79,8 @@ pub enum WorkspaceClientError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("workspace hibernated; it revives on the next bind; do not retry")]
+    WorkspaceHibernated,
     /// The server returned an error envelope.
     #[error("workspace rpc error: {0}")]
     Rpc(RpcError),
@@ -131,6 +133,20 @@ pub fn is_transport_fatal(err: &xai_tool_runtime::ToolError) -> bool {
             .is_some_and(|c| c == "protocol_error"),
         _ => false,
     }
+}
+/// True when the hub's `workspace_unavailable` details carry `retryable: false`, the contract
+/// that blind retries cannot succeed until the workspace is revived.
+fn is_non_retryable_workspace_unavailable(err: &xai_tool_runtime::ToolError) -> bool {
+    if !matches!(err.kind, xai_tool_runtime::ToolErrorKind::Custom) {
+        return false;
+    }
+    err.details
+        .as_ref()
+        .and_then(|d| {
+            use serde::Deserialize as _;
+            xai_tool_protocol::WorkspaceUnavailableDetails::deserialize(d).ok()
+        })
+        .is_some_and(|d| d.code == xai_tool_protocol::WORKSPACE_UNAVAILABLE_SUBCODE && !d.retryable)
 }
 /// Typed client over a bound [`ToolHarness`] for `workspace.*` RPCs.
 ///
@@ -231,6 +247,9 @@ impl WorkspaceClient {
             None => fut.await,
         };
         let typed = result.map_err(|e| {
+            if is_non_retryable_workspace_unavailable(&e) {
+                return WorkspaceClientError::WorkspaceHibernated;
+            }
             if is_transport_fatal(&e) {
                 self.mark_disconnected();
             }
@@ -642,9 +661,31 @@ mod tests {
                 }
                 "workspace.netfail" => Err(ToolError::network_error("socket dropped")),
                 "workspace.toolfail" => Err(ToolError::custom("some_code", "boom")),
+                "workspace.hibernated" => Err(workspace_gone_tool_error(
+                    xai_tool_protocol::WorkspaceGoneReason::Hibernated,
+                    xai_tool_protocol::WorkspaceGonePhase::RouteMissing,
+                )),
+                "workspace.gone_retryable" => Err(workspace_gone_tool_error(
+                    xai_tool_protocol::WorkspaceGoneReason::NotBound,
+                    xai_tool_protocol::WorkspaceGonePhase::RouteMissing,
+                )),
                 other => panic!("unexpected method {other}"),
             }
         }
+    }
+    fn workspace_gone_tool_error(
+        reason: xai_tool_protocol::WorkspaceGoneReason,
+        phase: xai_tool_protocol::WorkspaceGonePhase,
+    ) -> ToolError {
+        let xai_tool_protocol::ToolErrorWire::Custom {
+            subcode,
+            message,
+            details,
+        } = xai_tool_protocol::workspace_unavailable_wire(reason, phase)
+        else {
+            panic!("workspace_unavailable_wire builds Custom");
+        };
+        ToolError::custom(subcode, message).with_details(details.expect("details always present"))
     }
     fn client() -> WorkspaceClient {
         let registry = LocalRegistry::new();
@@ -778,6 +819,29 @@ mod tests {
             c.is_connected(),
             "non-fatal tool errors must not trip the latch"
         );
+    }
+    #[tokio::test]
+    async fn hibernated_route_miss_maps_to_workspace_hibernated() {
+        let c = client();
+        let err = c
+            .rpc_raw("workspace.hibernated", Value::Null)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, WorkspaceClientError::WorkspaceHibernated),
+            "{err:?}"
+        );
+        assert!(c.is_connected(), "hibernation must not trip the latch");
+    }
+    #[tokio::test]
+    async fn retryable_workspace_unavailable_stays_transport() {
+        let c = client();
+        let err = c
+            .rpc_raw("workspace.gone_retryable", Value::Null)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceClientError::Transport(_)), "{err:?}");
+        assert!(c.is_connected());
     }
     #[tokio::test(start_paused = true)]
     async fn deadline_times_out_slow_calls() {

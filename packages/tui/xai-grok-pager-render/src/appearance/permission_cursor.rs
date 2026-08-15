@@ -229,16 +229,31 @@ pub fn set_last_used_permission(kind: DefaultSelectedPermission) {
 /// 4. index 0 (clients that don't get the YOLO row prepended).
 ///
 /// The YOLO row is skipped while a concrete target kind is in play, so a
-/// configured / sticky preselection never lands on it.
+/// configured / sticky preselection never lands on it — including when the
+/// target kind has no matching row (the always-allow row may be suppressed
+/// as unhonorable): a concrete target degrades to the one-shot allow row,
+/// never escalates to the global always-approve row.
 pub fn resolve_initial_cursor(options: &[acp::PermissionOption]) -> usize {
     let target = match last_used_permission() {
         DefaultSelectedPermission::AlwaysAllowAllSessions => load_default_selected_permission(),
         sticky => sticky,
     };
-    options
+    if let Some(idx) = options
         .iter()
         .position(|o| target.matches_kind(&o.kind) && !is_enable_always_approve_option(o))
-        .or_else(|| options.iter().position(is_enable_always_approve_option))
+    {
+        return idx;
+    }
+    if target != DefaultSelectedPermission::AlwaysAllowAllSessions
+        && let Some(idx) = options.iter().position(|o| {
+            o.kind == acp::PermissionOptionKind::AllowOnce && !is_enable_always_approve_option(o)
+        })
+    {
+        return idx;
+    }
+    options
+        .iter()
+        .position(is_enable_always_approve_option)
         .unwrap_or(0)
 }
 
@@ -448,6 +463,36 @@ mod tests {
             ];
             // No sticky, default config, no YOLO row (non-TUI client) → index 0.
             assert_eq!(resolve_initial_cursor(&options), 0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// A concrete sticky target with no matching row (the always-allow row
+    /// may be suppressed as unhonorable) degrades to the one-shot allow —
+    /// never to the global always-approve row, which is one Enter away from
+    /// persisting always-approve mode.
+    #[test]
+    fn unmatched_concrete_target_degrades_to_allow_once_not_yolo() {
+        std::thread::spawn(|| {
+            set_last_used_permission(DefaultSelectedPermission::AllowCommandAlways);
+            let options = [
+                opt(
+                    xai_grok_workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID,
+                    acp::PermissionOptionKind::AllowOnce,
+                ),
+                opt("allow-once", acp::PermissionOptionKind::AllowOnce),
+                opt("reject-once", acp::PermissionOptionKind::RejectOnce),
+                opt(
+                    "reject-always-command",
+                    acp::PermissionOptionKind::RejectAlways,
+                ),
+            ];
+            assert_eq!(
+                resolve_initial_cursor(&options),
+                1,
+                "cursor must land on the plain allow-once row"
+            );
         })
         .join()
         .unwrap();

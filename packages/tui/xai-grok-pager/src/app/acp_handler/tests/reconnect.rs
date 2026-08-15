@@ -122,8 +122,8 @@
         );
         assert_eq!(
             app.agents[&id].last_seen_event_id.as_deref(),
-            Some("sess-resume-4"),
-            "the reconnect cursor follows the last APPLIED event id, replay included"
+            Some("sess-resume-9"),
+            "reconnect cursor is forward-only: lower post-reset ids must not regress the highwater"
         );
         // SessionLoaded completes the window.
         app.agents.get_mut(&id).unwrap().session.loading_replay = false;
@@ -199,8 +199,8 @@
         );
         assert_eq!(
             agent.last_seen_event_id.as_deref(),
-            Some("sess-rc-2"),
-            "the cursor follows the replayed tail"
+            Some("sess-rc-3"),
+            "forward-only cursor keeps the pre-outage highwater when replayed ids are lower"
         );
         assert!(matches!(agent.session.state, AgentState::Idle));
     }
@@ -429,6 +429,87 @@
             "the interrupted load's placeholder was removed before stashing"
         );
         assert!(agent.loading_placeholder_id.is_none());
+    }
+
+    #[test]
+    fn full_replay_rebuilds_subagent_row_from_stashed_domain_state() {
+        let mut app = make_app_with_agent("sess-subagent-reload");
+        let id = AgentId(0);
+        let _ = handle(
+            make_ext_session_notification_with_method(
+                "sess-subagent-reload",
+                "x.ai/session/update",
+                test_subagent_spawned("sess-subagent-reload", "child-replay"),
+            ),
+            &mut app,
+        );
+        app.agents.get_mut(&id).unwrap().begin_session_reload(1);
+
+        let replay = subagent_ext_replay(
+            "sess-subagent-reload",
+            serde_json::to_value(test_subagent_spawned(
+                "sess-subagent-reload",
+                "child-replay",
+            ))
+            .unwrap(),
+            "sess-subagent-reload-1",
+        );
+        assert!(handle_ext_notification(&replay, &mut app));
+
+        let agent = app.agents.get_mut(&id).unwrap();
+        assert!(agent.finish_session_reload(1, true));
+        assert_eq!(agent.scrollback.len(), 1);
+        let info = &agent.subagent_sessions["child-replay"];
+        assert!(
+            info.scrollback_entry_id
+                .is_some_and(|entry_id| agent.scrollback.get_by_id(entry_id).is_some()),
+            "full replay must rebuild the retained subagent row"
+        );
+    }
+
+    #[test]
+    fn late_grace_replay_rebuilds_subagent_row_after_full_reload_finalize() {
+        let mut app = make_app_with_agent("sess-subagent-late-replay");
+        let id = AgentId(0);
+        let _ = handle(
+            make_ext_session_notification_with_method(
+                "sess-subagent-late-replay",
+                "x.ai/session/update",
+                test_subagent_spawned("sess-subagent-late-replay", "child-late-replay"),
+            ),
+            &mut app,
+        );
+        app.agents.get_mut(&id).unwrap().begin_session_reload(1);
+
+        assert!(!handle(
+            replay_chunk(
+                "sess-subagent-late-replay",
+                "replayed transcript",
+                "sess-subagent-late-replay-1",
+            ),
+            &mut app,
+        ));
+        assert!(app.agents.get_mut(&id).unwrap().finish_session_reload(1, true));
+
+        let replay = subagent_ext_replay(
+            "sess-subagent-late-replay",
+            serde_json::to_value(test_subagent_spawned(
+                "sess-subagent-late-replay",
+                "child-late-replay",
+            ))
+            .unwrap(),
+            "sess-subagent-late-replay-2",
+        );
+        assert!(handle_ext_notification(&replay, &mut app));
+
+        let agent = &app.agents[&id];
+        assert_eq!(agent.scrollback.len(), 2);
+        let info = &agent.subagent_sessions["child-late-replay"];
+        assert!(
+            info.scrollback_entry_id
+                .is_some_and(|entry_id| agent.scrollback.get_by_id(entry_id).is_some()),
+            "late-grace replay must rebuild a subagent row discarded with the stash"
+        );
     }
 
     /// An applied Plan update advances the reconnect cursor like any other

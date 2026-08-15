@@ -62,12 +62,22 @@ fn matches_trusted_base_url(candidate: &str, trusted_base: &str) -> bool {
 pub fn is_prod_cli_chat_proxy_url(url: &str) -> bool {
     matches_trusted_base_url(url, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL)
 }
+/// True for configured first-party cli-chat-proxy routes, excluding arbitrary loopback URLs.
+///
+/// Unlike [`is_cli_chat_proxy_url`], this only trusts the exact compiled or
+/// environment-selected route and is suitable for xAI-only request extensions.
+pub fn is_trusted_cli_chat_proxy_url(url: &str) -> bool {
+    if is_prod_cli_chat_proxy_url(url) {
+        return true;
+    }
+    false
+}
 /// True for cli-chat-proxy URLs (production, plus local-dev hosts when the
 /// optional non-production feature is enabled). When that feature is on,
 /// runtime env overrides can extend this trust set. Loopback is always
 /// accepted (unit tests and local mock servers on arbitrary ports).
 pub fn is_cli_chat_proxy_url(url: &str) -> bool {
-    if matches_trusted_base_url(url, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL) {
+    if is_trusted_cli_chat_proxy_url(url) {
         return true;
     }
     if let Ok(u) = reqwest::Url::parse(url)
@@ -92,26 +102,39 @@ pub fn is_xai_api_url(url: &str) -> bool {
 /// session bearer is never attached to a cleartext endpoint, including loopback
 /// (a co-located process could otherwise read a token sent to `http://localhost`).
 pub fn is_xai_api_bearer_url(url: &str) -> bool {
-    is_xai_api_url_impl(url, true)
+    if is_trusted_xai_https_url(url) {
+        return true;
+    }
+    false
+}
+/// True for trusted first-party xAI HTTPS routes, excluding arbitrary loopback URLs.
+pub fn is_trusted_xai_https_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    if is_loopback_host(&parsed) {
+        return false;
+    }
+    if is_trusted_cli_chat_proxy_url(url) {
+        return true;
+    }
+    parsed
+        .host_str()
+        .is_some_and(|host| host == "x.ai" || host.ends_with(".x.ai"))
 }
 fn is_xai_api_url_impl(url: &str, require_https: bool) -> bool {
     if require_https {
-        let Ok(parsed) = reqwest::Url::parse(url) else {
-            return false;
-        };
-        if parsed.scheme() != "https" {
-            return false;
-        }
-        if is_loopback_host(&parsed) {
-            return false;
-        }
+        return is_xai_api_bearer_url(url);
     }
     if is_cli_chat_proxy_url(url) {
         return true;
     }
     reqwest::Url::parse(url)
         .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
+        .and_then(|url| url.host_str().map(str::to_owned))
         .is_some_and(|host| host == "x.ai" || host.ends_with(".x.ai"))
 }
 fn is_loopback_host(parsed: &reqwest::Url) -> bool {

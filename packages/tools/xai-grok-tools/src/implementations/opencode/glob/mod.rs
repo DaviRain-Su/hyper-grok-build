@@ -180,9 +180,9 @@ impl xai_tool_runtime::Tool for GlobTool {
             .arg(&input.pattern)
             .arg(&search_dir)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        crate::util::detach_command(&mut cmd);
-        cmd.stdin(Stdio::null());
+            // stderr is never read; a pipe would block rg once warnings fill it.
+            .stderr(Stdio::null());
+        crate::util::detach_search_command(&mut cmd);
 
         #[allow(clippy::disallowed_methods)] // search helper, waited on below
         let mut child = match cmd.spawn() {
@@ -227,15 +227,12 @@ impl xai_tool_runtime::Tool for GlobTool {
             }
         }
 
-        // Consume stderr to avoid deadlocks.
-        if let Some(stderr_pipe) = child.stderr.take() {
-            let _ = stderr_pipe
-                .take(1_000_000)
-                .read_to_end(&mut Vec::new())
-                .await;
+        if truncated_by_bytes {
+            // Bounded reap: a D-state rg must not stall this future forever.
+            crate::util::reap_killed_search_child(&mut child).await;
+        } else {
+            let _ = child.wait().await;
         }
-
-        let _ = child.wait().await;
 
         // ── Parse file paths from stdout ────────────────────────
         let stdout = String::from_utf8_lossy(&stdout_buf);
@@ -416,6 +413,45 @@ mod tests {
         assert_eq!(output.count, 0);
         assert!(!output.truncated);
         assert!(output.tool_output_for_prompt.contains("No files found"));
+    }
+
+    /// One unreadable subdir must not lose sibling results or report
+    /// truncation (rg's warnings go to a null stderr, not a droppable pipe).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn glob_survives_unreadable_subdir() {
+        use std::os::unix::fs::PermissionsExt;
+        if nix::unistd::geteuid().is_root() {
+            return; // chmod 0o000 doesn't bar root
+        }
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.ts"), "x").unwrap();
+        std::fs::write(tmp.path().join("b.ts"), "y").unwrap();
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("c.ts"), "z").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let tool = GlobTool;
+        let resources = test_resources(tmp.path());
+        let output = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            GlobInput {
+                pattern: "*.ts".to_string(),
+                path: None,
+            },
+        )
+        .await;
+
+        // Restore before asserting so TempDir cleanup works even on failure.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let output = output.unwrap();
+        assert_eq!(output.count, 2, "visible files must all be returned");
+        assert!(!output.truncated);
+        assert!(output.tool_output_for_prompt.contains("a.ts"));
+        assert!(output.tool_output_for_prompt.contains("b.ts"));
     }
 
     #[tokio::test]

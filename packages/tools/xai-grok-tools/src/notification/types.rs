@@ -318,15 +318,59 @@ pub struct ScheduledTaskFired {
     pub revision: u64,
 }
 
+/// Why a scheduled task was removed. Drives client UX: only `Expired` needs a visible notice
+/// (the task died without any user or model action).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, schemars::JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum ScheduledTaskRemovedReason {
+    /// A one-shot task fired and completed.
+    Completed,
+    /// A recurring task reached `expires_at` (7 days after creation).
+    Expired,
+    /// Explicit `scheduler_delete` by the user or model.
+    Deleted,
+    /// Actor shutdown chip-cleanup. The task itself persists on disk and re-arms on session
+    /// resume, so this must not read as a real removal.
+    Shutdown,
+    /// Absent on legacy payloads, or a variant this build doesn't know. Consumers must treat
+    /// it as "no special handling".
+    #[default]
+    #[cfg_attr(feature = "serde", serde(other))]
+    Unknown,
+}
+
 /// Notification that a scheduled task was removed (deleted, expired, or one-shot completed).
+/// `#[non_exhaustive]`: downstream crates construct via [`Self::new`], so the next wire field
+/// stays additive there instead of breaking every struct literal again.
 #[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct ScheduledTaskRemoved {
     pub task_id: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub reason: ScheduledTaskRemovedReason,
     #[cfg_attr(feature = "serde", serde(default))]
     pub generation: String,
     #[cfg_attr(feature = "serde", serde(default))]
     pub revision: u64,
+}
+
+impl ScheduledTaskRemoved {
+    pub fn new(
+        task_id: String,
+        reason: ScheduledTaskRemovedReason,
+        generation: String,
+        revision: u64,
+    ) -> Self {
+        Self {
+            task_id,
+            reason,
+            generation,
+            revision,
+        }
+    }
 }
 
 /// Notification that a scheduled task was created and should appear in the tasks pane.
@@ -643,14 +687,28 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "task_id": "loop-1" })).unwrap();
         assert_eq!(legacy.generation, "");
         assert_eq!(legacy.revision, 0);
+        assert_eq!(
+            legacy.reason,
+            ScheduledTaskRemovedReason::Unknown,
+            "legacy payloads decode to the no-op reason"
+        );
 
         let current = ScheduledTaskRemoved {
             task_id: "loop-1".into(),
+            reason: ScheduledTaskRemovedReason::Expired,
             generation: "019b0000-0000-7000-8000-000000000000".into(),
             revision: 7,
         };
-        let round_trip: ScheduledTaskRemoved =
-            serde_json::from_value(serde_json::to_value(&current).unwrap()).unwrap();
+        let json = serde_json::to_value(&current).unwrap();
+        assert_eq!(json["reason"], "expired", "reason serializes snake_case");
+        let round_trip: ScheduledTaskRemoved = serde_json::from_value(json).unwrap();
         assert_eq!(round_trip, current);
+
+        // A reason variant from a newer sender must not break deserialization.
+        let future: ScheduledTaskRemoved = serde_json::from_value(
+            serde_json::json!({ "task_id": "loop-1", "reason": "vaporized" }),
+        )
+        .unwrap();
+        assert_eq!(future.reason, ScheduledTaskRemovedReason::Unknown);
     }
 }

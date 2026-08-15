@@ -119,7 +119,7 @@ fn build_session() -> (ScrollbackState, usize) {
             &mut state,
             RenderBlock::edit_with_hunks(
                 format!("packages/tui/xai-grok-pager/src/mod_{i}.rs"),
-                xai_grok_pager::diff::diff_hunks_from_strings(&old, &new, 1),
+                xai_grok_pager_diff::diff_hunks_from_strings(&old, &new, 1),
             ),
             old.len() + new.len(),
         );

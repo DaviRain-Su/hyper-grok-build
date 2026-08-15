@@ -9,13 +9,19 @@ use xai_tool_protocol::{
 };
 use xai_tool_runtime::{ToolError, ToolErrorKind};
 
-const REASONS: [WorkspaceGoneReason; 5] = [
+const REASONS: [WorkspaceGoneReason; 6] = [
     WorkspaceGoneReason::IdleTimeout,
     WorkspaceGoneReason::Disconnect,
     WorkspaceGoneReason::Shutdown,
     WorkspaceGoneReason::NotBound,
     WorkspaceGoneReason::InstanceGone,
+    WorkspaceGoneReason::Hibernated,
 ];
+
+fn expected_retryable(reason: WorkspaceGoneReason, phase: WorkspaceGonePhase) -> bool {
+    !(matches!(reason, WorkspaceGoneReason::Hibernated)
+        && matches!(phase, WorkspaceGonePhase::RouteMissing))
+}
 const PHASES: [WorkspaceGonePhase; 2] = [
     WorkspaceGonePhase::InFlightCancelled,
     WorkspaceGonePhase::RouteMissing,
@@ -54,11 +60,35 @@ fn round_trip_through_envelope_is_recognized_for_every_reason_and_phase() {
                     code: WORKSPACE_UNAVAILABLE_SUBCODE.to_owned(),
                     reason,
                     phase,
-                    retryable: true,
+                    retryable: expected_retryable(reason, phase),
                 },
             );
         }
     }
+}
+
+#[test]
+fn hibernated_route_missing_round_trips_as_non_retryable() {
+    let wire = workspace_unavailable_wire(
+        WorkspaceGoneReason::Hibernated,
+        WorkspaceGonePhase::RouteMissing,
+    );
+    let err = error_from_envelope(envelope_for(&wire));
+    assert!(is_workspace_unavailable(&err));
+    let details: WorkspaceUnavailableDetails =
+        serde_json::from_value(err.details.expect("details survive")).unwrap();
+    assert_eq!(details.reason, WorkspaceGoneReason::Hibernated);
+    assert_eq!(details.phase, WorkspaceGonePhase::RouteMissing);
+    assert!(!details.retryable, "hibernated route miss is non-retryable");
+
+    let wire = workspace_unavailable_wire(
+        WorkspaceGoneReason::Hibernated,
+        WorkspaceGonePhase::InFlightCancelled,
+    );
+    let err = error_from_envelope(envelope_for(&wire));
+    let details: WorkspaceUnavailableDetails =
+        serde_json::from_value(err.details.expect("details survive")).unwrap();
+    assert!(details.retryable);
 }
 
 #[test]

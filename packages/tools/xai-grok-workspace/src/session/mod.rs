@@ -552,7 +552,7 @@ pub struct WorkspaceShared {
     /// Whether per-session `events.jsonl` recording is enabled
     /// (`GROK_WORKSPACE_EVENTS_ENABLED=true`). When `false`, every
     /// [`session_event_writer`](Self::session_event_writer) hands back an
-    /// [`EventWriter::noop()`](xai_file_utils::events::EventWriter::noop) and
+    /// [`EventWriter::noop()`](xai_grok_session_events::EventWriter::noop) and
     /// no session directory or `events.jsonl` is ever created — the legacy
     /// behaviour, preserved bit-for-bit.
     pub(crate) events_enabled: bool,
@@ -568,7 +568,7 @@ pub struct WorkspaceShared {
     /// `Tool*` events resolve the right writer without a back-reference to
     /// `WorkspaceShared`. Stays empty whenever `events_enabled` is `false`.
     pub(crate) session_event_writers:
-        Arc<dashmap::DashMap<String, xai_file_utils::events::EventWriter>>,
+        Arc<dashmap::DashMap<String, xai_grok_session_events::EventWriter>>,
     /// In-flight before-turn enqueue tasks, keyed by `(session_id, turn)`.
     /// Stored by `on_before_turn`; evicted on every turn-end path. The `After`
     /// turn-hook handler awaits the handle for its ack's `artifact_count`; the
@@ -612,14 +612,14 @@ impl WorkspaceShared {
     /// `workspace_home/sessions/{session_id}/`.
     ///
     /// When `events_enabled` is `false` this returns
-    /// [`EventWriter::noop()`](xai_file_utils::events::EventWriter::noop)
+    /// [`EventWriter::noop()`](xai_grok_session_events::EventWriter::noop)
     /// WITHOUT touching the cache or the filesystem, so the flag-off path stays
     /// byte-for-byte identical to the legacy behaviour. The returned handle is
     /// `Clone + Send + Sync`; callers emit through it directly.
     pub(crate) fn session_event_writer(
         &self,
         session_id: &str,
-    ) -> xai_file_utils::events::EventWriter {
+    ) -> xai_grok_session_events::EventWriter {
         get_or_open_session_writer(
             self.events_enabled,
             &self.session_event_writers,
@@ -633,7 +633,7 @@ impl WorkspaceShared {
     pub(crate) fn session_event_writer_cached(
         &self,
         session_id: &str,
-    ) -> Option<xai_file_utils::events::EventWriter> {
+    ) -> Option<xai_grok_session_events::EventWriter> {
         if !self.events_enabled {
             return None;
         }
@@ -913,11 +913,11 @@ impl WorkspaceShared {
 ///   existing `events.jsonl` rather than truncating it.
 pub(crate) fn get_or_open_session_writer(
     enabled: bool,
-    writers: &dashmap::DashMap<String, xai_file_utils::events::EventWriter>,
+    writers: &dashmap::DashMap<String, xai_grok_session_events::EventWriter>,
     workspace_home: &Path,
     session_id: &str,
-) -> xai_file_utils::events::EventWriter {
-    use xai_file_utils::events::EventWriter;
+) -> xai_grok_session_events::EventWriter {
+    use xai_grok_session_events::EventWriter;
     if !enabled {
         return EventWriter::noop();
     }
@@ -947,7 +947,7 @@ pub(crate) fn get_or_open_session_writer(
 mod tests {
     use super::get_or_open_session_writer;
     use dashmap::DashMap;
-    use xai_file_utils::events::{Event, EventWriter};
+    use xai_grok_session_events::{Event, EventWriter};
     fn count_lines(path: &std::path::Path) -> usize {
         std::fs::read_to_string(path)
             .unwrap()

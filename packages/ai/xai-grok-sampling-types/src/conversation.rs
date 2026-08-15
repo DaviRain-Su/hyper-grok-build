@@ -805,37 +805,73 @@ pub fn parse_prompt_cache_retention(raw: &str) -> Option<rs::PromptCacheRetentio
 }
 
 impl ConversationRequest {
-    /// Strip all inline image data from the conversation to reduce payload size.
-    ///
-    /// Replaces `ContentPart::Image` entries with a text placeholder so the
-    /// model knows an image was there but the base64 blob is gone. This is
-    /// used as a recovery strategy when the downstream API returns 413
-    /// "Request Entity Too Large".
-    pub fn strip_images(&mut self) -> usize {
-        let mut stripped = 0usize;
-        for item in &mut self.items {
-            match item {
-                ConversationItem::User(user) => {
-                    for part in &mut user.content {
-                        if matches!(part, ContentPart::Image { .. }) {
+    /// Strip every image; returns the stripped URLs.
+    pub fn strip_images(&mut self) -> Vec<Arc<str>> {
+        strip_images_where(&mut self.items, |_| true)
+    }
+}
+
+/// Strip only `urls`. Unlisted images (compaction, newer turns) stay.
+/// Returns the number of stripped occurrences (one per replaced part, so a
+/// URL stored twice counts twice).
+///
+/// Invariant: replaces parts in place, never adds or removes a
+/// `ConversationItem` (the `&mut [_]` signature cannot resize); chat-state
+/// relies on this to skip turn-capture rebasing.
+pub fn strip_images_by_url(items: &mut [ConversationItem], urls: &[Arc<str>]) -> usize {
+    strip_images_where(items, |url| urls.iter().any(|u| u.as_ref() == url)).len()
+}
+
+/// Replaces a stripped user image. Deliberately verbose, like the eviction
+/// placeholder: a silently-stripped image otherwise induces confident
+/// hallucination of its contents.
+pub const IMAGE_STRIP_PLACEHOLDER: &str = "[image removed — the server could not process it; \
+     its contents are unavailable. Ask the user to re-attach the image if it is still needed.]";
+
+/// User images become [`IMAGE_STRIP_PLACEHOLDER`]; tool-result images are
+/// dropped (a placeholder there is invisible to the conversion layers).
+fn strip_images_where(
+    items: &mut [ConversationItem],
+    mut should_strip: impl FnMut(&str) -> bool,
+) -> Vec<Arc<str>> {
+    let mut stripped = Vec::new();
+    for item in items {
+        match item {
+            ConversationItem::User(user) => {
+                for part in &mut user.content {
+                    match part {
+                        ContentPart::Image { url } if should_strip(url) => {
+                            stripped.push(Arc::clone(url));
                             *part = ContentPart::Text {
-                                text: Arc::<str>::from("[image removed — conversation too large]"),
+                                text: Arc::<str>::from(IMAGE_STRIP_PLACEHOLDER),
                             };
-                            stripped += 1;
                         }
+                        ContentPart::Image { .. } | ContentPart::Text { .. } => {}
                     }
                 }
-                ConversationItem::ToolResult(t) => {
-                    // Drop inline images from tool results (e.g. read_file on
-                    // images/PDFs). On 413 retry these are the largest payloads.
-                    stripped += t.images.len();
-                    t.images.clear();
-                }
-                _ => {}
             }
+            ConversationItem::ToolResult(t) => {
+                t.images.retain(|part| match part {
+                    ContentPart::Image { url } if should_strip(url) => {
+                        stripped.push(Arc::clone(url));
+                        false
+                    }
+                    ContentPart::Image { .. } | ContentPart::Text { .. } => true,
+                });
+            }
+            // Exhaustive on purpose: a future image-bearing variant must
+            // choose its strip behavior here, not silently keep images.
+            ConversationItem::System(_)
+            | ConversationItem::Assistant(_)
+            | ConversationItem::BackendToolCall(_)
+            | ConversationItem::Reasoning(_)
+            | ConversationItem::Compaction(_) => {}
         }
-        stripped
     }
+    stripped
+}
+
+impl ConversationRequest {
 
     /// Remove provider/model-bound continuation state while retaining portable
     /// user, assistant, and local tool history. Used for a single recovery
@@ -9867,7 +9903,7 @@ mod tests {
         req.items.push(user);
 
         let stripped = req.strip_images();
-        assert_eq!(stripped, 1);
+        assert_eq!(stripped.len(), 1);
 
         // Verify image was replaced with placeholder text
         if let ConversationItem::User(user) = &req.items[0] {
@@ -9888,7 +9924,7 @@ mod tests {
         req.items.push(ConversationItem::assistant("response"));
 
         let stripped = req.strip_images();
-        assert_eq!(stripped, 0);
+        assert_eq!(stripped.len(), 0);
     }
 
     #[test]
@@ -9917,7 +9953,7 @@ mod tests {
             .push(ConversationItem::tool_result("call-1", "result text"));
 
         let stripped = req.strip_images();
-        assert_eq!(stripped, 0);
+        assert_eq!(stripped.len(), 0);
 
         // Verify nothing was modified
         assert_matches!(&req.items[0], ConversationItem::System(s) => {
@@ -9971,7 +10007,7 @@ mod tests {
         req.items.push(user2);
 
         let stripped = req.strip_images();
-        assert_eq!(stripped, 3);
+        assert_eq!(stripped.len(), 3);
     }
 
     // ── Tool result with images tests ──────────────────────────────────────────
@@ -10178,7 +10214,7 @@ mod tests {
         ));
 
         let stripped = req.strip_images();
-        assert_eq!(stripped, 2);
+        assert_eq!(stripped.len(), 2);
 
         // Images should be cleared
         if let ConversationItem::ToolResult(t) = &req.items[0] {
@@ -10191,6 +10227,71 @@ mod tests {
         } else {
             panic!("Expected ToolResult");
         }
+    }
+
+    /// The URL-scoped strip: listed URLs are stripped from both part kinds
+    /// (User images → placeholder, ToolResult images removed), unlisted
+    /// images survive, and the count reflects parts stripped.
+    #[test]
+    fn test_strip_images_by_url_strips_only_listed_urls() {
+        let listed: Arc<str> = "data:image/png;base64,aaa".into();
+        let mut user = ConversationItem::user("look");
+        user.add_image(listed.to_string());
+        user.add_image("data:image/png;base64,unlisted".to_string());
+        let mut items = vec![
+            user,
+            ConversationItem::tool_result_with_images(
+                "call_1",
+                "read photo.png",
+                vec![
+                    ContentPart::Image {
+                        url: listed.clone(),
+                    },
+                    ContentPart::Image {
+                        url: "data:image/png;base64,unlisted".into(),
+                    },
+                ],
+            ),
+        ];
+
+        assert_eq!(strip_images_by_url(&mut items, &[listed]), 2);
+
+        // The whole safety case for persisting via `replace_history`: an
+        // in-place strip never changes item count or ordering.
+        assert_eq!(items.len(), 2, "strip must never add or remove items");
+
+        let ConversationItem::User(u) = &items[0] else {
+            panic!("expected User");
+        };
+        assert!(
+            u.content.iter().any(|p| matches!(
+                p,
+                ContentPart::Text { text } if text.as_ref() == IMAGE_STRIP_PLACEHOLDER
+            )),
+            "listed user image must be replaced by the strip placeholder: {:?}",
+            u.content
+        );
+        let user_image_urls: Vec<_> = u
+            .content
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Image { url } => Some(url.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            user_image_urls,
+            ["data:image/png;base64,unlisted"],
+            "listed user image replaced, unlisted survives"
+        );
+        let ConversationItem::ToolResult(t) = &items[1] else {
+            panic!("expected ToolResult");
+        };
+        assert!(
+            matches!(&t.images[..], [ContentPart::Image { url }] if url.contains("unlisted")),
+            "listed tool image removed, unlisted survives: {:?}",
+            t.images
+        );
     }
 
     #[test]

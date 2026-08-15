@@ -31,7 +31,6 @@
 //! - **Consumer direction** remote tools are merged with `kind: None` and
 //!   are only visible under `CapabilityMode::All`. They are dropped in
 //!   subagent sessions with restricted capability modes.
-use crate::diag_server::DiagHandle;
 use crate::error::{WorkspaceError, WorkspaceResult};
 use crate::handle::WorkspaceHandle;
 use async_trait::async_trait;
@@ -42,6 +41,7 @@ use url::Url;
 use xai_computer_hub_sdk::{
     AuthProvider, ClientError, HubConnectionPool, ToolServer, ToolServerBuilder, ToolServerHandler,
 };
+use xai_grok_diag_server::DiagHandle;
 use xai_grok_tools::registry::types::ToolConfig;
 use xai_tool_protocol::ToolId;
 use xai_tool_runtime::{
@@ -221,6 +221,11 @@ impl HubHandle {
             .auth_provider(config.auth.clone())
             .allow_insecure_ws(config.allow_insecure_ws)
             .binary_version(xai_grok_version::VERSION)
+            .image_capabilities(
+                crate::image_capabilities::image_capabilities()
+                    .wire()
+                    .to_vec(),
+            )
             .with_ws_ping_interval(ws_ping);
         if let Some(schedule) = ws_reconnect_backoff {
             server_builder = server_builder.with_reconnect_backoff(schedule);
@@ -402,7 +407,7 @@ struct CallCompletedGuard {
     tracker: Arc<crate::activity::ActivityTracker>,
     call_id: String,
     session_id: Option<String>,
-    outcome: xai_file_utils::events::ToolOutcome,
+    outcome: xai_grok_session_events::ToolOutcome,
 }
 impl CallCompletedGuard {
     fn new(
@@ -414,10 +419,10 @@ impl CallCompletedGuard {
             tracker,
             call_id,
             session_id,
-            outcome: xai_file_utils::events::ToolOutcome::Cancelled,
+            outcome: xai_grok_session_events::ToolOutcome::Cancelled,
         }
     }
-    fn set_outcome(&mut self, outcome: xai_file_utils::events::ToolOutcome) {
+    fn set_outcome(&mut self, outcome: xai_grok_session_events::ToolOutcome) {
         self.outcome = outcome;
     }
 }
@@ -550,7 +555,7 @@ impl ToolServerHandler for SessionRoutedToolHandler {
                     }
                     ToolStreamItem::Terminal(Ok(run_result)) => {
                         // Background-task accounting lives in the activity feed, not here.
-                        _guard.set_outcome(xai_file_utils::events::ToolOutcome::Success);
+                        _guard.set_outcome(xai_grok_session_events::ToolOutcome::Success);
                         yield ToolStreamItem::Terminal(Ok(
                             run_result.into_typed_tool_output(tool_id),
                         ));
@@ -564,7 +569,7 @@ impl ToolServerHandler for SessionRoutedToolHandler {
                             kind = %e.variant_name(),
                             "tool call failed"
                         );
-                        _guard.set_outcome(xai_file_utils::events::ToolOutcome::Error);
+                        _guard.set_outcome(xai_grok_session_events::ToolOutcome::Error);
                         // Forward the inner ToolError verbatim so the harness
                         // and dashboards keep its kind + structured details
                         // (e.g. invalid-argument vs crashed subprocess).
@@ -1078,6 +1083,7 @@ mod tests {
             kind: TaskKind::Bash,
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
             is_backgrounded: false,

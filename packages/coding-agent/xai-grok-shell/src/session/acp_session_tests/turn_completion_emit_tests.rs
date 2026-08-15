@@ -57,7 +57,7 @@ fn turn_completed_fields(msgs: &[PersistenceMsg]) -> Option<(String, String, Opt
 /// A minimal front pending input matching `prompt_id`. `queue_meta` is `None`
 /// so `handle_completion` does not also broadcast a `queue/changed`. The
 /// completion receiver is returned so the caller keeps it alive.
-fn pending_input(prompt_id: &str) -> (InputItem, oneshot::Receiver<PromptTurnResult>) {
+pub(super) fn pending_input(prompt_id: &str) -> (InputItem, oneshot::Receiver<PromptTurnResult>) {
     let (respond_to, rx) = oneshot::channel();
     let item = InputItem {
         prompt_id: prompt_id.to_string(),

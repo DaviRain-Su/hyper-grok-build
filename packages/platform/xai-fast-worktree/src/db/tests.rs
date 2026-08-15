@@ -804,3 +804,35 @@ fn read_only_handles_reject_writes_on_both_journal_arms() {
     ro.register(&make_labeled_record("d", "/tmp/wt-d", "x"))
         .expect_err("Truncate-arm read-only handle must reject writes");
 }
+
+fn grok_dir_under(dir: &Path) -> PathBuf {
+    dunce::canonicalize(dir)
+        .unwrap_or_else(|_| dir.to_path_buf())
+        .join(".grok")
+}
+
+#[test]
+fn resolve_grok_home_uses_home_dir_when_grok_home_unset() {
+    let home = tempfile::TempDir::new().unwrap();
+    let resolved = resolve_grok_home_from(None, Some(home.path().to_path_buf())).unwrap();
+    assert_eq!(resolved, grok_dir_under(home.path()));
+}
+
+#[test]
+fn resolve_grok_home_prefers_grok_home() {
+    let grok = tempfile::TempDir::new().unwrap();
+    let resolved = resolve_grok_home_from(
+        Some(grok.path().as_os_str().to_owned()),
+        Some(PathBuf::from("/some/home")),
+    )
+    .unwrap();
+    assert_eq!(resolved, grok.path());
+}
+
+#[test]
+fn resolve_grok_home_treats_empty_grok_home_as_unset() {
+    let home = tempfile::TempDir::new().unwrap();
+    let resolved =
+        resolve_grok_home_from(Some(OsString::new()), Some(home.path().to_path_buf())).unwrap();
+    assert_eq!(resolved, grok_dir_under(home.path()));
+}

@@ -20,12 +20,13 @@ mod replay;
 #[cfg(test)]
 mod replay_tests;
 pub mod search;
-mod search_bootstrap;
 mod search_content;
-mod search_db;
-pub mod search_fts;
-mod search_recovery;
+pub(crate) mod search_gate;
 pub(crate) mod summary_write;
+
+/// The session search index moved to its own crate; re-exported here so
+/// `session::storage::search_fts::…` keeps resolving for its consumers.
+pub use xai_grok_session_search::fts as search_fts;
 
 /// On-disk file names, relative to a session directory. Single source of truth for
 /// the storage adapter and the session/state and session/import extensions.
@@ -1188,6 +1189,12 @@ pub trait StorageAdapter: Send + Sync {
         messages: &[ConversationItem],
     ) -> io::Result<()>;
 
+    /// Copy the on-disk chat history before a destructive image-strip
+    /// rewrite (first backup wins), mirroring the `*.corrupt` quarantine.
+    /// Required, not defaulted: a new adapter must choose its
+    /// recoverability story explicitly.
+    async fn backup_chat_history_before_strip(&self, info: &Info) -> io::Result<()>;
+
     /// Copy session data from source to target, transforming session IDs
     /// The `options` parameter allows setting parent session tracking and model overrides.
     async fn copy_session_data(
@@ -1277,12 +1284,25 @@ pub trait StorageAdapter: Send + Sync {
     ) -> io::Result<crate::extensions::notification::CompactionCheckpointFile>;
 }
 
+/// Backup-gated strip rewrite: the destructive rewrite runs only when the
+/// backup landed, so recoverability can never be silently forfeited (full
+/// disk, read-only volume). Factored out of the persistence actor so the
+/// gate ordering is testable against a real adapter.
+pub(crate) async fn strip_rewrite_gated(
+    storage: &dyn StorageAdapter,
+    info: &Info,
+    messages: &[ConversationItem],
+) -> io::Result<()> {
+    storage.backup_chat_history_before_strip(info).await?;
+    storage.replace_chat_history(info, messages).await
+}
+
 pub use jsonl::JsonlStorageAdapter;
 #[cfg(any(test, feature = "test-support"))]
 pub use replay::load_updates_for_replay_at;
 pub use replay::{
-    PreparedReplay, ReplayEmission, ReplayPathHint, load_updates_for_replay, prepare_replay_lines,
-    stream_replay_updates_at, stream_replay_updates_at_hinted,
+    PreparedReplay, ReplayEmission, ReplayLookupFallback, ReplayPathHint, load_updates_for_replay,
+    prepare_replay_lines, stream_replay_updates_at, stream_replay_updates_at_hinted,
 };
 pub(crate) use replay::{ReplayToolCollapser, filter_delta_replay_lines};
 

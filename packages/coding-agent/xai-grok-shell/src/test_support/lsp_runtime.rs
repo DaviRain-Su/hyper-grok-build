@@ -35,6 +35,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
             endpoint_path: None,
             auth_scheme: Default::default(),
             extra_headers: Default::default(),
+            extra_response_includes: Vec::new(),
             query_params: Default::default(),
             env_http_headers: Default::default(),
             context_window: 256_000,

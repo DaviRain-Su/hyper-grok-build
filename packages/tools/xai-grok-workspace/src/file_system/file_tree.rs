@@ -337,6 +337,34 @@ impl DirectoryNode {
     }
 }
 
+/// Project overview across every provisioned mount. One walk per root so a
+/// multi-repo workspace prompt is not primary-only. Empty `roots` → empty string.
+pub async fn list_contents_multi(
+    roots: &[PathBuf],
+    limits: ListContentsLimits,
+) -> Result<String, FsError> {
+    match roots {
+        [] => Ok(String::new()),
+        [only] => list_contents(only.clone(), limits).await,
+        many => {
+            let n = many.len().max(1);
+            let per = ListContentsLimits {
+                max_characters: limits.max_characters / n,
+                max_depth: limits.max_depth,
+                max_dirs_visited: limits.max_dirs_visited / n,
+            };
+            let mut out = String::new();
+            for root in many {
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str(&list_contents(root.clone(), per).await?);
+            }
+            Ok(out)
+        }
+    }
+}
+
 /// Creates the project overview
 pub async fn list_contents(
     path: impl Into<PathBuf>,

@@ -17,6 +17,9 @@ xai-prompt-queue = { workspace = true }
 # Presentation-primitives layer (extracted)
 xai-grok-pager-render = { path = "../xai-grok-pager-render" }
 
+# Diff hunk construction (extracted)
+xai-grok-pager-diff = { path = "../xai-grok-pager-diff" }
+
 # Rendering
 ratatui = { workspace = true, features = ["crossterm", "unstable-widget-ref"] }
 xai-grok-announcements = { workspace = true }
@@ -99,6 +102,8 @@ xai-grok-update = { path = "../../coding-agent/xai-grok-update" }
 agent-client-protocol = { workspace = true }
 xai-acp-lib = { workspace = true }
 xai-file-utils = { path = "../../platform/xai-file-utils" }
+# Crash-recovery registry of open TUI sessions.
+xai-grok-active-sessions = { workspace = true }
 xai-grok-config = { workspace = true }
 # Voice dictation. `audio` (mic capture) is enabled on every target. On
 # macOS/Windows it links cpal; on Linux it compiles a subprocess-recorder
@@ -108,6 +113,8 @@ xai-grok-voice = { path = "../../ai/xai-grok-voice", default-features = false, f
 xai-grok-shell = { workspace = true }
 xai-grok-models = { workspace = true }
 xai-grok-workspace = { workspace = true }
+# Foreign coding-agent session discovery.
+xai-grok-foreign-sessions = { workspace = true }
 xai-token-estimation = { workspace = true }
 xai-grok-telemetry = { workspace = true }
 xai-fast-worktree = { path = "../../platform/xai-fast-worktree", features = ["metadata"] }

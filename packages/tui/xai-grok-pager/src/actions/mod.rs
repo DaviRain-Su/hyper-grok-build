@@ -1043,6 +1043,87 @@ mod tests {
         assert!(registry.find(ActionId::ExitSession).is_none());
     }
 
+    fn binds_ctrl_4(def: &ActionDef) -> bool {
+        let ctrl_4 = key!('4', CONTROL);
+        def.default_key == ctrl_4 || def.alt_keys.contains(&ctrl_4)
+    }
+
+    // Host-default registry: at most one of these two owns Ctrl+4.
+    #[test]
+    fn open_dashboard_and_toggle_queue_do_not_both_bind_ctrl_4() {
+        let registry = ActionRegistry::defaults();
+        let dashboard = registry.find(ActionId::OpenDashboard).unwrap();
+        let queue = registry.find(ActionId::ToggleQueue).unwrap();
+        assert!(!(binds_ctrl_4(dashboard) && binds_ctrl_4(queue)));
+        assert_eq!(dashboard.default_key, key!('\\', CONTROL));
+        // Exactly one of the two binds Ctrl+4 under host defaults (legacy alt XOR queue primary).
+        assert!(
+            binds_ctrl_4(dashboard) ^ binds_ctrl_4(queue),
+            "exactly one of OpenDashboard/ToggleQueue must bind Ctrl+4 on this host"
+        );
+    }
+
+    // Crossterm maps C0 FS (physical Ctrl+\) to Char('4')+CONTROL without KKP.
+    #[test]
+    fn open_dashboard_accepts_legacy_ctrl_4_encoding() {
+        let mut actions = default_actions(crate::app::ScreenMode::Fullscreen, false);
+        for def in actions.iter_mut() {
+            if def.id == ActionId::OpenDashboard {
+                def.alt_keys = vec![key!('4', CONTROL)];
+            }
+            if def.id == ActionId::ToggleQueue {
+                def.default_key = key!(';', CONTROL);
+                def.alt_keys = vec![key!('\'', CONTROL)];
+            }
+        }
+        let registry = ActionRegistry::new(actions);
+        let ctrl_backslash = KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL);
+        let ctrl_4 = KeyEvent::new(KeyCode::Char('4'), KeyModifiers::CONTROL);
+        let ctrl_semicolon = KeyEvent::new(KeyCode::Char(';'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            registry.lookup(&ctrl_backslash, When::Always),
+            Some(ActionId::OpenDashboard)
+        );
+        assert_eq!(
+            registry.lookup(&ctrl_4, When::Always),
+            Some(ActionId::OpenDashboard)
+        );
+        assert_eq!(registry.lookup(&ctrl_4, When::AgentScreen), None);
+        assert_eq!(
+            registry.lookup(&ctrl_semicolon, When::AgentScreen),
+            Some(ActionId::ToggleQueue)
+        );
+    }
+
+    // Mac-VS pin: ToggleQueue primary Ctrl+4; OpenDashboard keeps Ctrl+\ only.
+    #[test]
+    fn mac_vscode_ctrl_4_stays_toggle_queue_not_open_dashboard() {
+        let mut actions = default_actions(crate::app::ScreenMode::Fullscreen, false);
+        for def in actions.iter_mut() {
+            if def.id == ActionId::ToggleQueue {
+                def.default_key = key!('4', CONTROL);
+                def.alt_keys = vec![key!(';', CONTROL), key!('\'', CONTROL)];
+            }
+            if def.id == ActionId::OpenDashboard {
+                def.alt_keys = vec![];
+            }
+        }
+        let registry = ActionRegistry::new(actions);
+        let ctrl_4 = KeyEvent::new(KeyCode::Char('4'), KeyModifiers::CONTROL);
+        let ctrl_backslash = KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            registry.lookup(&ctrl_4, When::AgentScreen),
+            Some(ActionId::ToggleQueue)
+        );
+        assert_eq!(registry.lookup(&ctrl_4, When::Always), None);
+        assert_eq!(
+            registry.lookup(&ctrl_backslash, When::Always),
+            Some(ActionId::OpenDashboard)
+        );
+    }
+
     #[test]
     fn shortcuts_help_registered_with_ctrl_dot_and_ctrl_x() {
         let registry = ActionRegistry::defaults();

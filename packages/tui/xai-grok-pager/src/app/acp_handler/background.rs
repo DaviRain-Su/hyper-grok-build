@@ -412,8 +412,8 @@ pub(super) fn handle_scheduled_task_deleted(
     let Ok(session_notif) = serde_json::from_str::<SessionNotification>(notif.params.get()) else {
         return false;
     };
-    let task_id = match session_notif.update {
-        XaiSessionUpdate::ScheduledTaskDeleted { task_id } => task_id,
+    let (task_id, reason) = match session_notif.update {
+        XaiSessionUpdate::ScheduledTaskDeleted { task_id, reason } => (task_id, reason),
         _ => return false,
     };
     let matched = match find_session_match(app, &session_notif.session_id) {
@@ -427,8 +427,41 @@ pub(super) fn handle_scheduled_task_deleted(
         .get_mut(&agent_id)
         .expect("find_session_match returned an existing AgentId");
 
-    agent.session.scheduled_tasks.remove(&task_id);
+    let info = agent.session.scheduled_tasks.remove(&task_id);
+
+    // Expiry is the only removal nobody asked for, so it alone leaves a transcript record (the
+    // tombstone replays on resume). Chip presence makes re-delivered tombstones a no-op; the
+    // replay gate keeps a misrouted replay from duplicating history on a live transcript.
+    let meta = NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()));
+    if reason == ScheduledTaskRemovedReason::Expired
+        && (!meta.is_replay || agent.accepts_replayed_update())
+        && let Some(info) = info
+    {
+        let entry_id = agent
+            .scrollback
+            .push_block(RenderBlock::system(expired_task_notice(&info)));
+        // A reconnect reload may have rendered this notice live before the outage; recording the
+        // staged entry lets the keep-stash finalize drop the duplicate. (Marking the reload
+        // replay-seen instead would swap in a notice-only transcript and drop the stash.)
+        if meta.is_replay {
+            agent.note_replayed_expiry_notice(entry_id);
+        }
+    }
     is_active
+}
+
+/// One-line transcript notice for a scheduled task that hit its auto-expiry.
+fn expired_task_notice(info: &crate::app::agent::ScheduledTaskInfo) -> String {
+    let first_line = crate::app::status_blocks::first_nonempty_line(&info.prompt);
+    let mut head: String = first_line.chars().take(60).collect();
+    if head.len() < first_line.len() {
+        head.push('\u{2026}');
+    }
+    format!(
+        "Scheduled task expired: \"{head}\" ({}). Recurring tasks auto-expire after {} days; re-create it if still needed.",
+        info.human_schedule,
+        xai_grok_tools::implementations::grok_build::scheduler::types::RECURRING_TASK_TTL_DAYS,
+    )
 }
 
 pub(super) fn handle_scheduled_task_inject_prompt(

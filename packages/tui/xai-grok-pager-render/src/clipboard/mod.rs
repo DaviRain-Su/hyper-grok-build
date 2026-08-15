@@ -142,11 +142,24 @@ impl std::fmt::Display for ClipboardRoute {
 /// which forces OSC 52 off everywhere. Tests that cannot control SSH env vars
 /// should skip asserting `osc52` for non-tmux cases.
 pub fn resolve_clipboard_route(ctx: &TerminalContext) -> ClipboardRoute {
-    resolve_clipboard_route_with(ctx, osc52_disabled())
+    resolve_clipboard_route_with(
+        ctx,
+        ClipboardRouteOpts {
+            no_osc52: osc52_disabled(),
+            wrap_sink: osc52_sink_active(),
+        },
+    )
 }
 
-/// Pure clipboard-route resolution (kill-switch injected for tests).
-fn resolve_clipboard_route_with(ctx: &TerminalContext, no_osc52: bool) -> ClipboardRoute {
+/// Test/production overrides for pure clipboard-route resolution.
+#[derive(Clone, Copy)]
+struct ClipboardRouteOpts {
+    no_osc52: bool,
+    wrap_sink: bool,
+}
+
+/// Pure clipboard-route resolution (kill-switch / wrap-sink injected for tests).
+fn resolve_clipboard_route_with(ctx: &TerminalContext, opts: ClipboardRouteOpts) -> ClipboardRoute {
     let is_tmux = ctx.multiplexer == MultiplexerKind::Tmux;
     // Linux: always emit OSC 52 as a safety net. This matches other
     // terminal agent CLIs which emit OSC 52 on every copy.
@@ -154,12 +167,12 @@ fn resolve_clipboard_route_with(ctx: &TerminalContext, no_osc52: bool) -> Clipbo
     // upstream `grok wrap` sink is capturing our output and will forward
     // the sequence to the real clipboard.
     // `GROK_CLIPBOARD_NO_OSC52` wins over every automatic path.
-    let osc52 = !no_osc52
+    let osc52 = !opts.no_osc52
         && (cfg!(target_os = "linux")
             || is_tmux
             || is_remote()
             || is_container_no_display()
-            || osc52_sink_active());
+            || opts.wrap_sink);
     ClipboardRoute {
         native: true,
         tmux_buffer: is_tmux,
@@ -1791,7 +1804,13 @@ mod tests {
         for case in cases {
             // Pure helper with kill switch off so ambient GROK_CLIPBOARD_NO_OSC52
             // cannot flake CI (route() itself still reads the real env).
-            let route = resolve_clipboard_route_with(&case.ctx, false);
+            let route = resolve_clipboard_route_with(
+                &case.ctx,
+                ClipboardRouteOpts {
+                    no_osc52: false,
+                    wrap_sink: false,
+                },
+            );
             assert_eq!(
                 route.native, case.native,
                 "native mismatch on case '{}'",
@@ -1867,11 +1886,43 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_route_osc52_when_wrap_sink_active() {
+        let on = resolve_clipboard_route_with(
+            &plain_terminal_ctx(),
+            ClipboardRouteOpts {
+                no_osc52: false,
+                wrap_sink: true,
+            },
+        );
+        assert!(
+            on.osc52,
+            "grok wrap sink must emit OSC 52 so the local PTY can intercept it"
+        );
+        let killed = resolve_clipboard_route_with(
+            &plain_terminal_ctx(),
+            ClipboardRouteOpts {
+                no_osc52: true,
+                wrap_sink: true,
+            },
+        );
+        assert!(
+            !killed.osc52,
+            "GROK_CLIPBOARD_NO_OSC52 still wins over the wrap sink"
+        );
+    }
+
+    #[test]
     fn clipboard_route_osc52_always_for_tmux_backed() {
         // In tmux-backed environments, OSC 52 is always emitted regardless of
         // remote session status (unless the kill switch is on — tested below).
         for ctx in [plain_tmux_ctx(), byobu_tmux_ctx()] {
-            let route = resolve_clipboard_route_with(&ctx, false);
+            let route = resolve_clipboard_route_with(
+                &ctx,
+                ClipboardRouteOpts {
+                    no_osc52: false,
+                    wrap_sink: false,
+                },
+            );
             assert!(
                 route.osc52,
                 "OSC 52 should always be emitted in tmux-backed env: {:?}",
@@ -1891,7 +1942,13 @@ mod tests {
             zellij_ctx(),
             plain_screen_ctx(),
         ] {
-            let route = resolve_clipboard_route_with(&ctx, true);
+            let route = resolve_clipboard_route_with(
+                &ctx,
+                ClipboardRouteOpts {
+                    no_osc52: true,
+                    wrap_sink: false,
+                },
+            );
             assert!(
                 !route.osc52,
                 "OSC 52 must be off under kill switch for {:?}",
@@ -1906,7 +1963,13 @@ mod tests {
             assert!(route.native);
         }
         // tmux buffer still active when in tmux — only OSC 52 is killed.
-        let tmux = resolve_clipboard_route_with(&plain_tmux_ctx(), true);
+        let tmux = resolve_clipboard_route_with(
+            &plain_tmux_ctx(),
+            ClipboardRouteOpts {
+                no_osc52: true,
+                wrap_sink: false,
+            },
+        );
         assert!(tmux.tmux_buffer);
         assert!(!tmux.osc52);
     }
@@ -1914,15 +1977,51 @@ mod tests {
     #[test]
     fn clipboard_route_osc52_tmux_passthrough_truth_table() {
         // tmux + no editor: wrap (tmux is the immediate terminal).
-        assert!(resolve_clipboard_route_with(&plain_tmux_ctx(), false).osc52_tmux_passthrough);
+        assert!(
+            resolve_clipboard_route_with(
+                &plain_tmux_ctx(),
+                ClipboardRouteOpts {
+                    no_osc52: false,
+                    wrap_sink: false
+                }
+            )
+            .osc52_tmux_passthrough
+        );
         // tmux + embedded editor: don't wrap (libvterm is the immediate terminal).
         let mut tmux_in_editor = plain_tmux_ctx();
         tmux_in_editor.embedded_editor = Some(EmbeddedEditor::Neovim);
-        assert!(!resolve_clipboard_route_with(&tmux_in_editor, false).osc52_tmux_passthrough);
+        assert!(
+            !resolve_clipboard_route_with(
+                &tmux_in_editor,
+                ClipboardRouteOpts {
+                    no_osc52: false,
+                    wrap_sink: false
+                }
+            )
+            .osc52_tmux_passthrough
+        );
         // non-tmux: never wrap.
-        assert!(!resolve_clipboard_route_with(&plain_terminal_ctx(), false).osc52_tmux_passthrough);
+        assert!(
+            !resolve_clipboard_route_with(
+                &plain_terminal_ctx(),
+                ClipboardRouteOpts {
+                    no_osc52: false,
+                    wrap_sink: false
+                }
+            )
+            .osc52_tmux_passthrough
+        );
         // kill switch: never wrap even in plain tmux.
-        assert!(!resolve_clipboard_route_with(&plain_tmux_ctx(), true).osc52_tmux_passthrough);
+        assert!(
+            !resolve_clipboard_route_with(
+                &plain_tmux_ctx(),
+                ClipboardRouteOpts {
+                    no_osc52: true,
+                    wrap_sink: false
+                }
+            )
+            .osc52_tmux_passthrough
+        );
     }
 
     // =====================================================================
@@ -1981,7 +2080,13 @@ mod tests {
     #[test]
     fn clipboard_route_tmux_backed_all_three_legs() {
         for ctx in [plain_tmux_ctx(), byobu_tmux_ctx()] {
-            let route = resolve_clipboard_route_with(&ctx, false);
+            let route = resolve_clipboard_route_with(
+                &ctx,
+                ClipboardRouteOpts {
+                    no_osc52: false,
+                    wrap_sink: false,
+                },
+            );
             assert!(route.native, "native should be true");
             assert!(route.tmux_buffer, "tmux_buffer should be true");
             assert!(route.osc52, "osc52 should be true for tmux-backed");

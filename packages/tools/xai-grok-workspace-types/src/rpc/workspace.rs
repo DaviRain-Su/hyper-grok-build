@@ -243,6 +243,37 @@ impl WorkspaceRpc for TasksSnapshotReq {
     type Response = TasksSnapshotResponse;
 }
 
+/// Outcome of `workspace.kill_task`, mirroring `xai_grok_tools::KillOutcome`
+/// wire tags (`killed` / `already_exited` / `not_found`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KillTaskOutcome {
+    Killed,
+    AlreadyExited,
+    NotFound,
+}
+
+/// Response of `workspace.kill_task`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KillTaskResponse {
+    pub task_id: String,
+    pub outcome: KillTaskOutcome,
+}
+
+/// `workspace.kill_task` — terminate a background terminal task by id.
+/// Caller supplies the hub-bound session id (same as `tasks_snapshot`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KillTaskReq {
+    pub session_id: String,
+    pub task_id: String,
+}
+
+impl WorkspaceRpc for KillTaskReq {
+    const METHOD: &'static str = "workspace.kill_task";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
+    type Response = KillTaskResponse;
+}
+
 /// One TODO list item (slim DTO over `xai_grok_tools`'s `TodoState`). `status`
 /// is the snake_case tag: `pending` | `in_progress` | `completed` | `cancelled`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

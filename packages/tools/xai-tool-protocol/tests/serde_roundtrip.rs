@@ -10,18 +10,18 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 use xai_tool_protocol::{
     AttachRoute, ConnectionId, ConnectionKind, ERROR_CODES, FrameSeq, HelloAckMsg, HelloMsg,
-    HookEvent, HookFrame, HookKind, JsonRpcId, JsonRpcVersion, KNOWN_NOTIFICATION_KINDS, LastSeq,
-    McpBlock, Method, NotificationFilter, NotificationSchemas, PingFrame, PongFrame,
-    RegistrationOutcome, RegistryError, RequestId, ServerBindAck, ServerBindOutcome, ServerId,
-    SessionAttachServerParams, SessionAttachServerResult, SessionBindServerParams,
-    SessionBindServerResult, SessionCloseParams, SessionEvent, SessionId, SessionOpenParams,
-    SessionPhase, SessionUnbindServerParams, StreamingSpec, SubscribeAck,
-    SubscribeNotificationsParams, SubscribeOutcome, ToolCallId, ToolCallOutcome, ToolCallParams,
-    ToolCallProgressFrame, ToolCallResult, ToolCapabilities, ToolDefinitionMode,
-    ToolDescriptionWithSchema, ToolErrorWire, ToolId, ToolNotificationFrame, ToolOutputWire,
-    ToolRegistration, ToolScope, ToolSearchResult, ToolServerRegistration, ToolsChanged,
-    ToolsListParams, ToolsListResult, ToolsSearchParams, ToolsSearchResultBody, TransportKind,
-    UnsubscribeAck, UnsubscribeNotificationsParams, UnsubscribeOutcome, UserId,
+    HookEvent, HookFrame, HookKind, IMAGE_CAPABILITIES_V1, JsonRpcId, JsonRpcVersion,
+    KNOWN_NOTIFICATION_KINDS, LastSeq, McpBlock, Method, NotificationFilter, NotificationSchemas,
+    PingFrame, PongFrame, RegistrationOutcome, RegistryError, RequestId, ServerBindAck,
+    ServerBindOutcome, ServerId, SessionAttachServerParams, SessionAttachServerResult,
+    SessionBindResult, SessionBindServerParams, SessionBindServerResult, SessionCloseParams,
+    SessionEvent, SessionId, SessionOpenParams, SessionPhase, SessionUnbindServerParams,
+    StreamingSpec, SubscribeAck, SubscribeNotificationsParams, SubscribeOutcome, ToolCallId,
+    ToolCallOutcome, ToolCallParams, ToolCallProgressFrame, ToolCallResult, ToolCapabilities,
+    ToolDefinitionMode, ToolDescriptionWithSchema, ToolErrorWire, ToolId, ToolNotificationFrame,
+    ToolOutputWire, ToolRegistration, ToolScope, ToolSearchResult, ToolServerRegistration,
+    ToolsChanged, ToolsListParams, ToolsListResult, ToolsSearchParams, ToolsSearchResultBody,
+    TransportKind, UnsubscribeAck, UnsubscribeNotificationsParams, UnsubscribeOutcome, UserId,
     WireCustomNotification, WireToolNotification, error_codes,
 };
 use xai_tool_types::ToolDescription;
@@ -938,6 +938,7 @@ fn session_lifecycle_payloads_round_trip() {
         binary_version: Some("1.0.15".to_owned()),
         unserved_tool_ids: vec!["GrokBuild:monitor".to_owned()],
         resolve_error: Some("missing_tool_config: no explicit tool configuration".to_owned()),
+        image_capabilities: vec![IMAGE_CAPABILITIES_V1.to_owned(), "node.22".to_owned()],
     };
     let v = roundtrip(&bind_result);
     assert_eq!(v["tools"].as_array().unwrap().len(), 1);
@@ -946,6 +947,10 @@ fn session_lifecycle_payloads_round_trip() {
     assert_eq!(
         v["resolve_error"],
         json!("missing_tool_config: no explicit tool configuration")
+    );
+    assert_eq!(
+        v["image_capabilities"],
+        json!(["capabilities.v1", "node.22"])
     );
 
     let bind_result_empty = SessionBindServerResult::default();
@@ -957,7 +962,8 @@ fn session_lifecycle_payloads_round_trip() {
     assert!(
         !v.as_object().unwrap().contains_key("binary_version")
             && !v.as_object().unwrap().contains_key("unserved_tool_ids")
-            && !v.as_object().unwrap().contains_key("resolve_error"),
+            && !v.as_object().unwrap().contains_key("resolve_error")
+            && !v.as_object().unwrap().contains_key("image_capabilities"),
         "absent bind-report fields must be omitted from wire (old-server parity)"
     );
 
@@ -966,6 +972,7 @@ fn session_lifecycle_payloads_round_trip() {
     assert_eq!(legacy.binary_version, None);
     assert!(legacy.unserved_tool_ids.is_empty());
     assert_eq!(legacy.resolve_error, None);
+    assert!(legacy.image_capabilities.is_empty());
 
     let unbind = SessionUnbindServerParams {
         server_id: server(),
@@ -996,6 +1003,36 @@ fn session_lifecycle_payloads_round_trip() {
             && !v.as_object().unwrap().contains_key("route"),
         "empty attach result fields must be omitted from wire"
     );
+}
+
+#[test]
+fn session_bind_result_image_capabilities_round_trip() {
+    let populated = SessionBindResult {
+        tools: vec![ToolDescription::new("my_tool", "desc")],
+        binary_version: Some("1.0.15".to_owned()),
+        unserved_tool_ids: Vec::new(),
+        resolve_error: None,
+        image_capabilities: vec![
+            IMAGE_CAPABILITIES_V1.to_owned(),
+            "grok-files.occ".to_owned(),
+        ],
+    };
+    let v = roundtrip(&populated);
+    assert_eq!(
+        v["image_capabilities"],
+        json!(["capabilities.v1", "grok-files.occ"])
+    );
+
+    let v = roundtrip(&SessionBindResult::default());
+    assert!(
+        !v.as_object().unwrap().contains_key("image_capabilities"),
+        "an empty token set must be omitted (old-server parity)"
+    );
+
+    // A server predating the field.
+    let legacy: SessionBindResult =
+        serde_json::from_value(json!({"tools": []})).expect("legacy payload parses");
+    assert!(legacy.image_capabilities.is_empty());
 }
 
 #[test]

@@ -11,11 +11,10 @@
 static DHAT_ALLOC: dhat::Alloc = dhat::Alloc;
 pub(crate) use xai_grok_telemetry::unified_log;
 pub use xai_tracing_macros::{teprintln, timed, tprintln};
-pub mod active_sessions;
 pub mod agent;
 pub mod auth;
 pub mod builtin;
-pub mod bundle;
+pub use xai_grok_bundle as bundle;
 pub mod claude_import;
 pub mod claude_import_state;
 pub mod cli_models;
@@ -23,7 +22,7 @@ pub mod config;
 pub use xai_grok_shell_base::cpu_profile;
 pub use xai_grok_shell_base::env;
 pub mod extensions;
-pub use xai_grok_workspace::foreign_sessions;
+pub use xai_grok_foreign_sessions as foreign_sessions;
 pub mod heap_profile;
 /// Shell-backed Hypercore host (`ShellHyperHost`).
 pub mod hypercore_host;

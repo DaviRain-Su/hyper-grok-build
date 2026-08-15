@@ -10,13 +10,14 @@ default-bazel = []
 
 [dependencies]
 indexmap = { workspace = true }
-regex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 strum = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+# `CompactionDetail`, embedded in `CompactionMode::Segments`.
+xai-compaction-transcript = { workspace = true }
 xai-grok-compaction = { path = "../xai-grok-compaction" }
 xai-grok-sampling-types = { path = "../../ai/xai-grok-sampling-types" }
 xai-token-estimation = { workspace = true }

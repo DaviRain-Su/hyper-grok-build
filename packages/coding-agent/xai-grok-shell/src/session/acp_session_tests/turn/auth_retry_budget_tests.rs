@@ -32,9 +32,9 @@ impl crate::auth::refresh::TokenRefresher for WakeGapRefresher {
     ) -> crate::auth::refresh::RefreshOutcome {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_pre_request && reason == crate::auth::refresh::RefreshReason::PreRequest {
-            return crate::auth::refresh::RefreshOutcome::TransientFailure {
-                message: "simulated post-wake network gap".to_string(),
-            };
+            return crate::auth::refresh::RefreshOutcome::transient(
+                "simulated post-wake network gap",
+            );
         }
         crate::auth::refresh::RefreshOutcome::success(GrokAuth {
             key: FRESH_TOKEN.to_string(),

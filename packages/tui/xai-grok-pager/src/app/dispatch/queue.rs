@@ -3,7 +3,7 @@
 //! ([`maybe_drain_queue`]), the turn-start shim, and the queue-interject
 //! action arm. Split out of `dispatch.rs` verbatim (pure code motion).
 
-use super::ctx::{active_agent_session_id, with_active_agent};
+use super::ctx::{NO_SESSION_NOTICE, active_agent_session_id, with_active_agent};
 use super::interject::record_interject_prompt_history;
 use crate::acp::meta::user_prompt_meta;
 use crate::app::actions::Effect;
@@ -72,13 +72,13 @@ fn combine_queued_prompts_enabled() -> bool {
 /// later prompts behind the older ones (they join the local queue and drain in
 /// order), preserving FIFO.
 ///
-/// **Leader gate (`leader_mode`):** the shared queue exists to hold every
-/// attached client to one order. With no leader there is one client, and the
-/// two queues merge as *server rows first, then local rows*, so a local row
-/// (slash command, image prompt, scheduled prompt) can never move above them.
+/// **Leader / follow-up Steer gate:** the shared queue exists to hold every
+/// attached client to one order. `[ui].follow_up_behavior = "steer"` also
+/// takes this path so the shell can promote the row to a mid-turn
+/// interjection at the next tool batch or model step.
 pub(super) fn immediate_server_send_eligible(agent: &AgentView, leader_mode: bool) -> bool {
     let server_busy = agent.session.state.is_turn_running() || !agent.shared_queue.is_empty();
-    leader_mode
+    (leader_mode || crate::appearance::cache::load_follow_up_steer())
         && server_busy
         && agent.session.session_id.is_some()
         && agent.session.pending_prompts.is_empty()
@@ -1084,17 +1084,136 @@ pub(super) fn dispatch_queue_interject_shared(
     }
 }
 
+/// Decides whether the edited row is dropped and whether its text reaches the send path.
+enum EditedCommandGate {
+    /// Drop the row and run the command. Carries the bound session a server-row removal needs.
+    Run { session_id: acp::SessionId },
+    /// `dispatch_send_prompt_inner` refuses this one before running it: let it print the refusal
+    /// and keep the row.
+    RefusedBySendPath,
+    /// No bound session: a server-row removal has no address, and a command that needs one would
+    /// fail after the row was gone. Keep the row and say so.
+    NeedsSession,
+}
+
+/// `Action::RunEditedQueuedCommand` arm: the row's edited text resolved to a pager builtin, so drop
+/// the row and run the text through slash dispatch, the owner of resolution and command telemetry.
+///
+/// Every gate that can refuse the command (active view, the send path's screen-mode refusal, a
+/// bound session) runs before the removal, so a refusal leaves the row queued with its pre-edit
+/// text instead of trading it for a hint.
+pub(super) fn dispatch_run_edited_queued_command(
+    app: &mut AppView,
+    local_id: u64,
+    server: Option<crate::app::actions::SharedQueueTarget>,
+    text: String,
+) -> Vec<Effect> {
+    if app.reconnect_pending {
+        // Nothing runs and nothing drains while reconnecting (see `dispatch_drain_queue`), so the
+        // row just stays put.
+        app.show_toast(super::prompt::RECONNECTING_NOTICE);
+        return vec![];
+    }
+    // The send half is bound to the active view (the dashboard popup forwards keys to an attached
+    // agent without switching it), so resolve the removal target the same way. The edit exit has
+    // already taken the composer text, so a silent bail would drop the command without a trace.
+    let ActiveView::Agent(agent_id) = app.active_view else {
+        app.show_toast("Open the session to run this command");
+        return vec![];
+    };
+    // The screen-mode refusal is resolved the executor's way (`get_for_dispatch` → `mode_support`)
+    // so it cannot disagree with `dispatch_send_prompt_inner`; that path's restricted-command
+    // upsell can't fire here because the classifier already required the same lookup.
+    let screen_mode = app.screen_mode;
+    let gate = {
+        let Some(agent) = app.agents.get(&agent_id) else {
+            return vec![];
+        };
+        let registry = agent.prompt.slash_controller.registry();
+        let mode_refused = crate::slash::parse_invocation(text.trim()).is_some_and(|invocation| {
+            registry
+                .get_for_dispatch(invocation.token)
+                .is_some_and(|command| {
+                    command
+                        .mode_support()
+                        .refusal(invocation.token, screen_mode)
+                        .is_some()
+                })
+        });
+        if mode_refused {
+            EditedCommandGate::RefusedBySendPath
+        } else {
+            // Fail closed on the session itself rather than on what a command declares:
+            // `session_scoped` is a menu-offering hint, so it says nothing reliable about whether
+            // `run()` needs a bound session.
+            match agent.session.session_id.clone() {
+                Some(session_id) => EditedCommandGate::Run { session_id },
+                None => EditedCommandGate::NeedsSession,
+            }
+        }
+    };
+
+    let mut effects = Vec::new();
+    let sends = match gate {
+        EditedCommandGate::Run { session_id } => {
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            match server {
+                // Server rows are never mutated client-side; the `x.ai/queue/changed` rebroadcast
+                // is the visual result.
+                Some(server) => effects.push(Effect::QueueRemove {
+                    session_id,
+                    id: server.id,
+                    expected_version: server.expected_version,
+                }),
+                None => {
+                    if let Some(removed) = agent.remove_local_queue_row(local_id) {
+                        // Defensive: the edit exit already cleaned the temp paths the composer
+                        // shared with this row. Covers images the composer never held.
+                        for image in &removed.images {
+                            crate::prompt_images::cleanup_temp_file(image);
+                        }
+                    }
+                }
+            }
+            true
+        }
+        EditedCommandGate::RefusedBySendPath => true,
+        // Row kept and nothing runs: a command that ignores the missing session (`/compact`
+        // enqueues regardless) would leave a second row.
+        EditedCommandGate::NeedsSession => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.show_toast(NO_SESSION_NOTICE);
+            }
+            false
+        }
+    };
+    if sends {
+        effects.extend(super::prompt::dispatch_send_prompt_inner(
+            app, text, /* consume_input */ false, /* literal */ false,
+            /* is_follow_up */ false,
+        ));
+    }
+    // The edit lock is released either way, so a command that starts no turn (or a refusal that
+    // keeps the row) must not strand the queue, exactly as the plain save's `DrainQueue` did.
+    effects.extend(maybe_drain_queue_and_note_peek(app, agent_id));
+    effects
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::actions::Action;
+    use crate::app::actions::{Action, SharedQueueTarget};
     use crate::app::agent::AgentState;
     use crate::app::agent_view::test_fixtures::{
         complete_task_output_wait_call, count_turn_markers, running_subagent_info,
         simulate_subagent_wait, simulate_task_output_wait, simulate_task_output_wait_call,
     };
     use crate::app::dispatch::router::dispatch;
-    use crate::app::dispatch::tests::{end_turn, enqueue_local, test_app_with_agent};
+    use crate::app::dispatch::tests::{
+        end_turn, enqueue_local, last_system_text, test_app_with_agent,
+    };
 
     /// A running background bash task for the work-count fixtures.
     fn running_bg_task(task_id: &str) -> crate::app::agent::BgTaskState {
@@ -1202,6 +1321,284 @@ mod tests {
         // "third" should still be in queue.
         assert_eq!(app.agents[&id].session.queue_len(), 1);
         assert_eq!(app.agents[&id].session.pending_prompts[0].text, "third");
+    }
+
+    // Edited row that resolved to a pager builtin
+
+    fn run_edited_queued_command(
+        app: &mut AppView,
+        local_id: u64,
+        server: Option<SharedQueueTarget>,
+        text: &str,
+    ) -> Vec<Effect> {
+        dispatch(
+            Action::RunEditedQueuedCommand {
+                local_id,
+                server,
+                text: text.into(),
+            },
+            app,
+        )
+    }
+
+    /// The fixture's shared queue with one row, `p1` at version 2.
+    fn seed_shared_row(app: &mut AppView, id: AgentId) {
+        app.agents.get_mut(&id).unwrap().shared_queue =
+            vec![crate::app::prompt_queue::QueueEntryWire {
+                id: "p1".into(),
+                version: 2,
+                owner: None,
+                last_editor: None,
+                kind: "prompt".into(),
+                text: "what is the default".into(),
+                position: 0,
+                combined_texts: None,
+            }];
+    }
+
+    fn shared_target() -> Option<SharedQueueTarget> {
+        Some(SharedQueueTarget {
+            id: "p1".into(),
+            expected_version: 2,
+        })
+    }
+
+    #[test]
+    fn run_edited_queued_command_drops_local_row_then_runs_command() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+        enqueue_local(&mut app, id, "what is the default");
+        let local_id = app.agents[&id].session.pending_prompts[0].id;
+
+        let effects =
+            run_edited_queued_command(&mut app, local_id, None, "/btw what is the default");
+
+        assert!(
+            matches!(effects.as_slice(), [Effect::SendBtw { .. }]),
+            "expected the command to run, got {effects:?}"
+        );
+        assert_eq!(app.agents[&id].session.queue_len(), 0);
+    }
+
+    /// Server row: a versioned remove, then the command. The shared mirror is never mutated
+    /// client-side: the rebroadcast is the source of truth.
+    #[test]
+    fn run_edited_queued_command_removes_server_row_then_runs_command() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        seed_shared_row(&mut app, id);
+
+        let effects = run_edited_queued_command(&mut app, 7, shared_target(), "/btw why");
+
+        match effects.as_slice() {
+            [
+                Effect::QueueRemove {
+                    id: removed,
+                    expected_version,
+                    ..
+                },
+                Effect::SendBtw { .. },
+            ] => {
+                assert_eq!(removed, "p1");
+                assert_eq!(*expected_version, 2);
+            }
+            other => panic!("expected [QueueRemove, SendBtw], got {other:?}"),
+        }
+        assert_eq!(app.agents[&id].shared_queue.len(), 1);
+    }
+
+    /// A command that returns without starting a turn must not strand the rows queued behind
+    /// the one it replaced.
+    #[test]
+    fn run_edited_queued_command_drains_the_row_behind_it() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        enqueue_local(&mut app, id, "front");
+        enqueue_local(&mut app, id, "behind");
+        let local_id = app.agents[&id].session.pending_prompts[0].id;
+
+        let effects = run_edited_queued_command(&mut app, local_id, None, "/btw why");
+
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::SendBtw { .. }, Effect::SendPrompt { text, .. }] if text == "behind"
+            ),
+            "expected the command then the next row's turn, got {effects:?}"
+        );
+        assert_eq!(app.agents[&id].session.queue_len(), 0);
+    }
+
+    /// An enqueueing builtin re-enters the local queue at the tail, so the row's
+    /// position is not preserved.
+    #[test]
+    fn run_edited_queued_command_with_enqueueing_builtin_re_adds_at_the_tail() {
+        use crate::app::agent::QueueEntryKind;
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+        enqueue_local(&mut app, id, "edited into a command");
+        enqueue_local(&mut app, id, "behind");
+        let local_id = app.agents[&id].session.pending_prompts[0].id;
+
+        let effects = run_edited_queued_command(&mut app, local_id, None, "/compact");
+
+        assert!(effects.is_empty(), "no turn starts mid-turn: {effects:?}");
+        let rows: Vec<(&str, QueueEntryKind)> = app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| (p.text.as_str(), p.kind))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("behind", QueueEntryKind::Prompt),
+                ("/compact", QueueEntryKind::Command),
+            ]
+        );
+    }
+
+    /// Reconnecting: the guard bails before the removal, so the row survives for a retry.
+    #[test]
+    fn run_edited_queued_command_while_reconnecting_keeps_row() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        enqueue_local(&mut app, id, "what is the default");
+        let local_id = app.agents[&id].session.pending_prompts[0].id;
+        app.reconnect_pending = true;
+
+        let effects = run_edited_queued_command(&mut app, local_id, None, "/btw why");
+
+        assert!(effects.is_empty());
+        assert_eq!(app.agents[&id].session.queue_len(), 1);
+    }
+
+    /// The dashboard popup forwards keys to an attached agent without making it the active view.
+    /// The send half would no-op there, so nothing runs, the row keeps its text, and the toast
+    /// lands on the surface the user is actually looking at.
+    #[test]
+    fn run_edited_queued_command_off_active_view_keeps_row() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        enqueue_local(&mut app, id, "what is the default");
+        let local_id = app.agents[&id].session.pending_prompts[0].id;
+        app.active_view = ActiveView::AgentDashboard;
+        app.dashboard = Some(crate::views::dashboard::DashboardState::default());
+
+        let effects = run_edited_queued_command(&mut app, local_id, None, "/btw why");
+
+        assert!(effects.is_empty());
+        assert_eq!(app.agents[&id].session.queue_len(), 1);
+        assert_eq!(
+            app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+            Some("Open the session to run this command")
+        );
+    }
+
+    /// A command the current screen mode refuses is a pre-execution refusal: the user gets the hint
+    /// and the row keeps its pre-edit text.
+    #[test]
+    fn run_edited_queued_command_refused_by_screen_mode_keeps_row() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        // Mid-turn so the surviving row is observable rather than drained.
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+        enqueue_local(&mut app, id, "what is the default");
+        let local_id = app.agents[&id].session.pending_prompts[0].id;
+
+        // `/fullscreen` is minimal-only and the fixture's mode is not minimal.
+        let effects = run_edited_queued_command(&mut app, local_id, None, "/fullscreen");
+
+        assert!(effects.is_empty());
+        assert_eq!(
+            app.agents[&id].session.pending_prompts[0].text, "what is the default",
+            "the row survives with its pre-edit text"
+        );
+        assert!(last_system_text(&app, id).contains("already in fullscreen"));
+    }
+
+    /// A refusal releases the edit lock too, so the queue must not park behind the row
+    /// that was not removed.
+    #[test]
+    fn run_edited_queued_command_refusal_still_drains_the_queue() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        enqueue_local(&mut app, id, "what is the default");
+        let local_id = app.agents[&id].session.pending_prompts[0].id;
+
+        let effects = run_edited_queued_command(&mut app, local_id, None, "/fullscreen");
+
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::SendPrompt { text, .. }] if text == "what is the default"
+            ),
+            "expected the kept row to drain, got {effects:?}"
+        );
+    }
+
+    /// Fail closed while the session is binding: the row survives (a server row's removal has no
+    /// address either) and the user is told why.
+    #[test]
+    fn run_edited_queued_command_without_session_keeps_row() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        seed_shared_row(&mut app, id);
+        app.agents.get_mut(&id).unwrap().session.session_id = None;
+
+        let effects = run_edited_queued_command(&mut app, 7, shared_target(), "/btw why");
+
+        assert!(effects.is_empty(), "no unaddressed QueueRemove");
+        assert_eq!(app.agents[&id].shared_queue.len(), 1);
+        assert_eq!(
+            app.agents[&id]
+                .toast
+                .as_ref()
+                .map(|(text, _)| text.as_str()),
+            Some("No active session")
+        );
+    }
+
+    /// A command that produces no effect at all still costs the row: the removal is not tied to
+    /// something coming back from the send path.
+    #[test]
+    fn run_edited_queued_command_drops_row_for_effect_free_builtin() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        enqueue_local(&mut app, id, "edited into a command");
+        let local_id = app.agents[&id].session.pending_prompts[0].id;
+
+        let effects = run_edited_queued_command(&mut app, local_id, None, "/help");
+
+        assert!(effects.is_empty(), "the palette is state, not an effect");
+        assert_eq!(app.agents[&id].session.queue_len(), 0, "row dropped");
+        assert!(
+            matches!(
+                app.agents[&id].active_modal,
+                Some(crate::views::modal::ActiveModal::CommandPalette { .. })
+            ),
+            "the command ran"
+        );
+    }
+
+    /// Row already gone (a rebroadcast or a concurrent delete): nothing to remove, but the command
+    /// the user typed still runs.
+    #[test]
+    fn run_edited_queued_command_with_unknown_local_id_still_runs() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+        enqueue_local(&mut app, id, "someone else's row");
+
+        let effects = run_edited_queued_command(&mut app, 9999, None, "/btw why");
+
+        assert!(
+            matches!(effects.as_slice(), [Effect::SendBtw { .. }]),
+            "expected the command to run, got {effects:?}"
+        );
+        assert_eq!(app.agents[&id].session.queue_len(), 1);
     }
 
     #[test]
@@ -2978,7 +3375,7 @@ mod tests {
         assert!(
             matches!(
                 agent.resolve_turn_activity(),
-                Some(TurnActivity::Waiting(WaitingReason::Subagent))
+                Some(TurnActivity::Waiting(WaitingReason::Subagent { .. }))
             ),
             "the meta-less spawn starts with a provisional foreground wait"
         );
@@ -3003,7 +3400,7 @@ mod tests {
         assert!(
             !matches!(
                 agent.resolve_turn_activity(),
-                Some(TurnActivity::Waiting(WaitingReason::Subagent))
+                Some(TurnActivity::Waiting(WaitingReason::Subagent { .. }))
             ),
             "an omitted run_in_background field means background: the provisional \
              foreground wait must clear"

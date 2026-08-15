@@ -1093,6 +1093,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "follow_up_behavior" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("follow_up_behavior", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_follow_up_behavior(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
         "show_timeline" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("show_timeline", "Bool", &value));
@@ -1740,7 +1748,7 @@ pub(super) fn unregister_active_session_best_effort_in(
     root: &Path,
     session_id: &acp::SessionId,
 ) {
-    match xai_grok_shell::active_sessions::try_unregister_in(root, session_id) {
+    match xai_grok_active_sessions::try_unregister_in(root, session_id) {
         Ok(true) => {}
         Ok(false) => {
             tracing::debug!(

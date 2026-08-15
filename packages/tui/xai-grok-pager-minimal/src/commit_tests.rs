@@ -9,6 +9,7 @@ use ratatui::style::Color;
 use xai_grok_pager::scrollback::block::RenderBlock;
 use xai_grok_pager::scrollback::entry::ScrollbackEntry;
 use xai_grok_pager::scrollback::state::ScrollbackState;
+use xai_grok_pager_diff::DiffLine;
 
 fn test_cwd() -> &'static std::path::Path {
     std::path::Path::new("/test/session")
@@ -636,19 +637,19 @@ fn terminal_native_lock_paints_only_native_colors() {
               - item one\n- item two\n\n> a quote\n\n```rust\nfn main() { println!(\"hi\"); }\n```";
     use similar::ChangeTag;
     let hunk = vec![
-        xai_grok_pager::diff::DiffLine {
+        DiffLine {
             text: "let x = 1;\n".into(),
             lo: 1,
             ln: 1,
             tag: ChangeTag::Equal,
         },
-        xai_grok_pager::diff::DiffLine {
+        DiffLine {
             text: "let y = 2;\n".into(),
             lo: 2,
             ln: 0,
             tag: ChangeTag::Delete,
         },
-        xai_grok_pager::diff::DiffLine {
+        DiffLine {
             text: "let y = 3;\n".into(),
             lo: 0,
             ln: 2,
@@ -782,7 +783,6 @@ fn committed_edit_keeps_diff_line_backgrounds() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use similar::ChangeTag;
-    use xai_grok_pager::diff::DiffLine;
 
     let hunk = vec![
         DiffLine {

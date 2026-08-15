@@ -50,6 +50,7 @@ pub struct LocalSandboxTelemetry {
 ///
 /// Path format: `{session_id}/turn_{N}/metadata.json`
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PromptMetadata {
     /// Schema version for this metadata format
     pub schema_version: String,
@@ -124,6 +125,71 @@ pub struct PromptMetadata {
     /// Resolved OS sandbox profile and whether enforcement is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<LocalSandboxTelemetry>,
+}
+/// Always-present fields for [`PromptMetadata::new`].
+///
+/// Name required fields explicitly; optional fields may use `..Default::default()`.
+#[derive(Debug, Clone, Default)]
+pub struct PromptMetadataParams {
+    pub schema_version: String,
+    pub session_id: String,
+    pub turn_number: u64,
+    pub request_id: String,
+    pub turn_started_at: String,
+    pub repo_root: Option<String>,
+    pub remote_url: Option<String>,
+    pub workspace_type: Option<String>,
+    pub user_id: Option<String>,
+    pub user_email: Option<String>,
+    pub team_id: Option<String>,
+    pub client_source: Option<String>,
+    pub client_version: Option<String>,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub experiment_id: Option<String>,
+    pub host_os: String,
+    pub host_arch: String,
+    pub prompt_has_image: Option<bool>,
+    pub prompt_was_truncated: Option<bool>,
+    pub prompt_verbatim: Option<bool>,
+    pub cwd: Option<String>,
+    pub agent_type: Option<String>,
+    pub shell_version: Option<String>,
+    pub sandbox: Option<LocalSandboxTelemetry>,
+}
+impl PromptMetadata {
+    /// Complete constructor. Optional collection fields are defaulted when
+    /// compiled in, so callers never name them in a struct literal.
+    #[must_use]
+    pub fn new(params: PromptMetadataParams) -> Self {
+        Self {
+            schema_version: params.schema_version,
+            session_id: params.session_id,
+            turn_number: params.turn_number,
+            request_id: params.request_id,
+            turn_started_at: params.turn_started_at,
+            repo_root: params.repo_root,
+            remote_url: params.remote_url,
+            workspace_type: params.workspace_type,
+            user_id: params.user_id,
+            user_email: params.user_email,
+            team_id: params.team_id,
+            client_source: params.client_source,
+            client_version: params.client_version,
+            model: params.model,
+            reasoning_effort: params.reasoning_effort,
+            experiment_id: params.experiment_id,
+            host_os: params.host_os,
+            host_arch: params.host_arch,
+            prompt_has_image: params.prompt_has_image,
+            prompt_was_truncated: params.prompt_was_truncated,
+            prompt_verbatim: params.prompt_verbatim,
+            cwd: params.cwd,
+            agent_type: params.agent_type,
+            shell_version: params.shell_version,
+            sandbox: params.sandbox,
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -216,5 +282,21 @@ mod tests {
                 applied: true,
             })
         );
+    }
+    #[test]
+    fn new_defaults_optional_collection_fields() {
+        let meta = PromptMetadata::new(PromptMetadataParams {
+            schema_version: GCS_SCHEMA_VERSION.into(),
+            session_id: "abc".into(),
+            turn_number: 1,
+            request_id: "req-1".into(),
+            turn_started_at: "2025-01-01T00:00:00Z".into(),
+            model: "grok-3".into(),
+            host_os: "linux".into(),
+            host_arch: "x86_64".into(),
+            ..Default::default()
+        });
+        assert_eq!(meta.session_id, "abc");
+        assert_eq!(meta.model, "grok-3");
     }
 }

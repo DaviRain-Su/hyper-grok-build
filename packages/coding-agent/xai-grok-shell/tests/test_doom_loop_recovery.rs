@@ -27,8 +27,6 @@ use xai_grok_test_support::{MockInferenceServer, MockModelEntry, ScriptedRespons
 
 const MODEL: &str = "test-model";
 
-/// A sampling client with the doom-loop check enabled (default tunables:
-/// `max_threshold` 8, `max_retries` 2).
 fn doom_loop_client(base_url: &str) -> Client {
     let mut config = test_sampler_config(base_url, ApiBackend::Responses, &[]);
     config.doom_loop_recovery = Some(Default::default());
@@ -288,8 +286,8 @@ async fn disabled_policy_leaves_terminal_field_unparsed() {
 // Recovery contract (the acceptance spec for the resample behavior)
 // ---------------------------------------------------------------------------
 
-/// A confident signal (`tail_repetition:8@thinking` at the default
-/// `max_threshold` 8) on a completed turn is resampled once: two requests,
+/// A confident signal (`tail_repetition:8@thinking` is confident under
+/// default `max_threshold` 32) on a completed turn is resampled once: two requests,
 /// the clean second script is the accepted response, and the resample
 /// request body is identical to the first — the poisoned turn's output never
 /// enters the conversation.
@@ -579,7 +577,7 @@ async fn headless_config_enables_doom_loop_check_header() {
     for turn in turns {
         assert_eq!(
             turn.header("x-grok-doom-loop-check"),
-            Some("true"),
+            Some("1024"),
             "[doom_loop_recovery] enabled must reach the turn request header; requests:\n{}",
             server.request_log_summary()
         );

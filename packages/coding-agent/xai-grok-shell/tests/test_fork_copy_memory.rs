@@ -13,7 +13,7 @@ use agent_client_protocol as acp;
 use tempfile::TempDir;
 use xai_grok_shell::session::info::Info;
 use xai_grok_shell::session::storage::{CopySessionOptions, JsonlStorageAdapter, StorageAdapter};
-use xai_grok_shell::session::testkit::synth::synthesize_to_target_bytes;
+use xai_grok_shell::session::testkit::synth::make_session_with_size;
 use xai_grok_test_support::env::env_parse;
 use xai_grok_test_support::resources::RssSampler;
 
@@ -37,7 +37,7 @@ async fn fork_copy_peak_rss_under_budget() {
     let budget_mb = env_parse("FORK_COPY_MAX_PEAK_MB", 48u64);
 
     let root = TempDir::new().unwrap();
-    let source = synthesize_to_target_bytes(root.path(), target_mb * 1024 * 1024);
+    let source = make_session_with_size(root.path(), target_mb * 1024 * 1024).await;
     let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
     let updates_path = adapter
         .updates_file_path(&source)

@@ -159,6 +159,20 @@ fn user_echo_mode(prompt_id: &str) -> UserEchoMode {
     }
 }
 impl SessionActor {
+    /// Exactly once per turn: the cancel path and the turn's own post-loop both announce.
+    pub(super) async fn notify_turn_abort(
+        &self,
+        epoch: TurnEpoch,
+        reason: xai_agent_lifecycle::TurnAbortReason,
+    ) {
+        if !self.turn_abort.try_mark_announced(epoch) {
+            return;
+        }
+        let input = xai_agent_lifecycle::TurnAbortInput::new(reason);
+        for contributor in self.extension_registry.turn_lifecycle_contributors() {
+            contributor.on_turn_abort(&input).await;
+        }
+    }
     /// Run the image-normalization pipeline (re-encode caps, min-side and
     /// integrity checks) and surface its outcomes: compression / re-encode
     /// fallback / dropped notices are appended to `text_out` (TEXT only —
@@ -662,7 +676,7 @@ impl SessionActor {
         }
         let query = crate::session::placeholder_images::strip_paths_from_image_placeholders(query);
         let query = if send_now && !verbatim {
-            format!("{}\n{query}", xai_interjection_core::INTERJECTION_NOTE)
+            xai_interjection_core::frame_user_turn(xai_interjection_core::INTERJECTION_NOTE, &query)
         } else {
             query
         };
@@ -813,9 +827,6 @@ impl SessionActor {
                 self.chat_state_handle.begin_turn_capture();
             }
             let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
-            if matches!(origin, super::super::PromptOrigin::User) {
-                self.maybe_inject_interrupt_reminder().await;
-            }
             let mut user_chat = match &origin {
                 super::super::PromptOrigin::TaskCompleted { .. } => {
                     ConversationItem::task_completed(user_message)
@@ -840,7 +851,9 @@ impl SessionActor {
                 }
                 super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
                 super::super::PromptOrigin::User => {
-                    let mut item = ConversationItem::user(user_message);
+                    let mut item = ConversationItem::user(
+                        self.maybe_apply_interrupt_envelope(user_message, verbatim),
+                    );
                     if let Some(interrupt) = self
                         .events
                         .take_prior_interrupt_category()
@@ -902,6 +915,7 @@ impl SessionActor {
             xai_grok_hooks::event::HookEventName::UserPromptSubmit,
             xai_grok_hooks::event::HookPayload::UserPromptSubmit {
                 prompt: Some(prompt_text_for_hook.clone()),
+                subagent_type: self.subagent_type_label(),
             },
             Some(prompt_id),
             None,
@@ -1018,18 +1032,15 @@ impl SessionActor {
                     None,
                 );
                 if let Some(explanation) = refusal {
-                    let details = (!explanation.is_empty()).then(|| explanation.clone());
-                    self.dispatch_hook(
-                        xai_grok_hooks::event::HookEventName::StopFailure,
-                        xai_grok_hooks::event::HookPayload::StopFailure {
+                    self.report_turn_end(
+                        prompt_id,
+                        TurnEnd::Failed {
                             error: xai_grok_hooks::event::StopFailureKind::InvalidRequest,
-                            error_details: details.clone(),
-                            last_assistant_message: details,
+                            error_details: None,
+                            last_assistant_message: (!explanation.is_empty())
+                                .then(|| explanation.clone()),
                         },
-                        Some(prompt_id),
-                        None,
-                    )
-                    .await;
+                    );
                 }
                 self.send_after_turn_event(xai_tool_protocol::turn_hook::AfterTurnPayload {
                     turn_number: current_prompt_index as u64,
@@ -1179,17 +1190,14 @@ impl SessionActor {
                         error_category: Some(error_category),
                     },
                 );
-                self.dispatch_hook(
-                    xai_grok_hooks::event::HookEventName::StopFailure,
-                    xai_grok_hooks::event::HookPayload::StopFailure {
+                self.report_turn_end(
+                    prompt_id,
+                    TurnEnd::Failed {
                         error: Self::stop_failure_error_type(err),
                         error_details: Self::turn_error_detail(err),
                         last_assistant_message: Some(Self::format_turn_error_message(err)),
                     },
-                    Some(prompt_id),
-                    None,
-                )
-                .await;
+                );
             }
         }
         xai_grok_telemetry::session_ctx::log_session_event(
@@ -1220,12 +1228,11 @@ impl SessionActor {
                 }
             }
             Ok(TurnOutcome::Cancelled { .. }) | Ok(TurnOutcome::MaxTurnsReached { .. }) => {
-                let input = xai_agent_lifecycle::TurnAbortInput::new(
+                self.notify_turn_abort(
+                    self.turn_report.epoch(),
                     xai_agent_lifecycle::TurnAbortReason::Interrupted,
-                );
-                for contributor in self.extension_registry.turn_lifecycle_contributors() {
-                    contributor.on_turn_abort(&input).await;
-                }
+                )
+                .await;
             }
             Err(err) => {
                 let message = err.to_string();
@@ -1873,7 +1880,6 @@ impl SessionActor {
             }
         }
     }
-
     /// Heap-allocate the legacy turn future and poll it under a temporary
     /// heap pin from thin frame. See [`box_turn_future`] / docs §8.3.
     fn process_conversation_turn_boxed<'a>(
@@ -1892,6 +1898,10 @@ impl SessionActor {
                 json_schema,
             )
         })
+    }
+
+    pub(super) fn is_first_turn_memory_score_visible(score: f64) -> bool {
+        format!("{score:.2}") != "0.00"
     }
     /// Compute the first-turn memory reminder, if one should be injected.
     ///
@@ -1950,15 +1960,14 @@ impl SessionActor {
             raw_query
         };
         let inject_start = std::time::Instant::now();
-        let inject_results = backend.search(&query, 6, configured_min_score).await.ok();
-        let result_count = inject_results.as_ref().map_or(0, |r| r.len());
-        let top_score = inject_results
-            .as_ref()
-            .and_then(|r| r.first())
-            .map_or(0.0, |r| r.score);
-        let total_snippet_chars: usize = inject_results
-            .as_ref()
-            .map_or(0, |r| r.iter().map(|s| s.snippet.len()).sum());
+        let mut inject_results = backend
+            .search(&query, 6, configured_min_score)
+            .await
+            .unwrap_or_default();
+        inject_results.retain(|result| Self::is_first_turn_memory_score_visible(result.score));
+        let result_count = inject_results.len();
+        let top_score = inject_results.first().map_or(0.0, |r| r.score);
+        let total_snippet_chars: usize = inject_results.iter().map(|s| s.snippet.len()).sum();
         tracing::info!(
             target: xai_grok_telemetry::memory_log::TARGET,
             configured_min_score,
@@ -1975,9 +1984,7 @@ impl SessionActor {
                 injection_duration_ms: inject_start.elapsed().as_millis() as u64,
             },
         );
-        inject_results.and_then(|results| {
-            crate::session::helpers::memory_context::format_memory_reminder(&results)
-        })
+        crate::session::helpers::memory_context::format_memory_reminder(&inject_results)
     }
     /// Inspect `tool_calls` for a `StructuredOutput` call and decide the turn's
     /// next step, pushing the call's `tool_result` (correction / retry error /
@@ -2342,7 +2349,7 @@ impl SessionActor {
                     .unwrap_or_else(|| ACTION_STATIONARITY_NUDGE_TEMPLATE.to_string());
                 self.push_system_reminder(&reminder);
             }
-            self.drain_pending_interjections().await;
+            self.drain_interjections_at_safe_point().await;
             self.flush_pending_skill_reminders().await;
             self.inject_pending_monitor_events().await;
             let memory_reminder = self.first_turn_memory_reminder().await;
@@ -2820,8 +2827,8 @@ impl SessionActor {
                         ));
                     }
                 }
-                if self.drain_pending_interjections().await {
-                    tracing::info!("Drained interjection(s) before turn completion — continuing");
+                if self.drain_interjections_at_safe_point().await {
+                    tracing::info!("Drained interjection(s) before turn completion; continuing");
                     continue;
                 }
                 let snapshot = self
@@ -2834,7 +2841,7 @@ impl SessionActor {
                     .await;
                 if self.drain_pending_interjections().await {
                     tracing::info!(
-                        "Drained late interjection(s) during turn-end bookkeeping — continuing"
+                        "Drained late interjection(s) during turn-end bookkeeping; continuing"
                     );
                     continue;
                 }

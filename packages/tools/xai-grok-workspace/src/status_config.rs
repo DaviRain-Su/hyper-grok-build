@@ -116,6 +116,14 @@ pub struct StatusConfig {
     /// True when restore injects `GROK_REVIVE_SCRIPT_CONFIGURED=true` (launchable
     /// revive configured); unset on first boot and non-launchable restores.
     pub revive_script_configured: bool,
+    /// True when restore injects `GROK_RESUME_NUDGE_DISABLED=true` (per-env
+    /// `resume_nudge_disabled` sandbox config): the session-resumed nudge is
+    /// suppressed at source for this boot.
+    pub resume_nudge_disabled: bool,
+    /// True when restore injects `GROK_COMPUTER_SESSION_RESUMED_EMIT=true` (sandbox
+    /// `computer_session_resumed_emit` config field; default OFF). When false, the
+    /// session-resumed nudge is suppressed at source.
+    pub computer_session_resumed_emit: bool,
 }
 
 impl Default for StatusConfig {
@@ -146,6 +154,8 @@ impl Default for StatusConfig {
             preview_control_port: None,
             session_restored: false,
             revive_script_configured: false,
+            resume_nudge_disabled: false,
+            computer_session_resumed_emit: false,
         }
     }
 }
@@ -213,6 +223,11 @@ impl StatusConfig {
             preview_control_port: defaults.preview_control_port,
             session_restored: std::env::var("GROK_SESSION_RESTORED").as_deref() == Ok("true"),
             revive_script_configured: std::env::var("GROK_REVIVE_SCRIPT_CONFIGURED").as_deref()
+                == Ok("true"),
+            resume_nudge_disabled: std::env::var("GROK_RESUME_NUDGE_DISABLED").as_deref()
+                == Ok("true"),
+            computer_session_resumed_emit: std::env::var("GROK_COMPUTER_SESSION_RESUMED_EMIT")
+                .as_deref()
                 == Ok("true"),
         };
         cfg.validate();
@@ -418,6 +433,8 @@ mod tests {
         assert_eq!(cfg.preview_state_poll_interval, Duration::from_secs(5));
         assert!(!cfg.session_restored);
         assert!(!cfg.revive_script_configured);
+        assert!(!cfg.resume_nudge_disabled);
+        assert!(!cfg.computer_session_resumed_emit);
     }
 
     #[test]
@@ -566,6 +583,8 @@ mod tests {
             "GROK_WORKSPACE_PRESENCE_ACTIVITY_WINDOW_MS",
             "GROK_SESSION_RESTORED",
             "GROK_REVIVE_SCRIPT_CONFIGURED",
+            "GROK_RESUME_NUDGE_DISABLED",
+            "GROK_COMPUTER_SESSION_RESUMED_EMIT",
         ] {
             unsafe { std::env::remove_var(var) };
         }
@@ -601,6 +620,11 @@ mod tests {
             cfg.revive_script_configured,
             default.revive_script_configured
         );
+        assert_eq!(cfg.resume_nudge_disabled, default.resume_nudge_disabled);
+        assert_eq!(
+            cfg.computer_session_resumed_emit,
+            default.computer_session_resumed_emit
+        );
     }
 
     #[test]
@@ -624,6 +648,30 @@ mod tests {
         let non_canonical = StatusConfig::from_env().revive_script_configured;
         unsafe { std::env::remove_var("GROK_REVIVE_SCRIPT_CONFIGURED") };
         assert!(configured);
+        assert!(!non_canonical);
+    }
+
+    #[test]
+    fn from_env_reads_resume_nudge_disabled_true_only() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("GROK_RESUME_NUDGE_DISABLED", "true") };
+        let disabled = StatusConfig::from_env().resume_nudge_disabled;
+        unsafe { std::env::set_var("GROK_RESUME_NUDGE_DISABLED", "1") };
+        let non_canonical = StatusConfig::from_env().resume_nudge_disabled;
+        unsafe { std::env::remove_var("GROK_RESUME_NUDGE_DISABLED") };
+        assert!(disabled);
+        assert!(!non_canonical);
+    }
+
+    #[test]
+    fn from_env_reads_computer_session_resumed_emit_true_only() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("GROK_COMPUTER_SESSION_RESUMED_EMIT", "true") };
+        let enabled = StatusConfig::from_env().computer_session_resumed_emit;
+        unsafe { std::env::set_var("GROK_COMPUTER_SESSION_RESUMED_EMIT", "1") };
+        let non_canonical = StatusConfig::from_env().computer_session_resumed_emit;
+        unsafe { std::env::remove_var("GROK_COMPUTER_SESSION_RESUMED_EMIT") };
+        assert!(enabled);
         assert!(!non_canonical);
     }
 

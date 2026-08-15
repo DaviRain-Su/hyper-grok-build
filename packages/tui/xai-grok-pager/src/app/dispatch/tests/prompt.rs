@@ -1084,6 +1084,146 @@ fn send_prompt_while_running_queues_without_drain() {
     assert_eq!(q[0].text, "queued");
 }
 
+#[test]
+fn send_prompt_while_running_queues_on_server_when_follow_up_steer() {
+    struct ResetFollowUp(crate::appearance::FollowUpBehavior);
+    impl Drop for ResetFollowUp {
+        fn drop(&mut self) {
+            crate::appearance::cache::set_follow_up_behavior(self.0);
+        }
+    }
+    let _reset = ResetFollowUp(crate::appearance::cache::load_follow_up_behavior());
+    crate::appearance::cache::set_follow_up_behavior(crate::appearance::FollowUpBehavior::Steer);
+
+    let mut app = test_app_with_agent();
+    app.leader_mode = false;
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(Action::SendPrompt("steer me".into()), &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::SendPrompt { text, .. }] if text == "steer me"
+        ),
+        "Steer should server-queue, not interject yet, got {effects:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 0);
+}
+
+#[test]
+fn send_prompt_while_running_with_follow_up_queue_stays_local_when_not_leader() {
+    struct ResetFollowUp(crate::appearance::FollowUpBehavior);
+    impl Drop for ResetFollowUp {
+        fn drop(&mut self) {
+            crate::appearance::cache::set_follow_up_behavior(self.0);
+        }
+    }
+    let _reset = ResetFollowUp(crate::appearance::cache::load_follow_up_behavior());
+    crate::appearance::cache::set_follow_up_behavior(crate::appearance::FollowUpBehavior::Queue);
+
+    let mut app = test_app_with_agent();
+    app.leader_mode = false;
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(Action::SendPrompt("later".into()), &mut app);
+    assert!(
+        effects
+            .iter()
+            .all(|e| !matches!(e, Effect::SendInterject { .. })),
+        "Queue must not interject mid-turn, got {effects:?}"
+    );
+    // Non-leader + Queue: local drip-feed path (not server-immediate).
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+}
+
+/// With Steer, an older local drip-feed row still blocks server-immediate
+/// send: newer Enter must not interject or jump the server queue ahead of
+/// the older local prompt.
+#[test]
+fn send_while_running_with_pending_local_and_steer_preserves_fifo() {
+    struct ResetFollowUp(crate::appearance::FollowUpBehavior);
+    impl Drop for ResetFollowUp {
+        fn drop(&mut self) {
+            crate::appearance::cache::set_follow_up_behavior(self.0);
+        }
+    }
+    let _reset = ResetFollowUp(crate::appearance::cache::load_follow_up_behavior());
+    crate::appearance::cache::set_follow_up_behavior(crate::appearance::FollowUpBehavior::Steer);
+
+    let mut app = test_app_with_agent();
+    app.leader_mode = false;
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.enqueue_prompt("two".into());
+        assert_eq!(agent.session.pending_prompts.len(), 1);
+    }
+
+    let effects = dispatch(Action::SendPrompt("three".into()), &mut app);
+    assert!(
+        effects
+            .iter()
+            .all(|e| !matches!(e, Effect::SendInterject { .. } | Effect::SendPrompt { .. })),
+        "Steer must not bypass empty-local-queue gate, got {effects:?}"
+    );
+    let order: Vec<&str> = app.agents[&id]
+        .session
+        .pending_prompts
+        .iter()
+        .map(|p| p.text.as_str())
+        .collect();
+    assert_eq!(order, vec!["two", "three"]);
+}
+
+/// Images never ride server-immediate; with Steer they still join the local
+/// queue (no interject-on-Enter with attachments).
+#[test]
+fn send_prompt_with_images_while_running_and_steer_stays_local() {
+    struct ResetFollowUp(crate::appearance::FollowUpBehavior);
+    impl Drop for ResetFollowUp {
+        fn drop(&mut self) {
+            crate::appearance::cache::set_follow_up_behavior(self.0);
+        }
+    }
+    let _reset = ResetFollowUp(crate::appearance::cache::load_follow_up_behavior());
+    crate::appearance::cache::set_follow_up_behavior(crate::appearance::FollowUpBehavior::Steer);
+
+    let mut app = test_app_with_agent();
+    app.leader_mode = false;
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent
+            .prompt
+            .insert_image(crate::prompt_images::PastedImage {
+                element_id: xai_ratatui_textarea::ElementId::from_raw(0),
+                display_number: 0,
+                mime_type: "image/png".to_owned(),
+                dimensions: Some((8, 8)),
+                byte_len: 1,
+                encoded_bytes: Some(vec![0].into()),
+                source_path: None,
+                staged_temp_path: None,
+                session_image_path: None,
+                preview: crate::prompt_images::PromptImagePreview::default(),
+            })
+            .unwrap();
+    }
+
+    let effects = dispatch(Action::SendPrompt("with image".into()), &mut app);
+    assert!(
+        effects
+            .iter()
+            .all(|e| !matches!(e, Effect::SendInterject { .. } | Effect::SendPrompt { .. })),
+        "images + Steer must not interject or server-send, got {effects:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+}
+
 /// Regression (queue reorder race): a plain prompt typed while a turn is
 /// running must NOT jump onto the server queue when an older prompt is still
 /// waiting in the local drip-feed queue — e.g. prompts queued during

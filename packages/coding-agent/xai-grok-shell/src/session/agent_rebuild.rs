@@ -93,6 +93,10 @@ pub(crate) struct AgentRebuildSpec {
     pub memory_workspace_path: Option<String>,
     pub memory_backend: Option<Arc<dyn MemoryBackend>>,
     pub web_search_config: WebSearchConfig,
+    /// `[toolset.web_search]` domain policy, resolved once at spawn and applied
+    /// to both search paths (the hosted `tool_overrides` merge and the
+    /// client-side `WebSearchConfig`) so they never diverge.
+    pub web_search_domains: Option<xai_grok_sampling_types::WebSearchOptions>,
     pub backend_search: bool,
     pub web_fetch_config: WebFetchConfig,
     pub image_gen_config: ImageGenConfig,
@@ -200,6 +204,7 @@ impl AgentRebuildSpec {
             memory_workspace_path,
             memory_backend,
             web_search_config,
+            web_search_domains,
             backend_search,
             web_fetch_config,
             image_gen_config,
@@ -246,6 +251,18 @@ impl AgentRebuildSpec {
         #[allow(unused_variables)]
         let is_cursor_template =
             crate::session::is_cursor_system_template(&definition.system_prompt);
+        let mut definition = definition;
+        if let Some(cfg_opts) = web_search_domains.clone() {
+            definition
+                .tool_overrides
+                .get_or_insert_with(Default::default)
+                .web_search = Some(cfg_opts);
+        }
+        let session_env = {
+            let mut env = session_env.as_ref().clone();
+            env.insert("GROK_SESSION_ID".to_string(), session_id_str.clone());
+            Arc::new(env)
+        };
         let mut builder = AgentBuilder::new(
             working_directory.clone(),
             terminal_backend.clone(),
@@ -447,6 +464,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         memory_workspace_path: None,
         memory_backend: None,
         web_search_config: WebSearchConfig::default(),
+        web_search_domains: None,
         backend_search: false,
         web_fetch_config: WebFetchConfig::Disabled,
         image_gen_config: ImageGenConfig::default(),
@@ -510,6 +528,84 @@ mod tests {
             .find(|definition| definition.function.name == task_name)
             .and_then(|definition| definition.function.description)
             .expect("GrokBuild Task description should be present")
+    }
+    /// The `[toolset.web_search]` policy is authoritative on the backend-hosted
+    /// path: agent frontmatter is model-writable (`.grok/agents/*.md`), so a
+    /// configured blocklist must survive a frontmatter allowlist, matching the
+    /// client-side `resolve_filters`. With no configured policy, frontmatter
+    /// still applies.
+    #[tokio::test(flavor = "current_thread")]
+    async fn config_web_search_domains_beat_agent_frontmatter() {
+        use xai_grok_sampling_types::{HostedTool, ToolOverrides, WebSearchOptions};
+        let frontmatter = WebSearchOptions {
+            allowed_domains: Some(vec!["attacker.example".into()]),
+            excluded_domains: None,
+        };
+        let configured = WebSearchOptions {
+            allowed_domains: None,
+            excluded_domains: Some(vec!["reddit.com".into()]),
+        };
+        let definition = || {
+            let mut d = AgentDefinition::default_grok_build();
+            d.tool_overrides = Some(ToolOverrides {
+                x_search: None,
+                web_search: Some(frontmatter.clone()),
+            });
+            d
+        };
+        let spec_with = |domains: Option<WebSearchOptions>| {
+            let mut spec = test_rebuild_spec_default();
+            let spec_mut =
+                Arc::get_mut(&mut spec).expect("test rebuild spec should be uniquely owned");
+            spec_mut.web_search_domains = domains;
+            spec_mut.backend_search = true;
+            spec_mut.web_search_config = WebSearchConfig::Enabled {
+                api_key: "test-key".to_string(),
+                base_url: "https://api.x.ai/v1".to_string(),
+                model: "grok-4".to_string(),
+                extra_headers: Default::default(),
+                alpha_test_key: None,
+                allowed_domains: None,
+                excluded_domains: None,
+            };
+            spec
+        };
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let agent = spec_with(Some(configured.clone()))
+                    .build_agent(definition())
+                    .await
+                    .expect("agent build should succeed");
+                assert_eq!(
+                    agent
+                        .definition()
+                        .tool_overrides
+                        .as_ref()
+                        .and_then(|o| o.web_search.clone()),
+                    Some(configured.clone()),
+                    "config must replace the frontmatter allowlist"
+                );
+                assert!(
+                    agent.hosted_tools().contains(&HostedTool::WebSearch {
+                        options: Some(configured.clone()),
+                    }),
+                    "the hosted tool carries the configured policy: {:?}",
+                    agent.hosted_tools()
+                );
+                let agent = spec_with(None)
+                    .build_agent(definition())
+                    .await
+                    .expect("agent build should succeed");
+                assert_eq!(
+                    agent
+                        .definition()
+                        .tool_overrides
+                        .as_ref()
+                        .and_then(|o| o.web_search.clone()),
+                    Some(frontmatter.clone())
+                );
+            })
+            .await;
     }
     #[tokio::test(flavor = "current_thread")]
     async fn rebuild_projects_fresh_public_model_keys_into_task_description() {

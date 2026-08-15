@@ -75,6 +75,7 @@
                 "x.ai/session/update",
                 XaiSessionUpdate::ScheduledTaskDeleted {
                     task_id: "loop-1".into(),
+                    reason: Default::default(),
                 },
             ),
             &mut app,
@@ -658,6 +659,7 @@
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
             is_backgrounded: true,

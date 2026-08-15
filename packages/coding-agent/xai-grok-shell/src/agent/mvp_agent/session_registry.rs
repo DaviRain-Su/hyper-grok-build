@@ -220,6 +220,7 @@ pub(super) struct SessionCounts {
     pub(super) session_live_state: usize,
     pub(super) model_unavailable_sessions: usize,
     pub(super) dispatch_locks: usize,
+    pub(super) live_orphan_heal_locks: usize,
     pub(super) session_turn_numbers: usize,
     pub(super) permission_event_receivers: usize,
     pub(super) session_index_claims: usize,
@@ -682,6 +683,18 @@ impl SessionRegistry {
                 .clone()
         })
     }
+    /// Per-parent heal mutex. Tray `list_running` and resume heal take this
+    /// from the registry; the session actor holds the same `Arc` on
+    /// `ToolContext` so overlapping ticks share one lock.
+    pub(super) fn live_orphan_heal_lock(&self, id: &acp::SessionId) -> Arc<tokio::sync::Mutex<()>> {
+        self.edit(id, |e| {
+            e.retained
+                .get_or_insert_default()
+                .live_orphan_heal_lock
+                .get_or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        })
+    }
     pub(super) fn set_permission_receiver(
         &self,
         id: &acp::SessionId,
@@ -749,6 +762,8 @@ impl SessionRegistry {
             counts.model_unavailable_sessions += usize::from(unavailable_model.is_some());
             if let Some(retained) = retained {
                 counts.dispatch_locks += usize::from(retained.dispatch_lock.is_some());
+                counts.live_orphan_heal_locks +=
+                    usize::from(retained.live_orphan_heal_lock.is_some());
                 counts.session_turn_numbers += usize::from(retained.turn_number.is_some());
                 counts.permission_event_receivers +=
                     usize::from(retained.permission_event_receiver.is_some());

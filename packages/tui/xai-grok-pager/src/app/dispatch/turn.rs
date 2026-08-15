@@ -1,11 +1,11 @@
 //! Turn cancellation, task and subagent kills, and overdue turn reconciliation.
 
-use super::ctx::find_agent_by_session_id;
+use super::ctx::{active_subagent_view_mut, find_agent_by_session_id};
 use super::permissions::drain_permission_queue;
 use super::queue::{apply_turn_start_shim, maybe_drain_queue, note_peek_page_flip};
 use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
-use crate::app::agent_view::ActivePane;
+use crate::app::agent_view::{ActivePane, AgentView};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::blocks::SessionEvent;
 use std::time::Instant;
@@ -55,6 +55,46 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    // Overlay [stop] is the child's turn. Parent may be Idle (background Task) and the ask panel
+    // would render under the overlay, unreachable.
+    if let Some(agent) = active_subagent_view_mut(app) {
+        // No wire target: leave local state alone (do not flip to Cancelling).
+        let Some(session_id) = agent.session.session_id.clone() else {
+            return vec![];
+        };
+        let retrying = agent.any_cancel_pending();
+        crate::unified_log::info(
+            if retrying {
+                "cancel.retry"
+            } else {
+                "cancel.overlay"
+            },
+            Some(&session_id.0),
+            Some(serde_json::json!({
+                "current_prompt_id": agent.session.current_prompt_id,
+            })),
+        );
+        if retrying {
+            agent.clear_send_now_expectation();
+            return vec![emit_cancel_turn(
+                agent, session_id, /* cancel_subagents */ true,
+                /* rewind_if_no_output */ false,
+            )];
+        }
+        return cancel_agent_turn(
+            agent, /* cancel_rewind_enabled */ false, /* cancel_subagents */ true,
+        );
+    }
+    // Focused running subagent with no child view (no overlay to cancel through): kill is
+    // the same lever as the row's kill button.
+    let focused_subagent_kill = app.agents.get(&id).and_then(|agent| {
+        let child_sid = agent.active_subagent.as_ref()?;
+        let info = agent.subagent_sessions.get(child_sid.as_str())?;
+        info.is_running().then(|| info.subagent_id.to_string())
+    });
+    if let Some(subagent_id) = focused_subagent_kill {
+        return dispatch_kill_subagent(app, subagent_id);
+    }
     let ui_pref = effective_cancel_subagents_preference(None, &app.current_ui);
 
     // Scoped agent borrow: extract decisions, then release before `do_cancel_turn`.
@@ -216,9 +256,18 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let cancel_rewind_enabled = app.cancel_rewind_enabled;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
+    cancel_agent_turn(agent, cancel_rewind_enabled, cancel_subagents)
+}
+
+fn cancel_agent_turn(
+    agent: &mut AgentView,
+    cancel_rewind_enabled: bool,
+    cancel_subagents: bool,
+) -> Vec<Effect> {
     if agent.session.state.is_compact_running() {
         agent.session.cancel_compact_command();
         agent.cancel_turn_view = None;
@@ -292,7 +341,7 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
     // Trigger-agnostic on purpose: fall back to the standard cancel.
     let composer_has_draft = !agent.prompt.text().is_empty() || !agent.prompt.images.is_empty();
     let rewinding = agent.shared_queue.is_empty()
-        && app.cancel_rewind_enabled
+        && cancel_rewind_enabled
         && agent.session.in_flight_prompt.is_some()
         && agent.session.pending_prompts.is_empty()
         && !in_flight_committed
@@ -436,53 +485,60 @@ pub(crate) const CANCEL_RESEND_MAX_ATTEMPTS: u8 = 3;
 pub(crate) fn reconcile_overdue_cancels(app: &mut AppView) -> Option<Vec<Effect>> {
     let mut effects = Vec::new();
     for agent in app.agents.values_mut() {
-        // A cancelled wake turn keeps the pane Idle (never adopted), so its
-        // cancelling phase lives on `running_wake_turn` instead of the state.
-        if !agent.any_cancel_pending() {
-            // The turn resolved (or a new one adopted); the marker is stale.
-            agent.pending_cancel_resend = None;
-            continue;
+        if let Some(effect) = overdue_cancel_for_agent(agent) {
+            effects.push(effect);
         }
-        let Some(session_id) = agent.session.session_id.clone() else {
-            continue;
-        };
-        // A received `prompt_complete` broadcast proves the cancel landed;
-        // the turn-end reconcile owns the exit from here. Resending would
-        // race it and could cancel a queued prompt the shell has already
-        // promoted.
-        if agent.pending_turn_end_reconcile.is_some() {
-            if let Some(pending) = agent.pending_cancel_resend.as_mut() {
-                pending.confirmed = true;
+        for child in agent.subagent_views.values_mut() {
+            if let Some(effect) = overdue_cancel_for_agent(child) {
+                effects.push(effect);
             }
-            continue;
         }
-        let Some(pending) = agent.pending_cancel_resend.as_mut() else {
-            continue;
-        };
-        if pending.confirmed
-            || pending.attempts >= CANCEL_RESEND_MAX_ATTEMPTS
-            || pending.sent_at.elapsed() < CANCEL_RESEND_GRACE
-        {
-            continue;
-        }
-        pending.attempts += 1;
-        pending.sent_at = Instant::now();
-        crate::unified_log::warn(
-            "cancel.resend",
-            Some(&session_id.0),
-            Some(serde_json::json!({
-                "attempts": pending.attempts,
-                "target_prompt_id": pending.prompt_id,
-            })),
-        );
-        effects.push(Effect::CancelTurn {
-            session_id,
-            cancel_subagents: pending.cancel_subagents,
-            trigger: Some(pending.trigger),
-            rewind_if_no_output: false,
-        });
     }
     (!effects.is_empty()).then_some(effects)
+}
+
+fn overdue_cancel_for_agent(agent: &mut AgentView) -> Option<Effect> {
+    // A cancelled wake turn keeps the pane Idle (never adopted), so its
+    // cancelling phase lives on `running_wake_turn` instead of the state.
+    if !agent.any_cancel_pending() {
+        // The turn resolved (or a new one adopted); the marker is stale.
+        agent.pending_cancel_resend = None;
+        return None;
+    }
+    let session_id = agent.session.session_id.clone()?;
+    // A received `prompt_complete` broadcast proves the cancel landed;
+    // the turn-end reconcile owns the exit from here. Resending would
+    // race it and could cancel a queued prompt the shell has already
+    // promoted.
+    if agent.pending_turn_end_reconcile.is_some() {
+        if let Some(pending) = agent.pending_cancel_resend.as_mut() {
+            pending.confirmed = true;
+        }
+        return None;
+    }
+    let pending = agent.pending_cancel_resend.as_mut()?;
+    if pending.confirmed
+        || pending.attempts >= CANCEL_RESEND_MAX_ATTEMPTS
+        || pending.sent_at.elapsed() < CANCEL_RESEND_GRACE
+    {
+        return None;
+    }
+    pending.attempts += 1;
+    pending.sent_at = Instant::now();
+    crate::unified_log::warn(
+        "cancel.resend",
+        Some(&session_id.0),
+        Some(serde_json::json!({
+            "attempts": pending.attempts,
+            "target_prompt_id": pending.prompt_id,
+        })),
+    );
+    Some(Effect::CancelTurn {
+        session_id,
+        cancel_subagents: pending.cancel_subagents,
+        trigger: Some(pending.trigger),
+        rewind_if_no_output: false,
+    })
 }
 
 /// Grace window between a driver-side `x.ai/session/prompt_complete`
@@ -675,6 +731,7 @@ pub(super) fn dispatch_kill_bg_task(app: &mut AppView, task_id: String) -> Vec<E
     vec![Effect::KillBgTask {
         session_id,
         task_id,
+        source: xai_grok_shell::extensions::task::TaskKillSource::ClientUi,
     }]
 }
 

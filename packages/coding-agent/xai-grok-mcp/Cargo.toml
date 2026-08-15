@@ -50,6 +50,7 @@ sse-stream = "0.2"
 # Deps for servers.rs.
 agent-client-protocol = { workspace = true }
 xai-file-utils = { path = "../../platform/xai-file-utils" }
+xai-grok-session-events = { workspace = true }
 futures = { workspace = true }
 regex = { workspace = true }
 which = { workspace = true }

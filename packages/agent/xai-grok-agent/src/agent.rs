@@ -241,6 +241,7 @@ impl Agent {
         ctx.prompt_mode = definition.prompt_mode.clone();
         ctx.prompt_body = definition.prompt_body.clone();
         ctx.system_prompt = definition.system_prompt.clone();
+        ctx.include_browser_verification = definition.include_browser_verification();
         ctx.build_timestamp_utc = chrono::Utc::now().to_rfc3339();
 
         // Clear agents_md if the new definition doesn't want it

@@ -492,6 +492,9 @@ pub struct SessionBindServerResult {
     /// [`SessionBindResult::resolve_error`], forwarded verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve_error: Option<String>,
+    /// [`SessionBindResult::image_capabilities`], forwarded verbatim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_capabilities: Vec<String>,
 }
 
 /// `session_unbind_server` params (harness → hub). Unbind a tool
@@ -596,6 +599,53 @@ pub struct SessionBindResult {
     /// resolutions and on servers predating the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve_error: Option<String>,
+    /// Advisory image capability tokens declared by the image the responding
+    /// server runs in, sorted, deduped and validated by that server. Empty
+    /// both on servers predating the field and on images predating the
+    /// declaration; [`IMAGE_CAPABILITIES_V1`] tells the two apart, not this
+    /// field's shape.
+    ///
+    /// Set membership only, never ordered comparison, and never an
+    /// authorization input — the tokens are guest-forgeable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_capabilities: Vec<String>,
+}
+
+/// Self-describing image capability token. Its presence in
+/// [`SessionBindResult::image_capabilities`] means the set is authoritative
+/// (a token not in it is genuinely absent); its absence means unknown.
+pub const IMAGE_CAPABILITIES_V1: &str = "capabilities.v1";
+
+/// Cap on the number of tokens in [`SessionBindResult::image_capabilities`].
+pub const MAX_IMAGE_CAPABILITIES: usize = 128;
+/// Cap on one token's length in bytes.
+pub const MAX_IMAGE_CAPABILITY_LEN: usize = 64;
+
+/// Charset/length gate for an image capability token: dot-separated
+/// `[a-z0-9-]` segments, at least two of them, no empty segment, no
+/// leading/trailing dash, at most [`MAX_IMAGE_CAPABILITY_LEN`] bytes. So it
+/// rejects dotfiles, `..`, uppercase and overlong names.
+///
+/// Declared once here, beside [`IMAGE_CAPABILITIES_V1`], because the producing
+/// reader and every consumer that re-validates the guest-forgeable set must
+/// apply identical rules: a copy that drifts stricter silently drops tokens the
+/// image legitimately declared.
+pub fn is_image_capability_token(name: &str) -> bool {
+    if name.is_empty() || name.len() > MAX_IMAGE_CAPABILITY_LEN {
+        return false;
+    }
+    let mut segments = 0usize;
+    for segment in name.split('.') {
+        let bytes = segment.as_bytes();
+        let charset_ok = bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+        if bytes.is_empty() || !charset_ok || bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
+            return false;
+        }
+        segments += 1;
+    }
+    segments >= 2
 }
 
 /// `session.unbind` params (hub → server). Hub tells the server to
@@ -1726,5 +1776,49 @@ mod tests {
         assert_eq!(v["hook_id"], "");
         let back: HookFrame = serde_json::from_value(v).expect("deserialize");
         assert_eq!(back.hook_id, Some(String::new()));
+    }
+
+    // ── Image capability tokens ─────────────────────────────────────
+    //
+    // The canonical accept/reject lists for every hop: the workspace-side
+    // reader and the chat-side re-validation both call this gate, so a rule
+    // change has to break here first.
+
+    #[test]
+    fn image_capability_tokens_accepted() {
+        for name in [
+            IMAGE_CAPABILITIES_V1,
+            "grok-files.occ",
+            "playwright.chromium-headless-shell",
+            "app-template.v2",
+            "a.b.c",
+            "node.22",
+            &format!("a.{}", "b".repeat(MAX_IMAGE_CAPABILITY_LEN - 2)),
+        ] {
+            assert!(is_image_capability_token(name), "expected valid: {name}");
+        }
+    }
+
+    #[test]
+    fn image_capability_tokens_rejected() {
+        for name in [
+            "",
+            "README",
+            "..",
+            ".hidden",
+            "trailing.",
+            "Grove.Daemon",
+            "grok_files.occ",
+            "-lead.ing",
+            "trail-.ing",
+            "seg..empty",
+            "space d.ot",
+            "unicode.é",
+            "single",
+            "../etc/passwd",
+            &format!("a.{}", "b".repeat(MAX_IMAGE_CAPABILITY_LEN)),
+        ] {
+            assert!(!is_image_capability_token(name), "expected invalid: {name}");
+        }
     }
 }

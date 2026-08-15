@@ -2101,6 +2101,7 @@ fn stop_top_level_activity(agent: &mut crate::app::agent_view::AgentView) -> Opt
             effects.push(Effect::KillBgTask {
                 session_id: session_id.clone(),
                 task_id,
+                source: xai_grok_shell::extensions::task::TaskKillSource::Teardown,
             });
         }
         let scheduled: Vec<String> = agent.session.scheduled_tasks.keys().cloned().collect();

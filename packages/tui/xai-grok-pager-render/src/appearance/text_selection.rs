@@ -7,7 +7,11 @@
 //! - `flash` — brief highlight on mouse-up, then clear; double-click toggles fold.
 //! - `hold` — selection stays until dismissed; double-click toggles fold.
 //! - `word_select` — selection stays until dismissed; double-click selects &
-//!   copies a word, triple-click a line (terminal-like). Implies `hold`.
+//!   copies a word, triple-click a paragraph (terminal-like). Implies `hold`.
+//!
+//! The compile-time default is `flash`. A remote `keep_text_selection_default` soft-default
+//! (`flash` | `hold` | `word_select`) can override it at pager startup; see
+//! `apply_remote_keep_text_selection_default`.
 
 /// Scrollback text-selection behavior: highlight lifetime + double-click action.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -17,8 +21,8 @@ pub enum TextSelection {
     Flash,
     /// Stay visible until Esc/click/scroll; double-click toggles fold.
     Hold,
-    /// Stay visible until dismissed; double/triple-click selects & copies a
-    /// word/line (terminal-like). Implies [`TextSelection::holds`].
+    /// Stay visible until dismissed; double-click selects & copies a word, triple-click a
+    /// paragraph (terminal-like). Implies [`TextSelection::holds`].
     WordSelect,
 }
 
@@ -47,7 +51,7 @@ impl TextSelection {
         matches!(self, Self::Hold | Self::WordSelect)
     }
 
-    /// Whether double-click selects & copies a word (and triple-click a line),
+    /// Whether double-click selects & copies a word (and triple-click a paragraph),
     /// terminal-style, instead of toggling a fold (`word_select` only).
     pub const fn selects_word(self) -> bool {
         matches!(self, Self::WordSelect)

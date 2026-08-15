@@ -35,7 +35,6 @@ use syntect::highlighting::Style as SyntectStyle;
 
 use super::TOOL_HEADER_RANGE;
 use crate::appearance::AppearanceConfig;
-use crate::diff::{DiffHunk, diff_hunks_to_patch};
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{
     AccentStyle, BlockBackground, BlockContext, BlockLine, BlockOutput, DisplayMode,
@@ -44,6 +43,7 @@ use crate::scrollback::types::{
 };
 use crate::syntax::{Syntect, get_syntect};
 use crate::theme::{Theme, ThemeKind};
+use xai_grok_pager_diff::{DiffHunk, diff_hunks_to_patch};
 
 /// Skip full-file HL when the post-edit file exceeds this size (2 MiB).
 ///
@@ -379,7 +379,7 @@ pub fn render_diff_hunks_with_styles(
 /// user already saw). `None` — missing line, text drift, or nothing visible —
 /// keeps the cold spans.
 fn map_spans_for_line(
-    line: &crate::diff::DiffLine,
+    line: &xai_grok_pager_diff::DiffLine,
     expanded: &str,
     by_new_line: &HashMap<usize, EditLineStyles>,
     theme: &Theme,
@@ -410,7 +410,7 @@ fn map_spans_for_line(
 
 /// Assemble gutter + content spans into one or more wrapped [`DiffLineOutput`]s.
 fn assemble_diff_line_outputs(
-    line: &crate::diff::DiffLine,
+    line: &xai_grok_pager_diff::DiffLine,
     content_spans: Vec<Span<'static>>,
     layout: &GutterLayout,
     indent_width: usize,
@@ -643,7 +643,7 @@ fn gutter_layout(hunk: &DiffHunk, config: &DiffRenderConfig) -> GutterLayout {
 /// Render the line number gutter.
 fn render_gutter(
     spans: &mut Vec<Span<'static>>,
-    line: &crate::diff::DiffLine,
+    line: &xai_grok_pager_diff::DiffLine,
     layout: &GutterLayout,
     theme: &Theme,
     config: &DiffRenderConfig,
@@ -1502,8 +1502,8 @@ mod tests {
 
     use super::*;
     use crate::appearance::AppearanceConfig;
-    use crate::diff::DiffLine;
     use crate::scrollback::types::DisplayMode;
+    use xai_grok_pager_diff::DiffLine;
 
     fn test_ctx() -> BlockContext {
         BlockContext {

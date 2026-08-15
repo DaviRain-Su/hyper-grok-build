@@ -1,6 +1,6 @@
 //! System-reminder injection concern for `SessionActor`: reminder policy,
-//! the TodoGate, date/interrupt reminders, and between-turn completion
-//! reminders.
+//! the TodoGate, date reminders, post-cancel interrupt framing, and
+//! between-turn completion reminders.
 use super::*;
 /// Owned snapshot returned by [`SessionActor::collect_todo_gate_input`].
 ///
@@ -173,11 +173,6 @@ pub(crate) fn date_rollover_reminder(
          use {today} as the current date."
     ))
 }
-/// Body of the one-shot interrupt `<system-reminder>` injected on the next real
-/// user turn after a mid-stream abort that left the model with no other signal.
-/// Wrapped in grok's `<system-reminder>` shape by [`SessionActor::push_system_reminder`].
-/// See [`SessionActor::maybe_inject_interrupt_reminder`].
-pub(crate) const INTERRUPT_REMINDER: &str = "[Request interrupted by user]";
 const WORKFLOW_RESULT_SUMMARY_REMINDER_CAP: usize = 4 * 1024;
 const WORKFLOW_OBJECTIVE_REMINDER_CAP: usize = 256;
 fn workflow_completion_detail(detail: &str) -> std::borrow::Cow<'_, str> {
@@ -519,19 +514,24 @@ impl SessionActor {
             "Injected date rollover reminder"
         );
     }
-    /// Inject a one-shot `<system-reminder>` telling the model its previous turn
-    /// was interrupted mid-stream, when nothing else will (no in-flight tool to
-    /// repair into a "cancelled" tool-result, no permission tool-result). The
-    /// flag is armed by [`Self::cancel_running_task`] only on the no-active-tool
-    /// abort path, and is consumed exactly once (caller gates to real user
-    /// prompts). Skipped for the harness that owns this surface; unlike the date-rollover reminder,
-    /// no template scoping applies to an interrupt notice.
-    pub(super) async fn maybe_inject_interrupt_reminder(&self) {
+    /// Frame the already-assembled user turn when a mid-stream abort left the model no other
+    /// signal.
+    /// One-shot; skipped for the harness that owns this surface.
+    /// Verbatim prompts still consume the flag (this is the next real user turn) but keep the
+    /// caller-owned bytes, matching truncation and send-now.
+    /// Callers must gate to `PromptOrigin::User` so synthetic turns leave the flag.
+    pub(super) fn maybe_apply_interrupt_envelope(
+        &self,
+        user_message: String,
+        verbatim: bool,
+    ) -> String {
         if !self.events.take_pending_interrupt_reminder() {
-            return;
+            return user_message;
         }
-        self.push_system_reminder(INTERRUPT_REMINDER);
-        tracing::debug!("Injected prior-turn interrupt reminder");
+        if verbatim {
+            return user_message;
+        }
+        frame_user_turn(INTERRUPT_NOTE, &user_message)
     }
     /// Push a `<system-reminder>`-wrapped user message into the conversation.
     pub(super) fn push_system_reminder(&self, content: &str) {

@@ -75,10 +75,13 @@ pub(crate) fn init_metrics() {
 }
 pub use manager::{
     AUTO_DENY_CONSECUTIVE_LIMIT, AUTO_DENY_TOTAL_LIMIT, PermissionHandle,
-    default_always_allow_scope, reasons, spawn_permission_manager,
+    always_allow_scope_persists, default_always_allow_scope, default_always_deny_scope,
+    minimum_always_allow_scope, reasons, spawn_permission_manager,
     spawn_permission_manager_with_hub,
 };
-pub use policy::{CompiledPolicy, bash_pattern_is_broad, bash_pattern_matches_command};
+pub use policy::{
+    CompiledPolicy, bash_glob_is_catchall, bash_pattern_is_broad, bash_pattern_matches_command,
+};
 pub use prompter::{
     ALLOW_EDITS_SESSION_OPTION_ID, AcpPrompter, BashCommandPermission, BashCommandSelectedTerms,
     ENABLE_ALWAYS_APPROVE_OPTION_ID, MCP_TOOL_NAME_DELIMITER, McpScopeSelection, McpToolPermission,

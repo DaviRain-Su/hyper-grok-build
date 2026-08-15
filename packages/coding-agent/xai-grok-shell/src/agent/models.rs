@@ -1127,7 +1127,9 @@ impl ModelsManager {
     /// bundled/cache catalog stays and the next refresh retries) instead of
     /// stalling boot, mirroring the readiness path's no-mint auth bound.
     async fn bounded_startup_auth(auth_manager: &Arc<AuthManager>) -> Option<GrokAuth> {
-        Self::bounded_auth_refresh(async { auth_manager.auth().await.ok() }).await
+        // A dark-wake deferral degrades to a session-less fetch here and the
+        // next full wake retries.
+        Self::bounded_auth_refresh(async { auth_manager.auth_background().await.ok() }).await
     }
 
     /// Bounds an auth-refresh future to `STARTUP_AUTH_REFRESH_TIMEOUT`, yielding

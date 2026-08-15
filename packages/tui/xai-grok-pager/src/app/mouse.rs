@@ -850,7 +850,7 @@ impl AgentView {
                                     }
                                     3 => {
                                         if !self.select_cell_at(&hit) {
-                                            self.select_line_at(&hit);
+                                            self.select_paragraph_at(&hit);
                                         }
                                         true
                                     }

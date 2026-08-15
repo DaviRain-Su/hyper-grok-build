@@ -121,12 +121,7 @@ fn resolve_config(cfg: &AgentConfig, auth_manager: &AuthManager) -> AgentConfig 
         }
     }
 
-    let managed_enforced = crate::config::apply_managed_settings_features(&mut cfg);
-    let requirements_enforced = crate::config::apply_requirements(&mut cfg);
-
-    for e in managed_enforced.iter().chain(&requirements_enforced) {
-        tracing::info!(field = %e.path, value = %e.value, source = %e.source, "policy override");
-    }
+    crate::config::apply_policy(&mut cfg);
 
     // Idempotent: bootstrap may already have fetched + applied side effects for the gate.
     // Full prefetch (with managed-config sync when stale) is allowed after the gate.

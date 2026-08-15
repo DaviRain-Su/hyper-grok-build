@@ -12,6 +12,7 @@ Use this table (or `scripts/upstream-path-rewrite.py`) when merging upstream pat
 | `crates/codegen/xai-acp-lib` | `packages/coding-agent/xai-acp-lib` | `coding-agent` |
 | `crates/codegen/xai-agent-lifecycle` | `packages/agent/xai-agent-lifecycle` | `agent` |
 | `crates/codegen/xai-chat-state` | `packages/agent/xai-chat-state` | `agent` |
+| `crates/codegen/xai-compaction-transcript` | `packages/agent/xai-compaction-transcript` | `agent` |
 | `crates/common/xai-circuit-breaker` | `packages/platform/xai-circuit-breaker` | `platform` |
 | `crates/codegen/xai-codebase-graph` | `packages/platform/xai-codebase-graph` | `platform` |
 | `crates/common/xai-computer-hub-core` | `packages/tools/xai-computer-hub-core` | `tools` |
@@ -21,19 +22,24 @@ Use this table (or `scripts/upstream-path-rewrite.py`) when merging upstream pat
 | `crates/codegen/xai-fast-worktree` | `packages/platform/xai-fast-worktree` | `platform` |
 | `crates/codegen/xai-file-utils` | `packages/platform/xai-file-utils` | `platform` |
 | `crates/codegen/xai-fsnotify` | `packages/platform/xai-fsnotify` | `platform` |
+| `crates/codegen/xai-fuzzy-file-search` | `packages/platform/xai-fuzzy-file-search` | `platform` |
 | `crates/codegen/xai-gix-status` | `packages/platform/xai-gix-status` | `platform` |
+| `crates/codegen/xai-grok-active-sessions` | `packages/coding-agent/xai-grok-active-sessions` | `coding-agent` |
 | `crates/codegen/xai-grok-agent` | `packages/agent/xai-grok-agent` | `agent` |
 | `crates/codegen/xai-grok-announcements` | `packages/coding-agent/xai-grok-announcements` | `coding-agent` |
 | `crates/codegen/xai-grok-auth` | `packages/ai/xai-grok-auth` | `ai` |
+| `crates/codegen/xai-grok-bundle` | `packages/coding-agent/xai-grok-bundle` | `coding-agent` |
 | `crates/common/xai-grok-compaction` | `packages/agent/xai-grok-compaction` | `agent` |
 | `crates/codegen/xai-grok-config` | `packages/coding-agent/xai-grok-config` | `coding-agent` |
 | `crates/codegen/xai-grok-config-types` | `packages/coding-agent/xai-grok-config-types` | `coding-agent` |
 | `crates/codegen/xai-grok-dashboard` | `packages/coding-agent/xai-grok-dashboard` | `coding-agent` |
+| `crates/codegen/xai-grok-diag-server` | `packages/tools/xai-grok-diag-server` | `tools` |
 | `crates/codegen/xai-grok-env` | `packages/platform/xai-grok-env` | `platform` |
 | `crates/codegen/xai-grok-extension-api` | `packages/extensions/xai-grok-extension-api` | `extensions` |
 | `crates/codegen/xai-grok-extension-macros` | `packages/extensions/xai-grok-extension-macros` | `extensions` |
 | `crates/codegen/xai-grok-extension-runtime` | `packages/extensions/xai-grok-extension-runtime` | `extensions` |
 | `crates/codegen/xai-grok-extension-sdk` | `packages/extensions/xai-grok-extension-sdk` | `extensions` |
+| `crates/codegen/xai-grok-foreign-sessions` | `packages/tools/xai-grok-foreign-sessions` | `tools` |
 | `crates/codegen/xai-grok-extra-ca` | `packages/platform/xai-grok-extra-ca` | `platform` |
 | `crates/codegen/xai-grok-hooks` | `packages/coding-agent/xai-grok-hooks` | `coding-agent` |
 | `crates/codegen/xai-grok-http` | `packages/ai/xai-grok-http` | `ai` |
@@ -45,6 +51,7 @@ Use this table (or `scripts/upstream-path-rewrite.py`) when merging upstream pat
 | `crates/codegen/xai-grok-models` | `packages/ai/xai-grok-models` | `ai` |
 | `crates/codegen/xai-grok-pager` | `packages/tui/xai-grok-pager` | `tui` |
 | `crates/codegen/xai-grok-pager-bin` | `packages/coding-agent/xai-grok-pager-bin` | `coding-agent` |
+| `crates/codegen/xai-grok-pager-diff` | `packages/tui/xai-grok-pager-diff` | `tui` |
 | `crates/codegen/xai-grok-pager-minimal` | `packages/tui/xai-grok-pager-minimal` | `tui` |
 | `crates/codegen/xai-grok-pager-pty-harness` | `packages/tui/xai-grok-pager-pty-harness` | `tui` |
 | `crates/codegen/xai-grok-pager-render` | `packages/tui/xai-grok-pager-render` | `tui` |
@@ -54,6 +61,8 @@ Use this table (or `scripts/upstream-path-rewrite.py`) when merging upstream pat
 | `crates/codegen/xai-grok-sampling-types` | `packages/ai/xai-grok-sampling-types` | `ai` |
 | `crates/codegen/xai-grok-sandbox` | `packages/tools/xai-grok-sandbox` | `tools` |
 | `crates/codegen/xai-grok-secrets` | `packages/platform/xai-grok-secrets` | `platform` |
+| `crates/codegen/xai-grok-session-events` | `packages/platform/xai-grok-session-events` | `platform` |
+| `crates/codegen/xai-grok-session-search` | `packages/coding-agent/xai-grok-session-search` | `coding-agent` |
 | `crates/codegen/xai-grok-shared` | `packages/coding-agent/xai-grok-shared` | `coding-agent` |
 | `crates/codegen/xai-grok-shell` | `packages/coding-agent/xai-grok-shell` | `coding-agent` |
 | `crates/codegen/xai-grok-shell-base` | `packages/coding-agent/xai-grok-shell-base` | `coding-agent` |
@@ -68,6 +77,7 @@ Use this table (or `scripts/upstream-path-rewrite.py`) when merging upstream pat
 | `crates/codegen/xai-grok-voice` | `packages/ai/xai-grok-voice` | `ai` |
 | `crates/codegen/xai-grok-workspace` | `packages/tools/xai-grok-workspace` | `tools` |
 | `crates/codegen/xai-grok-workspace-client` | `packages/tools/xai-grok-workspace-client` | `tools` |
+| `crates/codegen/xai-grok-workspace-daemon` | `packages/tools/xai-grok-workspace-daemon` | `tools` |
 | `crates/codegen/xai-grok-workspace-types` | `packages/tools/xai-grok-workspace-types` | `tools` |
 | `crates/codegen/xai-hooks-plugins-types` | `packages/coding-agent/xai-hooks-plugins-types` | `coding-agent` |
 | `crates/codegen/xai-hunk-tracker` | `packages/platform/xai-hunk-tracker` | `platform` |

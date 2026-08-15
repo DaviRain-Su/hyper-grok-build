@@ -978,7 +978,7 @@ async fn next_compaction_segment_index(compaction_dir: &std::path::Path) -> u64 
         if let Some(n) = entry
             .file_name()
             .to_str()
-            .and_then(xai_chat_state::compaction_transcript::parse_segment_index)
+            .and_then(xai_compaction_transcript::parse_segment_index)
         {
             next = next.max(n + 1);
         }
@@ -1454,6 +1454,17 @@ impl StorageAdapter for JsonlStorageAdapter {
         .await
         .map_err(io::Error::other)?
     }
+    async fn backup_chat_history_before_strip(&self, info: &Info) -> io::Result<()> {
+        let path = self.chat_file(info);
+        let backup = path.with_extension("jsonl.pre-strip");
+        if !tokio::fs::try_exists(&path).await? || tokio::fs::try_exists(&backup).await? {
+            return Ok(());
+        }
+        let staging = path.with_extension("jsonl.pre-strip.tmp");
+        tokio::fs::copy(&path, &staging).await?;
+        tokio::fs::rename(&staging, &backup).await?;
+        Ok(())
+    }
     async fn replace_chat_history(
         &self,
         info: &Info,
@@ -1600,7 +1611,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         segment: &crate::extensions::notification::CompactionSegmentFile,
     ) -> io::Result<()> {
         use tokio::io::AsyncWriteExt;
-        use xai_chat_state::compaction_transcript::{
+        use xai_compaction_transcript::{
             COMPACTION_DIR, INDEX_FILE, INDEX_HEADER, extract_keywords, render_index_row,
             render_segment_md, segment_filename,
         };

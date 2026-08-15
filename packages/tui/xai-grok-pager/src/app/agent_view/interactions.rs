@@ -111,20 +111,42 @@ impl AgentView {
                         } else if is_right {
                             scope.selected = crate::views::permission_view::McpScope::Tool;
                         }
-                    } else if is_right
-                        && let Some(ref h) = perm.bash_highlights
-                        && perm.bash_selection_count < h.highlighted_words.len()
+                        let on_scoped_row = perm
+                            .options
+                            .get(perm.active_idx)
+                            .is_some_and(|o| perm.is_scoped_option(o));
+                        if !on_scoped_row && let Some(idx) = perm.scoped_allow_row_idx() {
+                            perm.active_idx = idx;
+                        }
+                    } else if let Some(len) = perm
+                        .bash_highlights
+                        .as_ref()
+                        .map(|h| h.highlighted_words.len())
                     {
-                        perm.bash_selection_count += 1;
-                    } else if is_left && perm.bash_selection_count > 1 {
-                        perm.bash_selection_count -= 1;
-                    }
-                    let on_scoped_row = perm
-                        .options
-                        .get(perm.active_idx)
-                        .is_some_and(|o| perm.is_scoped_option(o));
-                    if !on_scoped_row && let Some(idx) = perm.scoped_allow_row_idx() {
-                        perm.active_idx = idx;
+                        let on_scoped_row = perm
+                            .options
+                            .get(perm.active_idx)
+                            .is_some_and(|o| perm.is_scoped_option(o));
+                        if !on_scoped_row && let Some(idx) = perm.scoped_row_jump_idx() {
+                            perm.active_idx = idx;
+                        }
+                        let active_row = perm
+                            .options
+                            .get(perm.active_idx)
+                            .map(|o| o.option_id.0.as_ref());
+                        if active_row
+                            == Some(crate::views::permission_view::REJECT_ALWAYS_COMMAND_OPTION_ID)
+                        {
+                            if is_right && perm.bash_deny_selection_count < len {
+                                perm.bash_deny_selection_count += 1;
+                            } else if is_left && perm.bash_deny_selection_count > 1 {
+                                perm.bash_deny_selection_count -= 1;
+                            }
+                        } else if active_row
+                            == Some(crate::views::permission_view::ALLOW_ALWAYS_COMMAND_OPTION_ID)
+                        {
+                            perm.bash_selection_count = perm.step_persisting_allow_scope(is_right);
+                        }
                     }
                     return InputOutcome::Changed;
                 }
@@ -165,7 +187,9 @@ impl AgentView {
                     return InputOutcome::Changed;
                 };
                 if key.code == KeyCode::Enter {
-                    if edit.trimmed().is_some()
+                    if edit
+                        .trimmed()
+                        .is_some_and(|p| !xai_grok_workspace::permission::bash_glob_is_catchall(p))
                         && let Some(opt) = perm
                             .allow_always_command_idx()
                             .and_then(|idx| perm.options.get(idx))
@@ -1107,18 +1131,15 @@ impl AgentView {
     }
     /// Give back the draft a card displaced when it opened.
     ///
-    /// A permission and a plan approval each stash the composer and blank it, so while one is up the composer is not the live editor
-    /// and their stash is what will be restored from. The draft has to go there instead, or that stash puts back whatever the card was
-    /// holding, which for `/feedback` is a report that must never reach the model's input. Casual commenting is the other way round,
-    /// keeping its draft parked and the composer live, so it takes the ordinary restore.
+    /// Permission open: write into `permission_stashed_prompt`. Otherwise restore
+    /// the live composer (plan freeform when approval is parked; session draft is
+    /// only on `plan_approval_view.stashed_prompt`).
     pub(crate) fn restore_card_prompt(
         &mut self,
         stashed: crate::views::prompt_widget::StashedPrompt,
     ) {
         if self.permission_stashed_prompt.is_some() {
             self.permission_stashed_prompt = Some(stashed);
-        } else if let Some(pav) = self.plan_approval_view.as_mut() {
-            pav.stashed_prompt = stashed;
         } else {
             self.prompt.restore(stashed);
         }
@@ -1652,6 +1673,7 @@ mod permission_scope_key_tests {
             },
         );
         perm.bash_selection_count = 2;
+        perm.bash_deny_selection_count = 2;
         agent.permission_queue.push_back(perm);
     }
     /// ←/→ on the "Never allow" (RejectAlways) row must adjust the scope in
@@ -1668,7 +1690,98 @@ mod permission_scope_key_tests {
         assert!(matches!(outcome, InputOutcome::Changed));
         let perm = agent.permission_queue.front().unwrap();
         assert_eq!(perm.active_idx, 3, "cursor must stay on the deny row");
-        assert_eq!(perm.bash_selection_count, 1, "← must still narrow scope");
+        assert_eq!(
+            perm.bash_deny_selection_count, 1,
+            "← on the deny row narrows the deny scope"
+        );
+        assert_eq!(
+            perm.bash_selection_count, 2,
+            "the allow scope is untouched from the deny row"
+        );
+    }
+    /// Dangerous commands pin the scope to the full command: ← must not
+    /// narrow below it, since enforcement ignores dangerous prefix grants and
+    /// a narrowed selection would save a rule that never matches.
+    #[test]
+    fn scope_left_is_clamped_for_dangerous_commands() {
+        let mut agent = make_agent();
+        setup_bash_permission(&mut agent);
+        {
+            let perm = agent.permission_queue.front_mut().unwrap();
+            perm.bash_highlights = Some(
+                xai_grok_workspace::permission::bash_command_splitting::BashCommandHighlights {
+                    prefix: vec![],
+                    highlighted_words: vec!["git".into(), "push".into(), "origin".into()],
+                    suffix: vec![],
+                },
+            );
+            perm.bash_selection_count = 3;
+            perm.active_idx = 0;
+        }
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::empty());
+        agent.handle_permission_key(&left);
+        {
+            let perm = agent.permission_queue.front().unwrap();
+            assert_eq!(
+                perm.bash_selection_count, 3,
+                "← must not narrow a dangerous allow below the full scope"
+            );
+        }
+        {
+            let perm = agent.permission_queue.front_mut().unwrap();
+            perm.bash_deny_selection_count = 3;
+            perm.active_idx = 3;
+        }
+        agent.handle_permission_key(&left);
+        let perm = agent.permission_queue.front().unwrap();
+        assert_eq!(
+            perm.bash_deny_selection_count, 2,
+            "← on the deny row narrows even for dangerous commands"
+        );
+        assert!(
+            perm.has_adjustable_scope(),
+            "arrows stay advertised while the deny row is adjustable"
+        );
+    }
+    /// The allow arrow skips an argv-ambiguous intermediate scope (a quoted
+    /// arg with a space) that would persist nothing, landing on the next
+    /// scope that saves a working grant.
+    #[test]
+    fn allow_scope_skips_ambiguous_intermediate() {
+        let mut agent = make_agent();
+        setup_bash_permission(&mut agent);
+        {
+            let perm = agent.permission_queue.front_mut().unwrap();
+            perm.bash_highlights = Some(
+                xai_grok_workspace::permission::bash_command_splitting::BashCommandHighlights {
+                    prefix: vec![],
+                    highlighted_words: vec![
+                        "git".into(),
+                        "show".into(),
+                        "-e".into(),
+                        "A B".into(),
+                        "file".into(),
+                    ],
+                    suffix: vec![],
+                },
+            );
+            perm.bash_selection_count = 3;
+            perm.active_idx = 0;
+        }
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::empty());
+        agent.handle_permission_key(&right);
+        assert_eq!(
+            agent.permission_queue.front().unwrap().bash_selection_count,
+            5,
+            "→ must skip the argv-ambiguous scope 4"
+        );
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::empty());
+        agent.handle_permission_key(&left);
+        assert_eq!(
+            agent.permission_queue.front().unwrap().bash_selection_count,
+            3,
+            "← must skip the argv-ambiguous scope 4"
+        );
     }
     /// From a non-scoped row ←/→ still jump the cursor to the AllowAlways
     /// row (the discoverability affordance).
@@ -1756,10 +1869,35 @@ mod permission_scope_key_tests {
             }
         }
     }
-    /// With only the exact `reject-always-command` row present, ←/→ still
-    /// adjust the scope in place on that row; from a neutral row there is no
-    /// allow row to jump to, so the cursor stays put (but the scope keys keep
-    /// working).
+    /// A catch-all pattern must not submit from the editor: the manager would
+    /// silently refuse to persist it, and the user would be re-prompted after
+    /// believing a rule was saved.
+    #[test]
+    fn pattern_editor_refuses_catchall_submit() {
+        let mut agent = make_agent();
+        setup_bash_permission(&mut agent);
+        let e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty());
+        let _ = agent.handle_permission_key(&e);
+        let ctrl_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        let _ = agent.handle_permission_key(&ctrl_u);
+        let star = KeyEvent::new(KeyCode::Char('*'), KeyModifiers::empty());
+        let _ = agent.handle_permission_key(&star);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        let outcome = agent.handle_permission_key(&enter);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "catch-all pattern must not submit, got {outcome:?}"
+        );
+        assert_eq!(
+            agent.permission_queue.front().unwrap().focus,
+            crate::views::permission_view::PermissionFocus::PatternEdit,
+            "editor stays open for the user to narrow the pattern"
+        );
+    }
+    /// With only the exact `reject-always-command` row present (the allow row
+    /// may be suppressed as unhonorable), ←/→ adjust the deny scope in place
+    /// on that row, and from a neutral row they land on the deny row — never
+    /// on an invisible allow count.
     #[test]
     fn reject_only_scoped_row_adjusts_in_place_without_allow_jump() {
         let mut agent = make_agent();
@@ -1780,14 +1918,24 @@ mod permission_scope_key_tests {
         {
             let perm = agent.permission_queue.front().unwrap();
             assert_eq!(perm.active_idx, 1, "cursor stays on the deny row");
-            assert_eq!(perm.bash_selection_count, 1, "← must still narrow scope");
+            assert_eq!(
+                perm.bash_deny_selection_count, 1,
+                "← must still narrow the deny scope"
+            );
         }
         agent.permission_queue.front_mut().unwrap().active_idx = 0;
         let right = KeyEvent::new(KeyCode::Right, KeyModifiers::empty());
         let _ = agent.handle_permission_key(&right);
         let perm = agent.permission_queue.front().unwrap();
-        assert_eq!(perm.active_idx, 0, "no allow row -> no cursor jump");
-        assert_eq!(perm.bash_selection_count, 2, "→ must still expand scope");
+        assert_eq!(perm.active_idx, 1, "arrows land on the deny row");
+        assert_eq!(
+            perm.bash_deny_selection_count, 2,
+            "→ expands the deny scope"
+        );
+        assert_eq!(
+            perm.bash_selection_count, 2,
+            "the invisible allow count is untouched"
+        );
     }
     /// Ctrl-F toggles args expansion in both focus modes when the prompt
     /// shows planned MCP args — even when remember_tool_approvals=false

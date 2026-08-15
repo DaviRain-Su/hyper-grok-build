@@ -7,6 +7,11 @@ use crate::app::app_view::{ActiveView, AppView, WelcomeAnnouncementState};
 use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
 
+/// Refusal shown when a dispatch path can't proceed without a bound session. Every path in this
+/// module tree that says exactly this uses it; the action-specific variants ("No active session
+/// to delete") stay separate.
+pub(super) const NO_SESSION_NOTICE: &str = "No active session";
+
 /// The active agent's root session id, if any. Used to scope server-queue
 /// edit Effects to the foregrounded session.
 pub(super) fn active_agent_session_id(app: &AppView) -> Option<acp::SessionId> {
@@ -86,6 +91,19 @@ pub(super) fn get_active_agent_mut(app: &mut AppView) -> Option<&mut AgentView> 
         return Some(agent);
     }
     None
+}
+
+/// Child view when a fullscreen subagent overlay is open.
+///
+/// Unlike [`get_active_agent_mut`], never falls back to the parent.
+/// Overlay cancel uses this so the overlay-open check and cancel target cannot disagree.
+pub(super) fn active_subagent_view_mut(app: &mut AppView) -> Option<&mut AgentView> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return None;
+    };
+    let agent = app.agents.get_mut(&id)?;
+    let child_sid = agent.active_subagent.clone()?;
+    agent.subagent_views.get_mut(&child_sid).map(|b| &mut **b)
 }
 
 /// Apply a closure to the active agent's scrollback (if any).

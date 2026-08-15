@@ -53,10 +53,6 @@ regex = { workspace = true }
 xai-grok-mcp = { workspace = true }
 reqwest = { workspace = true, features = ["stream", "blocking"] }
 reqwest-middleware = { workspace = true }
-# rusqlite 0.37 + bundled = self-contained SQLite (>= 3.50.2) with FTS5.
-# Bumped from 0.32 to resolve CVE-2025-29087, CVE-2025-3277, CVE-2025-6965.
-# sqlite-vec is C ABI, not Rust-version dependent — any rusqlite with `bundled` works.
-rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { workspace = true }
 serde_ignored = "0.1"
 serde_json = { workspace = true, features = ["preserve_order"] }
@@ -150,8 +146,12 @@ xai-agent-lifecycle = { workspace = true }
 xai-interjection-core = { workspace = true }
 xai-grok-sandbox = { path = "../../tools/xai-grok-sandbox", default-features = false }
 xai-chat-state = { path = "../../agent/xai-chat-state" }
+# Segment markdown rendering + the `compaction/` store path convention.
+xai-compaction-transcript = { workspace = true }
 xai-grok-compaction = { path = "../../agent/xai-grok-compaction" }
 xai-grok-sampler = { path = "../../ai/xai-grok-sampler" }
+# Session FTS search; owns this crate's only rusqlite/bundled-SQLite use.
+xai-grok-session-search = { workspace = true }
 xai-sqlite-journal = { workspace = true }
 xai-token-estimation = { workspace = true }
 xai-grok-sampling-types = { path = "../../ai/xai-grok-sampling-types" }
@@ -160,8 +160,11 @@ xai-tty-utils = { workspace = true }
 xai-workflow = { path = "../../agent/xai-workflow" }
 xai-system-power = { workspace = true }
 xai-grok-workspace = { workspace = true }
+# Backs the compatibility-only `xai_grok_shell::foreign_sessions` re-export.
+xai-grok-foreign-sessions = { workspace = true }
 xai-grok-subagent-resolution = { path = "../../agent/xai-grok-subagent-resolution" }
 xai-grok-agent = { path = "../../agent/xai-grok-agent" }
+xai-grok-bundle = { workspace = true }
 xai-grok-config = { workspace = true }
 xai-grok-config-types = { workspace = true }
 xai-grok-memory = { workspace = true }
@@ -171,6 +174,7 @@ xai-grok-extension-runtime = { path = "../../extensions/xai-grok-extension-runti
 xai-hooks-plugins-types = { path = "../xai-hooks-plugins-types" }
 xai-grok-plugin-marketplace = { path = "../../extensions/xai-grok-plugin-marketplace" }
 xai-file-utils = { path = "../../platform/xai-file-utils" }
+xai-grok-session-events = { workspace = true }
 xai-grok-auth = { workspace = true, features = ["middleware"] }
 xai-grok-telemetry = { workspace = true }
 xai-grok-http = { workspace = true }
@@ -211,6 +215,9 @@ ctor = { workspace = true }
 filetime = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
+# `extensions::bundle` tests build archives with `bundle::test_helpers`, which
+# is `#[cfg(test)]`-only inside xai-grok-bundle without this feature.
+xai-grok-bundle = { workspace = true, features = ["test-support"] }
 xai-grok-memory = { workspace = true, features = ["test-support"] }
 xai-grok-workspace = { workspace = true, features = ["test-support"] }
 xai-grok-config = { workspace = true, features = [] }
@@ -244,6 +251,10 @@ required-features = ["test-support"]
 
 [[bench]]
 name = "skills_watcher_startup"
+harness = false
+
+[[bench]]
+name = "child_replay_lookup"
 harness = false
 
 [[test]]

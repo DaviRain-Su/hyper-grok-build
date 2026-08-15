@@ -391,12 +391,31 @@ async fn new_event_types_fire_and_receive_correct_envelope() {
                 error: xai_grok_hooks::event::StopFailureKind::RateLimit,
                 error_details: Some("429 Too Many Requests".into()),
                 last_assistant_message: Some("Turn failed: rate limited".into()),
+                subagent_type: None,
             },
             assertions: vec![
                 ("hookEventName", "stop_failure".into()),
                 ("error", "rate_limit".into()),
                 ("errorDetails", "429 Too Many Requests".into()),
                 ("lastAssistantMessage", "Turn failed: rate limited".into()),
+            ],
+        },
+        Case {
+            event_name: HookEventName::StopCancelled,
+            json_key: "StopCancelled",
+            payload: HookPayload::StopCancelled {
+                reason: xai_grok_hooks::event::StopCancelledReason::UserInterrupt,
+                cancelled_by: xai_grok_hooks::event::CancelledBy::User,
+                cancel_trigger: Some("ctrl_c".into()),
+                reason_details: Some("read_file: user declined".into()),
+                last_assistant_message: Some("partial answer".into()),
+                subagent_type: Some("explore".into()),
+            },
+            assertions: vec![
+                ("hookEventName", "stop_cancelled".into()),
+                ("reason", "user_interrupt".into()),
+                ("cancelledBy", "user".into()),
+                ("cancelTrigger", "ctrl_c".into()),
             ],
         },
     ];

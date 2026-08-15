@@ -1,6 +1,6 @@
 //! Plan, yolo, auto, and permission mode transitions and toasts.
 
-use super::ctx::with_active_agent;
+use super::ctx::{NO_SESSION_NOTICE, with_active_agent};
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
 use super::settings::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
@@ -53,7 +53,7 @@ pub(super) fn dispatch_enter_plan_mode(
 
     let agent = app.agents.get_mut(&id).unwrap();
     let Some(session_id) = agent.session.session_id.clone() else {
-        agent.show_toast("No active session");
+        agent.show_toast(NO_SESSION_NOTICE);
         return vec![];
     };
 
@@ -142,7 +142,7 @@ pub(super) fn set_plan_mode(
     };
 
     let Some(session_id) = agent.session.session_id.clone() else {
-        agent.show_toast("No active session");
+        agent.show_toast(NO_SESSION_NOTICE);
         return vec![];
     };
 

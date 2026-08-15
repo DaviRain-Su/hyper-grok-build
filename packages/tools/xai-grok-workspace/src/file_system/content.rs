@@ -1,7 +1,5 @@
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -44,8 +42,7 @@ fn build_ripgrep_command(root: &Path, params: &ContentSearchParams) -> Command {
     cmd.current_dir(root);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
-    cmd.stdin(Stdio::null());
-    xai_grok_tools::util::detach_command(&mut cmd);
+    xai_tty_utils::detach_search_command(&mut cmd);
 
     cmd.arg("--json");
     cmd.arg("--line-number");
@@ -129,12 +126,11 @@ fn parse_file_path_from_json(root: &Path, json: &serde_json::Value) -> Option<St
     Some(root.join(normalized).to_string_lossy().to_string())
 }
 
-/// Streaming content search with batched status notifications.
-/// Set `cancel` to true to abort the search early.
+/// Streaming content search with batched status notifications. Cancellation
+/// is dropping the future: the spawn config kills rg on drop.
 pub async fn content_search_streaming<F>(
     root: &Path,
     params: &ContentSearchParams,
-    cancel: Arc<AtomicBool>,
     on_status: F,
 ) -> anyhow::Result<ContentSearchData>
 where
@@ -144,7 +140,7 @@ where
     let max_matches = params.max_matches.unwrap_or(DEFAULT_MAX_MATCHES);
 
     let mut cmd = build_ripgrep_command(root, params);
-    #[allow(clippy::disallowed_methods)] // waited on below; killed when cancelled
+    #[allow(clippy::disallowed_methods)] // waited on below; killed on drop (cancellation)
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to spawn ripgrep: {}", e))?;
@@ -163,10 +159,6 @@ where
     let mut hit_limit = false;
 
     while let Ok(Some(line)) = reader.next_line().await {
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
-
         if line.is_empty() {
             continue;
         }
@@ -229,20 +221,12 @@ where
         }
     }
 
-    let cancelled = cancel.load(Ordering::Relaxed);
-    if hit_limit || cancelled {
-        let _ = child.kill().await;
-    }
-    let _ = child.wait().await;
-
-    if cancelled {
-        let total_files = files.len();
-        return Ok(ContentSearchData {
-            files,
-            total_matches,
-            total_files,
-            truncated: false,
-        });
+    if hit_limit {
+        let _ = child.start_kill();
+        // Bounded reap: a D-state rg must not stall this future forever.
+        xai_grok_tools::util::reap_killed_search_child(&mut child).await;
+    } else {
+        let _ = child.wait().await;
     }
 
     if let Some(file) = current_file
@@ -271,4 +255,47 @@ where
         total_files,
         truncated,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Cancellation is dropping the future; commands from
+    /// `build_ripgrep_command` must kill rg on drop.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_spawned_search_child_kills_rg() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Overflow the stdout pipe (rg caps 50 matches/file, so use many files)
+        // so rg blocks on write and stays alive until killed.
+        let line = format!("needle {}\n", "x".repeat(120));
+        for i in 0..200 {
+            std::fs::write(tmp.path().join(format!("f{i}.txt")), line.repeat(50)).unwrap();
+        }
+
+        let params = ContentSearchParams {
+            pattern: "needle".to_string(),
+            ..Default::default()
+        };
+        let mut cmd = build_ripgrep_command(tmp.path(), &params);
+        // rg is hermetic under Bazel and on PATH locally; spawn failure is a real bug.
+        #[allow(clippy::disallowed_methods)] // test child, killed on drop below
+        let mut child = cmd.spawn().expect("spawn rg");
+        let pid = child.id().expect("child pid");
+
+        // Hold the read end open (no EPIPE death) and drop the child mid-run.
+        let stdout_pipe = child.stdout.take();
+        drop(child);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !xai_tty_utils::process_not_running(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "rg (pid {pid}) still running 5s after its Child was dropped — leaked"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        drop(stdout_pipe);
+    }
 }

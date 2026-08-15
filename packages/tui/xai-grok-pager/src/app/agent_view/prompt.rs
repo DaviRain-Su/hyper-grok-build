@@ -627,27 +627,32 @@ impl AgentView {
                     //    that text as the next prompt.
                     // 2) Empty composer + a visible follow-up in the queue →
                     //    same as bare Enter: send the top row now.
-                    // 3) Idle / nothing to send → no-op (not send-like-Enter).
+                    // 3) Idle / nothing to send: promote to ToggleYolo when that chord
+                    //    matches (Apple Terminal Ctrl+O opens YOLO / free-tier CTA).
                     let text = self.prompt.text().trim().to_string();
                     let turn_running = self.session.state.is_turn_running();
                     if !text.is_empty() {
-                        if !turn_running {
-                            return InputOutcome::Changed;
+                        if turn_running {
+                            // Paste-then-immediate-send: an image probe is still
+                            // off-thread. Stash (draft untouched) and re-issue on
+                            // completion so the not-yet-attached chip isn't dropped.
+                            if self.paste_probe_in_flight > 0 {
+                                self.deferred_send = Some(AgentDeferredSend::Interject);
+                                return InputOutcome::Changed;
+                            }
+                            // Drain images BEFORE set_text("") wipes the chip elements.
+                            let images = self.prompt.drain_images();
+                            self.prompt.set_text("");
+                            return InputOutcome::Action(Action::SendPromptNow { text, images });
                         }
-                        // Paste-then-immediate-send: an image probe is still
-                        // off-thread. Stash (draft untouched) and re-issue on
-                        // completion so the not-yet-attached chip isn't dropped.
-                        if self.paste_probe_in_flight > 0 {
-                            self.deferred_send = Some(AgentDeferredSend::Interject);
-                            return InputOutcome::Changed;
-                        }
-                        // Drain images BEFORE set_text("") wipes the chip elements.
-                        let images = self.prompt.drain_images();
-                        self.prompt.set_text("");
-                        return InputOutcome::Action(Action::SendPromptNow { text, images });
-                    }
-                    if turn_running && let Some(outcome) = self.try_send_now_queued_from_prompt() {
+                    } else if turn_running
+                        && let Some(outcome) = self.try_send_now_queued_from_prompt()
+                    {
                         return outcome;
+                    }
+                    if registry.matches_id(ActionId::ToggleYolo, key) {
+                        return self
+                            .handle_agent_action_with_registry(ActionId::ToggleYolo, registry);
                     }
                     return InputOutcome::Changed;
                 }
@@ -1907,5 +1912,86 @@ mod prompt_suggestion_key_tests {
             "the key event latches the impression before dismissing"
         );
         assert!(!agent.prompt.prompt_suggestion.has_suggestion());
+    }
+}
+
+#[cfg(test)]
+mod apple_terminal_ctrl_o_upgrade_cta_tests {
+    use super::*;
+    use crate::app::agent::AgentState;
+    use crate::app::app_view::InputOutcome;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use xai_grok_telemetry::events::AnnouncementCtaSurface;
+
+    fn ctrl_o() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn apple_terminal_idle_ctrl_o_opens_pinned_upgrade_cta() {
+        let mut agent = super::test_fixtures::make_agent();
+        agent.pinned_upgrade_cta_live = true;
+        let registry = ActionRegistry::apple_terminal_for_test();
+
+        let outcome = agent.handle_prompt_key_with_registry_for_test(&ctrl_o(), &registry);
+        assert!(
+            matches!(
+                outcome,
+                InputOutcome::Action(Action::AnnouncementsOpenCta(
+                    AnnouncementCtaSurface::Keyboard
+                ))
+            ),
+            "idle Apple-Terminal Ctrl+O must open pinned CTA, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn apple_terminal_idle_ctrl_o_without_promo_toggles_yolo() {
+        let mut agent = super::test_fixtures::make_agent();
+        agent.pinned_upgrade_cta_live = false;
+        let was_yolo = agent.session.is_yolo();
+        let registry = ActionRegistry::apple_terminal_for_test();
+
+        let outcome = agent.handle_prompt_key_with_registry_for_test(&ctrl_o(), &registry);
+        assert!(
+            matches!(
+                outcome,
+                InputOutcome::Action(Action::SetYoloMode(m)) if m != was_yolo
+            ),
+            "idle Apple-Terminal Ctrl+O without promo must toggle YOLO, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn apple_terminal_running_ctrl_o_still_interjects() {
+        let mut agent = super::test_fixtures::make_agent();
+        agent.session.state = AgentState::TurnRunning;
+        agent.prompt.set_text("steer mid-turn");
+        agent.pinned_upgrade_cta_live = true;
+        let registry = ActionRegistry::apple_terminal_for_test();
+
+        let outcome = agent.handle_prompt_key_with_registry_for_test(&ctrl_o(), &registry);
+        assert!(
+            matches!(
+                outcome,
+                InputOutcome::Action(Action::SendPromptNow { ref text, .. })
+                    if text == "steer mid-turn"
+            ),
+            "running + payload: interject must win over CTA, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn non_apple_ctrl_enter_idle_stays_noop() {
+        let mut agent = super::test_fixtures::make_agent();
+        agent.pinned_upgrade_cta_live = true;
+        let registry = ActionRegistry::non_vscode_for_test();
+        let ctrl_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL);
+
+        let outcome = agent.handle_prompt_key_with_registry_for_test(&ctrl_enter, &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "idle Ctrl+Enter must stay a silent interject no-op, got {outcome:?}"
+        );
     }
 }

@@ -34,44 +34,51 @@ fn turn_updates(info: &Info, turn: usize) -> Vec<SessionUpdate> {
     updates
 }
 
-/// Build a session dir under `root` whose `updates.jsonl` is at least
+/// Build a session dir under `root` whose `updates.jsonl` reaches *at least*
 /// `target_bytes`, appending realistic mixed updates through the real adapter.
+/// The file overshoots to the next 32-turn stat boundary, so the result is a
+/// floor, not an exact size.
 ///
-/// Synchronous (drives the async adapter on its own current-thread runtime) so
-/// Criterion benches can call it directly outside an async context.
-pub fn synthesize_to_target_bytes(root: &Path, target_bytes: u64) -> Info {
+/// Async callers await this directly; synchronous callers (Criterion benches,
+/// plain `#[test]`s) use [`make_session_with_size_blocking`].
+pub async fn make_session_with_size(root: &Path, target_bytes: u64) -> Info {
     let adapter = JsonlStorageAdapter::with_root(root.to_path_buf());
     let info = Info {
         id: acp::SessionId::new("fork-bench-src"),
         cwd: "/bench/workspace".to_string(),
     };
-    let rt = tokio::runtime::Builder::new_current_thread()
+    adapter
+        .init_session(&info, acp::ModelId::new("bench-model"))
+        .await
+        .expect("init session");
+    let updates_path = adapter.updates_file_path(&info).expect("updates path");
+    let mut turn = 0usize;
+    loop {
+        for update in turn_updates(&info, turn) {
+            adapter.append_update(&info, &update).await.expect("append");
+        }
+        turn += 1;
+        // Stat every 32 turns; sizes only grow. A persistent stat failure
+        // panics here rather than spinning the append loop forever.
+        if turn.is_multiple_of(32)
+            && std::fs::metadata(&updates_path)
+                .expect("stat updates.jsonl")
+                .len()
+                >= target_bytes
+        {
+            break;
+        }
+    }
+    info
+}
+
+/// Synchronous wrapper over [`make_session_with_size`] for callers outside an
+/// async context (Criterion benches, plain `#[test]`s). Drives the async core
+/// on a private current-thread runtime.
+pub fn make_session_with_size_blocking(root: &Path, target_bytes: u64) -> Info {
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("bench runtime");
-    rt.block_on(async {
-        adapter
-            .init_session(&info, acp::ModelId::new("bench-model"))
-            .await
-            .expect("init session");
-        let updates_path = adapter.updates_file_path(&info).expect("updates path");
-        let mut turn = 0usize;
-        loop {
-            for update in turn_updates(&info, turn) {
-                adapter.append_update(&info, &update).await.expect("append");
-            }
-            turn += 1;
-            // Stat every 32 turns; sizes only grow. A persistent stat failure
-            // panics here rather than spinning the append loop forever.
-            if turn.is_multiple_of(32)
-                && std::fs::metadata(&updates_path)
-                    .expect("stat updates.jsonl")
-                    .len()
-                    >= target_bytes
-            {
-                break;
-            }
-        }
-    });
-    info
+        .expect("bench runtime")
+        .block_on(make_session_with_size(root, target_bytes))
 }

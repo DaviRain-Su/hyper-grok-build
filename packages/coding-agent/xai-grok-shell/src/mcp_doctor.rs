@@ -280,7 +280,7 @@ async fn check_server_start(
     cwd: &Path,
 ) -> Result<(mcp_servers::McpClient, Check), Check> {
     let start = std::time::Instant::now();
-    let noop = xai_file_utils::events::EventWriter::noop();
+    let noop = xai_grok_session_events::EventWriter::noop();
     let ctx = mcp_servers::McpSpawnCtx::session_less(&noop);
     match mcp_servers::start_mcp_server(acp_server, Some(cwd), None, None, &ctx).await {
         Ok(client) => {

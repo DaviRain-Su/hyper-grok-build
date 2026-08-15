@@ -11,6 +11,7 @@ use super::model::{
     RADIUS_OAUTH_SCOPE, lookup_auth, platform_api_key_scope,
 };
 
+
 /// RAII guard for an exclusive advisory lock on `auth.json.lock`.
 /// The lock is released when the inner `File` is dropped (closing the FD).
 ///
@@ -65,6 +66,14 @@ impl AuthFileLock {
         let lock_path = auth_json_path.with_file_name("auth.json.lock");
         file_refers_to_path(&self._file, &lock_path)
     }
+
+    /// Re-check liveness and mint the witness. `None` means a sibling broke
+    /// this lock as stuck (see [`Self::still_live`]); on non-Unix liveness is
+    /// assumed (no flock-break protocol there).
+    pub(crate) fn live(&self, auth_json_path: &Path) -> Option<LiveAuthFileLock<'_>> {
+        self.still_live(auth_json_path)
+            .then_some(LiveAuthFileLock(self))
+    }
 }
 
 /// Resolve the path to the user's `auth.json`.
@@ -90,6 +99,14 @@ fn resolve_auth_json_path(grok_home: &Path) -> PathBuf {
         grok_home.join("auth.json")
     }
 }
+
+/// Liveness-witnessed borrow of an [`AuthFileLock`], only obtainable via
+/// [`AuthFileLock::live`]: a function requiring it cannot be reached with a
+/// lock whose inode a sibling already broke — the post-suspend case
+/// [`AuthFileLock::still_live`] exists for. Borrowed, so it cannot outlive
+/// the flock it vouches for (though liveness is proved at mint time, not
+/// continuously).
+pub(crate) struct LiveAuthFileLock<'a>(#[allow(dead_code)] &'a AuthFileLock);
 
 pub fn read_auth_json(auth_file: &Path) -> std::io::Result<AuthStore> {
     let mut file = File::open(auth_file)?;
@@ -459,6 +476,7 @@ pub fn read_token_by_scope(grok_home: &Path, scope: &str) -> anyhow::Result<Stri
         anyhow::anyhow!("Your auth token is invalid. Run `grok login` to re-authenticate.")
     })
 }
+
 
 /// Read the API key from the `xai::api_key` scope in auth.json.
 pub fn read_api_key(grok_home: &Path) -> Option<String> {

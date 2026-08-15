@@ -207,7 +207,7 @@ fn record_upload_failure(ctx: &PromptTraceContext, f: UploadFailure<'_>) {
 /// Increment when making breaking changes to PromptMetadata structure.
 /// Re-exported from the shared types crate.
 pub(crate) use prod_mc_cli_chat_proxy_types::{
-    GCS_SCHEMA_VERSION, LocalSandboxTelemetry, PromptMetadata,
+    GCS_SCHEMA_VERSION, LocalSandboxTelemetry, PromptMetadata, PromptMetadataParams,
 };
 pub(crate) fn local_sandbox_telemetry() -> Option<LocalSandboxTelemetry> {
     let profile = xai_grok_sandbox::configured_profile_name()?;
@@ -1151,8 +1151,8 @@ impl TraceExportSource for DynamicResolver {
                 ref mut user_token, ..
             } = config.upload_method
             {
-                match self.auth_manager.get_valid_token().await {
-                    Ok(key) => *user_token = key,
+                match self.auth_manager.auth_background().await {
+                    Ok(auth) => *user_token = auth.key,
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
@@ -1597,33 +1597,19 @@ mod tests {
     use crate::session::persistence::CopiedSessionFile;
     use prod_mc_cli_chat_proxy_types::PromptMetadata;
     fn bare_prompt_metadata() -> PromptMetadata {
-        PromptMetadata {
+        PromptMetadata::new(PromptMetadataParams {
             schema_version: GCS_SCHEMA_VERSION.to_string(),
             session_id: "test-session".into(),
             turn_number: 1,
             request_id: "req-001".into(),
             turn_started_at: "2026-01-01T00:00:00Z".into(),
-            repo_root: None,
-            remote_url: None,
-            user_id: None,
-            user_email: None,
-            team_id: None,
-            client_source: None,
-            client_version: None,
             model: "grok-3".into(),
-            reasoning_effort: None,
-            experiment_id: None,
             host_os: "linux".into(),
             host_arch: "x86_64".into(),
             prompt_has_image: Some(false),
             prompt_was_truncated: Some(false),
-            prompt_verbatim: None,
-            cwd: None,
-            agent_type: None,
-            shell_version: None,
-            workspace_type: None,
-            sandbox: None,
-        }
+            ..Default::default()
+        })
     }
     #[tokio::test]
     async fn fill_git_fields_skips_when_both_present() {

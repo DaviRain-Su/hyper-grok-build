@@ -22,21 +22,6 @@ fn xai_update(session_update_json: &str) -> String {
 }
 
 #[test]
-fn test_build_session_doc_hashes_content() {
-    let summary = test_summary("test-session", "/workspace", "My session title");
-
-    let doc = build_session_doc(&summary, "prompt text".to_string());
-    assert_eq!(doc.session_id, "test-session");
-    assert_eq!(doc.title, "My session title");
-    assert_eq!(doc.content, "prompt text");
-    assert!(!doc.content_hash.is_empty());
-
-    // Same content + same title → same hash
-    let doc2 = build_session_doc(&summary, "prompt text".to_string());
-    assert_eq!(doc.content_hash, doc2.content_hash);
-}
-
-#[test]
 fn test_single_pass_extracts_user_prompts() {
     let lines = vec![
         acp_update(
@@ -303,71 +288,6 @@ fn test_single_pass_tool_chars_cap() {
         a_count > 19_000,
         "should have collected at least one tool title, got {a_count}"
     );
-}
-
-#[test]
-fn test_build_session_doc_title_change_changes_hash() {
-    let old = test_summary("s1", "/workspace", "Old title");
-    let new = test_summary("s1", "/workspace", "New title");
-    let content = "same prompt text".to_string();
-
-    let doc_old = build_session_doc(&old, content.clone());
-    let doc_new = build_session_doc(&new, content);
-
-    assert_ne!(
-        doc_old.content_hash, doc_new.content_hash,
-        "title change must produce a different hash so dedup doesn't skip the upsert"
-    );
-}
-
-#[test]
-fn test_build_session_doc_prefers_generated_title() {
-    let mut summary = test_summary("s1", "/workspace", "session summary");
-    summary.generated_title = Some("Generated Title".to_string());
-    let doc = build_session_doc(&summary, "content".to_string());
-    assert_eq!(doc.title, "Generated Title");
-
-    summary.generated_title = Some(String::new());
-    let doc2 = build_session_doc(&summary, "content".to_string());
-    assert_eq!(doc2.title, "session summary");
-}
-
-#[test]
-fn test_should_skip_session_large_file() {
-    use std::io::Write as _;
-    let mut f = tempfile::NamedTempFile::new().unwrap();
-    f.write_all(&[0u8; 1024]).unwrap();
-    f.flush().unwrap();
-
-    assert!(should_skip_session(f.path(), 512));
-}
-
-#[test]
-fn test_should_skip_session_small_file() {
-    use std::io::Write as _;
-    let mut f = tempfile::NamedTempFile::new().unwrap();
-    f.write_all(&[0u8; 1024]).unwrap();
-    f.flush().unwrap();
-
-    assert!(!should_skip_session(f.path(), 2048));
-}
-
-#[test]
-fn test_should_skip_session_exact_limit() {
-    use std::io::Write as _;
-    let mut f = tempfile::NamedTempFile::new().unwrap();
-    f.write_all(&[0u8; 1024]).unwrap();
-    f.flush().unwrap();
-
-    assert!(!should_skip_session(f.path(), 1024));
-}
-
-#[test]
-fn test_should_skip_session_nonexistent_file() {
-    assert!(!should_skip_session(
-        Path::new("/nonexistent/updates.jsonl"),
-        100
-    ));
 }
 
 #[test]

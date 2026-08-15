@@ -120,7 +120,11 @@ pub(crate) async fn single_check(
         })),
     );
     if let Err(e) = auth_manager
-        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            crate::auth::manager::RefreshUrgency::UserFacing,
+        )
         .await
     {
         xai_grok_telemetry::unified_log::warn(

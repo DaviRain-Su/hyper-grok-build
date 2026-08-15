@@ -1144,6 +1144,46 @@ pub(in crate::app::dispatch) fn set_combine_queued_prompts(
     }]
 }
 
+pub(super) fn set_follow_up_behavior_inner(
+    app: &mut AppView,
+    new: crate::appearance::FollowUpBehavior,
+) {
+    app.current_ui.follow_up_behavior = Some(new.as_canonical().to_string());
+    crate::appearance::cache::set_follow_up_behavior(new);
+    // Same-process atomic only (tests / in-proc shell). The real agent is a
+    // separate process; it re-resolves Steer from config.toml mtime after the
+    // PersistSetting disk write lands.
+    xai_grok_shell::util::config::set_follow_up_steer_cache(new.is_steer());
+}
+
+pub(in crate::app::dispatch) fn set_follow_up_behavior(
+    app: &mut AppView,
+    new: crate::appearance::FollowUpBehavior,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_follow_up_behavior();
+    if prev == new {
+        return vec![];
+    }
+    set_follow_up_behavior_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "follow_up_behavior",
+        value = new.as_canonical(),
+        "setting changed",
+    );
+    let label = match new {
+        crate::appearance::FollowUpBehavior::Queue => "Queue",
+        crate::appearance::FollowUpBehavior::Steer => "Steer",
+    };
+    app.show_toast(&format!("\u{2713} Follow-up behavior: {label}"));
+    vec![Effect::PersistSetting {
+        key: "follow_up_behavior",
+        value: crate::settings::SettingValue::Enum(new.as_canonical()),
+        rollback_value: crate::settings::SettingValue::Enum(prev.as_canonical()),
+    }]
+}
+
 /// State-only mutation for `simple_mode`.
 ///
 /// Propagates to every agent's `input_mode` so the toggle takes

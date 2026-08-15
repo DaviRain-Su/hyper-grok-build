@@ -572,6 +572,7 @@ fn hinted_replay_skips_non_authoritative_source_while_journal_exists() {
         super::super::ReplayPathHint {
             parent_cwd: Some(Path::new("/source")),
             child_cwd: None,
+            ..Default::default()
         },
         |update| {
             if let acp::SessionUpdate::UserMessageChunk(chunk) = update

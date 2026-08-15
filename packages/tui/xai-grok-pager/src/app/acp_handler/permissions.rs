@@ -106,6 +106,28 @@ fn enqueue_permission(
         .as_ref()
         .map(|h| xai_grok_workspace::permission::default_always_allow_scope(&h.highlighted_words))
         .unwrap_or(0);
+    let bash_deny_selection_count = bash_highlights
+        .as_ref()
+        .map(|h| xai_grok_workspace::permission::default_always_deny_scope(&h.highlighted_words))
+        .unwrap_or(0);
+
+    // The request arrives over ACP from a possibly older agent, so a violated
+    // enqueue invariant (allow row on a non-persisting default scope) is
+    // warned, never asserted; the agent proves the invariant crate-locally.
+    if let Some(h) = bash_highlights.as_ref() {
+        let offers_allow_row = perm.request.options.iter().any(|o| {
+            o.option_id.0.as_ref() == crate::views::permission_view::ALLOW_ALWAYS_COMMAND_OPTION_ID
+        });
+        if offers_allow_row
+            && !xai_grok_workspace::permission::always_allow_scope_persists(h, bash_selection_count)
+        {
+            tracing::warn!(
+                scope = bash_selection_count,
+                words = ?h.highlighted_words,
+                "allow-always-command row offered but default scope does not persist"
+            );
+        }
+    }
 
     // 1b. Parse MCP scope state from the `allow-always-mcp` option's meta.
     //     Mutually exclusive with the bash flow at the per-request level —
@@ -183,6 +205,7 @@ fn enqueue_permission(
         active_idx,
         bash_highlights,
         bash_selection_count,
+        bash_deny_selection_count,
         bash_command_raw,
         mcp_scope,
         title,

@@ -1,53 +1,20 @@
-//! Extracting searchable text from session update files and turning it
-//! into index documents.
+//! Extracting searchable text from session update files.
+//!
+//! The peek structs are shared with the resume/replay collectors in
+//! [`super`], so the indexed text cannot drift from what a resumed session
+//! replays. Everything downstream of the extracted string (hashing, dedup,
+//! the SQLite index itself) lives in `xai-grok-session-search`.
 
 use std::io::{self, BufRead};
 use std::path::Path;
 
-use super::search_fts::{SessionDoc, SessionSearchIndex};
 use super::{
     ContentPeek, PromptExtractEvent, RawLinePeek, RawParamsPeek, XAI_SESSION_UPDATE_METHOD,
     collect_prompts_from_events,
 };
-use crate::session::persistence::Summary;
 use crate::session::wire_tags::{REWIND_MARKER, USER_MESSAGE_CHUNK};
 
 const SEARCH_CONTENT_CHAR_LIMIT: usize = 200_000;
-
-pub(super) fn should_skip_session(updates_path: &Path, max_size: u64) -> bool {
-    match std::fs::metadata(updates_path) {
-        Ok(meta) => meta.len() > max_size,
-        Err(_) => false,
-    }
-}
-
-#[derive(Debug)]
-pub(super) enum UpsertOutcome {
-    Indexed {
-        bytes_read: u64,
-    },
-    /// Content hash matched the existing index entry.
-    Unchanged {
-        bytes_read: u64,
-    },
-    /// Storage backend doesn't expose an updates file path.
-    NoContent,
-}
-
-/// Upsert `doc` unless the stored content hash already matches.
-pub(super) fn upsert_unless_unchanged(
-    index: &SessionSearchIndex,
-    doc: &SessionDoc,
-    bytes_read: u64,
-) -> Result<UpsertOutcome, rusqlite::Error> {
-    if let Ok(Some(existing_hash)) = index.get_content_hash(&doc.session_id)
-        && existing_hash == doc.content_hash
-    {
-        return Ok(UpsertOutcome::Unchanged { bytes_read });
-    }
-    index.upsert_doc(doc)?;
-    Ok(UpsertOutcome::Indexed { bytes_read })
-}
 
 // Zero-copy peek structs. Text-bearing fields are `Cow`, not `&str`: serde
 // cannot borrow `&str` from JSON strings containing escapes, so borrowing
@@ -341,29 +308,15 @@ pub(super) fn collect_all_indexable_content_single_pass(
     Ok((joined, bytes_read))
 }
 
-pub(super) fn build_session_doc(summary: &Summary, content: String) -> SessionDoc {
-    let title = summary.display_title().to_owned();
-
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(title.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(content.as_bytes());
-    let content_hash = hasher.finalize().to_hex().to_string();
-
-    SessionDoc {
-        session_id: summary.info.id.to_string(),
-        cwd: summary.info.cwd.clone(),
-        updated_at_unix: summary.updated_at.timestamp(),
-        title,
-        content,
-        content_hash,
-    }
-}
-
 /// Summary fixture shared by this module's tests and `search.rs`.
 #[cfg(test)]
-pub(super) fn test_summary(session_id: &str, cwd: &str, title: &str) -> Summary {
+pub(super) fn test_summary(
+    session_id: &str,
+    cwd: &str,
+    title: &str,
+) -> crate::session::persistence::Summary {
     use crate::session::info::Info;
+    use crate::session::persistence::Summary;
     use agent_client_protocol as acp;
 
     Summary {

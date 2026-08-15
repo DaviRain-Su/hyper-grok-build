@@ -85,6 +85,10 @@ async fn empty_enter_force_sends_top_queued() {
         promoted.contains("<user_query>"),
         "send-now must wrap the steered text in user_query: {promoted}"
     );
+    assert!(
+        promoted.contains("Make sure to complete any unfinished tasks from previous turns."),
+        "send-now must keep the unfinished-task trailer: {promoted}"
+    );
 
     assert!(
         !harness.contains_text("panicked"),

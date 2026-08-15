@@ -24,13 +24,13 @@ use std::sync::mpsc::{Receiver, Sender};
 use indexmap::IndexMap;
 
 use crate::app::agent_view::AgentView;
-use crate::diff::DiffHunk;
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::tool::{
     EDIT_HL_MAX_BYTES, EditHighlightPhase, EditLineStyles, ToolCallBlock,
     compute_file_scoped_styles, file_text_within_hl_caps,
 };
 use crate::scrollback::entry::EntryId;
+use xai_grok_pager_diff::DiffHunk;
 
 /// Tracing target. Filter with `RUST_LOG=edit_hl=debug`.
 pub const EDIT_HL_TRACING_TARGET: &str = "edit_hl";
@@ -376,9 +376,9 @@ impl AgentView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::DiffLine;
     use similar::ChangeTag;
     use std::sync::mpsc;
+    use xai_grok_pager_diff::DiffLine;
 
     fn sample_hunks() -> Vec<DiffHunk> {
         vec![vec![DiffLine {

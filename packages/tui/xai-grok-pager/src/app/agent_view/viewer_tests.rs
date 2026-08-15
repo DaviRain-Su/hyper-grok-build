@@ -378,6 +378,73 @@ fn scrollbar_gesture_drops_stale_gutter_anchor() {
     );
 }
 
+/// A second multi-line gutter drag while already Commenting must not
+/// replace the frozen freeform stash with the unsaved comment draft.
+#[test]
+fn gutter_drag_while_commenting_does_not_clobber_freeform_stash() {
+    let mut agent = agent_with_scrollable_plan();
+    let registry = ActionRegistry::defaults();
+
+    agent.prompt.set_text("keep my freeform notes");
+    // First multi-line drag: enter commenting and freeze freeform.
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 10, 4),
+        &registry,
+    );
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Drag(MouseButton::Left), 10, 6),
+        &registry,
+    );
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Up(MouseButton::Left), 10, 6),
+        &registry,
+    );
+    {
+        let pav = agent.plan_approval_view.as_ref().unwrap();
+        assert_eq!(pav.focus, PlanApprovalFocus::Commenting);
+        assert_eq!(
+            pav.stashed_feedback_prompt
+                .as_ref()
+                .map(|s| s.text.as_str()),
+            Some("keep my freeform notes")
+        );
+    }
+    agent.prompt.set_text("unsaved comment draft");
+
+    // Second multi-line drag: new range, must keep original freeform stash.
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 10, 5),
+        &registry,
+    );
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Drag(MouseButton::Left), 10, 7),
+        &registry,
+    );
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Up(MouseButton::Left), 10, 7),
+        &registry,
+    );
+    {
+        let pav = agent.plan_approval_view.as_ref().unwrap();
+        assert_eq!(pav.focus, PlanApprovalFocus::Commenting);
+        assert_eq!(
+            pav.stashed_feedback_prompt
+                .as_ref()
+                .map(|s| s.text.as_str()),
+            Some("keep my freeform notes"),
+            "second gutter drag must not replace freeform with comment draft"
+        );
+    }
+    // Cancel commenting: freeform must restore, not the abandoned draft.
+    agent.prompt.set_text("another draft");
+    let esc = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    let _ = agent.handle_plan_feedback_key(&esc);
+    assert_eq!(agent.prompt.text(), "keep my freeform notes");
+}
+
 /// A lost mouse-up after a track press must not make the next plan-line
 /// click skip gutter / click-to-comment (sticky `is_scrollbar_dragging`).
 #[test]

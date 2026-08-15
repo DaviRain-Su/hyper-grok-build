@@ -109,6 +109,8 @@ async fn web_search_uses_model_override_from_config_end_to_end() {
             // `Credentials` at session-spawn time; in this self-contained
             // test fixture there's no extra access key in scope.
             alpha_test_key: None,
+            allowed_domains: None,
+            excluded_domains: None,
         },
         web_fetch_config: Default::default(),
         lsp: None,

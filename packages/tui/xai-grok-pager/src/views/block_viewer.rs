@@ -894,7 +894,7 @@ impl BlockViewerPane {
         // Build a flat list of DiffLine references from all hunks, interleaving
         // None for separator lines (which render_diff_lines inserts).
         // The rendered output has: [hunk0 lines...] [separator] [hunk1 lines...] ...
-        let mut meta_source: Vec<Option<&crate::diff::DiffLine>> = Vec::new();
+        let mut meta_source: Vec<Option<&xai_grok_pager_diff::DiffLine>> = Vec::new();
         for (i, hunk) in edit.hunks.iter().enumerate() {
             if i > 0 && !config.hunk_separator.is_empty() {
                 meta_source.push(None); // separator line

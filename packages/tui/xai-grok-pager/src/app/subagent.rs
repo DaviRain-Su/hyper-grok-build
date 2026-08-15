@@ -7,7 +7,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
 use xai_grok_shell::session::storage::{
-    ReplayEmission, ReplayPathHint, stream_replay_updates_at_hinted,
+    ReplayEmission, ReplayLookupFallback, ReplayPathHint, stream_replay_updates_at_hinted,
 };
 /// Enriched subagent tracking info.
 ///
@@ -44,6 +44,9 @@ pub struct SubagentInfo {
     /// Initialised to `started_at` so that brand-new subagents with
     /// no progress notifications yet still sort correctly.
     pub last_progress_at: Instant,
+    /// Lifecycle dedup tombstone: a child emits one terminal transition, so
+    /// duplicate finishes must not re-finalize it and duplicate spawns must
+    /// never replace this terminal state.
     pub finished: bool,
     /// "completed", "failed", or "cancelled".
     pub status: Option<Arc<str>>,
@@ -191,6 +194,21 @@ pub(crate) fn replay_inherited_updates(
     parent_cwd: &std::path::Path,
     child_cwd: Option<&std::path::Path>,
 ) {
+    replay_inherited_updates_with_fallback(
+        child_view,
+        child_session_id,
+        parent_cwd,
+        child_cwd,
+        ReplayLookupFallback::Relocation,
+    );
+}
+pub(crate) fn replay_inherited_updates_with_fallback(
+    child_view: &mut crate::app::agent_view::AgentView,
+    child_session_id: &str,
+    parent_cwd: &std::path::Path,
+    child_cwd: Option<&std::path::Path>,
+    fallback: ReplayLookupFallback,
+) {
     let home = effective_grok_home();
     let replay_meta = crate::acp::meta::NotificationMeta {
         is_replay: true,
@@ -199,6 +217,7 @@ pub(crate) fn replay_inherited_updates(
     let hint = ReplayPathHint {
         parent_cwd: Some(parent_cwd),
         child_cwd,
+        fallback,
     };
     child_view.scrollback.begin_batch();
     let outcome = stream_replay_updates_at_hinted(child_session_id, &home, hint, |update| {
@@ -319,6 +338,11 @@ pub(crate) fn ensure_subagent_child_replayed(
 }
 /// Finalize a finished child view: end the turn and append the `TurnCompleted`
 /// footer. Shared by the live `SubagentFinished` path and the deferred resume path.
+///
+/// Idempotent on the *trailing* footer: kill reconciliation or a late replay
+/// rebuild that re-finalizes an already-finished child must not append a second
+/// completed line. An earlier turn's `TurnCompleted` deeper in the transcript
+/// must not suppress a later turn's footer.
 pub(crate) fn finalize_finished_child_view(
     child_view: &mut crate::app::agent_view::AgentView,
     elapsed: std::time::Duration,
@@ -328,6 +352,19 @@ pub(crate) fn finalize_finished_child_view(
         .tracker
         .finish_turn(&mut child_view.scrollback);
     child_view.scrollback.finish_all_running();
+    let already_has_trailing_completed_footer = child_view.scrollback.last().is_some_and(|e| {
+        matches!(
+            &e.block,
+            crate::scrollback::block::RenderBlock::SessionEvent(seb)
+                if matches!(
+                    seb.event,
+                    crate::scrollback::blocks::SessionEvent::TurnCompleted { .. }
+                )
+        )
+    });
+    if already_has_trailing_completed_footer {
+        return;
+    }
     child_view
         .scrollback
         .push_block(crate::scrollback::block::RenderBlock::session_event(
@@ -395,7 +432,7 @@ pub(crate) fn format_context_badge(info: &SubagentInfo) -> &str {
 ///
 /// Returns `(Some(tag), rest_after_close_bracket)` if the description begins
 /// with `[<non-empty>]`, otherwise `(None, description)` unchanged.
-fn parse_tag_prefix(description: &str) -> (Option<&str>, &str) {
+pub(crate) fn parse_tag_prefix(description: &str) -> (Option<&str>, &str) {
     if let Some(rest) = description.strip_prefix('[')
         && let Some(close) = rest.find(']')
     {
@@ -511,6 +548,7 @@ pub(crate) fn format_activity_label(activity: &crate::acp::tracker::TurnActivity
         } => {
             format!("Retrying ({attempt}/{max_retries})")
         }
+        TurnActivity::WritingToolCall(writing) => writing.label(),
         TurnActivity::Waiting(reason) => reason.label(),
     }
 }
@@ -1198,7 +1236,7 @@ mod tests {
     fn activity_label_waiting_reasons() {
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         assert_eq!(
-            format_activity_label(&TurnActivity::Waiting(WaitingReason::Subagent)),
+            format_activity_label(&TurnActivity::Waiting(WaitingReason::subagent())),
             "Waiting on subagent…",
         );
         assert_eq!(

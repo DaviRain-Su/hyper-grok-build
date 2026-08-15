@@ -17,10 +17,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use xai_grok_pager::scrollback::text_selection::{
     PersistentTextSelection, RangeHit, ResolvedSelectionModel, SelectionEndpoint, SelectionOrigin,
-    configured_word_separators, render_persistent_selection_overlay, url_range_at_col,
-    word_boundaries_at_col,
+    configured_word_separators, render_persistent_selection_overlay, semantic_selection_at,
+    url_range_at_col,
 };
-use xai_grok_pager::scrollback::types::slice_display_cols;
 use xai_grok_pager::scrollback::{RenderBlock, ScratchBuffer, ScrollbackPane, ScrollbackState};
 
 /// Maximum time (ms) between consecutive clicks to count as a multi-click.
@@ -154,37 +153,25 @@ impl App {
     }
 
     fn select_word(&mut self, hit: &RangeHit) {
-        let Some(line) = self.last_selection_model.line_for_hit(hit) else {
+        let separators = configured_word_separators();
+        let Some(sel) = semantic_selection_at(&self.last_selection_model, hit, separators) else {
             return;
         };
-        let url_range = url_range_at_col(&line.text, hit.col_within_range);
-        let is_url = url_range.is_some();
-        let separators = configured_word_separators();
-        let selection_range = url_range.unwrap_or_else(|| {
-            word_boundaries_at_col(&line.text, hit.col_within_range, separators)
-        });
-        if selection_range.is_empty() {
-            return;
-        }
-
-        let text = slice_display_cols(&line.text, selection_range.start, selection_range.end);
-        let kind = if is_url { "url" } else { "word" };
+        let kind = if url_range_at_col(&sel.text, 0).is_some() {
+            "url"
+        } else {
+            "word"
+        };
         self.push(format!(
             "double-click {kind}: \"{}\"",
-            truncate_for_display(&text)
+            truncate_for_display(&sel.text)
         ));
 
         self.persistent_selection = Some(PersistentTextSelection {
             entry_idx: hit.entry_idx,
             range_id: hit.range_id,
-            anchor: SelectionEndpoint {
-                block_line_idx: hit.block_line_idx,
-                col_within_range: selection_range.start,
-            },
-            head: SelectionEndpoint {
-                block_line_idx: hit.block_line_idx,
-                col_within_range: selection_range.end.saturating_sub(1),
-            },
+            anchor: sel.anchor,
+            head: sel.head,
             origin: SelectionOrigin::DoubleClick,
             kind: Default::default(),
         });

@@ -778,6 +778,9 @@ pub struct AgentDefinition {
     /// Plugin namespace for plugin-backed agents only.
     #[serde(skip)]
     pub plugin_name: Option<String>,
+    /// Prevents external definitions from opting into built-in-only policy by name.
+    #[serde(skip)]
+    pub(crate) builtin_name: Option<BuiltinAgentName>,
     #[serde(default = "default_prompt_mode")]
     pub prompt_mode: PromptMode,
     #[serde(default = "default_grok_build_toolset")]
@@ -1512,6 +1515,12 @@ impl AgentDefinition {
     ) -> bool {
         false
     }
+    pub fn include_browser_verification(&self) -> bool {
+        matches!(
+            self.builtin_name,
+            Some(BuiltinAgentName::GrokBuildPlan | BuiltinAgentName::GrokBuildPlanNoSubagents)
+        )
+    }
     /// True iff this agent's wire format is non-interchangeable with the
     /// stock harness, so a client-supplied `_meta.agentProfile` must NOT
     /// override it. Strict iff any of: bespoke `system_prompt` template,
@@ -1556,7 +1565,10 @@ impl AgentDefinition {
     }
     /// Shared defaults for built-in constructors.
     fn base(name: BuiltinAgentName, description: &str) -> Self {
-        Self::builtin_defaults(name.as_ref(), description)
+        Self {
+            builtin_name: Some(name),
+            ..Self::builtin_defaults(name.as_ref(), description)
+        }
     }
     /// Shared defaults for out-of-tree built-in agent registrations.
     pub fn builtin_defaults(name: &str, description: &str) -> Self {
@@ -1564,6 +1576,7 @@ impl AgentDefinition {
             name: name.to_owned(),
             description: description.to_string(),
             plugin_name: None,
+            builtin_name: None,
             prompt_mode: PromptMode::Extend,
             tool_config: default_grok_build_toolset(),
             capability_mode: None,
@@ -2580,6 +2593,17 @@ description: Test default tool config
         assert!(def.agents_md);
         assert!(def.prompt_body.is_none());
         assert_eq!(def.scope, AgentScope::BuiltIn);
+    }
+    #[test]
+    fn same_name_acp_definition_does_not_enable_browser_verification() {
+        let def = AgentDefinition::from_json(&serde_json::json!({
+            "name": "grok-build-plan",
+            "description": "Custom plan agent"
+        }))
+        .unwrap();
+        assert!(!def.include_browser_verification());
+        assert!(AgentDefinition::grok_build_plan().include_browser_verification());
+        assert!(AgentDefinition::grok_build_plan_no_subagents().include_browser_verification());
     }
     #[test]
     fn test_from_json_has_default_toolset_with_task_tool() {

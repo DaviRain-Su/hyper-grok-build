@@ -314,13 +314,19 @@ fn file_link_presentation_with_home(
 /// Web/scheme URLs, `mailto:`/`tel:`, and anchors return `None`.
 ///
 /// - **Absolute / `~`** paths resolve directly (must be an existing file).
-/// - **Relative** paths (`images/1.jpg`) resolve against `media_paths` — the
-///   absolute paths of media actually generated in this transcript — by
-///   matching a unique entry whose path ends with those components. This ties
-///   each short path to the exact file its message produced (correct across
-///   forks/resumes) and never opens an arbitrary or out-of-session file; an
-///   ambiguous or absent match is left unlinked.
-pub fn local_link_to_file_target(dest: &str, media_paths: &[PathBuf]) -> Option<LinkTarget> {
+/// - **Relative** paths (`images/1.jpg`, `src/main.rs`) resolve in two steps:
+///   1. Against `media_paths` (absolute paths of media generated in this transcript),
+///      by matching a unique entry whose path ends with those components. This binds
+///      each short path to the exact file its message produced (stable across forks and
+///      resumes); an ambiguous match is left unlinked rather than guessed.
+///   2. Failing that, against the session `cwd`: the path is joined to `cwd`, accepted
+///      only when it stays inside `cwd` (no `..` escape) and names an existing file.
+///      `cwd = None` disables this fallback (media only).
+pub fn local_link_to_file_target(
+    dest: &str,
+    media_paths: &[PathBuf],
+    cwd: Option<&Path>,
+) -> Option<LinkTarget> {
     let dest = dest.trim();
     if dest.is_empty() || dest.starts_with('#') || dest.contains("://") {
         return None;
@@ -334,20 +340,40 @@ pub fn local_link_to_file_target(dest: &str, media_paths: &[PathBuf]) -> Option<
     let resolved: PathBuf = if target.is_absolute() {
         target
     } else {
-        // Relative: match a single generated-media file ending with these
-        // components. Unique match only, so a forked transcript with a duplicate
-        // name resolves to neither rather than the wrong one.
-        let mut hits = media_paths.iter().filter(|p| p.ends_with(path));
-        let first = hits.next()?.clone();
-        if hits.next().is_some() {
-            return None;
-        }
-        first
+        relative_link_target(path, media_paths, cwd)?
     };
     if !resolved.is_file() {
         return None;
     }
     Some(LinkTarget::File(Arc::from(resolved)))
+}
+
+/// Resolve a *relative* markdown link destination to an absolute path.
+///
+/// Prefers a unique generated-media match (stable across forks/resumes); an
+/// ambiguous media match resolves to neither. When the path is not generated
+/// media, falls back to `cwd`-relative resolution that must stay inside `cwd`.
+/// The caller still gates on the result naming a real file.
+fn relative_link_target(
+    path: &Path,
+    media_paths: &[PathBuf],
+    cwd: Option<&Path>,
+) -> Option<PathBuf> {
+    let mut hits = media_paths.iter().filter(|p| p.ends_with(path));
+    match (hits.next(), hits.next()) {
+        (Some(unique), None) => return Some(unique.clone()),
+        // Ambiguous generated-media reference (e.g. a fork with duplicate
+        // names): resolve to neither rather than opening the wrong file.
+        (Some(_), Some(_)) => return None,
+        _ => {}
+    }
+    // Not generated media: resolve against the session cwd, refusing any `..`
+    // that would escape it.
+    let cwd = cwd?;
+    let joined = xai_grok_paths::normalize_lexically(&cwd.join(path));
+    joined
+        .starts_with(xai_grok_paths::normalize_lexically(cwd))
+        .then_some(joined)
 }
 
 /// Convert a display-cell column to a `u16` suitable for overlay coordinates.
@@ -631,7 +657,9 @@ fn scan_logical_line(
             let path = m
                 .as_str()
                 .trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
-            let Some(file_target) = local_link_to_file_target(path, media_paths) else {
+            // Bare relative paths in prose stay media-only (no cwd fallback), so ordinary
+            // `a/b.ext`-shaped prose is not over-linkified.
+            let Some(file_target) = local_link_to_file_target(path, media_paths, None) else {
                 continue;
             };
             let path_end = m.start() + path.len();
@@ -680,7 +708,7 @@ mod tests {
         let media = vec![dir.path().join("images/1.jpg")];
 
         // Short session-relative path matches the generated media by suffix.
-        let target = local_link_to_file_target("images/1.jpg", &media).unwrap();
+        let target = local_link_to_file_target("images/1.jpg", &media, None).unwrap();
         assert_eq!(target, LinkTarget::File(Arc::from(media[0].as_path())));
         let resolved = resolve_link_target(&target).expect("resolved target");
         let url = resolved.osc8_url.expect("OSC 8 URL");
@@ -697,13 +725,13 @@ mod tests {
         std::fs::write(dir.path().join("images/1.jpg"), b"x").unwrap();
         let media = vec![dir.path().join("images/1.jpg")];
 
-        assert!(local_link_to_file_target("https://x.ai", &media).is_none());
-        assert!(local_link_to_file_target("mailto:a@b.c", &media).is_none());
-        assert!(local_link_to_file_target("#section", &media).is_none());
-        // Relative path that isn't a known generated media file.
-        assert!(local_link_to_file_target("images/2.jpg", &media).is_none());
+        assert!(local_link_to_file_target("https://x.ai", &media, None).is_none());
+        assert!(local_link_to_file_target("mailto:a@b.c", &media, None).is_none());
+        assert!(local_link_to_file_target("#section", &media, None).is_none());
+        // Relative path that isn't a known generated media file (no cwd).
+        assert!(local_link_to_file_target("images/2.jpg", &media, None).is_none());
         // No known media at all.
-        assert!(local_link_to_file_target("images/1.jpg", &[]).is_none());
+        assert!(local_link_to_file_target("images/1.jpg", &[], None).is_none());
     }
 
     #[test]
@@ -719,9 +747,57 @@ mod tests {
             dir.path().join("a/images/1.jpg"),
             dir.path().join("b/images/1.jpg"),
         ];
-        assert!(local_link_to_file_target("images/1.jpg", &media).is_none());
+        assert!(local_link_to_file_target("images/1.jpg", &media, None).is_none());
         // A `..` never matches a clean absolute media path, so it can't escape.
-        assert!(local_link_to_file_target("../images/1.jpg", &media).is_none());
+        assert!(local_link_to_file_target("../images/1.jpg", &media, None).is_none());
+    }
+
+    #[test]
+    fn local_link_relative_resolves_existing_cwd_file() {
+        // A relative markdown destination that is not generated media resolves
+        // against the session cwd when the file exists.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), b"fn main() {}").unwrap();
+
+        let target = local_link_to_file_target("src/main.rs", &[], Some(dir.path())).unwrap();
+        assert_eq!(
+            target,
+            LinkTarget::File(Arc::from(dir.path().join("src/main.rs").as_path()))
+        );
+
+        // Missing file under cwd stays unlinked (is_file guard).
+        assert!(local_link_to_file_target("src/missing.rs", &[], Some(dir.path())).is_none());
+        // A directory is not a file.
+        assert!(local_link_to_file_target("src", &[], Some(dir.path())).is_none());
+    }
+
+    #[test]
+    fn local_link_cwd_fallback_refuses_parent_escape() {
+        // `..` must not escape the session cwd even if the target file exists.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("secret.txt"), b"x").unwrap();
+        let cwd = dir.path().join("sub");
+        std::fs::create_dir(&cwd).unwrap();
+
+        assert!(local_link_to_file_target("../secret.txt", &[], Some(&cwd)).is_none());
+    }
+
+    #[test]
+    fn local_link_prefers_generated_media_over_cwd() {
+        // When a path matches both generated media and a cwd file, the unique
+        // media match wins (stable across forks/resumes).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("images")).unwrap();
+        std::fs::write(dir.path().join("images/1.jpg"), b"media").unwrap();
+        let media = vec![dir.path().join("images/1.jpg")];
+
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir(cwd.path().join("images")).unwrap();
+        std::fs::write(cwd.path().join("images/1.jpg"), b"cwd").unwrap();
+
+        let target = local_link_to_file_target("images/1.jpg", &media, Some(cwd.path())).unwrap();
+        assert_eq!(target, LinkTarget::File(Arc::from(media[0].as_path())));
     }
 
     // ── tool_path_file_target ──

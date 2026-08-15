@@ -71,10 +71,6 @@ mod tests {
     #[test]
     fn test_sandbox_mode_serializes_as_proto3_string() {
         assert_eq!(
-            serde_json::to_string(&SandboxMode::Agent).unwrap(),
-            r#""SANDBOX_MODE_AGENT""#
-        );
-        assert_eq!(
             serde_json::to_string(&SandboxMode::WorkspaceServer).unwrap(),
             r#""SANDBOX_MODE_WORKSPACE_SERVER""#
         );
@@ -92,7 +88,6 @@ mod tests {
     fn test_sandbox_mode_roundtrip() {
         for mode in [
             SandboxMode::Invalid,
-            SandboxMode::Agent,
             SandboxMode::WorkspaceServer,
             SandboxMode::Bare,
         ] {
@@ -137,14 +132,14 @@ mod tests {
             },
             "directUrls": {"6013": "http://direct.example.com:6013"},
             "cloudflareUrls": {"443": "https://cf.example.com"},
-            "mode": "SANDBOX_MODE_AGENT"
+            "mode": "SANDBOX_MODE_BARE"
         }"#;
 
         let resp: SandboxStartResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.sandbox_id, "sb-abc123");
         assert_eq!(resp.session_id, "sess-xyz789");
         assert_eq!(resp.websocket_url, "wss://sandbox.example.com/ws");
-        assert_eq!(resp.mode, Some(SandboxMode::Agent));
+        assert_eq!(resp.mode, Some(SandboxMode::Bare));
 
         // Verify direct_urls / cloudflare_urls maps
         assert_eq!(
@@ -277,14 +272,12 @@ pub struct SandboxTerminateRequest {
 /// Sandbox operating mode.
 ///
 /// Proto3 enum serialized as its string name on the wire
-/// (e.g. `"SANDBOX_MODE_AGENT"`).
+/// (e.g. `"SANDBOX_MODE_BARE"`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SandboxMode {
     #[default]
     #[serde(rename = "SANDBOX_MODE_INVALID")]
     Invalid,
-    #[serde(rename = "SANDBOX_MODE_AGENT")]
-    Agent,
     #[serde(rename = "SANDBOX_MODE_WORKSPACE_SERVER")]
     WorkspaceServer,
     #[serde(rename = "SANDBOX_MODE_BARE")]

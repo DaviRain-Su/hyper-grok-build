@@ -15,8 +15,8 @@ use super::{RpcActivityClass, WorkspaceRpc};
 /// A single file entry to write.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutFileEntry {
-    /// Path relative to the workspace root, or an absolute path within it.
-    /// Paths that escape the root are rejected.
+    /// Path relative to the client-fs base (the bound session's cwd when it
+    /// extends the workspace root, else the root); escapes are rejected.
     pub path: String,
     /// UTF-8 file content (one chunk).
     pub content: String,
@@ -59,7 +59,7 @@ impl WorkspaceRpc for PutFilesReq {
 /// Per-file result from a put_files operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutFileResult {
-    /// The resolved path (relative to workspace root).
+    /// The request path, echoed back.
     pub path: String,
     /// Whether this file was successfully written.
     pub ok: bool,
@@ -89,7 +89,7 @@ pub struct PutFilesRes {
 /// chunking should align offsets to codepoint boundaries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetFileEntry {
-    /// Path relative to the workspace root, or an absolute path within it.
+    /// Path relative to the client-fs base (see [`PutFileEntry::path`]).
     pub path: String,
     /// If set, the server compares this hash against the full-file content
     /// hash. If they match, the content field in the response is `None`
@@ -381,9 +381,9 @@ fn default_max_bytes() -> u64 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientFsListReq {
-    /// Path relative to the workspace root (`""` or `"."` = root), or an
-    /// absolute path within the root. Paths that escape the root are
-    /// rejected by the server.
+    /// Path relative to the client-fs base (`""` or `"."` = the base: the
+    /// bound session's cwd when it extends the workspace root, else the
+    /// root); escapes are rejected.
     pub path: String,
     /// Walk depth below `path` (1 = immediate children).
     #[serde(default = "default_client_depth")]
@@ -418,14 +418,14 @@ impl WorkspaceRpc for ClientFsListReq {
     type Response = ClientFsListRes;
 }
 
-/// One listed node. Shell-aligned except `path` (workspace-root-relative)
+/// One listed node. Shell-aligned except `path` (client-fs-base-relative)
 /// and `mtimeMs` (epoch millis).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientFsListNode {
     /// File name (final path component).
     pub name: String,
-    /// Path relative to the workspace root (divergent: shell is absolute).
+    /// Path relative to the client-fs base (divergent: shell is absolute).
     pub path: String,
     /// Node kind.
     #[serde(rename = "type")]
@@ -457,7 +457,7 @@ pub struct ClientFsListRes {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientFsStatReq {
-    /// Path relative to the workspace root, or an absolute path within it.
+    /// Path relative to the client-fs base (see [`ClientFsListReq::path`]).
     pub path: String,
 }
 
@@ -495,7 +495,7 @@ pub struct ClientFsStatRes {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientFsReadFileReq {
-    /// Path relative to the workspace root, or an absolute path within it.
+    /// Path relative to the client-fs base (see [`ClientFsListReq::path`]).
     pub path: String,
     /// Byte offset to start reading from (default 0).
     #[serde(default)]

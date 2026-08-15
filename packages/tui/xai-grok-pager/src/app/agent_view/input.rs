@@ -715,7 +715,7 @@ impl AgentView {
                 _ => InputOutcome::Changed,
             };
         }
-        if self.line_viewer.is_some() {
+        if self.line_viewer.is_some() && self.focused_card() != Some(BlockingCard::Permission) {
             if let Event::Mouse(mouse) = ev
                 && mouse.kind == MouseEventKind::Down(MouseButton::Left)
                 && self.hit_voice_stop_button.contains(mouse.column, mouse.row)
@@ -1117,6 +1117,12 @@ impl AgentView {
                     && let Some(outcome) = self.handle_scrollback_search_paste(text)
                 {
                     return outcome;
+                }
+                if self.active_pane == AgentPane::Scrollback
+                    && !self.vim_mode
+                    && self.no_input_overlay_pending()
+                {
+                    return InputOutcome::ActionThenForward(Action::FocusPrompt);
                 }
                 if self.active_pane == AgentPane::Prompt {
                     self.ephemeral_tip
@@ -2605,5 +2611,83 @@ mod rich_textarea_paste_routing_tests {
             Some("a中\nlineb")
         );
         assert_eq!(agent.prompt.text(), "hidden prompt");
+    }
+}
+/// Pasting while the scrollback pane holds the keyboard (prompt unfocused) must land in
+/// the composer, mirroring how a typed character focus-forwards into the prompt.
+#[cfg(test)]
+mod scrollback_paste_focus_forward_tests {
+    use super::test_fixtures::{make_agent, make_followup_permission_state};
+    use super::{AgentPane, AgentView};
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crossterm::event::Event;
+    fn scrollback_agent() -> (AgentView, ActionRegistry) {
+        let mut agent = make_agent();
+        agent.vim_mode = false;
+        agent.set_active_pane(AgentPane::Scrollback, true);
+        (agent, ActionRegistry::defaults())
+    }
+    /// The `ActionThenForward` round-trip the event loop performs: dispatch `FocusPrompt`
+    /// to focus the prompt pane, then re-process the same paste through it so the text lands.
+    #[test]
+    fn paste_from_scrollback_round_trip_lands_in_composer() {
+        let (mut agent, reg) = scrollback_agent();
+        let paste = Event::Paste("pasted text".to_owned());
+        assert!(matches!(
+            agent.handle_input(&paste, &reg),
+            InputOutcome::ActionThenForward(Action::FocusPrompt)
+        ));
+        agent.set_active_pane(AgentPane::Prompt, false);
+        let out = agent.handle_input(&paste, &reg);
+        assert!(matches!(out, InputOutcome::Changed));
+        assert_eq!(agent.prompt.text(), "pasted text");
+    }
+    /// A parked blocking card stays parked: `FocusPrompt` would unpark it and the
+    /// overlay would swallow the re-dispatched paste, so a paste here is inert.
+    #[test]
+    fn paste_from_scrollback_does_not_unpark_a_pending_overlay() {
+        let (mut agent, reg) = scrollback_agent();
+        agent
+            .permission_queue
+            .push_back(make_followup_permission_state());
+        assert!(agent.parked_card().is_some(), "card should be parked");
+        assert!(agent.focused_card().is_none());
+        let out = agent.handle_input(&Event::Paste("hello".to_owned()), &reg);
+        assert!(
+            matches!(out, InputOutcome::Unchanged),
+            "paste must not unpark a pending overlay, got {out:?}"
+        );
+        assert!(agent.parked_card().is_some(), "card must stay parked");
+        assert_eq!(agent.active_pane, AgentPane::Scrollback);
+    }
+    fn make_test_png(width: u32, height: u32) -> Vec<u8> {
+        use image::{ImageBuffer, Rgba};
+        let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(width, height, Rgba([128, 64, 32, 255]));
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+    /// A dragged image arrives as a `file://` bracketed paste; from a focused
+    /// scrollback it takes the same focus-forward round trip as a text paste.
+    #[test]
+    fn dragging_image_while_scrollback_focused_attaches_to_composer() {
+        let (mut agent, reg) = scrollback_agent();
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("drag.png");
+        std::fs::write(&png, make_test_png(8, 8)).unwrap();
+        let drop = Event::Paste(format!("file://{}", png.display()));
+        assert!(matches!(
+            agent.handle_input(&drop, &reg),
+            InputOutcome::ActionThenForward(Action::FocusPrompt)
+        ));
+        agent.set_active_pane(AgentPane::Prompt, false);
+        let out = agent.handle_input(&drop, &reg);
+        assert!(matches!(out, InputOutcome::Changed));
+        assert_eq!(agent.prompt.images.len(), 1);
+        assert!(agent.prompt.text().contains("[Image #1]"));
     }
 }

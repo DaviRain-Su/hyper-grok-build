@@ -209,6 +209,21 @@ impl ChatStateHandle {
         });
     }
 
+    /// See [`ChatStateCommand::StripConversationImages`]. The outcome is
+    /// typed and disk-acknowledged: `Applied` means the backup and the
+    /// rewrite both reached disk; a dead actor reads as `ActorUnavailable`,
+    /// never as a successful no-op.
+    pub async fn strip_conversation_images(
+        &self,
+        urls: Vec<std::sync::Arc<str>>,
+    ) -> crate::StripOutcome {
+        self.query("StripConversationImages", |reply| {
+            ChatStateCommand::StripConversationImages { urls, reply }
+        })
+        .await
+        .unwrap_or(crate::StripOutcome::ActorUnavailable)
+    }
+
     /// Out-of-band history repair (`x.ai/session/repair`); see
     /// [`ChatStateCommand::RepairHistory`]. Returns `None` if the actor is
     /// dead, `Some(Err(_))` if a turn was in flight at processing time.

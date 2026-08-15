@@ -33,6 +33,12 @@ tracing = { workspace = true }
 # `[package.metadata.cargo-shear]` note above.
 xai-ratatui-inline = { workspace = true }
 
+# `DiffLine` hunk fixtures for the committed-edit render tests. A normal (not
+# dev) dependency because gazelle lists `src/commit_tests.rs` in the library
+# `srcs` and so attributes its imports to the library target; a
+# `[dev-dependencies]` entry here would fail `just gazelle --check`.
+xai-grok-pager-diff = { path = "../xai-grok-pager-diff" }
+
 # Misc used by the commit/live/full-view paths.
 chrono = { workspace = true }
 similar = { workspace = true }

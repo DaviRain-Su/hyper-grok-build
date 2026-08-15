@@ -106,7 +106,7 @@ fn external_stream_gates_on_end_to_end() {
     });
     xai_grok_telemetry::log_event(xai_grok_telemetry::events::ToolCallCompleted {
         tool_name: "github__create_issue".into(),
-        outcome: xai_file_utils::events::types::ToolOutcome::Success,
+        outcome: xai_grok_session_events::types::ToolOutcome::Success,
         duration_ms: 12,
         file_path: Some("/tmp/projectdir/config.toml".into()),
         parameters: Some(serde_json::json!({

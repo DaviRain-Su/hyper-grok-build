@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use tokio::sync::Semaphore;
-use xai_grok_workspace::foreign_sessions::{
+use xai_grok_foreign_sessions::{
     EnabledForeignSessionSources, ForeignSessionSummary, ForeignSessionTool, RecentForeignSession,
 };
 
@@ -528,7 +528,7 @@ mod tests {
     use std::cell::RefCell;
     use std::time::{Duration, UNIX_EPOCH};
 
-    use xai_grok_workspace::foreign_sessions::ForeignSessionSource;
+    use xai_grok_foreign_sessions::ForeignSessionSource;
 
     use super::*;
 

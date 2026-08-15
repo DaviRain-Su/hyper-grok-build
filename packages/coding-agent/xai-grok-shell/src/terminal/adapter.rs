@@ -11,8 +11,8 @@ use super::output_recorder::{OutputRecorder, read_log_tail};
 use agent_client_protocol as acp;
 use xai_acp_lib::{AcpAgentGatewaySender as GatewaySender, acp_channel_failure};
 use xai_grok_tools::computer::types::{
-    BackgroundHandle, ComputerError, KillOutcome, TaskKind, TaskSnapshot, TerminalBackend,
-    TerminalRunRequest, TerminalRunResult,
+    BackgroundHandle, ComputerError, KillOutcome, KillSource, TaskKind, TaskSnapshot,
+    TerminalBackend, TerminalRunRequest, TerminalRunResult,
 };
 
 /// A snapshot's per-completion fields, grouped to avoid transposed positional args.
@@ -39,6 +39,10 @@ pub(super) struct TrackedTask {
     last_truncated: bool,
     block_waited: bool,
     explicitly_killed: bool,
+    kill_result_delivered: bool,
+    /// In-flight `wait_for_completion` callers. ACP has no oneshot list;
+    /// this is the live-waiter count used for kill delivery.
+    live_waiters: usize,
     kind: TaskKind,
     owner_session_id: Option<String>,
     description: Option<String>,
@@ -62,6 +66,8 @@ impl Default for TrackedTask {
             last_truncated: false,
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
+            live_waiters: 0,
             kind: TaskKind::Bash,
             owner_session_id: None,
             description: None,
@@ -99,6 +105,7 @@ impl TrackedTask {
             completed,
             block_waited: self.block_waited,
             explicitly_killed: self.explicitly_killed,
+            kill_result_delivered: self.kill_result_delivered,
             kind: self.kind,
             owner_session_id: self.owner_session_id.clone(),
             description: self.description.clone(),
@@ -110,6 +117,30 @@ impl TrackedTask {
 }
 
 pub(super) type TaskMap = Arc<Mutex<HashMap<String, TrackedTask>>>;
+
+#[must_use]
+struct LiveWaiter<'a> {
+    tasks: TaskMap,
+    task_id: &'a str,
+    /// Set on the normal return path so Drop does not treat this wait as
+    /// cancelled. A cancelled wait must clear `block_waited` immediately:
+    /// ClientUi kill only does that after the kill RPC, and the exit
+    /// watcher can emit `TaskCompleted` in that gap.
+    finished: bool,
+}
+
+impl Drop for LiveWaiter<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut tasks) = self.tasks.lock()
+            && let Some(task) = tasks.get_mut(self.task_id)
+        {
+            task.live_waiters = task.live_waiters.saturating_sub(1);
+            if task.live_waiters == 0 && !self.finished {
+                task.block_waited = false;
+            }
+        }
+    }
+}
 
 fn wrap_command(command: &str) -> Result<String, ComputerError> {
     #[cfg(not(unix))]
@@ -393,6 +424,12 @@ impl TerminalBackend for AcpTerminalAdapter {
     }
 
     async fn kill_task(&self, task_id: &str) -> KillOutcome {
+        self.kill_task_with_source(task_id, KillSource::ModelTool)
+            .await
+    }
+
+    async fn kill_task_with_source(&self, task_id: &str, source: KillSource) -> KillOutcome {
+        #[derive(Copy, Clone)]
         enum Tracked {
             Running,
             Completed,
@@ -404,6 +441,18 @@ impl TerminalBackend for AcpTerminalAdapter {
                 Some(task) if task.completed => Tracked::Completed,
                 Some(task) => {
                     task.explicitly_killed = true;
+                    // ModelTool/Teardown suppress auto-wake immediately
+                    // (`marks_result_delivered(false)` is true). ClientUi
+                    // waits until after the kill RPC so a cancelled waiter
+                    // is visible. Setting only `explicitly_killed` here
+                    // would let the exit watcher emit TaskCompleted with
+                    // `kill_result_delivered` still false.
+                    if source.marks_result_delivered(false) {
+                        task.kill_result_delivered = true;
+                    }
+                    if task.live_waiters == 0 {
+                        task.block_waited = false;
+                    }
                     Tracked::Running
                 }
                 None => Tracked::Unknown,
@@ -434,7 +483,7 @@ impl TerminalBackend for AcpTerminalAdapter {
             }
         }
 
-        match self
+        let outcome = match self
             .gateway
             .send(acp::KillTerminalRequest::new(
                 self.session_id.clone(),
@@ -444,7 +493,24 @@ impl TerminalBackend for AcpTerminalAdapter {
         {
             Ok(_) => KillOutcome::Killed,
             Err(_) => KillOutcome::NotFound,
+        };
+        // ClientUi: sample waiters after the RPC so a wait cancelled at
+        // its own `.await` (Drop of `LiveWaiter`) is not still counted as
+        // delivered. ACP has no oneshot list; this is the closest we get
+        // to local's `reply.send(...).is_ok()`. ModelTool/Teardown already
+        // marked delivered under the first lock.
+        if matches!(tracked, Tracked::Running)
+            && !source.marks_result_delivered(false)
+            && let Ok(mut tasks) = self.tasks.lock()
+            && let Some(task) = tasks.get_mut(task_id)
+        {
+            let any_delivered = task.live_waiters > 0;
+            task.kill_result_delivered = any_delivered;
+            if !any_delivered {
+                task.block_waited = false;
+            }
         }
+        outcome
     }
 
     async fn wait_for_completion(
@@ -454,19 +520,68 @@ impl TerminalBackend for AcpTerminalAdapter {
     ) -> Option<TaskSnapshot> {
         let timeout = timeout.unwrap_or(Duration::from_secs(30));
 
-        let already_completed = {
+        enum WaitStart {
+            Immediate,
+            Block,
+            ProbeThenMaybeBlock,
+        }
+        let start = {
             let mut tasks = self.tasks.lock().unwrap();
             match tasks.get_mut(task_id) {
                 Some(task) => {
                     task.block_waited = true;
-                    task.completed
+                    if task.completed {
+                        WaitStart::Immediate
+                    } else {
+                        task.live_waiters = task.live_waiters.saturating_add(1);
+                        WaitStart::Block
+                    }
                 }
-                None => false,
+                None => WaitStart::ProbeThenMaybeBlock,
             }
         };
-        if already_completed {
-            return self.get_task(task_id).await;
+        match start {
+            WaitStart::Immediate => return self.get_task(task_id).await,
+            WaitStart::ProbeThenMaybeBlock => {
+                // Not tracked as running: one output probe. A dead or unknown
+                // terminal must not burn the wait budget on WaitForTerminalExit.
+                // Match kill's untracked probe: `get_task` maps every
+                // TerminalOutput error to None, so a transport/channel blip
+                // on a still-live resumed terminal must not look like
+                // not-found. Only a client that answered and disowned the
+                // id is a definitive miss.
+                let probe = self
+                    .gateway
+                    .send(acp::TerminalOutputRequest::new(
+                        self.session_id.clone(),
+                        self.terminal_id(task_id),
+                    ))
+                    .await;
+                match probe {
+                    Err(err) if acp_channel_failure(&err).is_none() => return None,
+                    Err(_) => {}
+                    Ok(output) if output.exit_status.is_some() => {
+                        let (exit_code, signal) = parse_exit(&output.exit_status);
+                        return Some(TrackedTask::default().to_snapshot(
+                            task_id,
+                            SnapshotOutput {
+                                output: output.output,
+                                truncated: output.truncated,
+                                exit_code,
+                                signal,
+                            },
+                        ));
+                    }
+                    Ok(_) => {}
+                }
+            }
+            WaitStart::Block => {}
         }
+        let mut live_waiter = LiveWaiter {
+            tasks: self.tasks.clone(),
+            task_id,
+            finished: false,
+        };
 
         let gateway_result = tokio::time::timeout(
             timeout,
@@ -505,7 +620,9 @@ impl TerminalBackend for AcpTerminalAdapter {
             }
         }
 
-        self.get_task(task_id).await
+        let snapshot = self.get_task(task_id).await;
+        live_waiter.finished = true;
+        snapshot
     }
 
     async fn list_tasks(&self) -> Vec<TaskSnapshot> {
@@ -532,7 +649,8 @@ impl TerminalBackend for AcpTerminalAdapter {
                 .collect()
         };
         for task_id in task_ids {
-            self.kill_task(&task_id).await;
+            self.kill_task_with_source(&task_id, KillSource::Teardown)
+                .await;
         }
     }
 

@@ -573,3 +573,247 @@
         );
     }
 
+    fn seed_loop(app: &mut AppView, task_id: &str) {
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .scheduled_tasks
+            .insert(
+                task_id.into(),
+                crate::app::agent::ScheduledTaskInfo {
+                    task_id: task_id.into(),
+                    prompt: "babysit the WSD pipeline overnight\nsecond line".into(),
+                    human_schedule: "every 30 minutes".into(),
+                    created_at: Instant::now(),
+                    next_fire_at: Some("2026-01-01T00:00:00Z".into()),
+                    tag: "loop".into(),
+                    last_subagent_id: None,
+                },
+            );
+    }
+
+    /// An auto-expired task must leave a transcript record: it is the one removal nobody asked
+    /// for. The tombstone replays on resume, so this line is also what a returning user sees after
+    /// a restart.
+    #[test]
+    fn deleted_with_expired_reason_pushes_transcript_notice() {
+        use xai_grok_tools::notification::ScheduledTaskRemovedReason;
+        let mut app = make_app_with_agent("sess-1");
+        seed_loop(&mut app, "loop-exp");
+
+        let notif = make_deleted_ext_notif_with_reason(
+            "sess-1",
+            "loop-exp",
+            ScheduledTaskRemovedReason::Expired,
+            false,
+        );
+        assert!(handle_scheduled_task_deleted(&notif, &mut app));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.session.scheduled_tasks.is_empty(), "chip removed");
+        assert_eq!(agent.scrollback.len(), 1);
+        match &agent.scrollback.get(0).unwrap().block {
+            RenderBlock::System(block) => {
+                assert!(
+                    block.text.contains("Scheduled task expired"),
+                    "{}",
+                    block.text
+                );
+                assert!(
+                    block.text.contains("babysit the WSD pipeline overnight"),
+                    "first prompt line identifies the task: {}",
+                    block.text
+                );
+                assert!(!block.text.contains("second line"), "single-line notice");
+                assert!(block.text.contains("every 30 minutes"), "{}", block.text);
+            }
+            other => panic!("expected System block, got {other:?}"),
+        }
+
+        // Re-delivering the same tombstone (reconnect tail replaying an event
+        // already applied live) must not stack a second notice: the chip is
+        // already gone, so the push is skipped.
+        assert!(handle_scheduled_task_deleted(&notif, &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.scrollback.len(), 1, "duplicate delivery is a no-op");
+    }
+
+    /// A replayed expiry tombstone renders only while the agent accepts replay: inside an open
+    /// `session/load` window (`loading_replay`) or the post-load `late_replay_until` grace, where
+    /// legitimate replay tails still arrive after `SessionLoaded`. A misrouted replay against a
+    /// live transcript (neither open) must remove the chip but never duplicate history.
+    #[test]
+    fn replayed_expiry_notice_requires_replay_window() {
+        use xai_grok_tools::notification::ScheduledTaskRemovedReason;
+        #[derive(Debug)]
+        enum ReplayPhase {
+            None,
+            LoadWindow,
+            LateGrace,
+        }
+        for (phase, expected_lines) in [
+            (ReplayPhase::None, 0),
+            (ReplayPhase::LoadWindow, 1),
+            (ReplayPhase::LateGrace, 1),
+        ] {
+            let mut app = make_app_with_agent("sess-1");
+            seed_loop(&mut app, "loop-exp");
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            match phase {
+                ReplayPhase::None => {}
+                ReplayPhase::LoadWindow => agent.session.loading_replay = true,
+                ReplayPhase::LateGrace => agent.arm_late_replay_grace(),
+            }
+
+            let notif = make_deleted_ext_notif_with_reason(
+                "sess-1",
+                "loop-exp",
+                ScheduledTaskRemovedReason::Expired,
+                true,
+            );
+            assert!(handle_scheduled_task_deleted(&notif, &mut app));
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(agent.session.scheduled_tasks.is_empty(), "chip removed");
+            assert_eq!(agent.scrollback.len(), expected_lines, "phase {phase:?}");
+        }
+    }
+
+    /// Reconnect after a live expiry: the reload replays `ScheduledTaskCreated` (restoring the
+    /// chip) and then the expiry tombstone, which re-stages the notice. The keep-stash finalize
+    /// outcome must drop the staged copy instead of appending it below the line the stash
+    /// already rendered live before the outage.
+    #[test]
+    fn reconnect_replay_of_create_then_expiry_does_not_duplicate_notice() {
+        use xai_grok_tools::notification::ScheduledTaskRemovedReason;
+        let mut app = make_app_with_agent("sess-1");
+        seed_loop(&mut app, "loop-exp");
+
+        // Live expiry before the reconnect: notice rendered once.
+        let live = make_deleted_ext_notif_with_reason(
+            "sess-1",
+            "loop-exp",
+            ScheduledTaskRemovedReason::Expired,
+            false,
+        );
+        assert!(handle_scheduled_task_deleted(&live, &mut app));
+
+        // Reconnect: stash the transcript and replay the persisted scheduler events.
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .begin_session_reload(1);
+        let created = make_created_ext_notif(
+            "sess-1",
+            "loop-exp",
+            "babysit the WSD pipeline overnight",
+            "every 30 minutes",
+            Some("2026-01-01T00:00:00Z"),
+        );
+        assert!(handle_scheduled_task_created(&created, &mut app));
+        let replayed = make_deleted_ext_notif_with_reason(
+            "sess-1",
+            "loop-exp",
+            ScheduledTaskRemovedReason::Expired,
+            true,
+        );
+        assert!(handle_scheduled_task_deleted(&replayed, &mut app));
+        assert!(app
+            .agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .finish_session_reload(1, true));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.session.scheduled_tasks.is_empty(), "chip removed");
+        let notices = (0..agent.scrollback.len())
+            .filter(|i| match &agent.scrollback.get(*i).unwrap().block {
+                RenderBlock::System(block) => block.text.contains("Scheduled task expired"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(notices, 1, "reconnect replay must not duplicate the notice");
+    }
+
+    /// Two distinct loops can share a prompt and schedule, producing byte-identical expiry
+    /// notices. The reconnect dedupe must drop only as many staged copies as the stash already
+    /// shows: one for the task expired live, keeping the second task's notice.
+    #[test]
+    fn reconnect_dedupe_keeps_notice_for_second_task_with_identical_copy() {
+        use xai_grok_tools::notification::ScheduledTaskRemovedReason;
+        let mut app = make_app_with_agent("sess-1");
+        seed_loop(&mut app, "loop-a");
+
+        // Task A expires live: one notice in the pre-outage transcript.
+        let live = make_deleted_ext_notif_with_reason(
+            "sess-1",
+            "loop-a",
+            ScheduledTaskRemovedReason::Expired,
+            false,
+        );
+        assert!(handle_scheduled_task_deleted(&live, &mut app));
+
+        // Reconnect: the replay restores and expires BOTH tasks; B's notice is new information.
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .begin_session_reload(1);
+        for task_id in ["loop-a", "loop-b"] {
+            let created = make_created_ext_notif(
+                "sess-1",
+                task_id,
+                "babysit the WSD pipeline overnight\nsecond line",
+                "every 30 minutes",
+                Some("2026-01-01T00:00:00Z"),
+            );
+            assert!(handle_scheduled_task_created(&created, &mut app));
+            let replayed = make_deleted_ext_notif_with_reason(
+                "sess-1",
+                task_id,
+                ScheduledTaskRemovedReason::Expired,
+                true,
+            );
+            assert!(handle_scheduled_task_deleted(&replayed, &mut app));
+        }
+        assert!(app
+            .agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .finish_session_reload(1, true));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let notices = (0..agent.scrollback.len())
+            .filter(|i| match &agent.scrollback.get(*i).unwrap().block {
+                RenderBlock::System(block) => block.text.contains("Scheduled task expired"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            notices, 2,
+            "only the live-rendered copy dedupes; the second task's notice must survive"
+        );
+    }
+
+    /// Every non-expiry removal is user- or lifecycle-driven and already visible elsewhere; it
+    /// must stay silent in the transcript.
+    #[test]
+    fn deleted_with_other_or_unknown_reasons_is_silent() {
+        use xai_grok_tools::notification::ScheduledTaskRemovedReason::*;
+        for reason in [Unknown, Completed, Deleted, Shutdown] {
+            let mut app = make_app_with_agent("sess-1");
+            seed_loop(&mut app, "loop-quiet");
+
+            let notif = make_deleted_ext_notif_with_reason("sess-1", "loop-quiet", reason, false);
+            assert!(handle_scheduled_task_deleted(&notif, &mut app));
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(agent.session.scheduled_tasks.is_empty(), "chip removed");
+            assert_eq!(
+                agent.scrollback.len(),
+                0,
+                "no transcript line for {reason:?}"
+            );
+        }
+    }
+

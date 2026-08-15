@@ -286,3 +286,148 @@ async fn yolo_tool_does_not_fire_permission_prompt_notification() {
         })
         .await;
 }
+
+fn pre_tool_use_registry(script: &str) -> xai_grok_hooks::discovery::HookRegistry {
+    let (mut registry, _) = xai_grok_hooks::discovery::load_hooks(None, None);
+    registry.append_specs(vec![xai_grok_hooks::config::HookSpec {
+        name: "test/pretooluse".into(),
+        event: xai_grok_hooks::event::HookEventName::PreToolUse,
+        handler_type: xai_grok_hooks::config::HandlerType::Command,
+        configured_matcher: None,
+        matcher: None,
+        enabled: true,
+        command: Some(std::path::PathBuf::from(script)),
+        command_raw: Some(script.to_string()),
+        url: None,
+        url_raw: None,
+        timeout_ms: 5000,
+        source_dir: std::path::PathBuf::from("/tmp"),
+        extra_env: std::collections::HashMap::new(),
+        layer: xai_grok_hooks::config::HookProvenance::File,
+    }]);
+    registry
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pre_tool_use_updated_input_rewrites_prepared_call() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let hook_gateway = AcpAgentGatewaySender::new(gateway_tx.clone());
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_tools(edit_toolset()).await;
+            actor.hook_resolved_workspace_root = "/tmp".to_string();
+            install_real_permissions(&mut actor, /*yolo=*/ true, hook_gateway);
+            *actor.hook_registry.borrow_mut() = Some(std::sync::Arc::new(pre_tool_use_registry(
+                r#"echo '{"hookSpecificOutput":{"updatedInput":{"target_file":"/tmp/rewritten.txt"}}}'"#,
+            )));
+            let actor = Arc::new(actor);
+            spawn_gateway_loop(gateway_rx, Arc::new(AtomicUsize::new(0)), false);
+
+            let prepared = prepare(&actor, read_call("call_rewrite"))
+                .await
+                .expect("hook rewrite must prepare");
+            assert_eq!(
+                prepared.parsed_args["target_file"], "/tmp/rewritten.txt",
+                "hook updatedInput must replace the tool input; got {}",
+                prepared.raw_arguments
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pre_tool_use_invalid_updated_input_is_tool_parsing_error() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let hook_gateway = AcpAgentGatewaySender::new(gateway_tx.clone());
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_tools(edit_toolset()).await;
+            actor.hook_resolved_workspace_root = "/tmp".to_string();
+            install_real_permissions(&mut actor, /*yolo=*/ true, hook_gateway);
+            *actor.hook_registry.borrow_mut() = Some(std::sync::Arc::new(pre_tool_use_registry(
+                r#"echo '{"hookSpecificOutput":{"updatedInput":{"target_file":123}}}'"#,
+            )));
+            let actor = Arc::new(actor);
+            spawn_gateway_loop(gateway_rx, Arc::new(AtomicUsize::new(0)), false);
+
+            let result = prepare(&actor, read_call("call_bad_rewrite")).await;
+            assert!(
+                matches!(result, Err(ToolLoop::ToolParsingError)),
+                "an invalid hook updatedInput must surface as a parse error, got {result:?}"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pre_tool_use_updated_input_reflected_in_permission_prompt() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let hook_gateway = AcpAgentGatewaySender::new(gateway_tx.clone());
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_tools(edit_toolset()).await;
+            actor.hook_resolved_workspace_root = "/tmp".to_string();
+            install_real_permissions(&mut actor, /*yolo=*/ false, hook_gateway);
+            *actor.hook_registry.borrow_mut() = Some(std::sync::Arc::new(pre_tool_use_registry(
+                r#"echo '{"hookSpecificOutput":{"updatedInput":{"file_path":"/tmp/rewritten-edit.txt","old_string":"a","new_string":"b"}}}'"#,
+            )));
+            let actor = Arc::new(actor);
+
+            let captured: Arc<std::sync::Mutex<Option<serde_json::Value>>> =
+                Arc::new(std::sync::Mutex::new(None));
+            let captured_loop = captured.clone();
+            tokio::task::spawn_local(async move {
+                let mut gateway_rx = gateway_rx;
+                while let Some(msg) = gateway_rx.recv().await {
+                    match msg {
+                        xai_acp_lib::AcpClientMessage::RequestPermission(args) => {
+                            *captured_loop.lock().unwrap() =
+                                args.request.tool_call.fields.raw_input.clone();
+                            let _ = args.response_tx.send(Ok(
+                                acp::RequestPermissionResponse::new(
+                                    acp::RequestPermissionOutcome::Selected(
+                                        acp::SelectedPermissionOutcome::new(
+                                            acp::PermissionOptionId::new("allow-once"),
+                                        ),
+                                    ),
+                                ),
+                            ));
+                        }
+                        xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                            let _ = args.response_tx.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            prepare(&actor, edit_call("call_perm_rewrite"))
+                .await
+                .expect("prompted allow-once must prepare");
+            let raw = captured
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("permission prompt must carry raw_input");
+            assert!(
+                raw.to_string().contains("/tmp/rewritten-edit.txt"),
+                "permission prompt must reflect the hook's updatedInput, got {raw}"
+            );
+        })
+        .await;
+}

@@ -41,6 +41,31 @@ fn drain_gateway(mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpCl
     });
 }
 
+/// Acks like [`drain_gateway`] but keeps the hook events for the one test that asserts on them.
+fn capture_hook_events(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
+) -> std::rc::Rc<std::cell::RefCell<Vec<serde_json::Value>>> {
+    let fired = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = fired.clone();
+    tokio::task::spawn_local(async move {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                    let _ = args.response_tx.send(Ok(()));
+                }
+                xai_acp_lib::AcpClientMessage::ExtNotification(args)
+                    if args.request.method.as_ref() == "x.ai/hooks/event" =>
+                {
+                    sink.borrow_mut()
+                        .push(serde_json::from_str(args.request.params.get()).unwrap());
+                }
+                _ => {}
+            }
+        }
+    });
+    fired
+}
+
 fn drain_persistence_flush_enospc(mut rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>) {
     tokio::task::spawn_local(async move {
         while let Some(msg) = rx.recv().await {
@@ -149,8 +174,10 @@ async fn run_prompt(
     .expect("turn must finish within timeout")
 }
 
+/// Also the one test that drives a real turn into `StopFailure`: deleting the report in the
+/// turn's error arm leaves a host that watched the turn start waiting forever.
 #[test]
-fn completed_turn_flush_enospc_returns_error() {
+fn completed_turn_flush_enospc_returns_error_and_reports_stop_failure() {
     block_on_session(|| {
         current_thread_local(async {
             let server = MockInferenceServer::start()
@@ -163,16 +190,33 @@ fn completed_turn_flush_enospc_returns_error() {
 
             let (gateway_tx, gateway_rx) =
                 tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
-            drain_gateway(gateway_rx);
+            let fired = capture_hook_events(gateway_rx);
             let (persistence_tx, persistence_rx) =
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             drain_persistence_flush_enospc(persistence_rx);
 
             let actor = actor_with_mock_sampler(&server, persistence_tx, gateway_tx, None).await;
+            let mut hooks = crate::extensions::hooks::ClientHooks::new();
+            hooks.insert(
+                xai_grok_hooks::event::HookEventName::StopFailure,
+                vec![crate::extensions::hooks::ClientHookGroup {
+                    matcher: None,
+                    callback_ids: vec!["cb".to_string()],
+                    timeout: None,
+                }],
+            );
+            *actor.client_hooks.borrow_mut() = hooks;
+            let queue = super::turn_end_hooks::TurnEndQueue::spawn(actor.clone());
+
             let error = run_prompt(&actor, "disk-full-completed")
                 .await
                 .expect_err("completed turn must fail when flush hits ENOSPC");
+            queue.drain().await;
+
             assert_eq!(error.message, "No space left on device");
+            let fired = fired.borrow();
+            assert_eq!(fired.len(), 1);
+            assert_eq!(fired[0]["hookEventName"], "stop_failure");
         });
     });
 }

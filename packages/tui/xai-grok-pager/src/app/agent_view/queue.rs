@@ -80,7 +80,7 @@ impl AgentView {
     /// waits — see [`Self::renders_parked`].
     /// Purely view-derived — reading it has no turn-lifecycle side effects.
     pub(crate) fn is_parked_on_sendable_wait(&self) -> bool {
-        crate::views::turn_status::is_sendable_wait(&self.resolve_turn_activity())
+        crate::views::turn_status::is_sendable_wait(&self.resolve_turn_activity_unenriched())
             && !self
                 .goal_state
                 .as_ref()
@@ -143,8 +143,8 @@ impl AgentView {
     pub(crate) fn is_waiting_on_subagent(&self) -> bool {
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         matches!(
-            self.resolve_turn_activity(),
-            Some(TurnActivity::Waiting(WaitingReason::Subagent))
+            self.resolve_turn_activity_unenriched(),
+            Some(TurnActivity::Waiting(WaitingReason::Subagent { .. }))
         )
     }
 
@@ -455,15 +455,8 @@ impl AgentView {
                 // Forward-only: the xAI rail shares this cursor and may have
                 // applied later events during the buffering window — assigning
                 // a buffered (older) id would re-deliver those on reconnect.
-                let cur_seq = self
-                    .last_seen_event_id
-                    .as_deref()
-                    .and_then(|s| s.rsplit('-').next())
-                    .and_then(|c| c.parse::<u64>().ok());
-                if let (Some(seq), Some(id)) = (meta.event_seq, meta.event_id.take())
-                    && cur_seq.is_none_or(|cur| seq > cur)
-                {
-                    self.last_seen_event_id = Some(id);
+                if let (Some(seq), Some(id)) = (meta.event_seq, meta.event_id.take()) {
+                    self.advance_last_seen_event_id(id, Some(seq));
                 }
                 self.session
                     .handle_update(update, &meta, &mut self.scrollback);

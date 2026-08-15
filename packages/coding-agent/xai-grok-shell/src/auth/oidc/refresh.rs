@@ -4,6 +4,7 @@
 use super::super::GrokAuth;
 use super::protocol::{OidcError, OidcUserInfo, build_grok_auth, discover, refresh_tokens};
 use crate::auth::error::RefreshTokenFailedReason;
+use crate::auth::refresh::SuspectConsumedRt;
 
 /// Outcome of a pure OIDC token refresh (no AuthManager mutations).
 pub(crate) enum OidcRefreshResult {
@@ -18,7 +19,18 @@ pub(crate) enum OidcRefreshResult {
     /// of the first seconds after wake-from-sleep. Such failures prove
     /// nothing about the credential, so `OidcRefresher`'s transient →
     /// permanent escalation budget must not count them.
-    Failed { network_unreachable: bool },
+    ///
+    /// `suspected_consumed_rt` is `Some` when the token exchange failed
+    /// after the [`ProbeScope::Exchange`] probe measured a straddle past the
+    /// rotation grace: the RT was on the wire across the sleep and its fate
+    /// at the IdP is unknown. Deliberately conservative within that window —
+    /// a straddled *timeout* counts even though the request may never have
+    /// arrived, because a false positive costs one gated post-wake retry
+    /// while a miss costs a forced re-login on every session.
+    Failed {
+        network_unreachable: bool,
+        suspected_consumed_rt: Option<SuspectConsumedRt>,
+    },
 }
 
 /// Classify an OAuth2 `error` code as a terminal refresh failure. `None` means
@@ -38,6 +50,43 @@ pub(super) fn classify_terminal(error_code: &str) -> Option<RefreshTokenFailedRe
 /// no longer be recovered by re-presenting the old RT.
 const ROTATION_GRACE_MS: u64 = 60_000;
 
+// Test-only override forcing `SuspendProbe::straddled_past_grace`, so
+// straddles are testable without a real suspend. Thread-local: parallel
+// tests must not force each other's probes.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForcedStraddleForTest {
+    /// Every probe reports a straddle.
+    All,
+    /// Only the [`ProbeScope::WholeRefresh`] probe reports a straddle — a
+    /// suspend confined to discovery / pre-POST, over before the exchange.
+    WholeRefreshOnly,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FORCE_STRADDLED_FOR_TEST: std::cell::Cell<Option<ForcedStraddleForTest>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// What a [`SuspendProbe`] measurement covers — the distinction that decides
+/// whether a straddle can implicate the refresh token: only the RT-on-wire
+/// window may. A suspend confined to discovery or the pre-POST gap never put
+/// the RT on the wire and must not set
+/// [`OidcRefreshResult::Failed::suspected_consumed_rt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProbeScope {
+    /// Started before discovery; covers the entire refresh. Telemetry-only:
+    /// feeds `suspended_ms`/`suspected_suspend` and
+    /// `auth.refresh.suspend_spanned`.
+    WholeRefresh,
+    /// Started strictly before the first token POST is transmitted; covers
+    /// every in-call retry (each re-send re-exposes the RT) through the
+    /// final outcome. The only measurement that may gate the
+    /// possibly-consumed-RT sentinel and the in-call retry suppression.
+    Exchange,
+}
+
 /// Dual-clock suspend probe around an IdP exchange: the monotonic clock
 /// pauses during suspend and the wall clock does not, so their divergence
 /// measures time suspended since [`Self::start`]. Feeds `suspended_ms`
@@ -47,13 +96,18 @@ const ROTATION_GRACE_MS: u64 = 60_000;
 pub(super) struct SuspendProbe {
     mono: std::time::Instant,
     wall: chrono::DateTime<chrono::Utc>,
+    /// Read only by the test seam; production straddle decisions are scoped
+    /// by which probe a call site consults.
+    #[cfg_attr(not(test), allow(dead_code))]
+    scope: ProbeScope,
 }
 
 impl SuspendProbe {
-    pub(super) fn start() -> Self {
+    pub(super) fn start(scope: ProbeScope) -> Self {
         Self {
             mono: std::time::Instant::now(),
             wall: chrono::Utc::now(),
+            scope,
         }
     }
 
@@ -70,9 +124,22 @@ impl SuspendProbe {
         wall_ms.saturating_sub(mono_ms)
     }
 
-    /// `true` once the exchange has straddled a suspend past the rotation
-    /// grace.
+    /// `true` once this probe's window has straddled a suspend past the
+    /// rotation grace.
     pub(super) fn straddled_past_grace(&self) -> bool {
+        #[cfg(test)]
+        match FORCE_STRADDLED_FOR_TEST.with(std::cell::Cell::get) {
+            Some(ForcedStraddleForTest::All) => return true,
+            Some(ForcedStraddleForTest::WholeRefreshOnly)
+                if self.scope == ProbeScope::WholeRefresh =>
+            {
+                return true;
+            }
+            // `WholeRefreshOnly` + an `Exchange` probe falls through to the
+            // real measurement (no straddle under test), reproducing a
+            // suspend that ended before the exchange began.
+            _ => {}
+        }
         self.suspended_ms() > ROTATION_GRACE_MS
     }
 }
@@ -116,16 +183,19 @@ pub(crate) async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
     let Some(refresh_tok) = auth.refresh_token.as_ref() else {
         return OidcRefreshResult::Failed {
             network_unreachable: false,
+            suspected_consumed_rt: None,
         };
     };
     let Some(issuer) = auth.oidc_issuer.as_ref() else {
         return OidcRefreshResult::Failed {
             network_unreachable: false,
+            suspected_consumed_rt: None,
         };
     };
     let Some(client_id) = auth.oidc_client_id.as_ref() else {
         return OidcRefreshResult::Failed {
             network_unreachable: false,
+            suspected_consumed_rt: None,
         };
     };
 
@@ -137,8 +207,8 @@ pub(crate) async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
 
     // A large mono/wall divergence around the IdP call means the process was
     // suspended mid-refresh — the condition that can revoke the refresh token
-    // (response lost across sleep). See [`SuspendProbe`].
-    let probe = SuspendProbe::start();
+    // (response lost across sleep). See [`SuspendProbe`] and [`ProbeScope`].
+    let probe = SuspendProbe::start(ProbeScope::WholeRefresh);
     let timing = || {
         let (mono_ms, wall_ms) = probe.elapsed_ms();
         (
@@ -169,17 +239,26 @@ pub(crate) async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
             if suspected_suspend {
                 emit_suspend_spanned("discovery_failed", suspended_ms);
             }
+            // Even straddled, a discovery failure never presented the RT, so
+            // there is nothing the IdP could have consumed.
             return OidcRefreshResult::Failed {
                 network_unreachable,
+                suspected_consumed_rt: None,
             };
         }
     };
+    // Started strictly before the first token POST (`refresh_tokens` sends
+    // nothing before its first attempt); see [`ProbeScope::Exchange`]. The
+    // same probe drives `refresh_tokens`' in-call retry suppression, so the
+    // two decisions cannot drift.
+    let exchange_probe = SuspendProbe::start(ProbeScope::Exchange);
     let tokens = match refresh_tokens(
         &discovery.token_endpoint,
         refresh_tok,
         client_id,
         auth.principal_type.as_deref(),
         auth.principal_id.as_deref(),
+        &exchange_probe,
     )
     .await
     {
@@ -221,6 +300,10 @@ pub(crate) async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
             });
             let network_unreachable = is_network_unreachable(&e);
             let (mono_ms, wall_ms, suspended_ms, suspected_suspend) = timing();
+            // `suspected_suspend` stays whole-refresh (telemetry continuity);
+            // logged side by side so a capture shows which window the
+            // suspend fell into.
+            let exchange_straddled = exchange_probe.straddled_past_grace();
             crate::unified_log::error(
                 "oidc try_refresh_pure token exchange failed",
                 None,
@@ -233,6 +316,8 @@ pub(crate) async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
                     "wall_ms": wall_ms,
                     "suspended_ms": suspended_ms,
                     "suspected_suspend": suspected_suspend,
+                    "exchange_suspended_ms": exchange_probe.suspended_ms(),
+                    "exchange_straddled": exchange_straddled,
                 })),
             );
             tracing::warn!(
@@ -245,8 +330,12 @@ pub(crate) async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
             if suspected_suspend {
                 emit_suspend_spanned("transient_failed", suspended_ms);
             }
+            let suspected_consumed_rt = exchange_straddled.then(|| {
+                SuspectConsumedRt::new(refresh_tok.clone(), exchange_probe.suspended_ms())
+            });
             return OidcRefreshResult::Failed {
                 network_unreachable,
+                suspected_consumed_rt,
             };
         }
     };

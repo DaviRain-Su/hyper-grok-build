@@ -9,8 +9,8 @@
 //! - **Repo(s) on the project, chosen per conversation.** A project
 //!   configures remotes; a conversation binds a *set* of `(remote, branch)`.
 //!   [`resolve_repo_sources`] turns `(remotes, bindings)` into the repo set the
-//!   sandbox already knows how to provision (the `git_sources` contract) — the
-//!   binding is the *source* of the repos, not free-form client input.
+//!   sandbox provisioner consumes — the binding is the *source* of the repos,
+//!   not free-form client input.
 //!
 //! This crate is pure-data (no async, no I/O); the actual git mutations happen in
 //! the workspace server via WorkspaceOps and the sandbox provisioner.

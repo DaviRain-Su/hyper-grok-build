@@ -83,11 +83,11 @@ pub(super) fn parse_queue_edit_command(
         }
         "x.ai/queue/hold_edit" => {
             let id = params.get("id").and_then(|v| v.as_str())?.to_string();
-            Some(SessionCommand::HoldCombineEdit { id })
+            Some(SessionCommand::HoldEdit { id })
         }
         "x.ai/queue/release_edit" => {
             let id = params.get("id").and_then(|v| v.as_str())?.to_string();
-            Some(SessionCommand::ReleaseCombineEdit { id })
+            Some(SessionCommand::ReleaseEdit { id })
         }
         _ => None,
     }
@@ -259,12 +259,12 @@ mod tests {
         // hold_edit / release_edit: id only (combine-hold while the client edits).
         let p = serde_json::json!({ "sessionId": "s1", "id": "p12" });
         match parse_queue_edit_command("x.ai/queue/hold_edit", &p, None) {
-            Some(SessionCommand::HoldCombineEdit { id }) => assert_eq!(id, "p12"),
-            _ => panic!("expected HoldCombineEdit"),
+            Some(SessionCommand::HoldEdit { id }) => assert_eq!(id, "p12"),
+            _ => panic!("expected HoldEdit"),
         }
         match parse_queue_edit_command("x.ai/queue/release_edit", &p, None) {
-            Some(SessionCommand::ReleaseCombineEdit { id }) => assert_eq!(id, "p12"),
-            _ => panic!("expected ReleaseCombineEdit"),
+            Some(SessionCommand::ReleaseEdit { id }) => assert_eq!(id, "p12"),
+            _ => panic!("expected ReleaseEdit"),
         }
 
         // hold_edit / release_edit without id → None (can't target an entry).

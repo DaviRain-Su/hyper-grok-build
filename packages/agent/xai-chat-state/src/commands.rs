@@ -153,6 +153,15 @@ pub enum ChatStateCommand {
         >,
     },
 
+    /// Persist a URL-scoped strip. In-actor so it serializes with turn pushes.
+    /// Replies with the typed [`crate::StripOutcome`] once the DISK write is
+    /// acknowledged: `Applied` means the backup and rewrite both landed, so
+    /// the caller can honestly claim durable removal.
+    StripConversationImages {
+        urls: Vec<std::sync::Arc<str>>,
+        reply: tokio::sync::oneshot::Sender<crate::StripOutcome>,
+    },
+
     /// Atomically align the leading `System` message with `prompt` (inserting
     /// one if absent), persisting the conversation. Executed inside the actor so
     /// it serializes with concurrent turn pushes (`PushAssistantResponse` /

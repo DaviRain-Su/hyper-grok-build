@@ -592,7 +592,74 @@ impl SessionActor {
                 redirect_kind: crate::session::events::RedirectKind::Interjection,
             });
         Self::respond_removed_prompt(respond_to);
-        tracing::info!("goal turn: queued send-now prompt as a mid-turn interjection");
+        tracing::info!(
+            ?source,
+            prompt_id = %prompt_id,
+            "queued prompt promoted as a mid-turn interjection"
+        );
+    }
+
+    /// Move held user prompts into `pending_interjections` so the next drain
+    /// injects them. Stops (does not skip over) at: bash (FIFO); send-now
+    /// (cancel-and-run-next must not become continue-with-interject); edit
+    /// hold (would inject stale pre-edit text); a different `queue_meta.owner`
+    /// than the running prompt (leader mode: another client's next-turn row
+    /// stays queued); or a row with `tool_overrides_update` (interjection
+    /// discards the override payload that a normal turn drain would apply).
+    /// No-op when idle or the held queue is empty.
+    pub(super) async fn promote_queued_as_interjections(&self) {
+        let mut state = self.state.lock().await;
+        let running_front_id = state.running_prompt_id().map(str::to_string);
+        let Some(running_id) = running_front_id.as_deref() else {
+            return;
+        };
+        let running_owner = state
+            .pending_inputs
+            .iter()
+            .find(|item| item.prompt_id == running_id)
+            .and_then(|item| item.queue_meta.as_ref())
+            .and_then(|meta| meta.owner.as_deref())
+            .map(str::to_string);
+        let mut promoted = Vec::new();
+        loop {
+            let Some(pos) = state.pending_inputs.iter().position(|item| {
+                !item.origin.is_synthetic()
+                    && Some(item.prompt_id.as_str()) != running_front_id.as_deref()
+            }) else {
+                break;
+            };
+            let item = &state.pending_inputs[pos];
+            let item_owner = item
+                .queue_meta
+                .as_ref()
+                .and_then(|meta| meta.owner.as_deref());
+            if Self::extract_bash_command(&item.prompt_blocks).is_some()
+                || item.send_now
+                || state.edit_holds.contains_key(&item.prompt_id)
+                || item_owner != running_owner.as_deref()
+                || item.tool_overrides_update.is_some()
+            {
+                break;
+            }
+            if let Some(item) = state.pending_inputs.remove(pos) {
+                promoted.push(item);
+            }
+        }
+        if promoted.is_empty() {
+            return;
+        }
+        let goal_active = self.goal_tracker.lock().status()
+            == Some(crate::session::goal_tracker::GoalStatus::Active);
+        for item in promoted {
+            if goal_active {
+                self.enqueue_prompt_as_planner_steering(&item);
+            }
+            self.enqueue_prompt_as_interjection(
+                item,
+                crate::session::events::InterjectionSource::Queue,
+            );
+        }
+        self.broadcast_queue_changed(&state);
     }
 
     /// Resolve a removed prompt's pending RPC with `Ok(RemovedFromQueue)` before dropping it. A
@@ -632,6 +699,8 @@ impl SessionActor {
             }
             removed = true;
         }
+        // Client left edit with keep-hold; drop hold even on no-op so promote is not parked.
+        state.edit_holds.remove(id);
         if !removed {
             tracing::debug!(
                 queued_id = %id,
@@ -759,6 +828,8 @@ impl SessionActor {
                 "queue send-now no-op (running id / stale / drained / not owner); rebroadcasting"
             );
         }
+        // Every path clears: success, LWW fallback, and keep-hold no-op.
+        state.edit_holds.remove(id);
         // Always re-broadcast the authoritative queue so the client reconciles.
         self.broadcast_queue_changed(&state);
         cancel_running_turn
@@ -856,41 +927,54 @@ impl SessionActor {
     /// - The id names the currently-running turn — editing the live turn is
     ///   out of scope.
     /// - `new_text` is blank (a queued prompt is never blanked).
+    ///
+    /// Every path clears the id's hold under the queue lock so a stale edit
+    /// request cannot leave promote parked.
     pub(super) async fn handle_edit_queued_prompt(
         &self,
         id: &str,
         new_text: String,
         editor: Option<&str>,
     ) {
+        let mut state = self.state.lock().await;
+        let mut should_broadcast = false;
         if new_text.trim().is_empty() {
             tracing::debug!(queued_id = %id, "queue edit no-op: empty newText");
-            return;
-        }
-        let mut state = self.state.lock().await;
-        // Locked first: the promoter arms `running_task` under this lock.
-        if Self::is_running_prompt(&state, id) {
+        } else if Self::is_running_prompt(&state, id) {
+            // Locked first: the promoter arms `running_task` under this lock.
             tracing::debug!(
                 queued_id = %id,
                 "queue edit no-op: id names the running turn"
             );
-            return;
-        }
-        let Some(item) = state
+        } else if let Some(pos) = state
             .pending_inputs
-            .iter_mut()
-            .find(|item| item.queue_meta.as_ref().is_some_and(|m| m.id == id))
-        else {
+            .iter()
+            .position(|item| item.queue_meta.as_ref().is_some_and(|meta| meta.id == id))
+        {
+            if let Some(item) = state.pending_inputs.get_mut(pos) {
+                Self::apply_queued_prompt_edit(item, new_text, editor);
+            }
+            should_broadcast = true;
+        } else {
             tracing::debug!(
                 queued_id = %id,
                 "queue edit no-op: id not found (already drained / removed)"
             );
-            return;
-        };
-        Self::apply_queued_prompt_edit(item, new_text, editor);
-        // Clear the hold under the same lock as the text update — see
-        // pager `exit_editing_mode_keeping_hold` for the race this closes.
-        state.combine_edit_holds.remove(id);
-        self.broadcast_queue_changed(&state);
+        }
+        // One clear after the lock work — every path must drop the hold so a
+        // stale edit cannot leave promote parked (see pager
+        // `exit_editing_mode_keeping_hold`).
+        state.edit_holds.remove(id);
+        if should_broadcast {
+            self.broadcast_queue_changed(&state);
+        }
+    }
+
+    /// Stamp (or re-stamp) a queue-edit hold. `insert` refreshes the TTL so
+    /// re-entering edit after a dropped release does not inherit an aged bound.
+    pub(crate) async fn handle_hold_edit(&self, id: String) {
+        let mut state = self.state.lock().await;
+        state.edit_holds.insert(id, std::time::Instant::now());
     }
 
     /// Merge consecutive plain prompts into `pending[0]` via

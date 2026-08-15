@@ -4,9 +4,9 @@ use ratatui::style::Style;
 use ratatui::text::{Span, Text};
 
 use crate::appearance::AppearanceConfig;
-use crate::diff::DiffHunk;
 use crate::inline_media_ffmpeg::inline_media_reserved_rows;
 use crate::prompt_images::{InlineMediaInfo, ScrollbackImageRef, ScrollbackVideoRef};
+use xai_grok_pager_diff::DiffHunk;
 // Imported (rather than referenced as `crate::…`) so the default trait method
 // below stays free of `crate::` tokens: `#[enum_delegate::register]` captures
 // default method bodies into a generated macro, where `crate::` trips

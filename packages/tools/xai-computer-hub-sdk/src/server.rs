@@ -237,6 +237,7 @@ pub struct ToolServerBuilder {
     reconnect_backoff: Option<Arc<[std::time::Duration]>>,
     session_handler_resolver: Option<SessionHandlerResolver>,
     binary_version: Option<String>,
+    image_capabilities: Vec<String>,
 }
 
 impl ToolServerBuilder {
@@ -466,6 +467,14 @@ impl ToolServerBuilder {
         self
     }
 
+    /// Image capability tokens echoed on every bind as
+    /// [`xai_tool_protocol::SessionBindResult::image_capabilities`]. The
+    /// caller validates and sorts them; the SDK forwards them verbatim.
+    pub fn image_capabilities(mut self, tokens: Vec<String>) -> Self {
+        self.image_capabilities = tokens;
+        self
+    }
+
     /// Resolve the pool entry, bind sessions, register tools.
     ///
     /// Returns a [`ToolServer`] ready to be driven via
@@ -574,6 +583,7 @@ impl ToolServerBuilder {
             session_unserved: parking_lot::RwLock::new(HashMap::new()),
             session_resolve_errors: parking_lot::RwLock::new(HashMap::new()),
             binary_version: self.binary_version,
+            image_capabilities: self.image_capabilities,
             notification_fwd: Arc::new(parking_lot::Mutex::new(None)),
             parsed_notif_tx: Arc::new(parking_lot::Mutex::new(None)),
             session_handles: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -632,6 +642,7 @@ struct ToolServerInner {
     /// same lifetime as the `session_handlers` entry.
     session_resolve_errors: parking_lot::RwLock<HashMap<SessionId, String>>,
     binary_version: Option<String>,
+    image_capabilities: Vec<String>,
 
     /// Raw notification forwarding channel. Session loops write here;
     /// the parsing task (spawned in `run()`) reads and parses into
@@ -1440,6 +1451,10 @@ impl ToolServer {
                                             binary_version: server.inner().binary_version.clone(),
                                             unserved_tool_ids: server.unserved_for_session(&sid),
                                             resolve_error: server.resolve_error_for_session(&sid),
+                                            image_capabilities: server
+                                                .inner()
+                                                .image_capabilities
+                                                .clone(),
                                         };
                                         serde_json::json!({
                                             "jsonrpc": "2.0",

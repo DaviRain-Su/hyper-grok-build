@@ -729,6 +729,162 @@ async fn replace_conversation_persists_and_emits_reset() {
 }
 
 #[tokio::test]
+async fn strip_conversation_images_replaces_only_listed_urls_and_persists() {
+    let mut user = match ConversationItem::user("look at this") {
+        ConversationItem::User(u) => u,
+        _ => unreachable!(),
+    };
+    user.add_image("data:image/png;base64,AAAA");
+    let mut later = match ConversationItem::user("and this one") {
+        ConversationItem::User(u) => u,
+        _ => unreachable!(),
+    };
+    later.add_image("data:image/png;base64,BBBB");
+    let mut h = TestHarness::with_conversation(vec![
+        ConversationItem::User(user),
+        ConversationItem::User(later),
+    ]);
+
+    let outcome = h
+        .handle
+        .strip_conversation_images(vec!["data:image/png;base64,AAAA".into()])
+        .await;
+    assert_eq!(
+        outcome,
+        crate::StripOutcome::Applied { stripped: 1 },
+        "ack must carry the disk-applied count"
+    );
+
+    let conv = h.handle.get_conversation().await; // sync point
+    assert_eq!(
+        conv.len(),
+        2,
+        "in-place strip must not add or remove conversation items"
+    );
+    let ConversationItem::User(u) = &conv[0] else {
+        panic!("expected user item");
+    };
+    assert!(
+        u.content
+            .iter()
+            .all(|p| !matches!(p, xai_grok_sampling_types::ContentPart::Image { .. })),
+        "listed image part must be replaced"
+    );
+    let ConversationItem::User(survivor) = &conv[1] else {
+        panic!("expected user item");
+    };
+    assert!(
+        survivor
+            .content
+            .iter()
+            .any(|p| matches!(p, xai_grok_sampling_types::ContentPart::Image { .. })),
+        "unlisted image must survive the scoped strip"
+    );
+
+    let records = h.drain_persistence();
+    // The recoverability contract: strip rewrites go through the single
+    // backup-gated flavor, never the plain, unguarded ReplaceHistory.
+    assert!(
+        records
+            .iter()
+            .any(|r| matches!(r, PersistenceRecord::ReplaceHistoryForStrip(_))),
+        "strip must persist via the backup-gated flavor, got {records:?}"
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|r| matches!(r, PersistenceRecord::ReplaceHistory(_))),
+        "strip must not use the unguarded replace, got {records:?}"
+    );
+}
+
+#[tokio::test]
+async fn strip_conversation_images_does_not_reseed_provider_tokens() {
+    let mut user = match ConversationItem::user("look at this") {
+        ConversationItem::User(u) => u,
+        _ => unreachable!(),
+    };
+    user.add_image("data:image/png;base64,AAAA");
+    let mut h = TestHarness::with_conversation(vec![ConversationItem::User(user)]);
+    h.handle.record_token_usage(100_000);
+    let _ = h.handle.get_total_tokens().await;
+    h.drain_events();
+
+    let outcome = h
+        .handle
+        .strip_conversation_images(vec!["data:image/png;base64,AAAA".into()])
+        .await;
+    assert_eq!(
+        outcome,
+        crate::StripOutcome::Applied { stripped: 1 },
+        "ack must carry the disk-applied count"
+    );
+
+    assert_eq!(
+        h.handle.get_total_tokens().await,
+        100_000,
+        "provider total must survive a surgical strip"
+    );
+    assert!(
+        !h.drain_events()
+            .iter()
+            .any(|e| matches!(e, ChatStateEvent::ConversationReset { .. })),
+        "strip must not emit ConversationReset"
+    );
+}
+
+/// The honest-failure half of the contract: a failed disk write must
+/// surface as WriteFailed (never as Applied), so nobody tells the user a
+/// still-poisoned file was cleaned.
+#[tokio::test]
+async fn strip_conversation_images_reports_write_failure() {
+    let mut user = match ConversationItem::user("look at this") {
+        ConversationItem::User(u) => u,
+        _ => unreachable!(),
+    };
+    user.add_image("data:image/png;base64,AAAA");
+    let (mock, persistence_rx) = MockChatPersistence::new_failing_strip_writes();
+    let h = TestHarness::with_persistence(
+        vec![ConversationItem::User(user)],
+        test_config(),
+        mock,
+        persistence_rx,
+    );
+
+    let outcome = h
+        .handle
+        .strip_conversation_images(vec!["data:image/png;base64,AAAA".into()])
+        .await;
+    assert_eq!(
+        outcome,
+        crate::StripOutcome::WriteFailed { stripped: 1 },
+        "a failed disk write must never read as Applied"
+    );
+}
+
+#[tokio::test]
+async fn strip_conversation_images_is_a_noop_without_images() {
+    let mut h = TestHarness::with_conversation(vec![ConversationItem::user("plain text")]);
+
+    let outcome = h
+        .handle
+        .strip_conversation_images(vec!["data:image/png;base64,AAAA".into()])
+        .await;
+    assert_eq!(
+        outcome,
+        crate::StripOutcome::NoMatch,
+        "no match must be typed, not a fake success"
+    );
+
+    let conv = h.handle.get_conversation().await; // sync point
+    assert_eq!(conv.len(), 1);
+    assert!(
+        h.drain_persistence().is_empty(),
+        "no images stripped must mean no persistence write"
+    );
+}
+
+#[tokio::test]
 async fn compaction_reseed_carries_provider_overhead() {
     let h = TestHarness::new();
     // ~1k estimated tokens; provider reports 51k → 50k overhead.
@@ -4349,7 +4505,7 @@ async fn prefix_stable_after_image_pruning() {
     // Large enough that the serialized body crosses the compaction trigger.
     let big_image_url = format!(
         "data:image/png;base64,{}",
-        "A".repeat(crate::actor::request_builder::IMAGE_COMPACT_TRIGGER_BYTES)
+        "A".repeat(crate::image_budget::IMAGE_COMPACT_TRIGGER_BYTES)
     );
 
     let h = TestHarness::with_conversation(vec![
@@ -4486,6 +4642,75 @@ async fn build_request_preserves_small_old_images() {
         image_retained,
         "a small old image must be preserved, not stripped to a placeholder"
     );
+}
+
+#[tokio::test]
+async fn build_request_budgets_tool_images_on_request_copy_only() {
+    use xai_grok_sampling_types::{ContentPart, ToolCall};
+
+    let image_url = format!(
+        "data:image/png;base64,{}",
+        "A".repeat(crate::image_budget::IMAGE_COMPACT_TRIGGER_BYTES)
+    );
+    let source = vec![
+        ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "call-1".into(),
+            name: "read_file".into(),
+            arguments: r#"{"target_file":"image.png"}"#.into(),
+        }]),
+        ConversationItem::tool_result_with_images(
+            "call-1",
+            "tool text",
+            vec![ContentPart::Image {
+                url: image_url.into(),
+            }],
+        ),
+    ];
+    let source_bytes = serde_json::to_vec(&source).unwrap().len();
+    let mut h = TestHarness::with_conversation(source);
+    let request = h
+        .handle
+        .build_request(vec![], None, false, None, "c".into(), "r".into())
+        .await
+        .unwrap();
+    let event = h.next_event().await;
+    let canonical = h.handle.get_conversation().await;
+
+    let ChatStateEvent::ImageBudget {
+        body_bytes,
+        body_bytes_after,
+        inline_images,
+        needs_image_compaction,
+        evicted,
+        ..
+    } = event
+    else {
+        panic!("expected image budget event");
+    };
+    assert_eq!(body_bytes, source_bytes);
+    assert_eq!(
+        body_bytes_after,
+        serde_json::to_vec(&request.items).unwrap().len()
+    );
+    assert_eq!(inline_images, 1);
+    assert!(needs_image_compaction);
+    assert_eq!(evicted, 1);
+    let ConversationItem::ToolResult(request_result) = &request.items[1] else {
+        panic!("expected request tool result");
+    };
+    assert!(request_result.images.is_empty());
+    assert_eq!(request_result.tool_call_id, "call-1");
+    assert!(request_result.content.starts_with("tool text\n\n"));
+    assert!(
+        request_result
+            .content
+            .contains("images from this tool result were removed")
+    );
+    let ConversationItem::ToolResult(canonical_result) = &canonical[1] else {
+        panic!("expected canonical tool result");
+    };
+    assert_eq!(canonical_result.images.len(), 1);
+    assert_eq!(canonical_result.content.as_ref(), "tool text");
 }
 
 /// Prefix stability after tool result pruning. When context utilization

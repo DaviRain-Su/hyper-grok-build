@@ -21,6 +21,7 @@ crates = [
   "xai-grok-agent",
   "xai-agent-lifecycle",
   "xai-chat-state",
+  "xai-compaction-transcript",
   "xai-hyper-core",
   "xai-hyper-host",
   "xai-grok-compaction",
@@ -42,6 +43,9 @@ crates = [
   "xai-grok-workspace",
   "xai-grok-workspace-client",
   "xai-grok-workspace-types",
+  "xai-grok-workspace-daemon",
+  "xai-grok-diag-server",
+  "xai-grok-foreign-sessions",
   "xai-computer-hub-core",
   "xai-computer-hub-sdk",
   "xai-computer-hub-mcp-adapter",
@@ -51,6 +55,7 @@ crates = [
 from = ["crates/codegen"]
 crates = [
   "xai-grok-pager",
+  "xai-grok-pager-diff",
   "xai-grok-pager-render",
   "xai-grok-pager-minimal",
   "xai-grok-pager-pty-harness",
@@ -82,6 +87,9 @@ crates = [
   "xai-grok-hooks",
   "xai-hooks-plugins-types",
   "xai-grok-shared",
+  "xai-grok-active-sessions",
+  "xai-grok-bundle",
+  "xai-grok-session-search",
 ]
 
 [packages.extensions]
@@ -108,6 +116,8 @@ crates = [
   "xai-tracing-macros",
   "xai-fsnotify",
   "xai-file-utils",
+  "xai-fuzzy-file-search",
+  "xai-grok-session-events",
   "xai-fast-worktree",
   "xai-gix-status",
   "xai-codebase-graph",

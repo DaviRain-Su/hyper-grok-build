@@ -338,6 +338,7 @@ pub fn test_sampler_config(
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
+        extra_response_includes: Vec::new(),
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: 256_000,

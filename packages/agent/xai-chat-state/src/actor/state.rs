@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use xai_grok_sampling_types::{
-    ConversationItem, DanglingToolCallReason, SamplingConfig, TokenUsage,
+    ConversationItem, DanglingToolCallReason, SamplingConfig, TokenUsage, ToolSpec,
     dedup_duplicate_tool_results, repair_dangling_tool_calls,
 };
 
@@ -20,18 +20,37 @@ pub fn estimate_system_message_tokens(item: &ConversationItem) -> u64 {
     }
 }
 
+fn estimate_tool_tokens(
+    name: &str,
+    description: Option<&str>,
+    parameters: &serde_json::Value,
+) -> u64 {
+    let desc_len = description.map_or(0, str::len);
+    let params_len = parameters.to_string().len();
+    ((name.len() + desc_len + params_len) as u64) / xai_token_estimation::BYTES_PER_TOKEN
+}
+
 /// Bytes/4 estimate of one tool definition (name + description + the
 /// JSON-serialized parameters).
 pub fn estimate_tool_definition_tokens(td: &xai_grok_sampling_types::ToolDefinition) -> u64 {
-    let name_len = td.function.name.len();
-    let desc_len = td.function.description.as_deref().map_or(0, |d| d.len());
-    let params_len = td.function.parameters.to_string().len();
-    ((name_len + desc_len + params_len) as u64) / xai_token_estimation::BYTES_PER_TOKEN
+    estimate_tool_tokens(
+        &td.function.name,
+        td.function.description.as_deref(),
+        &td.function.parameters,
+    )
 }
 
 /// Sum [`estimate_tool_definition_tokens`] across a slice.
 pub fn estimate_tool_definitions_tokens(tds: &[xai_grok_sampling_types::ToolDefinition]) -> u64 {
     tds.iter().map(estimate_tool_definition_tokens).sum()
+}
+
+/// Bytes/4 estimate of the exact tool specs serialized on a request.
+pub fn estimate_tool_specs_tokens(tools: &[ToolSpec]) -> u64 {
+    tools
+        .iter()
+        .map(|tool| estimate_tool_tokens(&tool.name, tool.description.as_deref(), &tool.parameters))
+        .sum()
 }
 
 /// Bytes/4 estimate for a single [`ConversationItem`].
@@ -365,6 +384,27 @@ mod tests {
         );
         // name=6 + desc=11 + params=`{}`.len()=2 = 19, /4 = 4
         assert_eq!(estimate_tool_definition_tokens(&td), 4);
+    }
+
+    #[test]
+    fn estimate_tool_specs_tokens_counts_only_provided_specs() {
+        let kept = xai_grok_sampling_types::ToolDefinition::function(
+            "search",
+            Some("find a file"),
+            serde_json::json!({"type": "object"}),
+        );
+        let dropped = xai_grok_sampling_types::ToolDefinition::function(
+            "web_search",
+            Some("search the web"),
+            serde_json::json!({"type": "object"}),
+        );
+        let tools = vec![ToolSpec::from(kept.clone())];
+        let actual = estimate_tool_specs_tokens(&tools);
+        let expected = estimate_tool_definitions_tokens(std::slice::from_ref(&kept));
+        let unfiltered = estimate_tool_definitions_tokens(&[kept, dropped]);
+
+        assert_eq!(actual, expected);
+        assert!(actual < unfiltered);
     }
 
     #[test]

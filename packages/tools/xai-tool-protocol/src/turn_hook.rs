@@ -13,11 +13,11 @@ pub const BEFORE_TURN_KIND: &str = "before_turn";
 pub const AFTER_TURN_KIND: &str = "after_turn";
 
 /// Default `session_relationship` wire value (mirrors
-/// `xai_file_utils::events::SessionRelationship::Primary`).
+/// `xai_grok_session_events::SessionRelationship::Primary`).
 pub const DEFAULT_SESSION_RELATIONSHIP: &str = "primary";
 
 /// Default `schema_version` wire value. Bare literal (not the
-/// `xai-file-utils` constant) to avoid a dependency cycle.
+/// `xai-grok-session-events` constant) to avoid a dependency cycle.
 pub const DEFAULT_SCHEMA_VERSION: &str = "1.0";
 
 fn default_session_relationship() -> String {

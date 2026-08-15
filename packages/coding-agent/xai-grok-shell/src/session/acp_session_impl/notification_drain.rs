@@ -6,6 +6,12 @@ use super::*;
 /// Maximum number of pending notifications before oldest are dropped.
 pub(super) const MAX_PENDING_NOTIFICATIONS: usize = 50;
 
+/// Mid-turn live-orphan scan interval. InjectNotification can fire often;
+/// one disk pass per window is enough because persist-first makes a repeat
+/// finalize a no-op.
+pub(crate) const LIVE_ORPHAN_RECONCILE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 /// A notification buffered for idle-gated drain (see `maybe_drain_notifications`).
 pub(crate) struct PendingNotification {
     #[expect(
@@ -202,20 +208,48 @@ impl SessionActor {
             }
         }
 
-        // GC stale edit-holds: an id that is no longer queued (promoted,
-        // removed, or whose fire-and-forget `release_edit` was dropped) can
-        // never be edited again, so drop it to bound the set over a long session.
-        if !state.combine_edit_holds.is_empty() {
+        // Drop holds for rows no longer queued, then expire leaked holds so a
+        // client crash or dropped release cannot park the queue forever.
+        if !state.edit_holds.is_empty() {
             let live: std::collections::HashSet<String> = state
                 .pending_inputs
                 .iter()
                 .map(|i| i.prompt_id.clone())
                 .collect();
-            state.combine_edit_holds.retain(|id| live.contains(id));
+            state.edit_holds.retain(|id, _| live.contains(id));
+            super::expire_older_than(&mut state.edit_holds, super::EDIT_HOLD_TTL);
+        }
+
+        // Held front must not start until edit/release; check before combine so
+        // we never absorb followers into a front that will not run yet.
+        if let Some(front) = state.pending_inputs.front()
+            && state.edit_holds.contains_key(&front.prompt_id)
+        {
+            let front_prompt_id = front.prompt_id.as_str();
+            let queue_depth = state.pending_inputs.len();
+            xai_grok_telemetry::unified_log::debug(
+                "shell.prompt.start_blocked",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({
+                    "reason": "front_edit_hold",
+                    "queue_depth": queue_depth,
+                    "front_prompt_id": front_prompt_id,
+                })),
+            );
+            tracing::debug!(
+                target: "qtrace",
+                pid = std::process::id(),
+                event = "server_start_blocked",
+                queue_depth,
+                front_prompt_id,
+                session = self.session_info.id.0.as_ref(),
+                "maybe_start_running_task blocked: front is under edit hold",
+            );
+            return;
         }
 
         if combine_queued {
-            let holds: Vec<String> = state.combine_edit_holds.iter().cloned().collect();
+            let holds: Vec<String> = state.edit_holds.keys().cloned().collect();
             let skip: Vec<&str> = holds.iter().map(String::as_str).collect();
             SessionActor::combine_front_pending_inputs(&mut state.pending_inputs, &skip);
         }
@@ -311,6 +345,9 @@ impl SessionActor {
         // before the user-message chunk can race in.
         self.broadcast_queue_changed_promoting(&state, running_display);
 
+        // Bump the epoch here rather than in `handle_prompt`: a cancel reads the slot as soon as
+        // `running_task` is set on the next line.
+        self.turn_report.start_next_turn();
         state.running_task = Some(AgentTask::new_prompt(
             self.clone(),
             prompt_id,
@@ -329,6 +366,52 @@ impl SessionActor {
         ));
     }
 
+    /// Flip on-disk `running` metas that the coordinator no longer holds so
+    /// the pager stops showing Responding without a quit+resume.
+    pub(super) async fn reconcile_live_orphaned_subagents(&self) {
+        self.last_live_orphan_reconcile
+            .set(Some(std::time::Instant::now()));
+        let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
+            return;
+        };
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let backend =
+            xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
+                event_tx,
+            );
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        crate::agent::subagent::reconcile_live_orphaned_subagents(
+            &backend,
+            &session_dir,
+            self.session_info.id.0.as_ref(),
+            &self.notifications.gateway,
+            Some(&cmd_tx),
+            self.tool_context.live_orphan_heal_lock.clone(),
+        )
+        .await;
+        drop(cmd_tx);
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if let SessionCommand::XaiSessionNotification { notification } = cmd {
+                self.handle_xai_session_notification(notification).await;
+            }
+        }
+    }
+
+    /// Tray / reconnect can miss the idle hook; heal before listing so the
+    /// pager does not keep a dead child as Responding.
+    #[cfg(test)]
+    pub(super) async fn list_running_subagents(
+        &self,
+    ) -> Vec<xai_grok_tools::implementations::grok_build::task::types::SubagentInspection> {
+        self.reconcile_live_orphaned_subagents().await;
+        let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
+            return Vec::new();
+        };
+        xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(event_tx)
+            .list_running(self.session_info.id.0.as_ref())
+            .await
+    }
+
     /// Drain pending notifications into a single batched turn, if idle and not suppressed.
     ///
     /// Guards:
@@ -343,6 +426,17 @@ impl SessionActor {
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
+        // Mid-turn tick: parent may still be Responding so the idle
+        // hook never runs. Throttled so InjectNotification does not scan disk
+        // on every event.
+        if self
+            .last_live_orphan_reconcile
+            .get()
+            .is_none_or(|prev| prev.elapsed() >= LIVE_ORPHAN_RECONCILE_INTERVAL)
+        {
+            self.reconcile_live_orphaned_subagents().await;
+        }
+
         // Auto-wake notification turns are DROPPED both while the goal loop is
         // active (a bg-task / monitor "completed" turn would pull a weak model
         // off the goal continuation, e.g. relaunching a killed server) AND
@@ -425,12 +519,26 @@ impl SessionActor {
 
     /// Notifies extensions when the session settles idle (nothing running, nothing queued).
     /// The idle check stays host-side; extensions only get the event.
+    ///
+    /// Ignores `notifications_suppressed`, unlike [`is_session_idle_for_injection`]: after an
+    /// interrupt the session really is idle, and that is the ping a host waits for.
     pub(super) async fn emit_session_idle_if_idle(&self) {
-        {
+        let suppressed = {
             let state = self.state.lock().await;
-            if !is_session_idle_for_injection(&state) {
+            if state_is_busy(&state) {
                 return;
             }
+            state.notifications_suppressed
+        };
+        // Reconciliation writes subagent records, so it stays behind the suppression check, and
+        // it runs in a child session, which the notification below does not.
+        if !suppressed {
+            self.reconcile_live_orphaned_subagents().await;
+        }
+        // Like the session-end `Stop`: a subagent settling is not the session settling.
+        // `SessionEnd` itself still fires for a child, carrying `subagentType`.
+        if self.startup_hints.is_subagent {
+            return;
         }
         for contributor in self.extension_registry.session_lifecycle_contributors() {
             contributor
@@ -626,5 +734,361 @@ impl SessionActor {
     pub(super) async fn drain_monitor_buffer_to_pending(&self) {
         let mut state = self.state.lock().await;
         self.sweep_monitor_buffer_into_pending(&mut state, "monitor-turn-end-drain");
+    }
+}
+
+#[cfg(test)]
+mod live_orphan_hook_tests {
+    use super::*;
+    use crate::agent::subagent::{LIVE_ORPHAN_RECONCILE_REASON, SubagentMeta};
+    use crate::extensions::notification::SessionUpdate;
+    use crate::session::persistence::PersistenceMsg;
+    use xai_grok_tools::implementations::grok_build::task::types::{
+        SubagentEvent, SubagentInspection, SubagentSnapshot, SubagentSnapshotStatus,
+    };
+
+    fn running_meta(id: &str, parent: &str) -> SubagentMeta {
+        SubagentMeta {
+            subagent_id: id.into(),
+            parent_session_id: parent.into(),
+            child_session_id: format!("child-{id}"),
+            subagent_type: "explore".into(),
+            description: "task".into(),
+            prompt: "do work".into(),
+            status: "running".into(),
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            duration_ms: None,
+            tool_calls: None,
+            turns: None,
+            error: None,
+            effective_context_source: None,
+            context_normalized: false,
+            fork_copy_error: None,
+            persona: None,
+            resumed_from: None,
+            child_cwd: Some("/workspace".into()),
+            worktree_path: None,
+            snapshot_ref: None,
+            effective_model_id: None,
+        }
+    }
+
+    fn write_meta(dir: &std::path::Path, meta: &SubagentMeta) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            serde_json::to_string_pretty(meta).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn running_inspection(id: &str) -> SubagentInspection {
+        SubagentInspection {
+            snapshot: SubagentSnapshot {
+                subagent_id: id.to_string(),
+                description: "task".to_string(),
+                subagent_type: "explore".to_string(),
+                status: SubagentSnapshotStatus::Running {
+                    turn_count: 1,
+                    tool_call_count: 0,
+                    tokens_used: 0,
+                    context_window_tokens: 0,
+                    context_usage_pct: 0,
+                    tools_used: Vec::new(),
+                    error_count: 0,
+                },
+                started_at_epoch_ms: 0,
+                duration_ms: 50,
+                persona: None,
+            },
+            parent_session_id: String::new(),
+            child_session_id: format!("child-{id}"),
+            fork_parent_prompt_id: None,
+            resumed_from: None,
+        }
+    }
+
+    async fn actor_with_orphan(
+        id: &str,
+        inspect: Option<SubagentInspection>,
+    ) -> (
+        SessionActor,
+        std::path::PathBuf,
+        tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
+    ) {
+        let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut actor =
+            super::super::support::create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx)
+                .await;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        actor.session_info.id = acp::SessionId::new(format!("live-orphan-{id}-{unique}"));
+        let parent = actor.session_info.id.0.to_string();
+        let session_dir = crate::session::persistence::session_dir(&actor.session_info);
+        let sub_dir = session_dir.join("subagents").join(id);
+        write_meta(&sub_dir, &running_meta(id, &parent));
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        actor.tool_context.subagent_event_tx = Some(event_tx);
+        tokio::task::spawn_local(async move {
+            while let Some(event) = event_rx.recv().await {
+                if let SubagentEvent::Inspect(request) = event {
+                    let value = inspect
+                        .as_ref()
+                        .filter(|i| i.snapshot.subagent_id == request.subagent_id)
+                        .cloned();
+                    let _ = request.respond_to.send(value);
+                } else if let SubagentEvent::ListRunning(request) = event {
+                    let list = inspect
+                        .as_ref()
+                        .filter(|i| i.snapshot.is_running())
+                        .cloned()
+                        .into_iter()
+                        .collect();
+                    let _ = request.respond_to.send(list);
+                }
+            }
+        });
+        (actor, sub_dir, persistence_rx)
+    }
+
+    fn persisted_cancelled_finishes(
+        persistence_rx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
+        id: &str,
+    ) -> usize {
+        let mut count = 0;
+        while let Ok(msg) = persistence_rx.try_recv() {
+            let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(notif)) = msg
+            else {
+                continue;
+            };
+            let SessionUpdate::SubagentFinished {
+                subagent_id,
+                status,
+                error,
+                will_wake,
+                ..
+            } = notif.update
+            else {
+                continue;
+            };
+            if subagent_id != id {
+                continue;
+            }
+            assert_eq!(status, "cancelled");
+            assert_eq!(error.as_deref(), Some(LIVE_ORPHAN_RECONCILE_REASON));
+            assert!(!will_wake);
+            count += 1;
+        }
+        count
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn emit_session_idle_finalizes_orphan_and_persists_finish() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let id = "sa-idle-orphan";
+                let (actor, sub_dir, mut persistence_rx) = actor_with_orphan(id, None).await;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.emit_session_idle_if_idle(),
+                )
+                .await
+                .expect("idle reconcile must not hang");
+
+                let meta_path = sub_dir.join("meta.json");
+                let data = std::fs::read_to_string(&meta_path).unwrap_or_else(|e| {
+                    panic!(
+                        "read {}: {e}; dir_exists={} entries={:?}",
+                        meta_path.display(),
+                        sub_dir.exists(),
+                        std::fs::read_dir(&sub_dir).map(|rd| {
+                            rd.filter_map(|e| e.ok().map(|e| e.file_name()))
+                                .collect::<Vec<_>>()
+                        })
+                    )
+                });
+                let reread: SubagentMeta = serde_json::from_str(&data).unwrap();
+                assert_eq!(reread.status, "cancelled");
+                assert_eq!(persisted_cancelled_finishes(&mut persistence_rx, id), 1);
+                let _ = std::fs::remove_dir_all(sub_dir.parent().unwrap());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn emit_session_idle_skips_live_coordinator_child() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let id = "sa-idle-live";
+                let (actor, sub_dir, mut persistence_rx) =
+                    actor_with_orphan(id, Some(running_inspection(id))).await;
+                actor.emit_session_idle_if_idle().await;
+
+                let reread: SubagentMeta = serde_json::from_str(
+                    &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(reread.status, "running");
+                assert_eq!(persisted_cancelled_finishes(&mut persistence_rx, id), 0);
+                let _ = std::fs::remove_dir_all(sub_dir.parent().unwrap());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn emit_session_idle_skips_reconcile_while_suppressed() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let id = "sa-busy-orphan";
+                let (actor, sub_dir, mut persistence_rx) = actor_with_orphan(id, None).await;
+                actor.state.lock().await.notifications_suppressed = true;
+                actor.emit_session_idle_if_idle().await;
+
+                let reread: SubagentMeta = serde_json::from_str(
+                    &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(reread.status, "running");
+                assert_eq!(persisted_cancelled_finishes(&mut persistence_rx, id), 0);
+                let _ = std::fs::remove_dir_all(sub_dir.parent().unwrap());
+            })
+            .await;
+    }
+
+    async fn drain_once(actor: &std::sync::Arc<SessionActor>) {
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+        std::sync::Arc::clone(actor)
+            .maybe_drain_notifications(completion_tx)
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_running_subagents_finalizes_orphan_and_persists_finish() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let id = "sa-list-orphan";
+                let (actor, sub_dir, mut persistence_rx) = actor_with_orphan(id, None).await;
+                actor.state.lock().await.notifications_suppressed = true;
+                let listed = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.list_running_subagents(),
+                )
+                .await
+                .expect("list_running heal must not hang");
+                assert!(listed.is_empty());
+
+                let reread: SubagentMeta = serde_json::from_str(
+                    &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(reread.status, "cancelled");
+                assert_eq!(persisted_cancelled_finishes(&mut persistence_rx, id), 1);
+                let _ = std::fs::remove_dir_all(sub_dir.parent().unwrap());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_running_subagents_skips_live_coordinator_child() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let id = "sa-list-live";
+                let (actor, sub_dir, mut persistence_rx) =
+                    actor_with_orphan(id, Some(running_inspection(id))).await;
+                let listed = actor.list_running_subagents().await;
+                assert_eq!(listed.len(), 1);
+                assert_eq!(listed[0].snapshot.subagent_id, id);
+
+                let reread: SubagentMeta = serde_json::from_str(
+                    &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(reread.status, "running");
+                assert_eq!(persisted_cancelled_finishes(&mut persistence_rx, id), 0);
+                let _ = std::fs::remove_dir_all(sub_dir.parent().unwrap());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn maybe_drain_finalizes_orphan_while_parent_turn_running() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let id = "sa-drain-busy";
+                let (actor, sub_dir, mut persistence_rx) = actor_with_orphan(id, None).await;
+                // Mid-turn: idle hook is a no-op while the parent is Responding.
+                actor.state.lock().await.notifications_suppressed = true;
+                let actor = std::sync::Arc::new(actor);
+                drain_once(&actor).await;
+
+                let reread: SubagentMeta = serde_json::from_str(
+                    &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(reread.status, "cancelled");
+                assert_eq!(persisted_cancelled_finishes(&mut persistence_rx, id), 1);
+                assert!(actor.last_live_orphan_reconcile.get().is_some());
+                let _ = std::fs::remove_dir_all(sub_dir.parent().unwrap());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn maybe_drain_throttles_live_orphan_reconcile() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let id = "sa-drain-throttle";
+                let (actor, sub_dir, mut persistence_rx) = actor_with_orphan(id, None).await;
+                actor.state.lock().await.notifications_suppressed = true;
+                let actor = std::sync::Arc::new(actor);
+                drain_once(&actor).await;
+                let first = actor
+                    .last_live_orphan_reconcile
+                    .get()
+                    .expect("first drain must scan");
+                assert_eq!(persisted_cancelled_finishes(&mut persistence_rx, id), 1);
+
+                let parent = actor.session_info.id.0.to_string();
+                write_meta(&sub_dir, &running_meta(id, &parent));
+
+                drain_once(&actor).await;
+                assert_eq!(
+                    actor.last_live_orphan_reconcile.get(),
+                    Some(first),
+                    "second drain inside the window must not scan"
+                );
+                let reread: SubagentMeta = serde_json::from_str(
+                    &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(reread.status, "running");
+                assert_eq!(persisted_cancelled_finishes(&mut persistence_rx, id), 0);
+
+                actor
+                    .last_live_orphan_reconcile
+                    .set(first.checked_sub(LIVE_ORPHAN_RECONCILE_INTERVAL));
+                drain_once(&actor).await;
+                let reread: SubagentMeta = serde_json::from_str(
+                    &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(reread.status, "cancelled");
+                assert_eq!(persisted_cancelled_finishes(&mut persistence_rx, id), 1);
+                assert_ne!(actor.last_live_orphan_reconcile.get(), Some(first));
+                let _ = std::fs::remove_dir_all(sub_dir.parent().unwrap());
+            })
+            .await;
     }
 }

@@ -970,7 +970,7 @@ impl FeedbackManager {
 
 /// Bound on the final signals POST at process exit. Prefer a fast exit over
 /// waiting out a hung analytics endpoint — session metrics are best-effort.
-const SHUTDOWN_SIGNAL_SYNC_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const SHUTDOWN_SIGNAL_SYNC_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Default ceiling on non-empty upload-queue drain at process exit.
 /// Keeps sync+drain under [`crate::agent::activity::SESSION_FLUSH_GRACE`] with
@@ -978,9 +978,9 @@ const SHUTDOWN_SIGNAL_SYNC_TIMEOUT: Duration = Duration::from_secs(2);
 /// (still hard-capped by [`SHUTDOWN_DRAIN_HARD_MAX`]).
 const SHUTDOWN_DRAIN_CAP: Duration = Duration::from_secs(5);
 
-/// Absolute max non-empty drain at process exit: leave ≥1s residual under the
-/// 10s flush grace after the 2s signal-sync budget (10 − 2 − 1 = 7).
-const SHUTDOWN_DRAIN_HARD_MAX: Duration = Duration::from_secs(7);
+/// Absolute max non-empty drain at process exit: 10s flush grace, less the 2s signal-sync budget
+/// and the turn-end queue's two 250ms waits, leaves 7.5s; held at 7s for residual.
+pub(crate) const SHUTDOWN_DRAIN_HARD_MAX: Duration = Duration::from_secs(7);
 
 /// When nothing is pending, only wait this long for the upload worker to exit
 /// after the shutdown signal — should be milliseconds in practice.
@@ -1863,9 +1863,7 @@ mod tests {
                 &self,
                 _reason: crate::auth::refresh::RefreshReason,
             ) -> crate::auth::refresh::RefreshOutcome {
-                crate::auth::refresh::RefreshOutcome::TransientFailure {
-                    message: "noop".into(),
-                }
+                crate::auth::refresh::RefreshOutcome::transient("noop")
             }
         }
 

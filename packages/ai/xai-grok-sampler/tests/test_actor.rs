@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use xai_grok_sampler::{
     ApiBackend, RequestId, RetryPolicy, SamplerActor, SamplerConfig, SamplingChannel,
-    SamplingErrorKind, SamplingEvent,
+    SamplingErrorKind, SamplingEvent, StripReason,
 };
 use xai_grok_sampling_types::{
     BackendToolCallItem, BackendToolKind, ConversationItem, ConversationRequest,
@@ -83,6 +83,7 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         endpoint_path: None,
         auth_scheme: Default::default(),
         extra_headers: IndexMap::new(),
+        extra_response_includes: Vec::new(),
         query_params: IndexMap::new(),
         env_http_headers: IndexMap::new(),
         context_window: 128_000,
@@ -464,13 +465,7 @@ async fn retries_on_500_then_accepts_chunk_without_response_id() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Invalid-image 400 strips images and retries
-// ---------------------------------------------------------------------------
-
-/// The semantic `error.code` drives the strip recovery end-to-end: reject
-/// once with a coded 400, then expect a retry without the image and a
-/// Completed turn.
+/// Coded `invalid_image` 400: strip, emit ServerRejected, retry, Complete.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_image_code_strips_and_retries() {
     const IMAGE_URI: &str = "data:image/png;base64,cG9pc29uZWQ=";
@@ -524,8 +519,19 @@ async fn invalid_image_code_strips_and_retries() {
     server.shutdown();
 
     assert!(
+        events.iter().any(|e| match e {
+            SamplingEvent::ImagesStripped {
+                stripped_urls,
+                reason: xai_grok_sampler::StripReason::ServerRejected,
+                ..
+            } => stripped_urls.len() == 1 && stripped_urls[0].as_ref() == IMAGE_URI,
+            _ => false,
+        }),
+        "expected server-rejected ImagesStripped carrying the poisoned URL, got {events:?}"
+    );
+    assert!(
         matches!(events.last(), Some(SamplingEvent::Completed { .. })),
-        "expected Completed after strip-retry, got {events:?}"
+        "expected Completed after strip-retry"
     );
 
     let bodies = bodies.lock().unwrap();
@@ -537,11 +543,85 @@ async fn invalid_image_code_strips_and_retries() {
     );
 }
 
+/// A legacy-phrase 400 with no code still strips and recovers, but the
+/// reason is `PayloadHeuristic`: without the deterministic code the server
+/// blamed nothing specific, so the strip must stay request-local.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_phrase_400_strips_as_heuristic() {
+    const IMAGE_URI: &str = "data:image/png;base64,cG9pc29uZWQ=";
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err::<Sse<_>, (StatusCode, String)>((
+                        StatusCode::BAD_REQUEST,
+                        json!({
+                            "error": {
+                                "message": "Could not process image",
+                                "type": "invalid_request_error",
+                            }
+                        })
+                        .to_string(),
+                    ))
+                } else {
+                    let events = sse::chat_completion_events("recovered", "test-model");
+                    Ok(Sse::new(stream::iter(
+                        events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                    )))
+                }
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        test_config(server.base_url(), "test-model"),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let mut request = user_request("what is in this image?");
+    if let Some(ConversationItem::User(u)) = request.items.first_mut() {
+        u.add_image(IMAGE_URI);
+    }
+    handle.submit(RequestId::from("req-legacy-phrase-strip"), request);
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            SamplingEvent::ImagesStripped {
+                reason: StripReason::PayloadHeuristic,
+                ..
+            }
+        )),
+        "codeless legacy-phrase 400 must strip as PayloadHeuristic, got {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            SamplingEvent::ImagesStripped {
+                reason: StripReason::ServerRejected,
+                ..
+            }
+        )),
+        "no deterministic code, so never ServerRejected: {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Completed { .. })),
+        "expected Completed after strip-retry"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn image_400_with_nothing_left_to_strip_is_fatal_after_one_cycle() {
-    // The `stripped == 0` upgrade to Fatal is the only bound on the
-    // strip-retry loop: strip once, and if the server still answers an
-    // image 400, fail rather than spin.
+    // `stripped == 0` is the only bound on the strip-retry loop.
     let counter = Arc::new(AtomicU32::new(0));
     let counter_handler = Arc::clone(&counter);
     let app = Router::new().route(
@@ -580,6 +660,11 @@ async fn image_400_with_nothing_left_to_strip_is_fatal_after_one_cycle() {
     let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
     server.shutdown();
 
+    let strips = events
+        .iter()
+        .filter(|e| matches!(e, SamplingEvent::ImagesStripped { .. }))
+        .count();
+    assert_eq!(strips, 1, "exactly one strip cycle");
     assert!(
         matches!(events.last(), Some(SamplingEvent::Failed { .. })),
         "second image 400 with nothing left to strip must be fatal, got {events:?}"
@@ -588,6 +673,173 @@ async fn image_400_with_nothing_left_to_strip_is_fatal_after_one_cycle() {
         counter.load(Ordering::SeqCst),
         2,
         "one rejection, one strip-retry, then stop"
+    );
+}
+
+/// RST with a zero retry budget: the decision is Fatal, so the proactive
+/// heuristic strip must NOT run: no mutation, no ImagesStripped event, no
+/// "left out of the retry" note for a retry that never happens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fatal_decision_does_not_strip_or_emit_images_stripped() {
+    const IMAGE_URI: &str = "data:image/png;base64,cG9pc29uZWQ=";
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        // RST every connection: peek then drop (see xai-grok-http).
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => break,
+                accepted = listener.accept() => {
+                    let Ok((sock, _)) = accepted else { break };
+                    let mut buf = [0u8; 64];
+                    let _ = sock.peek(&mut buf).await;
+                    drop(sock);
+                }
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut config = test_config(format!("http://{addr}/v1"), "test-model");
+    config.max_retries = Some(0);
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(config, RetryPolicy::default(), event_tx);
+
+    let mut request = user_request("what is in this image?");
+    if let Some(ConversationItem::User(u)) = request.items.first_mut() {
+        u.add_image(IMAGE_URI);
+    }
+    handle.submit(RequestId::from("req-fatal-no-strip"), request);
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    let _ = shutdown_tx.send(());
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, SamplingEvent::ImagesStripped { .. })),
+        "a Fatal decision must not strip or emit ImagesStripped, got {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Failed { .. })),
+        "expected terminal Failed, got {events:?}"
+    );
+}
+
+/// RST mid-upload (nginx-style 413). Emit PayloadHeuristic; strip the request only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connection_reset_emits_payload_heuristic_and_strips_request() {
+    const IMAGE_URI: &str = "data:image/png;base64,cG9pc29uZWQ=";
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let bodies_handler = Arc::clone(&bodies);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        // Peek then drop so the peer sees RST (see xai-grok-http).
+        if let Ok((sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 64];
+            let _ = sock.peek(&mut buf).await;
+            drop(sock);
+        }
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |body: String| {
+                let bodies = Arc::clone(&bodies_handler);
+                async move {
+                    bodies.lock().unwrap().push(body);
+                    let events = sse::chat_completion_events("recovered", "test-model");
+                    Sse::new(stream::iter(
+                        events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                    ))
+                }
+            }),
+        );
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        test_config(format!("http://{addr}/v1"), "test-model"),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let mut request = user_request("what is in this image?");
+    if let Some(ConversationItem::User(u)) = request.items.first_mut() {
+        u.add_image(IMAGE_URI);
+    }
+    handle.submit(RequestId::from("req-heuristic-strip"), request);
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    let _ = shutdown_tx.send(());
+
+    assert!(
+        events.iter().any(|e| match e {
+            SamplingEvent::ImagesStripped {
+                stripped_urls,
+                reason: StripReason::PayloadHeuristic,
+                ..
+            } => stripped_urls.len() == 1 && stripped_urls[0].as_ref() == IMAGE_URI,
+            _ => false,
+        }),
+        "connection reset must emit PayloadHeuristic ImagesStripped, got {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            SamplingEvent::ImagesStripped {
+                reason: StripReason::ServerRejected,
+                ..
+            }
+        )),
+        "heuristic path must not be labeled ServerRejected, got {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Completed { .. })),
+        "strip-retry must complete, got {events:?}"
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1, "only the post-strip retry hits HTTP");
+    assert!(
+        !bodies[0].contains(IMAGE_URI),
+        "in-flight request must be stripped before the retry"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connect_failure_does_not_emit_images_stripped() {
+    // Connection refused is `is_connect`, not a body-upload reset.
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        test_config("http://127.0.0.1:1/v1".into(), "test-model"),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let mut request = user_request("what is in this image?");
+    if let Some(ConversationItem::User(u)) = request.items.first_mut() {
+        u.add_image("data:image/png;base64,cG9pc29uZWQ=");
+    }
+    handle.submit(RequestId::from("req-connect-fail"), request);
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, SamplingEvent::ImagesStripped { .. })),
+        "connect failure must not strip images, got {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Failed { .. })),
+        "exhausted connect retries must be Failed, got {events:?}"
     );
 }
 

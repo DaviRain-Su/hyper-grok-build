@@ -1067,6 +1067,7 @@ async fn refresher_disk_retry_invalid_client_with_different_client_id_preserves_
         .refresh_chain(
             crate::auth::token_type::TokenType::OidcSession,
             RefreshReason::ServerRejected,
+            crate::auth::manager::RefreshUrgency::UserFacing,
         )
         .await;
 
@@ -1380,7 +1381,7 @@ fn transient_blip_budget_is_scoped_to_the_credential() {
     // Accrue blips up to just under the escalation threshold on credential A.
     for _ in 0..MAX_CONSECUTIVE_TRANSIENT_FAILURES - 1 {
         assert!(matches!(
-            refresher.record_transient_failure("blip".into(), key_a.clone(), false),
+            refresher.record_transient_failure("blip".into(), key_a.clone(), false, None),
             RefreshOutcome::TransientFailure { .. }
         ));
     }
@@ -1388,7 +1389,12 @@ fn transient_blip_budget_is_scoped_to_the_credential() {
     // Credential B's first blip must stay transient, not escalate to permanent.
     assert!(
         matches!(
-            refresher.record_transient_failure("blip".into(), Some("cred-b".to_owned()), false),
+            refresher.record_transient_failure(
+                "blip".into(),
+                Some("cred-b".to_owned()),
+                false,
+                None
+            ),
             RefreshOutcome::TransientFailure { .. }
         ),
         "a fresh credential must not inherit a prior credential's blip count",
@@ -1409,7 +1415,7 @@ fn network_unreachable_blips_never_escalate() {
     for _ in 0..MAX_CONSECUTIVE_TRANSIENT_FAILURES * 3 {
         assert!(
             matches!(
-                refresher.record_transient_failure("wifi down".into(), key.clone(), true),
+                refresher.record_transient_failure("wifi down".into(), key.clone(), true, None),
                 RefreshOutcome::TransientFailure { .. }
             ),
             "a network-unreachable failure must never escalate to permanent",
@@ -1420,15 +1426,282 @@ fn network_unreachable_blips_never_escalate() {
     // full threshold before escalating.
     for _ in 0..MAX_CONSECUTIVE_TRANSIENT_FAILURES - 1 {
         assert!(matches!(
-            refresher.record_transient_failure("5xx".into(), key.clone(), false),
+            refresher.record_transient_failure("5xx".into(), key.clone(), false, None),
             RefreshOutcome::TransientFailure { .. }
         ));
     }
     assert!(
         matches!(
-            refresher.record_transient_failure("5xx".into(), key.clone(), false),
+            refresher.record_transient_failure("5xx".into(), key.clone(), false, None),
             RefreshOutcome::PermanentFailure { .. }
         ),
         "counted blips must still escalate at the threshold",
     );
+}
+
+/// RAII guard for `oidc::refresh::FORCE_STRADDLED_FOR_TEST`. Thread-local +
+/// current-thread tokio tests, so parallel tests cannot force each other's
+/// probes.
+struct ForceStraddleGuard;
+
+impl ForceStraddleGuard {
+    fn engage() -> Self {
+        Self::set(crate::auth::oidc::refresh::ForcedStraddleForTest::All)
+    }
+
+    /// Reproduces a suspend over before the exchange began — the RT was
+    /// never on the wire across it.
+    fn engage_whole_refresh_only() -> Self {
+        Self::set(crate::auth::oidc::refresh::ForcedStraddleForTest::WholeRefreshOnly)
+    }
+
+    fn set(mode: crate::auth::oidc::refresh::ForcedStraddleForTest) -> Self {
+        crate::auth::oidc::refresh::FORCE_STRADDLED_FOR_TEST.with(|f| f.set(Some(mode)));
+        Self
+    }
+}
+
+impl Drop for ForceStraddleGuard {
+    fn drop(&mut self) {
+        crate::auth::oidc::refresh::FORCE_STRADDLED_FOR_TEST.with(|f| f.set(None));
+    }
+}
+
+/// Mock IdP whose /token always fails with a retryable 5xx, counting POSTs.
+async fn start_mock_oidc_token_5xx(
+    attempts: Arc<std::sync::atomic::AtomicU32>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let base_for_discovery = base.clone();
+    let app = axum::Router::new()
+        .route(
+            "/.well-known/openid-configuration",
+            axum::routing::get(move || {
+                let b = base_for_discovery.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "authorization_endpoint": format!("{b}/authorize"),
+                        "token_endpoint": format!("{b}/token"),
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/token",
+            axum::routing::post(move || {
+                let attempts = attempts.clone();
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(serde_json::json!({ "error": "server_error" })),
+                    )
+                }
+            }),
+        );
+    let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (base, handle)
+}
+
+/// A straddled exchange failure must (1) suppress the in-call retry,
+/// (2) surface the RT it presented, and (3) never charge the transient →
+/// permanent escalation budget.
+#[tokio::test]
+async fn straddled_exchange_failure_surfaces_suspect_rt_and_never_escalates() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let attempts = Arc::new(AtomicU32::new(0));
+    let (base_url, server) = start_mock_oidc_token_5xx(attempts.clone()).await;
+    let _straddle = ForceStraddleGuard::engage();
+
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(
+        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+    );
+    mgr.hot_swap(GrokAuth {
+        key: "expired-key".into(),
+        user_id: "user-42".into(),
+        refresh_token: Some("rt-on-the-wire".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        oidc_issuer: Some(base_url.clone()),
+        oidc_client_id: Some("test-client".into()),
+        ..GrokAuth::test_default()
+    });
+    let refresher = OidcRefresher::new(mgr.clone());
+
+    // Two past the escalation threshold: without the poison rule these would
+    // escalate to a permanent `Other` verdict.
+    let rounds = super::MAX_CONSECUTIVE_TRANSIENT_FAILURES + 2;
+    for round in 0..rounds {
+        let before = attempts.load(Ordering::SeqCst);
+        let outcome = refresher.refresh(RefreshReason::ServerRejected).await;
+        match outcome {
+            RefreshOutcome::TransientFailure {
+                suspect_consumed_rt: Some(suspect),
+                ..
+            } => {
+                assert_eq!(
+                    suspect.refresh_token(),
+                    "rt-on-the-wire",
+                    "the suspect must be the RT actually presented"
+                );
+            }
+            other => panic!(
+                "round {round}: a straddled failure must stay transient and \
+                 carry the suspect RT, got {other:?}"
+            ),
+        }
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            before + 1,
+            "round {round}: the in-call retry must be suppressed after a straddle"
+        );
+    }
+
+    server.abort();
+}
+
+/// A straddled *discovery* failure never presented the RT, so it must not
+/// be flagged as possibly consumed.
+#[tokio::test]
+async fn straddled_discovery_failure_reports_no_suspect_rt() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let app = axum::Router::new().route(
+        "/.well-known/openid-configuration",
+        axum::routing::get(|| async {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": "unavailable" })),
+            )
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let _straddle = ForceStraddleGuard::engage();
+
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(
+        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+    );
+    mgr.hot_swap(GrokAuth {
+        key: "expired-key".into(),
+        user_id: "user-42".into(),
+        refresh_token: Some("rt-never-sent".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        oidc_issuer: Some(base_url.clone()),
+        oidc_client_id: Some("test-client".into()),
+        ..GrokAuth::test_default()
+    });
+
+    let outcome = OidcRefresher::new(mgr.clone())
+        .refresh(RefreshReason::ServerRejected)
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            RefreshOutcome::TransientFailure {
+                suspect_consumed_rt: None,
+                ..
+            }
+        ),
+        "a discovery failure never put the RT on the wire, got {outcome:?}"
+    );
+
+    server.abort();
+}
+
+/// The boundary case: a suspend confined to pre-exchange phases (discovery
+/// succeeded, straddle over before the first POST) with a clean exchange
+/// failure must not mark the RT possibly consumed — only the
+/// `ProbeScope::Exchange` measurement may gate the sentinel.
+#[tokio::test]
+async fn pre_exchange_suspend_with_clean_exchange_failure_reports_no_suspect_rt() {
+    use std::sync::atomic::AtomicU32;
+
+    let attempts = Arc::new(AtomicU32::new(0));
+    let (base_url, server) = start_mock_oidc_token_5xx(attempts.clone()).await;
+    let _straddle = ForceStraddleGuard::engage_whole_refresh_only();
+
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(
+        AuthManager::new(dir.path(), GrokComConfig::default()).with_proxy_base_url(&base_url),
+    );
+    mgr.hot_swap(GrokAuth {
+        key: "expired-key".into(),
+        user_id: "user-42".into(),
+        refresh_token: Some("rt-never-on-wire-across-suspend".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        oidc_issuer: Some(base_url.clone()),
+        oidc_client_id: Some("test-client".into()),
+        ..GrokAuth::test_default()
+    });
+
+    let outcome = OidcRefresher::new(mgr.clone())
+        .refresh(RefreshReason::ServerRejected)
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            RefreshOutcome::TransientFailure {
+                suspect_consumed_rt: None,
+                ..
+            }
+        ),
+        "a suspend over before the exchange began must not implicate the RT, \
+         got {outcome:?}"
+    );
+    assert!(
+        mgr.read_consumed_sentinel().is_none(),
+        "no false-positive sentinel for a pre-exchange suspend"
+    );
+
+    server.abort();
+}
+
+/// End-to-end with the real OIDC refresher and a mock IdP: the straddled
+/// exchange persists the cross-process sentinel.
+#[tokio::test]
+async fn straddled_exchange_via_refresh_chain_persists_sentinel() {
+    use std::sync::atomic::AtomicU32;
+
+    let attempts = Arc::new(AtomicU32::new(0));
+    let (base_url, server) = start_mock_oidc_token_5xx(attempts.clone()).await;
+    let _straddle = ForceStraddleGuard::engage();
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    let scope = cfg.auth_scope();
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url(&base_url));
+    let expired = GrokAuth {
+        key: "expired-key".into(),
+        user_id: "user-42".into(),
+        refresh_token: Some("rt-on-the-wire".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        oidc_issuer: Some(base_url.clone()),
+        oidc_client_id: Some("test-client".into()),
+        ..GrokAuth::test_default()
+    };
+    write_auth_to_disk(dir.path(), &scope, &expired);
+    mgr.hot_swap(expired);
+    mgr.set_refresher(Arc::new(OidcRefresher::new(mgr.clone())));
+
+    let err = mgr.auth().await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::auth::AuthError::Refresh(crate::auth::RefreshTokenError::Transient(_))
+        ),
+        "straddled exchange must surface transient, got {err:?}"
+    );
+    let sentinel = mgr
+        .read_consumed_sentinel()
+        .expect("refresh_chain must persist the sentinel for the straddled RT");
+    assert!(sentinel.matches_for_test("rt-on-the-wire"));
+    assert!(
+        mgr.permanent_failure().is_none(),
+        "no permanent verdict for a straddled failure"
+    );
+
+    server.abort();
 }

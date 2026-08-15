@@ -38,7 +38,7 @@ mod mock_fs;
 pub use mock_fs::MockFs;
 
 mod file_tree;
-pub use file_tree::{ListContentsLimits, list_contents};
+pub use file_tree::{ListContentsLimits, list_contents, list_contents_multi};
 
 mod git_status;
 pub use git_status::{git_status, git_status_short};
@@ -49,8 +49,7 @@ pub use jj_status::jj_status;
 mod attach_file;
 pub use attach_file::{FileReference, render_embedded_resource, render_file_reference};
 
-mod fuzzy;
-pub use fuzzy::{
+pub use xai_fuzzy_file_search::{
     FuzzyFileMatcher, FuzzyFileMatcherDaemon, FuzzyMatchResult, FuzzyMatcherDaemonResults,
     FuzzyMatcherStatus,
 };
@@ -108,31 +107,6 @@ const DEFAULT_SEARCH_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_TOP_K: usize = 1000;
 
 pub type FuzzySearchId = String;
-
-impl Serialize for FuzzyMatchResult {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        use std::borrow::Cow;
-
-        let path_str = self.path.to_string();
-        let node_type = if self.is_dir { "directory" } else { "file" };
-        let name: Cow<str> = std::path::Path::new(&path_str)
-            .file_name()
-            .map(|s| s.to_string_lossy())
-            .unwrap_or(Cow::Borrowed(&path_str));
-
-        let mut state = serializer.serialize_struct("FuzzyMatchResult", 5)?;
-        state.serialize_field("name", &name)?;
-        state.serialize_field("type", node_type)?;
-        state.serialize_field("path", &path_str)?;
-        state.serialize_field("score", &self.score)?;
-        state.serialize_field("indices", &self.indices)?;
-        state.end()
-    }
-}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

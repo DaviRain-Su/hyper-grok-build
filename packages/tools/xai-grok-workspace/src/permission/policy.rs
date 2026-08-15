@@ -86,6 +86,10 @@ pub struct CompiledPolicy {
     /// True if any Bash/Any allow rule exists, so the per-segment Bash allow
     /// gate should run. Read by `evaluate`.
     has_bash_allow_rules: bool,
+    /// Per-rule [`rule_is_catchall`] verdicts, index-aligned with
+    /// `config.rules`/`matchers`. Precomputed so the auto-mode narrow-allow
+    /// check doesn't re-probe every rule on every request.
+    catchall: Vec<bool>,
 }
 
 impl CompiledPolicy {
@@ -115,12 +119,14 @@ impl CompiledPolicy {
             matches!(rule.action, RuleAction::Allow)
                 && matches!(rule.tool, ToolFilter::Bash | ToolFilter::Any)
         });
+        let catchall = config.rules.iter().map(rule_is_catchall).collect();
         Self {
             config,
             matchers,
             has_file_restrictions,
             has_bash_command_restrictions,
             has_bash_allow_rules,
+            catchall,
         }
     }
 
@@ -277,7 +283,7 @@ impl CompiledPolicy {
         // independently matches an allow rule.
         if let AccessKind::Bash(cmd) = access {
             if self.has_bash_allow_rules
-                && self.bash_chain_fully_allowed(cmd, MAX_INLINE_SHELL_DEPTH)
+                && self.bash_chain_fully_allowed(cmd, MAX_INLINE_SHELL_DEPTH, AllowRuleScope::Any)
             {
                 return Some(Decision::Allow);
             }
@@ -289,7 +295,41 @@ impl CompiledPolicy {
         None
     }
 
-    fn bash_chain_fully_allowed(&self, cmd: &str, inline_depth_remaining: usize) -> bool {
+    /// Whether *narrow* allow rules alone fully authorize this Bash command —
+    /// [`Self::evaluate_with_cwd`]'s Bash allow arm restricted to
+    /// [`AllowRuleScope::NarrowOnly`]. Auto mode lets a deliberately scoped
+    /// rule (e.g. `Bash(git push:*)`) resolve before its classifier, matching
+    /// how ask mode honors the same rule, while a blanket `Bash(*)` or an
+    /// exec-vehicle rule stays suspended into the classifier.
+    ///
+    /// Provenance: allow rules merge from every settings source, including
+    /// project-tree files a repository can supply, so a checked-in rule can
+    /// decide what skips classification. Folder trust makes that acceptable —
+    /// untrusted directories' project rules are dropped at resolution time,
+    /// before this policy is compiled.
+    ///
+    /// Bash only: non-Bash access has no static findings, so its allow rules
+    /// already bypass the classifier without consulting narrowness. Only
+    /// meaningful when the full evaluation already returned `Allow` (deny/ask
+    /// precedence is not re-checked here).
+    pub(crate) fn narrow_allow_authorizes(&self, access: &AccessKind) -> bool {
+        let AccessKind::Bash(cmd) = access else {
+            return false;
+        };
+        self.has_bash_allow_rules
+            && self.bash_chain_fully_allowed(
+                cmd,
+                MAX_INLINE_SHELL_DEPTH,
+                AllowRuleScope::NarrowOnly,
+            )
+    }
+
+    fn bash_chain_fully_allowed(
+        &self,
+        cmd: &str,
+        inline_depth_remaining: usize,
+        scope: AllowRuleScope,
+    ) -> bool {
         let Some(segments) = all_commands_from_script(cmd) else {
             return false;
         };
@@ -306,7 +346,7 @@ impl CompiledPolicy {
                 return false;
             }
             let inner_words = norm.words;
-            if !self.bash_words_allowed(inner_words) {
+            if !self.bash_words_allowed(inner_words, scope) {
                 return false;
             }
             let shell_words: Vec<ShellWord<'_>> = inner_words.iter().map(ShellWord::from).collect();
@@ -315,6 +355,7 @@ impl CompiledPolicy {
                     if !self.bash_chain_fully_allowed(
                         inner_words[index].as_str(),
                         inline_depth_remaining - 1,
+                        scope,
                     ) {
                         return false;
                     }
@@ -326,8 +367,17 @@ impl CompiledPolicy {
         true
     }
 
-    fn bash_words_allowed(&self, words: &[String]) -> bool {
+    fn bash_words_allowed(&self, words: &[String], scope: AllowRuleScope) -> bool {
         if words.is_empty() {
+            return false;
+        }
+        let narrow_only = scope == AllowRuleScope::NarrowOnly;
+        // An exec-vehicle head makes any rule effectively a code-execution
+        // grant (`Bash(python:*)` is one `-c` away from arbitrary code), so it
+        // never counts as narrow — the classifier stays in the loop. The
+        // `-c` shells are also floored by `shell_dash_c_script`; this list
+        // covers the vehicles that floor does not model.
+        if narrow_only && head_is_exec_vehicle(words) {
             return false;
         }
         let cmd = words.join(" ");
@@ -335,8 +385,10 @@ impl CompiledPolicy {
             .rules
             .iter()
             .zip(&self.matchers)
-            .any(|(rule, matcher)| {
-                matches!(rule.action, RuleAction::Allow)
+            .zip(&self.catchall)
+            .any(|((rule, matcher), catchall)| {
+                !(narrow_only && *catchall)
+                    && matches!(rule.action, RuleAction::Allow)
                     && matches!(rule.tool, ToolFilter::Bash | ToolFilter::Any)
                     && bash_allow_pattern_matches(&cmd, rule, matcher.as_ref())
             })
@@ -521,6 +573,84 @@ fn tool_filter_matches(access: &AccessKind, filter: &ToolFilter) -> bool {
         ToolFilter::WebFetch => matches!(access, AccessKind::WebFetch(_)),
         ToolFilter::WebSearch => matches!(access, AccessKind::WebSearch(_)),
     }
+}
+
+/// Which allow rules an evaluation walk may count. Callers pick at the call
+/// site: [`Self::Any`] is the ordinary conjunctive allow gate; auto mode uses
+/// [`Self::NarrowOnly`] to decide what may resolve before its classifier.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AllowRuleScope {
+    /// Every allow rule.
+    Any,
+    /// Only deliberately scoped rules: non-catchall ([`rule_is_catchall`]) and
+    /// not headed by an exec vehicle ([`head_is_exec_vehicle`]).
+    NarrowOnly,
+}
+
+/// Program heads that execute code handed to them — interpreters, script
+/// runners, remote shells, and privilege escalators. Exact basename matches
+/// (compared lowercased, `.exe` stripped); interpreter families with
+/// versioned spellings (`python3.13`) live in [`EXEC_VEHICLE_HEAD_FAMILIES`].
+/// Extend as new vehicles come up. Over-matching is fail-safe: a head wrongly
+/// treated as a vehicle only loses the narrow-rule classifier bypass and
+/// floors its always-allow scope — never the reverse.
+const EXEC_VEHICLE_HEADS: &[&str] = &[
+    // Shells (their `-c` forms are also floored by `shell_dash_c_script`;
+    // listing them here additionally covers `bash script.sh`-style runs).
+    "sh", "bash", "zsh", "dash", "ksh", "fish",
+    // Interpreters and their distro / variant spellings that the versioned
+    // family rule below does not catch (`nodejs` is Debian/Ubuntu's node,
+    // `luajit`, `phpdbg`/`php-cgi`, `pythonw`).
+    "deno", "bun", "julia", "rscript", "awk", "gawk", "mawk", "nawk", "nodejs", "luajit", "phpdbg",
+    "php-cgi", "pythonw", // Package runners that fetch-and-execute.
+    "npx", "bunx", "pipx", "uvx", "uv",
+    // Arg-forwarding executors (`find -exec` hands off like `xargs`), remote
+    // shells, privilege escalators.
+    "xargs", "find", "sudo", "doas", "su", "ssh", "watch", "setsid", "flock", "chroot", "nsenter",
+    // Container runtimes: `run --privileged -v /:/host <image>` is full host
+    // root, so a bare `docker`/`podman` grant is as broad as `sudo`.
+    "docker", "podman",
+];
+
+/// Interpreter families with versioned spellings: `python` also covers
+/// `python3`, `python3.13`, and `python3.13t` (free-threaded). Only a
+/// version-like suffix counts — a bare prefix match would rope in unrelated
+/// tools (`nodemon`, `phpunit`) and cost their narrow rules the bypass.
+const EXEC_VEHICLE_HEAD_FAMILIES: &[&str] = &["python", "node", "ruby", "perl", "php", "lua"];
+
+/// Whether the command's program head executes code handed to it. Head is the
+/// basename, lowercased with a `.exe` suffix stripped, matched against
+/// [`EXEC_VEHICLE_HEADS`] or a versioned [`EXEC_VEHICLE_HEAD_FAMILIES`]
+/// spelling. `pub(crate)` so [`minimum_always_allow_scope`] floors these to
+/// the full command like dangerous verbs.
+pub(crate) fn head_is_exec_vehicle(words: &[String]) -> bool {
+    let Some(head) = words.first().and_then(|w| w.rsplit(['/', '\\']).next()) else {
+        return false;
+    };
+    let head = head.to_ascii_lowercase();
+    let head = head.strip_suffix(".exe").unwrap_or(&head);
+    if EXEC_VEHICLE_HEADS.contains(&head) {
+        return true;
+    }
+    EXEC_VEHICLE_HEAD_FAMILIES.iter().any(|family| {
+        head.strip_prefix(family).is_some_and(|rest| {
+            // digits/dots, plus an optional trailing `t` (free-threaded build).
+            let core = rest.strip_suffix('t').unwrap_or(rest);
+            core.chars().all(|c| c.is_ascii_digit() || c == '.')
+        })
+    })
+}
+
+/// Whether a bash glob pattern is universally broad — matches every bash probe
+/// [`bash_probes`], the same set [`rule_is_catchall`] uses. Callers persisting
+/// a client-supplied glob use this to refuse `*`, `**`, `?*`, `* *`, and the
+/// like, which "matches the prompted script" only because they match anything.
+/// Also the pattern editor's save gate, so it cannot drift from this refusal.
+pub fn bash_glob_is_catchall(pattern: &str) -> bool {
+    bash_probes().iter().all(|access| match access {
+        AccessKind::Bash(cmd) => bash_pattern_matches_command(pattern, cmd),
+        _ => false,
+    })
 }
 
 /// Prefix match requiring a word boundary: `git` matches `git`/`git ...` but
@@ -929,6 +1059,69 @@ mod tests {
         // Read/Edit/Grep are file-access only: never a `--yolo`-substitute catch-all.
         assert!(!rule_is_catchall(&glob(ToolFilter::Read, Some("**"))));
         assert!(!rule_is_catchall(&glob(ToolFilter::Edit, Some("*"))));
+    }
+
+    #[test]
+    fn bash_glob_is_catchall_refuses_universal_patterns() {
+        // Universal patterns match every bash probe, so persisting them from a
+        // (possibly forged) client reply would mint a blanket grant.
+        for pattern in ["*", "**", "* *", "?*"] {
+            assert!(
+                bash_glob_is_catchall(pattern),
+                "{pattern:?} matches everything and must be treated as a catch-all",
+            );
+        }
+        // Scoped patterns the editor produces stay honorable.
+        for pattern in ["gh api repos/owner/*", "git push*", "cargo *", "deploy *"] {
+            assert!(
+                !bash_glob_is_catchall(pattern),
+                "{pattern:?} is scoped and must not be a catch-all",
+            );
+        }
+    }
+
+    #[test]
+    fn head_is_exec_vehicle_normalizes_spellings() {
+        let words = |s: &str| -> Vec<String> { s.split_whitespace().map(str::to_owned).collect() };
+        // Interpreters, versioned/free-threaded spellings, distro variants,
+        // package runners, escalators, and remote shells — path- and
+        // case-insensitive, `.exe` stripped.
+        for cmd in [
+            "python foo.py",
+            "python3.13 foo.py",
+            "python3.13t foo.py",
+            "pythonw foo.py",
+            "nodejs server.js",
+            "luajit x.lua",
+            "phpdbg -qrr x.php",
+            "php-cgi x.php",
+            "/usr/local/bin/python3 x.py",
+            "PYTHON3.EXE x.py",
+            "sudo make install",
+            "ssh host uname",
+            "docker run --privileged -v /:/host img",
+            "podman run img",
+        ] {
+            assert!(
+                head_is_exec_vehicle(&words(cmd)),
+                "{cmd:?} head must be an exec vehicle",
+            );
+        }
+        // Family lookalikes without a version-like suffix, and plain tools, are
+        // not vehicles — they keep the narrow-rule classifier bypass.
+        for cmd in [
+            "nodemon server.js",
+            "phpunit --filter Foo",
+            "git push",
+            "ls -la",
+            "cargo test",
+        ] {
+            assert!(
+                !head_is_exec_vehicle(&words(cmd)),
+                "{cmd:?} head must not be an exec vehicle",
+            );
+        }
+        assert!(!head_is_exec_vehicle(&[]));
     }
 
     #[test]
@@ -1557,6 +1750,123 @@ mod tests {
             &policy,
         );
         assert!(matches!(result, Some(Decision::Reject(_))));
+    }
+
+    /// Rules naming an exec vehicle (interpreter / runner / privilege
+    /// escalator) look narrow to the catch-all probes but grant arbitrary
+    /// code execution, so they must not resolve before the auto classifier.
+    #[test]
+    fn exec_vehicle_rules_are_not_narrow() {
+        let rule = |pattern: &str| PermissionRule {
+            action: RuleAction::Allow,
+            tool: ToolFilter::Bash,
+            pattern: Some(pattern.to_owned()),
+            pattern_mode: PatternMode::Glob,
+        };
+        for (pattern, cmd) in [
+            ("python", "python -c 'import os'"),
+            ("python3.13", "python3.13 x.py"),
+            ("node", "node evil.js"),
+            ("npx", "npx some-package"),
+            ("uv", "uv run x.py"),
+            ("ssh", "ssh host uname"),
+            ("xargs", "xargs -n1 rm"),
+            ("find", "find /tmp -name x -delete"),
+            ("awk", "awk -f prog.awk data.txt"),
+            ("sudo", "sudo make install"),
+            ("bash", "bash script.sh"),
+            ("/usr/bin/python3", "/usr/bin/python3 x.py"),
+        ] {
+            let policy = CompiledPolicy::new(PermissionConfig::new(vec![rule(pattern)]));
+            let access = AccessKind::Bash(cmd.to_owned());
+            assert!(
+                matches!(policy.evaluate(&access), Some(Decision::Allow)),
+                "{pattern}: rule must still allow in ask mode"
+            );
+            assert!(
+                !policy.narrow_allow_authorizes(&access),
+                "{pattern}: exec vehicle must not count as narrow"
+            );
+        }
+        // Family lookalikes are NOT vehicles: only version-like suffixes
+        // (`python3.13`) count, so `nodemon`/`phpunit` rules keep the bypass.
+        for (pattern, cmd) in [
+            ("nodemon", "nodemon server.js"),
+            ("phpunit", "phpunit --filter Foo"),
+        ] {
+            let policy = CompiledPolicy::new(PermissionConfig::new(vec![rule(pattern)]));
+            assert!(
+                policy.narrow_allow_authorizes(&AccessKind::Bash(cmd.to_owned())),
+                "{pattern}: family-prefix lookalike must stay narrow"
+            );
+        }
+        // A scoped non-vehicle rule stays narrow; a catch-all never is, and a
+        // command only the catch-all covers is not narrow in a mixed config.
+        let push = AccessKind::Bash("git push origin main".into());
+        let narrow = rule("git push");
+        let catchall = PermissionRule {
+            action: RuleAction::Allow,
+            tool: ToolFilter::Bash,
+            pattern: None,
+            pattern_mode: PatternMode::Glob,
+        };
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![narrow.clone()]));
+        assert!(policy.narrow_allow_authorizes(&push));
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![catchall.clone()]));
+        assert!(!policy.narrow_allow_authorizes(&push));
+        let mixed = CompiledPolicy::new(PermissionConfig::new(vec![catchall, narrow]));
+        assert!(mixed.narrow_allow_authorizes(&push));
+        assert!(!mixed.narrow_allow_authorizes(&AccessKind::Bash("terraform destroy".into())));
+        // Non-Bash access is never narrow (its allows bypass the classifier
+        // without consulting narrowness).
+        assert!(!mixed.narrow_allow_authorizes(&AccessKind::WebFetch("https://x.test".into())));
+    }
+
+    #[test]
+    fn claude_mcp_server_deny_rule_scopes_to_server() {
+        use crate::permission::rules::parse_permission_rule;
+
+        let rule = parse_permission_rule("mcp__github", RuleAction::Deny).unwrap();
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![rule]));
+
+        let denied = AccessKind::MCPTool {
+            name: "github__create_issue".into(),
+            input: serde_json::Value::Null,
+        };
+        assert!(matches!(
+            policy.evaluate(&denied),
+            Some(Decision::Reject(_))
+        ));
+
+        // `github__*` must not leak onto other servers sharing the prefix.
+        let other_server = AccessKind::MCPTool {
+            name: "githubx__foo".into(),
+            input: serde_json::Value::Null,
+        };
+        assert!(policy.evaluate(&other_server).is_none());
+    }
+
+    /// The allow direction of the same `mcp__…` rewrite: a Claude-spelling
+    /// allow rule must auto-allow the server's tools end-to-end through
+    /// `CompiledPolicy`, and stay scoped to that server.
+    #[test]
+    fn claude_mcp_allow_rule_auto_allows_server_tools() {
+        use crate::permission::rules::parse_permission_rule;
+
+        let rule = parse_permission_rule("mcp__linear__*", RuleAction::Allow).unwrap();
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![rule]));
+
+        let allowed = AccessKind::MCPTool {
+            name: "linear__get_issue".into(),
+            input: serde_json::Value::Null,
+        };
+        assert!(matches!(policy.evaluate(&allowed), Some(Decision::Allow)));
+
+        let other_server = AccessKind::MCPTool {
+            name: "linearx__foo".into(),
+            input: serde_json::Value::Null,
+        };
+        assert!(policy.evaluate(&other_server).is_none());
     }
 
     #[test]

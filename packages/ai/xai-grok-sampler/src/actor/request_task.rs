@@ -19,13 +19,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use xai_grok_sampling_types::{
-    ConversationItem, ConversationRequest, ConversationResponse, EmptyResponseContext,
-    ReasoningModelIdentity, SamplingError, SentCredential, error::Result as SamplingResult,
+    ApiErrorCode, ConversationItem, ConversationRequest, ConversationResponse,
+    EmptyResponseContext, ReasoningModelIdentity, SamplingError, SentCredential,
+    error::Result as SamplingResult,
 };
 
 use crate::client::{ApiBackend, SamplingClient};
 use crate::config::{RetryPolicy, SamplerConfig};
-use crate::events::{SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
+use crate::events::{SamplingErrorInfo, SamplingErrorKind, SamplingEvent, StripReason};
 use crate::metrics::InferenceLatencyStats;
 use crate::retry::{
     self as retry_mod, RetryDecision, classify_error, clone_error, resolve_max_retries,
@@ -341,13 +342,28 @@ async fn apply_retry_decision(
     // Connection-reset / broken-pipe on body upload often means nginx
     // rejected an oversized payload before responding 413. Strip
     // images proactively before any retry of those errors so we don't
-    // burn budget re-uploading the same large body.
-    if err.is_likely_body_rejected() {
-        let stripped = request.strip_images();
-        if stripped > 0 {
+    // burn budget re-uploading the same large body. Gated on the decision
+    // actually retrying: a Fatal (budget exhausted) must not mutate the
+    // request or tell the user images were "left out of the retry".
+    let will_retry = matches!(
+        decision,
+        RetryDecision::Retry { .. }
+            | RetryDecision::RetryWithBackoff { .. }
+            | RetryDecision::RetryWithClientRebuild { .. }
+    );
+    if will_retry && err.is_likely_body_rejected() {
+        let stripped_urls = request.strip_images();
+        if !stripped_urls.is_empty() {
             tracing::warn!(
-                stripped,
-                "stripped {stripped} image(s) before retry (likely nginx 413 via connection reset)"
+                stripped = stripped_urls.len(),
+                "stripped {} image(s) before retry (likely nginx 413 via connection reset)",
+                stripped_urls.len()
+            );
+            emit_images_stripped(
+                event_tx,
+                request_id,
+                stripped_urls,
+                StripReason::PayloadHeuristic,
             );
         }
     }
@@ -398,18 +414,46 @@ async fn apply_retry_decision(
             true
         }
         RetryDecision::RetryWithImageStrip => {
-            let stripped = request.strip_images();
-            if stripped == 0 {
+            let stripped_urls = request.strip_images();
+            if stripped_urls.is_empty() {
                 // Nothing left to strip; upgrade to fatal.
                 emit_failed(event_tx, request_id, err);
                 send_completion(completion_tx, Err(clone_error(err)));
                 return false;
             }
+            // Only the deterministic signal (a 400 stamped with the
+            // invalid-image code) is a server rejection. Everything else
+            // that reaches this arm (413 body-size verdicts, proxy-wrapped
+            // 500s, the legacy phrase match, coded mid-stream errors) is a
+            // heuristic that must stay request-local.
+            // Exhaustive: a new error variant must choose its strip label
+            // here instead of silently landing on the heuristic branch.
+            let reason = match err {
+                SamplingError::Api {
+                    status,
+                    error_code: Some(ApiErrorCode::InvalidImage),
+                    ..
+                } if status.as_u16() == 400 => StripReason::ServerRejected,
+                SamplingError::Api { .. }
+                | SamplingError::StreamError { .. }
+                | SamplingError::Auth { .. }
+                | SamplingError::InvalidConfiguration(_)
+                | SamplingError::Http(_)
+                | SamplingError::Serialization(_)
+                | SamplingError::EventStreamError(_)
+                | SamplingError::IdleTimeout { .. }
+                | SamplingError::EmptyResponse { .. }
+                | SamplingError::MaxTokensTruncation
+                | SamplingError::DoomLoopDetected { .. } => StripReason::PayloadHeuristic,
+            };
             tracing::warn!(
-                stripped,
+                stripped = stripped_urls.len(),
+                reason = reason.as_str(),
                 error = %err,
-                "stripped {stripped} image(s) after server rejection; retrying without them"
+                "stripped {} image(s) after an image-related error; retrying without them",
+                stripped_urls.len()
             );
+            emit_images_stripped(event_tx, request_id, stripped_urls, reason);
             *retry_count += 1;
             emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
             true
@@ -967,6 +1011,19 @@ fn emit_retrying(
         reason,
         doom_loop_triggers: info.doom_loop_triggers,
         doom_loop_aborted_at_chunk: info.doom_loop_aborted_at_chunk,
+    });
+}
+
+fn emit_images_stripped(
+    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
+    request_id: &RequestId,
+    stripped_urls: Vec<std::sync::Arc<str>>,
+    reason: StripReason,
+) {
+    let _ = event_tx.send(SamplingEvent::ImagesStripped {
+        request_id: request_id.clone(),
+        stripped_urls,
+        reason,
     });
 }
 

@@ -23,37 +23,78 @@ pub struct RunContext<'a> {
 /// Result of running a single hook (any handler type).
 #[derive(Debug)]
 pub enum HookRunnerResult {
-    Decision(HookDecision),
+    Allow {
+        updated_input: Option<serde_json::Value>,
+    },
+    Deny {
+        reason: String,
+        hook_name: String,
+    },
     Stop(StopHookOutcome),
     Success,
     /// Failed: the caller fails open.
     Failed(String),
 }
 
-/// JSON from `PreToolUse` gate hooks:
-/// `{"decision": "allow" | "deny", "reason": "…"}`.
+/// JSON emitted by a `PreToolUse` gate hook. Every field is optional: `decision`
+/// carries the allow/deny verdict, `reason` its message, and
+/// `hookSpecificOutput.updatedInput` an optional rewrite of the tool input.
 #[derive(Debug, Deserialize)]
 pub(crate) struct GateHookJson {
-    pub decision: String,
+    #[serde(default)]
+    pub decision: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default, rename = "hookSpecificOutput")]
+    pub hook_specific_output: Option<GateHookSpecificOutputJson>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct GateHookSpecificOutputJson {
+    #[serde(default, rename = "updatedInput")]
+    pub updated_input: Option<serde_json::Value>,
+}
+
+impl GateHookJson {
+    /// True only when the payload carries a `decision` or `hookSpecificOutput`;
+    /// a stray JSON log line is not a gate document and must not read as allow.
+    fn is_gate_document(&self) -> bool {
+        self.decision.is_some() || self.hook_specific_output.is_some()
+    }
+
+    fn updated_input(&self, hook_name: &str) -> Option<serde_json::Value> {
+        let value = self.hook_specific_output.as_ref()?.updated_input.as_ref()?;
+        if value.is_object() {
+            return Some(value.clone());
+        }
+        tracing::warn!(hook_name, "ignoring non-object `updatedInput` from hook");
+        None
+    }
 }
 
 /// Interpret a [`GateHookJson`] as a [`HookDecision`]. An unknown decision value
 /// is an error so typos surface instead of failing open.
+///
+/// `fallback_reason` supplies the deny message when the JSON carries none
+/// (command hooks pass the first stderr line — the hook's feedback channel;
+/// HTTP hooks have no stderr and pass `None`).
 pub(crate) fn gate_json_to_decision(
-    json: GateHookJson,
+    json: &GateHookJson,
     hook_name: &str,
+    fallback_reason: Option<&str>,
 ) -> Result<HookDecision, String> {
-    match json.decision.as_str() {
-        "deny" => Ok(HookDecision::Deny {
+    match json.decision.as_deref() {
+        Some("deny") => Ok(HookDecision::Deny {
             reason: json
                 .reason
+                .clone()
+                .filter(|r| !r.trim().is_empty())
+                .or_else(|| fallback_reason.map(str::to_string))
                 .unwrap_or_else(|| format!("denied by hook '{hook_name}'")),
             hook_name: hook_name.to_string(),
         }),
-        "allow" => Ok(HookDecision::Allow),
-        other => Err(format!(
+        Some("allow") | None => Ok(HookDecision::Allow),
+        Some(other) => Err(format!(
             "unknown decision value '{other}' from hook '{hook_name}'"
         )),
     }

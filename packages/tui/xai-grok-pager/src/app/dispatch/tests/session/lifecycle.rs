@@ -2102,6 +2102,46 @@ fn delete_current_session_confirm_emits_effect() {
         "got {effects:?}"
     );
 }
+/// Reverting session-delete kills to the wire default (`ClientUi`) would auto-wake.
+#[test]
+fn delete_current_session_kills_bg_tasks_as_teardown() {
+    use xai_grok_shell::extensions::task::TaskKillSource;
+    let mut app = test_app_with_agent();
+    {
+        let a = app.agents.get_mut(&AgentId(0)).unwrap();
+        a.session.session_id = Some(acp::SessionId::new("sess-del"));
+        a.session.cwd = std::path::PathBuf::from("/repo");
+        a.session
+            .bg_tasks
+            .insert("bg-del".into(), super::super::make_bg_task("bg-del"));
+    }
+    assert!(dispatch(Action::DeleteCurrentSession, &mut app).is_empty());
+    let effects = dispatch(
+        Action::DeleteCurrentSessionAnswered { confirmed: true },
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::KillBgTask {
+                task_id,
+                source: TaskKillSource::Teardown,
+                ..
+            } if task_id == "bg-del"
+        )),
+        "session delete must emit Teardown, got {effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::KillBgTask {
+                source: TaskKillSource::ClientUi,
+                ..
+            }
+        )),
+        "session delete must not emit ClientUi, got {effects:?}"
+    );
+}
 #[test]
 fn delete_current_session_confirm_from_dashboard_emits_dashboard_after() {
     use crate::app::actions::AfterSessionDelete;

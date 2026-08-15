@@ -61,6 +61,7 @@ fn recorded_completion(output: String) -> Value {
                 completed: true,
                 block_waited: false,
                 explicitly_killed: false,
+                kill_result_delivered: false,
                 kind: Default::default(),
                 owner_session_id: None,
                 description: None,

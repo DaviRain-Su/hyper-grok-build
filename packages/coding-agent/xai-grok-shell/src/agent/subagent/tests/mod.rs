@@ -1,6 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
-use super::handle_request::{
+use super::attempt_runner::{
     canonical_total_tokens, record_subagent_usage, usage_is_incomplete,
 };
 use crate::test_support::lsp_runtime::{

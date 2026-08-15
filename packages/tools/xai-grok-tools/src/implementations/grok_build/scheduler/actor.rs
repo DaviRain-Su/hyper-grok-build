@@ -13,6 +13,7 @@ use crate::implementations::grok_build::task::types::{
 use crate::notification::types::ToolNotificationHandle;
 use crate::notification::{
     DurableNotificationTargets, ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved,
+    ScheduledTaskRemovedReason,
 };
 use crate::reminders::format_loop_iteration_prompt;
 use crate::types::resources::{SharedResources, State};
@@ -62,9 +63,14 @@ fn task_created_payload(task: &ScheduledTask, version: SchedulerVersion) -> Sche
     }
 }
 
-fn task_removed_payload(task_id: String, version: SchedulerVersion) -> ScheduledTaskRemoved {
+fn task_removed_payload(
+    task_id: String,
+    reason: ScheduledTaskRemovedReason,
+    version: SchedulerVersion,
+) -> ScheduledTaskRemoved {
     ScheduledTaskRemoved {
         task_id,
+        reason,
         generation: version.generation(),
         revision: version.revision(),
     }
@@ -138,11 +144,14 @@ impl SchedulerActor {
     async fn publish_durable_removal(
         &self,
         task_id: String,
+        reason: ScheduledTaskRemovedReason,
         version: SchedulerVersion,
     ) -> Result<(), SchedulerError> {
         let acknowledgements = self
             .notification_handle
-            .send_scheduled_task_removed_acknowledged(task_removed_payload(task_id, version));
+            .send_scheduled_task_removed_acknowledged(task_removed_payload(
+                task_id, reason, version,
+            ));
         self.await_bounded(acknowledgements.wait(), SchedulerError::Notification)
             .await
     }
@@ -168,7 +177,8 @@ impl SchedulerActor {
                 .expect("pending durable removal exists");
             (pending.task_id.clone(), pending.reservation.version_at(0))
         };
-        self.publish_durable_removal(task_id, version).await?;
+        self.publish_durable_removal(task_id, ScheduledTaskRemovedReason::Deleted, version)
+            .await?;
         let mut pending = self
             .pending_removal
             .take()
@@ -217,7 +227,11 @@ impl SchedulerActor {
             let commit = reservation.commit_next(&mut self.clock);
             log_rollover("shutdown", None, commit.rollover);
             self.notification_handle
-                .send_scheduled_task_removed(task_removed_payload(task_id, commit.version));
+                .send_scheduled_task_removed(task_removed_payload(
+                    task_id,
+                    ScheduledTaskRemovedReason::Shutdown,
+                    commit.version,
+                ));
         }
     }
 
@@ -236,7 +250,7 @@ impl SchedulerActor {
                     && res.get::<State<SchedulerState>>().is_some_and(|s| {
                         s.tasks
                             .iter()
-                            .any(|t| t.recurring && !t.foreground && t.next_fire_at() <= soon)
+                            .any(|t| t.recurring && !t.foreground && t.next_wake_at() <= soon)
                     });
                 let wired = res.get::<SubagentEventSender>().is_some()
                     && res.get::<SessionIdResource>().is_some();
@@ -260,7 +274,7 @@ impl SchedulerActor {
                 s.tasks
                     .iter()
                     .filter(|task| !self.blocked_expiries.contains(&task.id))
-                    .map(ScheduledTask::next_fire_at)
+                    .map(ScheduledTask::next_wake_at)
                     .min()
                     .map(|next| {
                         let now = Utc::now();
@@ -281,7 +295,7 @@ impl SchedulerActor {
         let mut res = self.resources.lock().await;
         let state = res.get_or_default::<State<SchedulerState>>();
         let idx = state.tasks.iter().position(|task| {
-            task.next_fire_at() <= now && !self.blocked_expiries.contains(&task.id)
+            task.next_wake_at() <= now && !self.blocked_expiries.contains(&task.id)
         });
 
         let Some(idx) = idx else {
@@ -377,7 +391,14 @@ impl SchedulerActor {
             }
 
             let version = reservation.version_at(0);
-            if let Err(error) = self.publish_durable_removal(task_id.clone(), version).await {
+            if let Err(error) = self
+                .publish_durable_removal(
+                    task_id.clone(),
+                    ScheduledTaskRemovedReason::Expired,
+                    version,
+                )
+                .await
+            {
                 tracing::warn!(
                     %task_id,
                     %error,
@@ -395,11 +416,26 @@ impl SchedulerActor {
         if is_expired {
             state.tasks.remove(idx);
             drop(res);
+            // Flush the absence before announcing, so a crash in the debounce window cannot
+            // resurrect and re-expire the task on restart. Best-effort (non-durable semantics):
+            // on failure the removal proceeds with a warn. The re-lock is race-free; only this
+            // actor task mutates scheduler state.
+            if let Err(error) = self.persist_resources().await {
+                tracing::warn!(
+                    task_id = %task_id,
+                    %error,
+                    "Expired task's absence was not persisted; a restart may resurrect and re-expire it"
+                );
+            }
             tracing::info!(task_id = %task_id, "Scheduled task expired; removing without firing");
             let commit = reservation.commit_next(&mut self.clock);
             log_rollover(transition, Some(&task_id), commit.rollover);
             self.notification_handle
-                .send_scheduled_task_removed(task_removed_payload(task_id, commit.version));
+                .send_scheduled_task_removed(task_removed_payload(
+                    task_id,
+                    ScheduledTaskRemovedReason::Expired,
+                    commit.version,
+                ));
             return;
         }
 
@@ -503,7 +539,11 @@ impl SchedulerActor {
             let removal = reservation.commit_next(&mut self.clock);
             debug_assert!(removal.rollover.is_none());
             self.notification_handle
-                .send_scheduled_task_removed(task_removed_payload(task_id, removal.version));
+                .send_scheduled_task_removed(task_removed_payload(
+                    task_id,
+                    ScheduledTaskRemovedReason::Completed,
+                    removal.version,
+                ));
         }
     }
 
@@ -1193,6 +1233,7 @@ mod tests {
         actor.fire_next_task().await;
         let expired = notification!(notifications.try_recv().unwrap(), ScheduledTaskRemoved);
         assert_eq!(expired.revision, 1);
+        assert_eq!(expired.reason, ScheduledTaskRemovedReason::Expired);
 
         actor.clock = SchedulerClock::at_revision_for_test(u64::MAX);
         let (acknowledged, mut deliveries) = ToolNotificationHandle::acknowledged_channel();
@@ -1223,6 +1264,29 @@ mod tests {
         );
         let deleted = notification!(notifications.try_recv().unwrap(), ScheduledTaskRemoved);
         assert_eq!(deleted.revision, 1);
+        assert_eq!(deleted.reason, ScheduledTaskRemovedReason::Deleted);
+    }
+
+    /// A recurring task whose interval stretches past the TTL must still expire at `expires_at`:
+    /// the actor wakes on min(next_fire_at, expires_at), so an interval longer than the TTL
+    /// cannot delay the expiry to its first fire.
+    #[tokio::test]
+    async fn expiry_fires_at_ttl_when_interval_outlives_it() {
+        let mut task = ScheduledTask::new(8 * 86_400, "interval outlives ttl".into(), true, false);
+        task.id = "slow-loop".into();
+        task.created_at = Utc::now() - chrono::Duration::seconds(10);
+        task.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        let (mut actor, mut notifications) = make_boundary_actor(vec![task], 0);
+
+        assert_eq!(actor.compute_next_fire_delay().await, Duration::ZERO);
+
+        actor.fire_next_task().await;
+        let removed = notification!(notifications.try_recv().unwrap(), ScheduledTaskRemoved);
+        assert_eq!(removed.task_id, "slow-loop");
+        assert_eq!(removed.reason, ScheduledTaskRemovedReason::Expired);
+        let res = actor.resources.lock().await;
+        let state = res.get::<State<SchedulerState>>().unwrap();
+        assert!(state.tasks.is_empty(), "expired task must be removed");
     }
 
     #[tokio::test]
@@ -1282,8 +1346,104 @@ mod tests {
         let second = notification!(notifications.try_recv().unwrap(), ScheduledTaskRemoved);
         assert_eq!((first.task_id.as_str(), first.revision), ("first", 1));
         assert_eq!((second.task_id.as_str(), second.revision), ("second", 2));
+        assert_eq!(first.reason, ScheduledTaskRemovedReason::Shutdown);
+        assert_eq!(second.reason, ScheduledTaskRemovedReason::Shutdown);
         assert_eq!(first.generation, second.generation);
         assert_ne!(first.generation, old_generation);
+    }
+
+    /// A plain (non-durable) recurring `/loop` must survive a process restart: persisted with
+    /// the session resources, then re-announced and re-armed by the next process's actor.
+    #[tokio::test]
+    async fn recurring_task_survives_restart_and_rearms() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resources_state.json");
+
+        // "First process": a due, non-durable recurring task exists; persist
+        // the resources the way the tool bridge does after a tool call.
+        let persistence = Arc::new(crate::persistence::ResourcesPersistence::new(path.clone()));
+        let mut task = ScheduledTask::new(1, "babysit the pipeline".into(), true, false);
+        task.id = "loop-1".into();
+        task.created_at = Utc::now() - chrono::Duration::seconds(10);
+        task.foreground = true;
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        resources.get_or_default::<State<SchedulerState>>().tasks = vec![task];
+        persistence.save(&resources);
+        persistence.flush().await;
+        drop(resources); // process dies
+
+        // "Second process": fresh resources restored from disk re-arm the loop.
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        assert!(
+            crate::persistence::ResourcesPersistence::new(path).load(&mut resources),
+            "persisted scheduler state must load on restart"
+        );
+        let shared = Arc::new(Mutex::new(resources));
+        let (notif_handle, mut notif_rx) = auto_acknowledged_notifications();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let cancel_token = CancellationToken::new();
+        tokio::spawn(
+            SchedulerActor {
+                resources: shared,
+                resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::noop()),
+                notification_handle: notif_handle,
+                cmd_rx,
+                cancel_token: cancel_token.clone(),
+                clock: SchedulerClock::new(),
+                pending_removal: None,
+                blocked_expiries: HashSet::new(),
+            }
+            .run(),
+        );
+
+        let announced = notification!(next_event(&mut notif_rx).await, ScheduledTaskCreated);
+        assert_eq!(announced.task_id, "loop-1", "restored loop is re-announced");
+        let fired = notification!(next_event(&mut notif_rx).await, ScheduledTaskFired);
+        assert_eq!(fired.task_id, "loop-1", "overdue restored loop fires");
+        cancel_token.cancel();
+    }
+
+    /// A non-durable expiry must persist the task's absence, otherwise every restart resurrects
+    /// the task, re-expires it, and stacks a duplicate expiry record in the session transcript.
+    #[tokio::test]
+    async fn non_durable_expiry_persists_task_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resources_state.json");
+        let persistence = Arc::new(crate::persistence::ResourcesPersistence::new(path.clone()));
+
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        resources.get_or_default::<State<SchedulerState>>().tasks =
+            vec![expired_task("stale-loop", false)];
+        persistence.save(&resources);
+        persistence.flush().await;
+
+        let (notif_handle, mut notif_rx) = auto_acknowledged_notifications();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let mut actor = SchedulerActor {
+            resources: Arc::new(Mutex::new(resources)),
+            resources_persistence: persistence.clone(),
+            notification_handle: notif_handle,
+            cmd_rx,
+            cancel_token: CancellationToken::new(),
+            clock: SchedulerClock::new(),
+            pending_removal: None,
+            blocked_expiries: HashSet::new(),
+        };
+        actor.fire_next_task().await;
+        persistence.flush().await;
+
+        let removed = notification!(next_event(&mut notif_rx).await, ScheduledTaskRemoved);
+        assert_eq!(removed.reason, ScheduledTaskRemovedReason::Expired);
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            persisted["state"]["grok_build.Scheduler"]["tasks"],
+            serde_json::json!([]),
+            "expired task must not survive on disk"
+        );
     }
 
     #[tokio::test]
@@ -1456,7 +1616,10 @@ mod tests {
             kinds.push(match notif {
                 ToolNotification::ScheduledTaskCreated(_) => "created",
                 ToolNotification::ScheduledTaskFired(_) => "fired",
-                ToolNotification::ScheduledTaskRemoved(_) => "removed",
+                ToolNotification::ScheduledTaskRemoved(removed) => {
+                    assert_eq!(removed.reason, ScheduledTaskRemovedReason::Completed);
+                    "removed"
+                }
                 _ => "other",
             });
         }

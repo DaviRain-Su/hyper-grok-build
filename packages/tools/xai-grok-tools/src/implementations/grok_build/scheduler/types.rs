@@ -231,6 +231,11 @@ pub const LOOP_FRESH_CHAIN_EVERY: u32 = 10;
 
 pub const LOOP_COMPLETION_OUTPUT_CAP: usize = 4_000;
 
+/// How long a recurring scheduled task lives before auto-expiry. Single source of truth for the
+/// TTL: task construction stamps `expires_at = now + days(this)`, and user-facing copy (pager
+/// notice, tool descriptions) must read the same constant so the number cannot drift.
+pub const RECURRING_TASK_TTL_DAYS: i64 = 7;
+
 const MAX_SCHEDULER_TRANSITIONS: usize = 50;
 
 fn default_recurring() -> bool {
@@ -267,7 +272,7 @@ impl ScheduledTask {
             created_at,
             last_fired_at: None,
             expires_at: if recurring {
-                Some(now + chrono::Duration::days(7))
+                Some(now + chrono::Duration::days(RECURRING_TASK_TTL_DAYS))
             } else {
                 None
             },
@@ -281,6 +286,17 @@ impl ScheduledTask {
     pub fn next_fire_at(&self) -> DateTime<Utc> {
         let anchor = self.last_fired_at.unwrap_or(self.created_at);
         anchor + chrono::Duration::seconds(self.interval_secs as i64)
+    }
+
+    /// Next moment the actor must wake for this task: the sooner of the next fire and the
+    /// auto-expiry deadline. Sleeping purely on `next_fire_at` would let a task whose interval
+    /// stretches past `expires_at` outlive the TTL (an 8-day interval must still expire at day
+    /// 7, not when its first fire comes due).
+    pub fn next_wake_at(&self) -> DateTime<Utc> {
+        match self.expires_at {
+            Some(expires_at) => self.next_fire_at().min(expires_at),
+            None => self.next_fire_at(),
+        }
     }
 
     /// Whether this task has expired (recurring tasks only).
@@ -342,12 +358,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_recurring_task_has_7_day_expiry() {
+    fn new_recurring_task_has_ttl_expiry() {
         let task = ScheduledTask::new(300, "check deploy".into(), true, false);
         assert!(task.expires_at.is_some());
         let expiry = task.expires_at.unwrap();
         let diff = expiry - task.created_at;
-        assert_eq!(diff.num_days(), 7);
+        assert_eq!(diff.num_days(), RECURRING_TASK_TTL_DAYS);
     }
 
     #[test]

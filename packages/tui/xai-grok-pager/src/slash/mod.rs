@@ -1409,6 +1409,25 @@ pub fn is_command_complete(line: &str, registry: &CommandRegistry) -> bool {
     !invocation.args.trim().is_empty()
 }
 
+/// True when `text` is a complete invocation of a pager BUILTIN, a name only this process honors.
+///
+/// The criterion is ownership, not outcome. A pager-owned name must never be sent to the model as
+/// text: the agent's `resolve()` reserves those names without handling them. ACP, skill, and
+/// unknown names belong to that `resolve()` and already round-trip correctly as queue text, so they
+/// are excluded. Restricted commands are excluded too: `get_for_dispatch` returns `None` for them.
+///
+/// Some builtins enqueue rather than execute (`/compact`, `/imagine`, `/loop`): dispatch re-adds
+/// those at the tail of the local queue, so the row's position is not preserved.
+pub(crate) fn is_complete_builtin_invocation(text: &str, registry: &CommandRegistry) -> bool {
+    let trimmed = text.trim();
+    let Some(invocation) = parse_invocation(trimmed) else {
+        return false;
+    };
+    registry.is_builtin(invocation.token)
+        && registry.get_for_dispatch(invocation.token).is_some()
+        && is_command_complete(trimmed, registry)
+}
+
 /// True when Enter should send `text` unchanged.
 ///
 /// Accept turns `/doctor` into `/doctor ` and opens the arg menu. Skip accept
@@ -1688,6 +1707,38 @@ mod tests {
     fn non_slash_is_not_complete() {
         let reg = test_registry();
         assert!(!is_command_complete("hello", &reg));
+    }
+
+    // Tests for is_complete_builtin_invocation
+
+    #[test]
+    fn is_complete_builtin_invocation_accepts_complete_builtin() {
+        let reg = test_registry();
+        assert!(is_complete_builtin_invocation("/btw why is it slow", &reg));
+        assert!(is_complete_builtin_invocation("  /compact  ", &reg));
+    }
+
+    #[test]
+    fn is_complete_builtin_invocation_rejects_incomplete_or_unowned_text() {
+        let reg = test_registry();
+        // Args required but missing: dispatch would not execute it either.
+        assert!(!is_complete_builtin_invocation("/btw", &reg));
+        // Unknown command: reserved for the agent's own pass-through.
+        assert!(!is_complete_builtin_invocation("/nope x", &reg));
+        // Not an invocation at position 0.
+        assert!(!is_complete_builtin_invocation("great /compact go", &reg));
+        assert!(!is_complete_builtin_invocation("plain prompt", &reg));
+        assert!(!is_complete_builtin_invocation("/", &reg));
+    }
+
+    #[test]
+    fn is_complete_builtin_invocation_rejects_restricted_builtin() {
+        let mut reg = test_registry();
+        reg.set_restricted_commands(&["usage".to_string()]);
+        assert!(
+            !is_complete_builtin_invocation("/usage", &reg),
+            "a tier-gated command must stay saved as text, not run from a queue row"
+        );
     }
 
     // -- Controller tests --

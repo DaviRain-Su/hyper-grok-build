@@ -51,6 +51,26 @@ fn search_replace_call(id: &str, path: &str) -> ToolCallResponse {
         ),
     }
 }
+fn pre_tool_use_registry(script: &str) -> xai_grok_hooks::discovery::HookRegistry {
+    let (mut registry, _) = xai_grok_hooks::discovery::load_hooks(None, None);
+    registry.append_specs(vec![xai_grok_hooks::config::HookSpec {
+        name: "test/pretooluse".into(),
+        event: xai_grok_hooks::event::HookEventName::PreToolUse,
+        handler_type: xai_grok_hooks::config::HandlerType::Command,
+        configured_matcher: None,
+        matcher: None,
+        enabled: true,
+        command: Some(std::path::PathBuf::from(script)),
+        command_raw: Some(script.to_string()),
+        url: None,
+        url_raw: None,
+        timeout_ms: 5000,
+        source_dir: std::path::PathBuf::from("/tmp"),
+        extra_env: std::collections::HashMap::new(),
+        layer: xai_grok_hooks::config::HookProvenance::File,
+    }]);
+    registry
+}
 async fn prepare(
     actor: &SessionActor,
     call: ToolCallResponse,
@@ -150,6 +170,36 @@ async fn inactive_plan_mode_does_not_gate_edits() {
                 result.is_ok(),
                 "edit outside plan mode must prepare; got {:?}",
                 result.err()
+            );
+        })
+        .await;
+}
+/// The gate must see a PreToolUse hook's rewrite: the model edits the plan file
+/// (allowed), the hook redirects it outside, and the gate rejects. Pins hook
+/// dispatch running before the plan gate.
+#[tokio::test(flavor = "current_thread")]
+async fn plan_gate_sees_hook_rewritten_path() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut actor = build_gate_actor().await;
+            actor.hook_resolved_workspace_root = "/tmp".to_string();
+            *actor.hook_registry.borrow_mut() = Some(
+                std::sync::Arc::new(
+                    pre_tool_use_registry(
+                        r#"echo '{"hookSpecificOutput":{"updatedInput":{"file_path":"/tmp/src/main.rs","old_string":"a","new_string":"b"}}}'"#,
+                    ),
+                ),
+            );
+            activate_plan_mode(&actor);
+            let result = prepare(
+                    &actor,
+                    search_replace_call("call_hook_gate", "/tmp/test-session/plan.md"),
+                )
+                .await;
+            assert!(
+                matches!(result, Err(ToolLoop::Continue)),
+                "plan gate must reject the hook-rewritten non-plan path; got {result:?}"
             );
         })
         .await;

@@ -95,6 +95,9 @@ pub struct PromptContext {
     /// prompt (Full). `None` = base template only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_body: Option<String>,
+    /// Persists plan-agent verification policy across prompt reconstruction.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_browser_verification: bool,
     /// Which base template to use for `Extend` mode.
     /// `TemplateOverride::None` = standard base/subagent template.
     /// `TemplateOverride::Codex` = apply-patch profile template (decrypted on demand).
@@ -178,6 +181,7 @@ impl Default for PromptContext {
             prompt_mode: PromptMode::Extend,
             audience: PromptAudience::default(),
             prompt_body: None,
+            include_browser_verification: false,
             system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
             persona_summaries: vec![],
@@ -208,6 +212,9 @@ impl PromptContext {
     /// - Subagents and primary sessions both get the full block, so a child
     ///   verifier sees the same project instructions as the main agent.
     pub fn agents_md_user_reminder(&self) -> Option<String> {
+        if self.include_browser_verification {
+            return None;
+        }
         self.format_agents_md_section()
     }
     /// Personas content for injection as a prepended user message.
@@ -248,6 +255,7 @@ impl PromptContext {
             "current_date": self.current_date.as_deref().unwrap_or(""),
             "is_non_interactive": self.is_non_interactive,
             "system_prompt_label": self.system_prompt_label.as_str(),
+            "include_browser_verification": self.include_browser_verification,
         })
     }
     /// Render the full system prompt via `ToolBridge`.
@@ -311,6 +319,7 @@ mod tests {
             prompt_mode: PromptMode::Extend,
             audience: PromptAudience::Primary,
             prompt_body: None,
+            include_browser_verification: false,
             system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
             persona_summaries: vec![],
@@ -327,6 +336,32 @@ mod tests {
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
         }
+    }
+    #[test]
+    fn standard_primary_template_renders_browser_verification_only_when_flagged() {
+        let renderer = TemplateRenderer::new(Default::default(), Default::default());
+        let mut ctx = test_context();
+        ctx.include_browser_verification = true;
+        let on = ctx.render_with_renderer(&renderer).unwrap();
+        ctx.include_browser_verification = false;
+        let off = ctx.render_with_renderer(&renderer).unwrap();
+        let block_start = on
+            .find("\n\n<browser_verification>")
+            .expect("flagged standard template must render browser verification");
+        assert_eq!(&on[..block_start], off);
+        assert!(on.ends_with("</browser_verification>"));
+        assert!(!off.contains("<browser_verification>"));
+    }
+    #[test]
+    fn full_mode_flag_does_not_append_browser_verification() {
+        let renderer = TemplateRenderer::new(Default::default(), Default::default());
+        let ctx = PromptContext {
+            prompt_mode: PromptMode::Full,
+            prompt_body: Some("base".into()),
+            include_browser_verification: true,
+            ..test_context()
+        };
+        assert_eq!(ctx.render_with_renderer(&renderer).as_deref(), Some("base"));
     }
     #[test]
     fn test_json_round_trip() {
@@ -578,6 +613,18 @@ mod tests {
         assert!(section.contains("XYZZY_AGENTS_MD_MARKER"));
     }
     #[test]
+    fn agents_md_user_reminder_suppressed_when_rules_are_in_the_prefix() {
+        let mut ctx = test_context();
+        ctx.include_browser_verification = true;
+        ctx.agents_md_files = vec![AgentConfigFile {
+            file_name: "AGENTS.md".to_string(),
+            file_path: "/repo/AGENTS.md".to_string(),
+            content: "# XYZZY_AGENTS_MD_MARKER".to_string(),
+        }];
+        assert!(ctx.agents_md_user_reminder().is_none());
+        assert!(ctx.format_agents_md_section().is_some());
+    }
+    #[test]
     fn personas_user_reminder_always_none() {
         let mut ctx = test_context();
         ctx.persona_summaries = vec!["- **reviewer** [user]: Meticulous code reviewer".to_string()];
@@ -593,6 +640,7 @@ mod tests {
             prompt_mode: PromptMode::Extend,
             audience: PromptAudience::Subagent,
             prompt_body: Some(subagent_prompts::GENERAL_PURPOSE_PROMPT.to_string()),
+            include_browser_verification: false,
             system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
             persona_summaries: vec![

@@ -1006,14 +1006,12 @@ pub async fn run_single_turn(
 
     let track_active = std::env::var("GROK_TRACK_HEADLESS").is_ok();
     if track_active {
-        let _ = xai_grok_shell::active_sessions::register(
-            xai_grok_shell::active_sessions::ActiveSession {
-                session_id: session_id.clone(),
-                pid: std::process::id(),
-                cwd: cwd.display().to_string(),
-                opened_at: chrono::Utc::now(),
-            },
-        );
+        let _ = xai_grok_active_sessions::register(xai_grok_active_sessions::ActiveSession {
+            session_id: session_id.clone(),
+            pid: std::process::id(),
+            cwd: cwd.display().to_string(),
+            opened_at: chrono::Utc::now(),
+        });
     }
 
     // Seed the reducer's session context BEFORE applying model/effort so a later failure carries it.
@@ -1250,7 +1248,7 @@ pub async fn run_single_turn(
 
     if track_active {
         // Non-blocking flock so a slow/network ~/.grok can't hang exit.
-        let _ = xai_grok_shell::active_sessions::try_unregister(&session_id);
+        let _ = xai_grok_active_sessions::try_unregister(&session_id);
     }
     // A mid-turn ACP close already reaped above; return that error before the normal outcome.
     if connection_closed {
@@ -1359,6 +1357,7 @@ fn reap_request_for_work(
             serde_json::value::to_raw_value(&KillTaskRequest {
                 session_id: session_id.0.to_string(),
                 task_id: id.clone(),
+                source: xai_grok_shell::extensions::task::TaskKillSource::Teardown,
             })?,
         ),
     };

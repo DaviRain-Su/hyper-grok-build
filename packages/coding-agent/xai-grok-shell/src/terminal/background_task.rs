@@ -319,6 +319,7 @@ fn get_task_output_path_in(
     Ok(tasks_dir.join(format!("{}.log", task_id)))
 }
 
+
 // ── Background task manifest for session resume ──
 
 const MANIFEST_FILENAME: &str = "background_tasks_manifest.json";
@@ -463,6 +464,7 @@ mod tests {
             "sessions root must be 0700"
         );
     }
+
 
     #[tokio::test]
     async fn test_register_and_get() {

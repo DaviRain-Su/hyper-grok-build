@@ -166,7 +166,7 @@ fn record_create(key: &Path, live_watchers: usize) {
     );
 }
 
-/// Construct via `FsConfig::default()` then chain `with_*` setters.
+/// Construct via `FsConfig::default()`, then assign the public fields.
 /// Internal timing constants (cooldown, stale-lock) live in `crate::state`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -181,20 +181,6 @@ impl Default for FsConfig {
             debounce_ms: 100,
             ignore_patterns: vec![],
         }
-    }
-}
-
-impl FsConfig {
-    #[must_use]
-    pub fn with_debounce_ms(mut self, ms: u64) -> Self {
-        self.debounce_ms = ms;
-        self
-    }
-
-    #[must_use]
-    pub fn with_ignore_patterns(mut self, patterns: Vec<String>) -> Self {
-        self.ignore_patterns = patterns;
-        self
     }
 }
 

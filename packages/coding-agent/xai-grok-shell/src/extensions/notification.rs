@@ -608,9 +608,7 @@ pub enum SessionUpdate {
         event_name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_name: Option<String>,
-        /// The prompt turn this batch belongs to, when known; lets the
-        /// client keep a delayed `stop`/`stop_failure` batch off the wrong
-        /// turn's marker.
+        /// Keeps a delayed turn-end batch off the wrong turn's marker.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt_id: Option<String>,
         runs: Vec<HookRunEntryDto>,
@@ -868,7 +866,12 @@ pub enum SessionUpdate {
         subagent_id: Option<String>,
     },
     /// A scheduled task was deleted/cancelled.
-    ScheduledTaskDeleted { task_id: String },
+    ScheduledTaskDeleted {
+        task_id: String,
+        /// `Unknown` on rows persisted before the reason field existed.
+        #[serde(default)]
+        reason: xai_grok_tools::notification::ScheduledTaskRemovedReason,
+    },
     /// A monitor event (stdout line from a monitor background process).
     MonitorEvent {
         task_id: String,

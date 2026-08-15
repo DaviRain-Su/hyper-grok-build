@@ -3,8 +3,9 @@ use std::sync::Arc;
 /// Credentials for authenticating with grok backend services.
 ///
 /// Two construction modes:
-/// - `with_auth_manager(am)` — live mode. `resolve_async()` drives
-///   `AuthManager::get_valid_token()` (memory -> disk -> OIDC refresh).
+/// - `with_auth_manager(am)` — live mode, a background-consumer surface:
+///   `resolve_async()` drives `AuthManager::get_valid_token_background()`
+///   (memory -> disk -> OIDC refresh, deferred during dark wake).
 /// - `new(token)` — static mode. For one-shot callers that don't have
 ///   an `AuthManager` (visibility checks, bundle fetches, tests).
 ///
@@ -93,15 +94,18 @@ impl GrokAuthCredentials {
             self.clone()
         }
     }
-    /// Async resolve via the internal `AuthManager::get_valid_token()`
-    /// (memory -> disk -> active OIDC refresh). Falls back to sync
-    /// `resolve()` on error so transient refresh failures don't drop
-    /// the bearer.
+    /// Async resolve via `AuthManager::get_valid_token_background()`
+    /// (memory -> disk -> active OIDC refresh). **Background urgency**: every
+    /// live-mode holder of this type is a background loop (FeedbackClient
+    /// signals sync, SessionRegistryClient) — user-facing paths resolve
+    /// through `AuthManager::auth()` directly. Falls back to sync
+    /// `resolve()` on error so transient refresh failures don't drop the
+    /// bearer.
     pub async fn resolve_async(&self) -> GrokAuthCredentials {
         let Some(ref am) = self.auth_manager else {
             return self.clone();
         };
-        match am.get_valid_token().await {
+        match am.get_valid_token_background().await {
             Ok(key) => {
                 let mut creds = self.clone();
                 creds.user_token = Some(key);

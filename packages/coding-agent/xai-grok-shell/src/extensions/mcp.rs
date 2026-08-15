@@ -571,7 +571,7 @@ fn disabled_server_placeholder_entry(name: &str) -> McpServerEntry {
 pub(crate) async fn build_mcp_status(
     mcp_state: &Arc<TokioMutex<McpState>>,
     tool_bridge: &Arc<xai_grok_tools::bridge::ToolBridge>,
-    event_writer: Option<&xai_file_utils::events::EventWriter>,
+    event_writer: Option<&xai_grok_session_events::EventWriter>,
 ) -> McpStatusSnapshot {
     let _build_mcp_status_timer = crate::instrumentation::timer("build_mcp_status");
     let (
@@ -615,7 +615,7 @@ pub(crate) async fn build_mcp_status(
 
         let healthy = client.is_healthy().await;
         if let Some(ew) = event_writer {
-            ew.emit(xai_file_utils::events::Event::McpHealthCheck {
+            ew.emit(xai_grok_session_events::Event::McpHealthCheck {
                 server_name: name.clone(),
                 healthy,
                 client_state: Some(if healthy { "ready" } else { "unavailable" }.to_string()),
@@ -747,7 +747,7 @@ pub(crate) async fn init_agent_mcp_pool(
         return;
     }
 
-    let noop = xai_file_utils::events::EventWriter::noop();
+    let noop = xai_grok_session_events::EventWriter::noop();
     // session_less picks Interactive to preserve prior deferred-OAuth behavior. A session-less SDK
     // agent can reach this non-interactively; threading real non-interactivity is a deliberate follow-up.
     let ctx = crate::session::mcp_servers::McpSpawnCtx::session_less(&noop);

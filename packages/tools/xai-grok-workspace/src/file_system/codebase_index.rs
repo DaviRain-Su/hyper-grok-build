@@ -96,6 +96,28 @@ impl CodebaseIndexManager {
         self.indexes.get(cwd).and_then(Weak::upgrade)
     }
 
+    /// Index whose root is the longest prefix of `path` (multi-repo dispatch).
+    ///
+    /// Upgrades first, then picks the longest *live* covering root: if the
+    /// longest-prefix root's `Weak` is already dead, a shorter but still-live
+    /// covering root is used instead of returning `None`.
+    pub fn get_covering(&self, path: &Path) -> Option<Arc<IndexManagerHandle>> {
+        self.indexes
+            .iter()
+            .filter(|(root, _)| path.starts_with(root))
+            .filter_map(|(root, weak)| weak.upgrade().map(|handle| (root, handle)))
+            .max_by_key(|(root, _)| root.as_os_str().len())
+            .map(|(_, handle)| handle)
+    }
+
+    /// Ensure an index exists for every materialized mount.
+    pub fn ensure_all(&mut self, roots: &[PathBuf]) -> Vec<Arc<IndexManagerHandle>> {
+        roots
+            .iter()
+            .map(|root| self.get_or_create(root.clone()).0)
+            .collect()
+    }
+
     /// Returns the number of currently-live indexes (test helper).
     #[cfg(test)]
     pub(crate) fn active_count(&self) -> usize {
@@ -146,6 +168,36 @@ mod tests {
             "get() must return None before get_or_create() is called — this is \
              the CodebaseIndexManager state that causes code/status to report notStarted"
         );
+    }
+
+    /// `get_covering` must skip a dead longest-prefix `Weak` and fall back to a
+    /// shorter but still-live covering root (regression: previously it picked
+    /// the longest prefix first and returned `None` if that one was dead).
+    #[test]
+    fn get_covering_skips_dead_weak_for_shorter_live_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let outer = temp.path().join("ws");
+        let inner = outer.join("app");
+        std::fs::create_dir_all(&inner).unwrap();
+
+        let mut mgr = CodebaseIndexManager::new();
+        let outer_handle = mgr.get_or_create(outer.clone()).0;
+        let inner_handle = mgr.get_or_create(inner.clone()).0;
+
+        let file = inner.join("src/main.rs");
+        // While both are live, the longest prefix (`inner`) wins.
+        assert!(std::sync::Arc::ptr_eq(
+            &mgr.get_covering(&file).expect("live inner"),
+            &inner_handle
+        ));
+
+        // Drop the longest root's strong ref: its `Weak` is now dead. Covering
+        // must fall back to the shorter live `outer`, not return `None`.
+        drop(inner_handle);
+        let covering = mgr.get_covering(&file).expect("fall back to live outer");
+        assert!(std::sync::Arc::ptr_eq(&covering, &outer_handle));
+
+        drop(outer_handle);
     }
 
     /// get() returns None even after another path was indexed.

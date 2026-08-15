@@ -17,6 +17,7 @@ use xai_grok_shell::extensions::notification::{
     SessionNotification, SessionUpdate as XaiSessionUpdate, is_reauthable_failure,
 };
 use xai_grok_shell::tools::todo::todo_item_from_plan_entry;
+use xai_grok_tools::notification::ScheduledTaskRemovedReason;
 use xai_grok_workspace::permission::bash_command_splitting::BashCommandHighlights;
 
 use crate::acp::meta::NotificationMeta;
@@ -48,6 +49,7 @@ mod routing;
 mod session_notification;
 mod settings;
 mod subagent_activity;
+mod subagent_lifecycle;
 mod workflow_ingest;
 
 #[cfg(test)]
@@ -71,6 +73,10 @@ pub(crate) use prompt_origin::{
 
 pub(crate) use subagent_activity::finalize_killed_subagent;
 use subagent_activity::{subagent_activity_label, sync_subagent_activity};
+use subagent_lifecycle::{
+    LifecycleDelivery, LifecycleOrigin, classify_subagent_lifecycle, gate_subagent_lifecycle,
+    redispatched_subagent_finish, take_deferred_subagent_finish,
+};
 
 use workflow_ingest::ingest_workflow_update;
 
@@ -79,7 +85,7 @@ pub(crate) use session_notification::apply_session_event_for_test;
 pub(crate) use session_notification::drop_unexpected_replay;
 use session_notification::{
     advance_reconnect_cursor, confirm_context_used, detect_plan_mode_change,
-    handle_session_notification,
+    handle_session_notification, handle_session_notification_with_origin,
 };
 
 pub(crate) use queue::PendingRunningAdoption;
@@ -456,30 +462,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // retry, etc.), the in-flight prompt can no longer be
                         // "rewound" by Ctrl+C. Clear the stash on the transition.
                         if !had_activity_before && agent.session.tracker.activity().is_some() {
-                            agent.session.in_flight_prompt = None;
-
-                            // Log initial TTFA once per turn (activity flips None→Some each loop).
-                            if let Some(started) = agent.turn_started_at
-                                && agent.first_activity_logged_for != Some(started)
-                            {
-                                agent.first_activity_logged_for = Some(started);
-                                let activity_label = agent
-                                    .session
-                                    .tracker
-                                    .activity()
-                                    .map(|a| a.as_label())
-                                    .unwrap_or("unknown");
-                                let ttfa_ms = started.elapsed().as_millis() as u64;
-                                let sid = agent.session.session_id.as_ref().map(|s| s.0.as_ref());
-                                crate::unified_log::info(
-                                    "turn.first_activity",
-                                    sid,
-                                    Some(serde_json::json!({
-                                        "ttfa_ms": ttfa_ms,
-                                        "activity": activity_label,
-                                    })),
-                                );
-                            }
+                            note_first_turn_activity(agent);
                         }
 
                         // Drain pending ACP commands immediately after handle_update.
@@ -655,6 +638,36 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
             false
         }
         _ => false,
+    }
+}
+
+/// The turn's first activity (tracker flip None→Some): the server has started
+/// producing, so drop the Ctrl+C rewind stash and log TTFA once per turn.
+/// Shared by `handle_update` and the `ToolCallDeltaChunk` arm so the rails can't drift.
+pub(super) fn note_first_turn_activity(agent: &mut AgentView) {
+    agent.session.in_flight_prompt = None;
+
+    // Log initial TTFA once per turn (activity flips None→Some each loop).
+    if let Some(started) = agent.turn_started_at
+        && agent.first_activity_logged_for != Some(started)
+    {
+        agent.first_activity_logged_for = Some(started);
+        let activity_label = agent
+            .session
+            .tracker
+            .activity()
+            .map(|a| a.as_label())
+            .unwrap_or("unknown");
+        let ttfa_ms = started.elapsed().as_millis() as u64;
+        let sid = agent.session.session_id.as_ref().map(|s| s.0.as_ref());
+        crate::unified_log::info(
+            "turn.first_activity",
+            sid,
+            Some(serde_json::json!({
+                "ttfa_ms": ttfa_ms,
+                "activity": activity_label,
+            })),
+        );
     }
 }
 

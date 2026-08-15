@@ -32,6 +32,14 @@ const TOTAL_TOKENS_KEY: &str = "totalTokens";
 /// `_meta` key holding the per-event id used for cursor-based reconnect.
 const EVENT_ID_KEY: &str = "eventId";
 
+/// What to do when cwd hints miss `updates.jsonl`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReplayLookupFallback {
+    #[default]
+    Relocation,
+    HintedOnly,
+}
+
 /// Optional location hints so child `updates.jsonl` lookup can skip a full
 /// `~/.grok/sessions` RelocationView scan.
 #[derive(Clone, Copy, Debug, Default)]
@@ -42,6 +50,8 @@ pub struct ReplayPathHint<'a> {
     /// Child working directory when it differs from the parent (worktree /
     /// custom cwd). Tried before [`Self::parent_cwd`].
     pub child_cwd: Option<&'a Path>,
+    /// When cwd hints miss: scan via [`RelocationView`], or return None.
+    pub fallback: ReplayLookupFallback,
 }
 
 #[doc(hidden)]
@@ -208,12 +218,18 @@ pub(crate) fn resolve_replay_updates_path(
     grok_home: &std::path::Path,
     hint: ReplayPathHint<'_>,
 ) -> std::io::Result<Option<std::path::PathBuf>> {
-    // A journal means both source and target dirs can exist; the hint can hit
-    // the non-authoritative transcript. Fall through to RelocationView then.
-    if let Some(path) = try_fast_replay_updates_path(session_id, grok_home, hint)
-        && !super::relocation::has_relocation_journal(grok_home, session_id)
-    {
-        return Ok(Some(path));
+    match try_fast_replay_updates_path(session_id, grok_home, hint) {
+        Some(path) if !super::relocation::has_relocation_journal(grok_home, session_id) => {
+            return Ok(Some(path));
+        }
+        Some(_journaled) => {
+            // Journal is authority; hinted source may be stale.
+        }
+        None if hint.fallback == ReplayLookupFallback::HintedOnly => {
+            // Hinted miss: skip RelocationView (UI-thread scan).
+            return Ok(None);
+        }
+        None => {}
     }
     let sessions_root = grok_home.join("sessions");
     let view = RelocationView::load_for_sessions_root(&sessions_root).map_err(io::Error::other)?;

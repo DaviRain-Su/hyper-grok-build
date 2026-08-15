@@ -18,6 +18,7 @@ use std::cell::Cell;
 
 use xai_grok_shared::ui_config::UiConfig;
 
+use super::follow_up_behavior::FollowUpBehavior;
 use super::render_mermaid::RenderMermaid;
 use super::scroll_mode::ScrollMode;
 use super::text_selection::TextSelection;
@@ -33,6 +34,7 @@ const TIMELINE_DEFAULT: bool = UiConfig::SHOW_TIMELINE_DEFAULT;
 const PAGE_FLIP_ON_SEND_DEFAULT: bool = UiConfig::PAGE_FLIP_ON_SEND_DEFAULT;
 /// Combine-queued-prompts rollout flag defaults OFF (opt-in).
 const COMBINE_QUEUED_PROMPTS_DEFAULT: bool = false;
+const FOLLOW_UP_BEHAVIOR_DEFAULT: FollowUpBehavior = FollowUpBehavior::Queue;
 const SIMPLE_MODE_DEFAULT: bool = true;
 /// Vim-mode scrollback default — matches the previous on-disk default.
 const VIM_MODE_DEFAULT: bool = false;
@@ -193,6 +195,38 @@ pub fn load_combine_queued_prompts() -> bool {
 pub fn set_combine_queued_prompts(enabled: bool) {
     COMBINE_QUEUED_PROMPTS_CURRENT.with(|c| c.set(enabled));
     COMBINE_QUEUED_PROMPTS_LOADED.with(|l| l.set(true));
+}
+
+thread_local! {
+    static FOLLOW_UP_BEHAVIOR_CURRENT: Cell<FollowUpBehavior> =
+        const { Cell::new(FOLLOW_UP_BEHAVIOR_DEFAULT) };
+    static FOLLOW_UP_BEHAVIOR_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Read cached `follow_up_behavior`, seeding from disk on first call.
+pub fn load_follow_up_behavior() -> FollowUpBehavior {
+    FOLLOW_UP_BEHAVIOR_LOADED.with(|loaded| {
+        if !loaded.get() {
+            let value = load_str_from_effective_config("follow_up_behavior")
+                .as_deref()
+                .and_then(FollowUpBehavior::from_canonical)
+                .unwrap_or(FOLLOW_UP_BEHAVIOR_DEFAULT);
+            FOLLOW_UP_BEHAVIOR_CURRENT.with(|c| c.set(value));
+            loaded.set(true);
+        }
+    });
+    FOLLOW_UP_BEHAVIOR_CURRENT.with(|c| c.get())
+}
+
+/// True when follow-ups should promote as mid-turn interjections (Steer).
+pub fn load_follow_up_steer() -> bool {
+    load_follow_up_behavior().is_steer()
+}
+
+/// Replace cached `follow_up_behavior`.
+pub fn set_follow_up_behavior(value: FollowUpBehavior) {
+    FOLLOW_UP_BEHAVIOR_CURRENT.with(|c| c.set(value));
+    FOLLOW_UP_BEHAVIOR_LOADED.with(|l| l.set(true));
 }
 
 // -- Simple mode --------------------------------------------------------------
@@ -410,6 +444,28 @@ pub fn set_keep_text_selection(value: TextSelection) {
     KEEP_TEXT_SELECTION_LOADED.with(|l| l.set(true));
 }
 
+/// Apply the remote soft default for `keep_text_selection` on top of the locally-resolved
+/// [`load_keep_text_selection`].
+///
+/// When the server supplies a recognized value (`flash` / `hold` / `word_select`) and the
+/// user has expressed no text-selection preference (no `keep_text_selection`, no legacy
+/// `selection_highlight_duration_ms`, no retired `double_click_action = "word_select"`),
+/// adopt it as the default. Any explicit local choice always wins, so this only sets the
+/// untouched default. An absent or unrecognized value leaves the compile-time default in
+/// place. Call once at startup after [`prime`].
+pub fn apply_remote_keep_text_selection_default(remote_default: Option<&str>, ui: &UiConfig) {
+    let Some(value) = remote_default.and_then(TextSelection::from_canonical) else {
+        return;
+    };
+    let user_expressed_preference = ui.keep_text_selection.is_some()
+        || ui.selection_highlight_duration_ms.is_some()
+        || ui.double_click_action.as_deref() == Some("word_select");
+    if user_expressed_preference {
+        return;
+    }
+    set_keep_text_selection(value);
+}
+
 // -- Scroll speed ------------------------------------------------------------
 
 thread_local! {
@@ -610,6 +666,12 @@ pub fn prime(ui: &UiConfig) {
         ui.combine_queued_prompts
             .unwrap_or(COMBINE_QUEUED_PROMPTS_DEFAULT),
     );
+    set_follow_up_behavior(
+        ui.follow_up_behavior
+            .as_deref()
+            .and_then(FollowUpBehavior::from_canonical)
+            .unwrap_or(FOLLOW_UP_BEHAVIOR_DEFAULT),
+    );
     set_simple_mode(ui.simple_mode.unwrap_or(SIMPLE_MODE_DEFAULT));
     set_keep_text_selection(text_selection_from_ui(ui));
     // Layered-config keys (not the `UiConfig` arg) — seed so the first frame
@@ -650,8 +712,14 @@ fn load_bool_from_effective_config(key: &str, default: bool) -> bool {
 /// 2. Else retired `double_click_action = "word_select"` migrates to
 ///    `word_select` (pre-unification / hand-edited configs only; Settings
 ///    clears it on any write via `set_keep_text_selection`).
-/// 3. Else legacy bool / `selection_highlight_duration_ms` fallback (`hold` vs
-///    `flash`).
+/// 3. Else a legacy `selection_highlight_duration_ms` maps `0 → hold`,
+///    non-zero `→ flash` (old configs that predate the unified key).
+/// 4. Else nothing is configured, so it resolves to
+///    [`KEEP_TEXT_SELECTION_DEFAULT`] (`flash`).
+///
+/// The remote soft default is layered on top of this at pager startup via
+/// [`apply_remote_keep_text_selection_default`]; it does not change this local
+/// resolution.
 fn text_selection_from_ui(ui: &UiConfig) -> TextSelection {
     if let Some(kind) = ui
         .keep_text_selection
@@ -664,10 +732,10 @@ fn text_selection_from_ui(ui: &UiConfig) -> TextSelection {
     if ui.double_click_action.as_deref() == Some("word_select") {
         return TextSelection::WordSelect;
     }
-    if ui.keep_text_selection_enabled() {
-        TextSelection::Hold
-    } else {
-        TextSelection::Flash
+    match ui.selection_highlight_duration_ms {
+        Some(0) => TextSelection::Hold,
+        Some(_) => TextSelection::Flash,
+        None => KEEP_TEXT_SELECTION_DEFAULT,
     }
 }
 
@@ -726,6 +794,10 @@ mod tests {
             COMBINE_QUEUED_PROMPTS_DEFAULT,
             ui.combine_queued_prompts
                 .unwrap_or(COMBINE_QUEUED_PROMPTS_DEFAULT)
+        );
+        assert_eq!(
+            FOLLOW_UP_BEHAVIOR_DEFAULT.as_canonical(),
+            ui.follow_up_behavior()
         );
         assert_eq!(SIMPLE_MODE_DEFAULT, ui.simple_mode.unwrap_or(true));
         assert_eq!(VIM_MODE_DEFAULT, ui.vim_mode.unwrap_or(false));
@@ -1183,6 +1255,39 @@ mod tests {
                     "explicit keep_text_selection={paired} must win over double_click_action"
                 );
             }
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// The remote `keep_text_selection_default` sets the untouched default, but
+    /// never overrides an explicit local choice, and ignores unknown values.
+    #[test]
+    fn remote_keep_text_selection_default_sets_only_untouched_default() {
+        std::thread::spawn(|| {
+            // Absent or unrecognized: the compile-time default (flash) stands.
+            set_keep_text_selection(TextSelection::Flash);
+            apply_remote_keep_text_selection_default(None, &UiConfig::default());
+            assert_eq!(load_keep_text_selection(), TextSelection::Flash);
+            apply_remote_keep_text_selection_default(Some("nonsense"), &UiConfig::default());
+            assert_eq!(load_keep_text_selection(), TextSelection::Flash);
+
+            // Recognized value, no user preference: adopted (word_select and hold).
+            set_keep_text_selection(TextSelection::Flash);
+            apply_remote_keep_text_selection_default(Some("word_select"), &UiConfig::default());
+            assert_eq!(load_keep_text_selection(), TextSelection::WordSelect);
+            set_keep_text_selection(TextSelection::Flash);
+            apply_remote_keep_text_selection_default(Some("hold"), &UiConfig::default());
+            assert_eq!(load_keep_text_selection(), TextSelection::Hold);
+
+            // The user explicitly chose flash: the user wins over a remote value.
+            set_keep_text_selection(TextSelection::Flash);
+            let ui = UiConfig {
+                keep_text_selection: Some("flash".into()),
+                ..UiConfig::default()
+            };
+            apply_remote_keep_text_selection_default(Some("word_select"), &ui);
+            assert_eq!(load_keep_text_selection(), TextSelection::Flash);
         })
         .join()
         .unwrap();

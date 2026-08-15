@@ -9,6 +9,7 @@ pub(super) const RESUME_REFUSES_CHAT: &str =
     "session/resume is not supported for chat sessions; use session/load";
 pub(super) const RESUME_REFUSES_EXTRA_DIRS: &str =
     "session/resume does not support additionalDirectories";
+const TOOL_OVERRIDES_ECHO_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 async fn read_applied_tool_overrides(
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<SessionCommand>,
 ) -> Option<xai_grok_sampling_types::ToolOverrides> {
@@ -20,10 +21,14 @@ async fn read_applied_tool_overrides(
         tracing::warn!("tool-overrides echo: session actor command channel closed");
         return None;
     }
-    match rx.await {
-        Ok(overrides) => overrides,
-        Err(_) => {
+    match tokio::time::timeout(TOOL_OVERRIDES_ECHO_BUDGET, rx).await {
+        Ok(Ok(overrides)) => overrides,
+        Ok(Err(_)) => {
             tracing::warn!("tool-overrides echo: session actor dropped the response channel");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("tool-overrides echo exceeded its budget; continuing without echo");
             None
         }
     }
@@ -1194,6 +1199,8 @@ impl MvpAgent {
                 session_id.0.as_ref(),
                 &self.gateway,
                 Some(&parent_cmd_tx),
+                crate::agent::subagent::ORPHAN_RECONCILE_REASON,
+                self.session_registry.live_orphan_heal_lock(&session_id),
             )
             .await;
         }

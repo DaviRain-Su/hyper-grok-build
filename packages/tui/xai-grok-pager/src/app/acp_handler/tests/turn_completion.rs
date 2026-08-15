@@ -1249,6 +1249,49 @@
     }
 
     #[test]
+    fn stop_cancelled_hooks_fold_into_the_cancelled_marker() {
+        // The report is dispatched off the command loop, so it races the terminal in both
+        // directions: the terminal first folds onto an existing marker, the batch first stashes.
+        for terminal_first in [true, false] {
+            let mut app = make_app_with_agent("sess-cancelled-hooks");
+            app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
+            let _ = handle(
+                make_agent_chunk_message_with_prompt(
+                    "sess-cancelled-hooks",
+                    "chunk",
+                    "pid-c",
+                    false,
+                ),
+                &mut app,
+            );
+            let terminal =
+                xai_turn_completed_notif("sess-cancelled-hooks", "pid-c", "cancelled", false);
+            let batch = xai_hook_execution_notif_for_prompt(
+                "sess-cancelled-hooks",
+                "stop_cancelled",
+                Some("pid-c"),
+                false,
+            );
+            for notif in if terminal_first {
+                [&terminal, &batch]
+            } else {
+                [&batch, &terminal]
+            } {
+                let _ = handle_ext_notification(notif, &mut app);
+            }
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(
+                last_marker_stop_hook_groups(&agent.scrollback),
+                Some(1),
+                "the cancelled turn's hook batch must render inside its marker \
+                 (terminal_first={terminal_first})"
+            );
+            assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
+        }
+    }
+
+    #[test]
     fn stamped_stop_hooks_merge_past_interleaved_tail_block() {
         // Viewer/race order with a block (compaction, recap, …) landing
         // between the marker and the batch: an exact pid match still merges

@@ -839,6 +839,7 @@ mod paste_routing_tests {
     #[test]
     fn scrollback_search_paste_stays_scoped_and_browse_is_inert() {
         let mut agent = make_agent();
+        agent.vim_mode = false;
         agent.set_active_pane(AgentPane::Scrollback, true);
         agent.prompt.set_text("hidden prompt");
         agent.scrollback_search = Some(ScrollbackSearchState::open());
@@ -870,8 +871,11 @@ mod paste_routing_tests {
         );
         assert_eq!(agent.prompt.text(), "hidden prompt");
         agent.scrollback_search = None;
-        let outcome = agent.handle_input(&Event::Paste("still ignored".to_owned()), &registry);
-        assert!(matches!(outcome, InputOutcome::Unchanged));
+        let outcome = agent.handle_input(&Event::Paste("forwarded".to_owned()), &registry);
+        assert!(matches!(
+            outcome,
+            InputOutcome::ActionThenForward(crate::app::actions::Action::FocusPrompt)
+        ));
         assert_eq!(agent.prompt.text(), "hidden prompt");
     }
 }

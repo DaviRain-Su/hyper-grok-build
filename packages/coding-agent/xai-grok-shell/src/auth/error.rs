@@ -57,8 +57,65 @@ pub enum RefreshTokenError {
 /// don't surface bare; the permanent arm derives its copy from
 /// [`RefreshTokenFailedReason::user_message`] and is not prefixed.
 #[derive(Debug, Error)]
-#[error("auth refresh failed: {0}")]
-pub struct RefreshTransientError(#[source] Box<dyn std::error::Error + Send + Sync>);
+#[error("auth refresh failed: {source}")]
+pub struct RefreshTransientError {
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync>,
+    reason: TransientReason,
+}
+
+/// Why the refresh path returned a transient error — machine-readable so
+/// callers can branch and telemetry can count the deferral classes apart
+/// (they all share one `Transient` message otherwise). `Other` covers
+/// causes carried in the source error (network, 5xx, persist failures).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransientReason {
+    /// Deferred: system sleep imminent (sleep gate raised).
+    SleepGate,
+    /// Deferred: dark wake (background consumer, or user-facing within the
+    /// deferral budget).
+    DarkWakeDeferred,
+    /// Deferred: consumed-RT sentinel present; retrying only at full wake.
+    SentinelAwaitingWake,
+    /// This failure straddled a suspend and recorded the suspect-RT
+    /// sentinel; the retry goes through the gate's election.
+    StraddleSuspectRecorded,
+    /// Aborted: the `auth.json.lock` died between the sentinel election and
+    /// the retry stamp; retrying re-runs the election under a fresh lock.
+    SentinelLockLost,
+    /// Aborted: the sentinel retry stamp could not be written; a process
+    /// that cannot write the stamp must not present the suspect RT.
+    SentinelStampFailed,
+    /// Deferred: another process holds the sentinel retry election.
+    SentinelCooldown,
+    /// No refresher configured.
+    NoRefresher,
+    /// `auth.json.lock` could not be acquired (or re-acquired) in time.
+    LockTimeout,
+    /// A sibling rotated the credential mid-flight; adopt on retry.
+    SiblingRotation,
+    /// Cause lives in the error chain (network, 5xx, persist failure, …).
+    Other,
+}
+
+impl TransientReason {
+    /// Stable label for telemetry fields.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::SleepGate => "sleep_gate",
+            Self::DarkWakeDeferred => "dark_wake_deferred",
+            Self::SentinelAwaitingWake => "sentinel_awaiting_wake",
+            Self::StraddleSuspectRecorded => "straddle_suspect_recorded",
+            Self::SentinelLockLost => "sentinel_lock_lost",
+            Self::SentinelStampFailed => "sentinel_stamp_failed",
+            Self::SentinelCooldown => "sentinel_cooldown",
+            Self::NoRefresher => "no_refresher",
+            Self::LockTimeout => "lock_timeout",
+            Self::SiblingRotation => "sibling_rotation",
+            Self::Other => "other",
+        }
+    }
+}
 
 /// A terminal refresh failure. `reason` is machine-readable; the user-facing
 /// copy is derived from it via [`RefreshTokenFailedReason::user_message`], so
@@ -150,11 +207,19 @@ pub(crate) fn provider_login_message(label: Option<&str>) -> Cow<'static, str> {
 }
 
 impl AuthError {
-    /// A retryable refresh failure with a message-only cause, for the genuinely
-    /// message-only sites (lock timeout, sleep/dark-wake defer, no refresher);
-    /// use [`Self::transient_source`] when a real error is in hand.
+    /// A retryable refresh failure with a message-only cause and
+    /// [`TransientReason::Other`]; prefer [`Self::transient_reason`] at the
+    /// refresh path's deferral/lock sites so telemetry can count them apart.
     pub(crate) fn transient(message: impl Into<String>) -> Self {
         Self::transient_source(message.into())
+    }
+
+    /// [`Self::transient`] with an explicit machine-readable reason.
+    pub(crate) fn transient_reason(reason: TransientReason, message: impl Into<String>) -> Self {
+        AuthError::Refresh(RefreshTokenError::Transient(RefreshTransientError {
+            source: message.into().into(),
+            reason,
+        }))
     }
 
     /// A retryable refresh failure that preserves `source` in the error chain
@@ -163,9 +228,18 @@ impl AuthError {
     pub(crate) fn transient_source(
         source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
     ) -> Self {
-        AuthError::Refresh(RefreshTokenError::Transient(RefreshTransientError(
-            source.into(),
-        )))
+        AuthError::Refresh(RefreshTokenError::Transient(RefreshTransientError {
+            source: source.into(),
+            reason: TransientReason::Other,
+        }))
+    }
+
+    /// The transient reason, `None` for non-transient errors.
+    pub(crate) fn transient_reason_kind(&self) -> Option<TransientReason> {
+        match self {
+            AuthError::Refresh(RefreshTokenError::Transient(t)) => Some(t.reason),
+            _ => None,
+        }
     }
 
     /// A terminal refresh failure for an already-classified `reason`.

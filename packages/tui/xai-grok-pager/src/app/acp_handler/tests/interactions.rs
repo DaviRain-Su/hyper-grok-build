@@ -110,6 +110,71 @@
     }
 
     #[test]
+    fn exec_vehicle_permission_enqueues_a_persisting_default_scope() {
+        // Regression guard for the enqueue invariant: an exec-vehicle bash
+        // prompt that offers the scoped "Always allow:" row must open on a
+        // default scope that persists a grant — the full command, not a bare
+        // `python3` prefix (which the ←/→ arrows could not repair).
+        use std::sync::Arc;
+        use xai_grok_workspace::permission::bash_command_splitting::BashCommandHighlights;
+
+        let mut app = make_app_with_agent("sess-1");
+        let highlights = BashCommandHighlights {
+            prefix: vec![],
+            highlighted_words: vec![
+                "python3".to_owned(),
+                "-u".to_owned(),
+                "foo.py".to_owned(),
+                "arg".to_owned(),
+            ],
+            suffix: vec![],
+        };
+        let meta = serde_json::to_value(&highlights).unwrap().as_object().cloned();
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = acp::RequestPermissionRequest::new(
+            acp::SessionId::new("sess-1"),
+            acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(Arc::from("call-perm-exec")),
+                acp::ToolCallUpdateFields::default(),
+            ),
+            vec![
+                acp::PermissionOption::new(
+                    acp::PermissionOptionId::new(Arc::from("allow-once")),
+                    "Allow once",
+                    acp::PermissionOptionKind::AllowOnce,
+                ),
+                acp::PermissionOption::new(
+                    acp::PermissionOptionId::new(Arc::from("allow-always-command")),
+                    "Always allow",
+                    acp::PermissionOptionKind::AllowAlways,
+                ),
+            ],
+        )
+        .meta(meta);
+        let msg = AcpClientMessage::RequestPermission(xai_acp_lib::AcpArgs {
+            request,
+            response_tx: tx,
+        });
+
+        handle(msg, &mut app);
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let perm = agent.permission_queue.front().expect("permission queued");
+        assert_eq!(
+            perm.bash_selection_count, 4,
+            "exec vehicle must open on the full-command scope"
+        );
+        assert!(
+            xai_grok_workspace::permission::always_allow_scope_persists(
+                perm.bash_highlights.as_ref().unwrap(),
+                perm.bash_selection_count,
+            ),
+            "the enqueue default scope must persist a grant"
+        );
+    }
+
+    #[test]
     fn ask_user_question_routes_to_background_session_not_active_view() {
         // Repro of the dashboard bug: a session started but not entered asks a
         // question. Active view is agent A (sess-A); the question is for the
@@ -339,10 +404,11 @@
     }
 
     #[test]
-    fn approve_after_reopen_does_not_overwrite_prompt() {
+    fn approve_after_reopen_keeps_session_draft_and_sends_freeform() {
         let mut app = make_app_with_agent("sess-A");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.prompt.set_text("session draft mid-thinking");
             seed_pending_tool(agent, "tc-prompt", "CreatePlan");
         }
 
@@ -361,27 +427,191 @@
             &mut app,
         );
 
-        // Close viewer.
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.cancel_line_viewer();
-
-        // User types new text in the prompt while viewer is closed.
-        agent.prompt.set_text("my new prompt text");
-
-        agent.reopen_plan_approval();
-        agent.approve_plan();
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.prompt.text(), "session draft mid-thinking");
         assert_eq!(
-            agent.prompt.text(),
-            "my new prompt text",
-            "stashed prompt should be restored after reopen + approve"
+            agent
+                .plan_approval_view
+                .as_ref()
+                .map(|p| p.stashed_prompt.text.as_str()),
+            Some("session draft mid-thinking"),
         );
 
-        // Response should be approved.
+        agent.cancel_line_viewer();
+        agent.prompt.set_text("revision freeform notes");
+
+        agent.reopen_plan_approval();
+        assert_eq!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .map(|p| p.stashed_prompt.text.as_str()),
+            Some("session draft mid-thinking"),
+        );
+        assert_eq!(agent.prompt.text(), "revision freeform notes");
+
+        let outcome = agent.approve_plan();
+        assert!(matches!(
+            outcome,
+            crate::app::app_view::InputOutcome::Action(
+                crate::app::actions::Action::Interject { ref text, .. }
+            ) if text.contains("revision freeform notes")
+        ));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.prompt.text(), "session draft mid-thinking");
+
         let response = rx.blocking_recv().expect("should have sent response");
         let raw = response.expect("should be Ok");
         let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).unwrap();
         assert_eq!(parsed["outcome"], "approved");
+    }
+
+    #[test]
+    fn exit_plan_mode_prefills_mid_thinking_draft_as_freeform() {
+        let mut app = make_app_with_agent("sess-B");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.prompt.set_text("typed while thinking");
+            seed_pending_tool(agent, "tc-draft", "CreatePlan");
+        }
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "sess-B".into(),
+            tool_call_id: "tc-draft".into(),
+            plan_content: Some("# Plan\n".into()),
+        };
+        let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
+        handle(
+            AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
+                request: acp::ExtRequest::new("x.ai/exit_plan_mode", raw.into()),
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.plan_approval_view.is_some());
+        assert_eq!(agent.prompt.text(), "typed while thinking");
+        assert_eq!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .map(|p| p.stashed_prompt.text.as_str()),
+            Some("typed while thinking"),
+        );
+    }
+
+    #[test]
+    fn exit_plan_mode_with_permission_followup_keeps_real_session_draft() {
+        let mut app = make_app_with_agent("sess-perm");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.permission_stashed_prompt =
+                Some(crate::views::prompt_widget::StashedPrompt {
+                    text: "real session draft".into(),
+                    cursor: 0,
+                    images: Vec::new(),
+                    chip_elements: Vec::new(),
+                    image_counter: 0,
+                    image_undo_stash: Vec::new(),
+                });
+            // Non-empty queue means permission still owns the keyboard.
+            agent.permission_queue.push_back(
+                crate::app::agent_view::test_fixtures::make_followup_permission_state(),
+            );
+            agent.prompt.set_text("permission followup text");
+            seed_pending_tool(agent, "tc-perm", "CreatePlan");
+        }
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "sess-perm".into(),
+            tool_call_id: "tc-perm".into(),
+            plan_content: Some("# Plan\n".into()),
+        };
+        let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
+        handle(
+            AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
+                request: acp::ExtRequest::new("x.ai/exit_plan_mode", raw.into()),
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .map(|p| p.stashed_prompt.text.as_str()),
+            Some("real session draft"),
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "",
+            "live must stay empty while permission owns keys"
+        );
+        assert!(agent.permission_stashed_prompt.is_none());
+        assert!(!agent.permission_queue.is_empty());
+    }
+
+    #[test]
+    fn exit_plan_mode_prefills_image_chips_into_freeform() {
+        let mut app = make_app_with_agent("sess-img");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.prompt.set_text("see ");
+            let img = crate::prompt_images::PastedImage {
+                element_id: xai_ratatui_textarea::ElementId::from_raw(0),
+                display_number: 0,
+                mime_type: "image/png".into(),
+                dimensions: Some((100, 80)),
+                byte_len: 2048,
+                encoded_bytes: Some(vec![0u8; 16].into()),
+                source_path: None,
+                staged_temp_path: None,
+                session_image_path: None,
+                preview: crate::prompt_images::PromptImagePreview::default(),
+            };
+            agent.prompt.insert_image(img).expect("insert image");
+            seed_pending_tool(agent, "tc-img", "CreatePlan");
+        }
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "sess-img".into(),
+            tool_call_id: "tc-img".into(),
+            plan_content: Some("# Plan\n".into()),
+        };
+        let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
+        handle(
+            AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
+                request: acp::ExtRequest::new("x.ai/exit_plan_mode", raw.into()),
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.prompt.text().contains("[Image #1]"),
+            "freeform prefill must keep image chip text, got {:?}",
+            agent.prompt.text()
+        );
+        assert_eq!(
+            agent.prompt.images.len(),
+            1,
+            "freeform prefill must restore image payload"
+        );
+        assert_eq!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .map(|p| p.stashed_prompt.images.len()),
+            Some(1),
+            "session draft must retain its own image payload"
+        );
     }
 

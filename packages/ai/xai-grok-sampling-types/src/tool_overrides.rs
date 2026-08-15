@@ -151,21 +151,133 @@ impl XSearchOptions {
     }
 }
 
-/// `web_search` override: a domain allowlist (empty or absent is unbounded).
+/// The public web-search API caps each domain list at 5 entries.
+pub const MAX_WEB_SEARCH_DOMAINS: usize = 5;
+
+/// `web_search` override: a domain allowlist and/or blocklist (empty or absent is unbounded).
+///
+/// The two lists are mutually exclusive and each is capped at [`MAX_WEB_SEARCH_DOMAINS`];
+/// both rules are enforced by [`WebSearchOptions::validate`] on every deserialize ingress.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", try_from = "WebSearchOptionsWire")]
 #[schemars(deny_unknown_fields)]
 pub struct WebSearchOptions {
+    /// Restrict search results to these domains. Cannot be combined with `excluded_domains`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_domains: Option<Vec<String>>,
+    /// Exclude these domains from search results. Cannot be combined with `allowed_domains`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_domains: Option<Vec<String>>,
 }
 
 impl WebSearchOptions {
     pub fn is_empty(&self) -> bool {
-        let WebSearchOptions { allowed_domains } = self;
-        allowed_domains
-            .as_ref()
-            .is_none_or(|domains| domains.is_empty())
+        let WebSearchOptions {
+            allowed_domains,
+            excluded_domains,
+        } = self;
+        allowed_domains.as_ref().is_none_or(|d| d.is_empty())
+            && excluded_domains.as_ref().is_none_or(|d| d.is_empty())
+    }
+
+    /// Reject a config that violates the public web-search API's rules: the allow/block lists
+    /// are mutually exclusive, and each is capped at [`MAX_WEB_SEARCH_DOMAINS`].
+    pub fn validate(&self) -> Result<(), WebSearchOptionsError> {
+        let WebSearchOptions {
+            allowed_domains,
+            excluded_domains,
+        } = self;
+        let has_allowed = allowed_domains.as_ref().is_some_and(|d| !d.is_empty());
+        let has_excluded = excluded_domains.as_ref().is_some_and(|d| !d.is_empty());
+        if has_allowed && has_excluded {
+            return Err(WebSearchOptionsError::BothAllowedAndExcluded);
+        }
+        for (field, list) in [
+            ("allowed_domains", allowed_domains),
+            ("excluded_domains", excluded_domains),
+        ] {
+            if let Some(domains) = list
+                && domains.len() > MAX_WEB_SEARCH_DOMAINS
+            {
+                return Err(WebSearchOptionsError::TooManyDomains {
+                    field,
+                    count: domains.len(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The raw `web_search` tool entry spliced into the Responses `tools` array. An empty
+    /// allowlist/blocklist is unbounded, so it emits no `filters` (matching a bare tool).
+    pub fn to_tool_entry(&self) -> serde_json::Value {
+        #[derive(Serialize)]
+        struct WebSearchToolFilters<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            allowed_domains: Option<&'a [String]>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            excluded_domains: Option<&'a [String]>,
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "snake_case")]
+        struct WebSearchToolEntry<'a> {
+            r#type: &'static str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            filters: Option<WebSearchToolFilters<'a>>,
+        }
+        // Destructure so a new field forces a compile error rather than a dropped wire field.
+        let WebSearchOptions {
+            allowed_domains,
+            excluded_domains,
+        } = self;
+        let allowed = allowed_domains.as_deref().filter(|d| !d.is_empty());
+        let excluded = excluded_domains.as_deref().filter(|d| !d.is_empty());
+        let filters = (allowed.is_some() || excluded.is_some()).then_some(WebSearchToolFilters {
+            allowed_domains: allowed,
+            excluded_domains: excluded,
+        });
+        #[expect(clippy::expect_used)]
+        serde_json::to_value(WebSearchToolEntry {
+            r#type: "web_search",
+            filters,
+        })
+        .expect("WebSearchToolEntry holds only &str and String lists, so serialization cannot fail")
+    }
+}
+
+/// Validation error for [`WebSearchOptions`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WebSearchOptionsError {
+    #[error("web_search cannot set both allowed_domains and excluded_domains")]
+    BothAllowedAndExcluded,
+    #[error(
+        "web_search {field} has {count} domains; the web-search API allows at most {MAX_WEB_SEARCH_DOMAINS}"
+    )]
+    TooManyDomains { field: &'static str, count: usize },
+}
+
+/// Deserialize target for [`WebSearchOptions`]: every ingress (agent frontmatter, per-turn
+/// `ToolOverridesUpdate`) routes through `try_from`, so both-set and over-limit configs fail
+/// to parse instead of surfacing as a request-level API error later.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WebSearchOptionsWire {
+    #[serde(default)]
+    allowed_domains: Option<Vec<String>>,
+    #[serde(default)]
+    excluded_domains: Option<Vec<String>>,
+}
+
+impl TryFrom<WebSearchOptionsWire> for WebSearchOptions {
+    type Error = WebSearchOptionsError;
+
+    fn try_from(wire: WebSearchOptionsWire) -> Result<Self, Self::Error> {
+        let opts = WebSearchOptions {
+            allowed_domains: wire.allowed_domains,
+            excluded_domains: wire.excluded_domains,
+        };
+        opts.validate()?;
+        Ok(opts)
     }
 }
 
@@ -248,5 +360,124 @@ fn merge_field<T>(
         Some(Some(value)) => drop_empty(Some(value), is_empty).or(base),
         Some(None) => None,
         None => base,
+    }
+}
+
+#[cfg(test)]
+mod web_search_options_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn opts(allowed: Option<&[&str]>, excluded: Option<&[&str]>) -> WebSearchOptions {
+        let to_vec = |s: &[&str]| s.iter().map(|d| d.to_string()).collect::<Vec<_>>();
+        WebSearchOptions {
+            allowed_domains: allowed.map(to_vec),
+            excluded_domains: excluded.map(to_vec),
+        }
+    }
+
+    #[test]
+    fn is_empty_covers_both_fields() {
+        assert!(WebSearchOptions::default().is_empty());
+        assert!(opts(Some(&[]), Some(&[])).is_empty());
+        assert!(!opts(Some(&["a.com"]), None).is_empty());
+        assert!(!opts(None, Some(&["b.com"])).is_empty());
+    }
+
+    #[test]
+    fn validate_rejects_both_non_empty() {
+        assert!(opts(Some(&["a.com"]), Some(&["b.com"])).validate().is_err());
+        // Either alone (or an empty counterpart) is fine.
+        assert!(opts(Some(&["a.com"]), None).validate().is_ok());
+        assert!(opts(None, Some(&["b.com"])).validate().is_ok());
+        assert!(opts(Some(&["a.com"]), Some(&[])).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_over_the_max() {
+        let six = ["1", "2", "3", "4", "5", "6"];
+        assert_eq!(
+            opts(Some(&six), None).validate(),
+            Err(WebSearchOptionsError::TooManyDomains {
+                field: "allowed_domains",
+                count: 6
+            })
+        );
+        assert_eq!(
+            opts(None, Some(&six)).validate(),
+            Err(WebSearchOptionsError::TooManyDomains {
+                field: "excluded_domains",
+                count: 6
+            })
+        );
+        // Exactly the max is allowed.
+        assert!(
+            opts(Some(&["1", "2", "3", "4", "5"]), None)
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn deserialize_hard_errors_on_both_set() {
+        let json = serde_json::json!({
+            "allowedDomains": ["a.com"],
+            "excludedDomains": ["b.com"]
+        });
+        assert!(WebSearchOptions::deserialize(&json).is_err());
+    }
+
+    #[test]
+    fn deserialize_hard_errors_over_the_max() {
+        let json = serde_json::json!({
+            "allowedDomains": ["1", "2", "3", "4", "5", "6"]
+        });
+        assert!(WebSearchOptions::deserialize(&json).is_err());
+    }
+
+    #[test]
+    fn deserialize_accepts_valid_config() {
+        let json = serde_json::json!({ "excludedDomains": ["reddit.com"] });
+        let parsed = WebSearchOptions::deserialize(&json).unwrap();
+        assert_eq!(
+            parsed.excluded_domains,
+            Some(vec!["reddit.com".to_string()])
+        );
+        assert!(parsed.allowed_domains.is_none());
+    }
+
+    #[test]
+    fn to_tool_entry_no_filters_matches_bare_tool() {
+        assert_eq!(
+            WebSearchOptions::default().to_tool_entry(),
+            json!({ "type": "web_search" })
+        );
+        // An explicitly empty list is unbounded, so it also emits no filters.
+        assert_eq!(
+            opts(Some(&[]), None).to_tool_entry(),
+            json!({ "type": "web_search" })
+        );
+    }
+
+    #[test]
+    fn to_tool_entry_allowlist_only() {
+        assert_eq!(
+            opts(Some(&["docs.x.ai", "arxiv.org"]), None).to_tool_entry(),
+            json!({
+                "type": "web_search",
+                "filters": { "allowed_domains": ["docs.x.ai", "arxiv.org"] }
+            })
+        );
+    }
+
+    #[test]
+    fn to_tool_entry_blocklist_only() {
+        assert_eq!(
+            opts(None, Some(&["reddit.com"])).to_tool_entry(),
+            json!({
+                "type": "web_search",
+                "filters": { "excluded_domains": ["reddit.com"] }
+            })
+        );
     }
 }

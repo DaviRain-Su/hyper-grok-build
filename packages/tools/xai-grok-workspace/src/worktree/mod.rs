@@ -36,6 +36,160 @@ pub use xai_grok_workspace_types::rpc::worktree::{
 
 const WORKTREE_LOG: &str = "xai_worktree";
 
+/// True when `path` is on a grove FUSE mount. Fast btrfs CoW cannot snapshot
+/// FUSE; callers must fall back to a plain git checkout ([`WorktreeType::Git`]).
+/// `fusectl` is not a guest mount (never match `/^fuse/` blindly).
+pub(crate) fn is_grove_fuse_mount(path: &Path) -> bool {
+    if path_looks_like_grove_store(path) {
+        return true;
+    }
+    let abs = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if path_looks_like_grove_store(&abs) {
+        return true;
+    }
+    let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return false;
+    };
+    longest_covering_fstype(&text, &abs).is_some_and(|fstype| {
+        let f = fstype.to_ascii_lowercase();
+        (f == "fuse" || f.starts_with("fuse.")) && f != "fusectl"
+    })
+}
+
+fn path_looks_like_grove_store(path: &Path) -> bool {
+    path.to_string_lossy().contains("/var/lib/grove/")
+}
+
+/// Unescape the octal escapes the kernel writes for whitespace/backslash in
+/// `/proc/self/mountinfo` fields (space=`\040`, tab=`\011`, newline=`\012`,
+/// backslash=`\134`). Without this a mount point containing a space never
+/// matches a real path.
+fn unescape_mountinfo_field(s: &str) -> String {
+    if !s.contains('\\') {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    // Accumulate raw bytes (not `as char`, which mis-maps bytes >= 0x80 to
+    // U+0080..U+00FF and splits multi-byte UTF-8): copy verbatim and reassemble
+    // once, so non-ASCII mount points survive the longest-prefix compare.
+    let mut out: Vec<u8> = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && i + 4 <= bytes.len()
+            && bytes[i + 1].is_ascii_digit()
+            && bytes[i + 2].is_ascii_digit()
+            && bytes[i + 3].is_ascii_digit()
+            && let Ok(code) = u8::from_str_radix(&s[i + 1..i + 4], 8)
+        {
+            out.push(code);
+            i += 4;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn longest_covering_fstype<'a>(mountinfo: &'a str, path: &Path) -> Option<&'a str> {
+    let path_s = path.to_string_lossy();
+    let mut best_mp = String::new();
+    let mut best_fs: Option<&'a str> = None;
+    for line in mountinfo.lines() {
+        // Tolerate malformed/blank rows: `continue` (not `?`) so a single bad
+        // line cannot abort the whole scan and drop an earlier valid cover.
+        let mut sides = line.splitn(2, " - ");
+        let (Some(left), Some(right)) = (sides.next(), sides.next()) else {
+            continue;
+        };
+        let Some(mp_raw) = left.split_whitespace().nth(4) else {
+            continue;
+        };
+        let Some(fstype) = right.split_whitespace().next() else {
+            continue;
+        };
+        // Mount points are octal-escaped in mountinfo; unescape before comparing.
+        let mp = unescape_mountinfo_field(mp_raw);
+        let covers = path_s == mp || path_s.starts_with(&format!("{mp}/")) || mp == "/";
+        if covers && mp.len() >= best_mp.len() {
+            best_mp = mp;
+            best_fs = Some(fstype);
+        }
+    }
+    best_fs
+}
+
+#[cfg(test)]
+mod grove_fuse_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn grove_store_path_is_detected() {
+        assert!(path_looks_like_grove_store(Path::new(
+            "/var/lib/grove/repos/app/worktree"
+        )));
+        assert!(!path_looks_like_grove_store(Path::new("/workspace/app")));
+    }
+
+    #[test]
+    fn mountinfo_prefers_longest_cover_and_skips_unrelated() {
+        let info = "\
+15 20 0:21 / / rw - ext4 /dev/sda1 rw\n\
+25 15 0:47 / /sys/fs/fuse/connections rw - fusectl fusectl rw\n\
+36 15 0:52 / /workspace/app rw - fuse.grove grove rw\n";
+        assert_eq!(
+            longest_covering_fstype(info, Path::new("/workspace/app/src")),
+            Some("fuse.grove")
+        );
+        assert_eq!(
+            longest_covering_fstype(info, Path::new("/home")),
+            Some("ext4")
+        );
+    }
+
+    #[test]
+    fn mountinfo_unescapes_octal_mount_points() {
+        // Mount point with a space is octal-escaped as `\040` in mountinfo.
+        let info = "15 20 0:21 / / rw - ext4 /dev/sda1 rw\n\
+             36 15 0:52 / /workspace/my\\040app rw - fuse.grove grove rw\n";
+        assert_eq!(
+            longest_covering_fstype(info, Path::new("/workspace/my app/src")),
+            Some("fuse.grove")
+        );
+    }
+
+    #[test]
+    fn mountinfo_skips_malformed_rows_without_aborting() {
+        // A blank line and a row with no " - " separator must not abort the scan
+        // and drop the valid grove cover that follows.
+        let info = "15 20 0:21 / / rw - ext4 /dev/sda1 rw\n\
+             \n\
+             this line has no separator and should be skipped\n\
+             36 15 0:52 / /workspace/app rw - fuse.grove grove rw\n";
+        assert_eq!(
+            longest_covering_fstype(info, Path::new("/workspace/app/src")),
+            Some("fuse.grove")
+        );
+    }
+
+    #[test]
+    fn unescape_mountinfo_field_handles_escapes_and_plain() {
+        assert_eq!(unescape_mountinfo_field("/a/b"), "/a/b");
+        assert_eq!(unescape_mountinfo_field("/a\\040b"), "/a b");
+        assert_eq!(unescape_mountinfo_field("/a\\134b"), "/a\\b");
+    }
+
+    #[test]
+    fn is_grove_fuse_mount_matches_store_layout() {
+        assert!(is_grove_fuse_mount(Path::new(
+            "/var/lib/grove/repos/app/worktree"
+        )));
+        assert!(!is_grove_fuse_mount(Path::new("/tmp/not-a-grove-path")));
+    }
+}
+
 /// Map a [`WorktreeType`] to the fast-worktree crate's `CreationMode`.
 pub(crate) fn to_creation_mode(t: WorktreeType) -> xai_fast_worktree::CreationMode {
     match t {
@@ -935,6 +1089,17 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
     // Determine worktree type, preserving the .git.is_dir() guard for Standalone mode.
     // A linked worktree has a `.git` *file* pointing to the main repo; a real repo has a `.git` *directory*.
     let requested_type = req.worktree_type.unwrap_or(WorktreeType::Linked);
+    let requested_type = if is_grove_fuse_mount(Path::new(&req.source_path)) {
+        tracing::info!(
+            target: WORKTREE_LOG,
+            session_id = %session_id,
+            source = %req.source_path,
+            "grove FUSE source: disabling fast-worktree CoW, using git checkout"
+        );
+        WorktreeType::Git
+    } else {
+        requested_type
+    };
     let git_dir_is_directory = std::path::Path::new(&req.source_path).join(".git").is_dir();
     let creation_mode = if requested_type == WorktreeType::Standalone {
         if git_dir_is_directory {

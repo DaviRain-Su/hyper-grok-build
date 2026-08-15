@@ -45,10 +45,10 @@ pub use xai_grok_workspace_types::rpc::git::{
     BinaryFileInfoData, CheckoutCommitResponse, CommitWithPatchData, DetectVcsKindReq,
     DiffStatsSummary, GitBranchesReq, GitCheckoutCommitReq, GitCheckoutReq, GitCollectChangesReq,
     GitCollectChangesResponse, GitCommitReq, GitCurrentCommitReq, GitDiffReq, GitDiscardReq,
-    GitFilesReq, GitInfoReq, GitResolveRootReq, GitStageContentReq, GitStageReq, GitStashReq,
-    GitStatusExtReq, GitStatusExtResponse, GitStatusFormat, GitStatusReq, GitSyncBaseReq,
-    GitUnstageReq, IdentityData, PublicBaseData, RepoInfo, UNTRACKED_CONTENT_THRESHOLD,
-    UncommittedChangesData, UntrackedFileData,
+    GitEnsureBindingReq, GitFilesReq, GitInfoReq, GitMergeToMainReq, GitPushReq, GitResolveRootReq,
+    GitStageContentReq, GitStageReq, GitStashReq, GitStatusExtReq, GitStatusExtResponse,
+    GitStatusFormat, GitStatusReq, GitSyncBaseReq, GitUnstageReq, IdentityData, PublicBaseData,
+    RepoInfo, UNTRACKED_CONTENT_THRESHOLD, UncommittedChangesData, UntrackedFileData,
 };
 pub use xai_grok_workspace_types::rpc::hooks::{
     HookEventNameWire, HookRegistryReq, HookRegistryWire, HookSpecWire,
@@ -346,13 +346,31 @@ impl WorkspaceOp for ReposListReq {
 /// caller provides one (the per-session repo, which the desktop sends per
 /// window), else the workspace root. Without this, every session's git
 /// queries/mutations would target the workspace launch directory's repo.
-fn git_op_cwd(
+pub(crate) async fn git_op_cwd(
     ws: &WorkspaceHandle,
     git_root: &Option<std::path::PathBuf>,
 ) -> WorkspaceResult<std::path::PathBuf> {
     match git_root {
         Some(root) => Ok(root.clone()),
         None => ws.root_cwd(),
+    }
+}
+/// Every provisioned mount (or the workspace root when none). Prompt, graph,
+/// fs-notify, and turn-commit walk this list so multi-repo is not primary-only.
+pub(crate) async fn materialized_git_roots(
+    ws: &WorkspaceHandle,
+) -> WorkspaceResult<Vec<std::path::PathBuf>> {
+    let root = ws.root_cwd()?;
+    let manifest = load_repos_manifest(&root).await?;
+    Ok(manifest.materialized_mounts(&root))
+}
+async fn load_repos_manifest(root: &std::path::Path) -> WorkspaceResult<RepoManifest> {
+    let path = root.join(xai_grok_workspace_types::rpc::repos::REPOS_MANIFEST_RELATIVE_PATH);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => RepoManifest::from_json_bytes(&bytes)
+            .map_err(|e| WorkspaceError::HubError(e.to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(RepoManifest::new(Vec::new())),
+        Err(e) => Err(WorkspaceError::HubError(e.to_string())),
     }
 }
 #[async_trait]
@@ -362,7 +380,7 @@ impl WorkspaceOp for GitStatusExtReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let cwd = git_op_cwd(ws, &self.git_root)?;
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
         match self.format {
             GitStatusFormat::Structured => {
                 let data = crate::session::git::status(
@@ -392,7 +410,7 @@ impl WorkspaceOp for GitFilesReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let cwd = git_op_cwd(ws, &self.git_root)?;
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
         crate::session::git::read_files(&cwd, &self.paths, &self.version)
             .await
             .map_err(|e| WorkspaceError::HubError(e.to_string()))
@@ -405,7 +423,7 @@ impl WorkspaceOp for GitDiffReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let cwd = git_op_cwd(ws, &self.git_root)?;
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
         crate::session::git::diffs(
             &cwd,
             self.paths.as_deref(),
@@ -426,7 +444,7 @@ impl WorkspaceOp for GitStageReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let cwd = git_op_cwd(ws, &self.git_root)?;
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
         crate::session::git::stage(&cwd, self.paths.clone())
             .await
             .map_err(|e| WorkspaceError::HubError(e.to_string()))
@@ -439,7 +457,7 @@ impl WorkspaceOp for GitStageContentReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let cwd = git_op_cwd(ws, &self.git_root)?;
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
         crate::session::git::stage_content(&cwd, &self.path, &self.content)
             .await
             .map_err(|e| WorkspaceError::HubError(e.to_string()))
@@ -452,7 +470,7 @@ impl WorkspaceOp for GitUnstageReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let cwd = git_op_cwd(ws, &self.git_root)?;
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
         crate::session::git::unstage(&cwd, self.paths.clone())
             .await
             .map_err(|e| WorkspaceError::HubError(e.to_string()))
@@ -465,7 +483,7 @@ impl WorkspaceOp for GitDiscardReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let cwd = git_op_cwd(ws, &self.git_root)?;
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
         crate::session::git::discard(&cwd, self.paths.clone(), self.scope, self.include_untracked)
             .await
             .map_err(|e| WorkspaceError::HubError(e.to_string()))
@@ -478,7 +496,7 @@ impl WorkspaceOp for GitCommitReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let cwd = git_op_cwd(ws, &self.git_root)?;
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
         crate::session::git::commit(&cwd, self)
             .await
             .map_err(|e| WorkspaceError::HubError(e.to_string()))
@@ -491,7 +509,7 @@ impl WorkspaceOp for GitSyncBaseReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let cwd = git_op_cwd(ws, &self.git_root)?;
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
         crate::session::git::sync_base(
             &cwd,
             self.base_ref.as_deref(),
@@ -509,8 +527,53 @@ impl WorkspaceOp for GitCheckoutReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let cwd = git_op_cwd(ws, &self.git_root)?;
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
         crate::session::git::checkout_branch(&cwd, &self.branch, self.create)
+            .await
+            .map_err(|e| WorkspaceError::HubError(e.to_string()))
+    }
+}
+#[async_trait]
+impl WorkspaceOp for GitEnsureBindingReq {
+    async fn execute(
+        &self,
+        ws: &WorkspaceHandle,
+        _session_id: Option<&str>,
+    ) -> WorkspaceResult<Self::Response> {
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
+        crate::session::git::ensure_binding(&cwd, &self.session_branch, &self.base_ref)
+            .await
+            .map_err(|e| WorkspaceError::HubError(e.to_string()))
+    }
+}
+#[async_trait]
+impl WorkspaceOp for GitMergeToMainReq {
+    async fn execute(
+        &self,
+        ws: &WorkspaceHandle,
+        _session_id: Option<&str>,
+    ) -> WorkspaceResult<Self::Response> {
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
+        let target = self.required_target_branch().ok_or_else(|| {
+            WorkspaceError::HubError(
+                "target_branch is required; omit/empty is rejected (no silent main default)"
+                    .to_string(),
+            )
+        })?;
+        crate::session::git::merge_to_main(&cwd, &self.session_branch, target, self.push)
+            .await
+            .map_err(|e| WorkspaceError::HubError(e.to_string()))
+    }
+}
+#[async_trait]
+impl WorkspaceOp for GitPushReq {
+    async fn execute(
+        &self,
+        ws: &WorkspaceHandle,
+        _session_id: Option<&str>,
+    ) -> WorkspaceResult<Self::Response> {
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
+        crate::session::git::push_branch(&cwd, self.branch.as_deref())
             .await
             .map_err(|e| WorkspaceError::HubError(e.to_string()))
     }
@@ -522,7 +585,7 @@ impl WorkspaceOp for GitStashReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let cwd = git_op_cwd(ws, &self.git_root)?;
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
         crate::session::git::stash(&cwd, self.include_untracked)
             .await
             .map_err(|e| WorkspaceError::HubError(e.to_string()))
@@ -535,7 +598,7 @@ impl WorkspaceOp for GitInfoReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let cwd = git_op_cwd(ws, &self.git_root)?;
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
         crate::session::git::git_info(&cwd)
             .await
             .map_err(|e| WorkspaceError::HubError(e.to_string()))
@@ -548,7 +611,7 @@ impl WorkspaceOp for GitBranchesReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let cwd = git_op_cwd(ws, &self.git_root)?;
+        let cwd = git_op_cwd(ws, &self.git_root).await?;
         crate::session::git::list_branches(&cwd)
             .await
             .map_err(|e| WorkspaceError::HubError(e.to_string()))
@@ -1000,9 +1063,9 @@ impl WorkspaceOp for PutFilesReq {
     async fn execute(
         &self,
         ws: &WorkspaceHandle,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        ws.put_files(self.files.clone()).await
+        ws.put_files(session_id, self.files.clone()).await
     }
 }
 #[async_trait]
@@ -1010,9 +1073,9 @@ impl WorkspaceOp for GetFilesReq {
     async fn execute(
         &self,
         ws: &WorkspaceHandle,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        ws.get_files(self.files.clone()).await
+        ws.get_files(session_id, self.files.clone()).await
     }
 }
 #[async_trait]
@@ -1020,9 +1083,9 @@ impl WorkspaceOp for ClientFsListReq {
     async fn execute(
         &self,
         ws: &WorkspaceHandle,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        crate::file_system::client_fs::list(ws, self).await
+        crate::file_system::client_fs::list(ws, session_id, self).await
     }
 }
 #[async_trait]
@@ -1030,9 +1093,9 @@ impl WorkspaceOp for ClientFsStatReq {
     async fn execute(
         &self,
         ws: &WorkspaceHandle,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        crate::file_system::client_fs::stat(ws, self).await
+        crate::file_system::client_fs::stat(ws, session_id, self).await
     }
 }
 #[async_trait]
@@ -1040,9 +1103,9 @@ impl WorkspaceOp for ClientFsReadFileReq {
     async fn execute(
         &self,
         ws: &WorkspaceHandle,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        crate::file_system::client_fs::read_file(ws, self).await
+        crate::file_system::client_fs::read_file(ws, session_id, self).await
     }
 }
 /// Resolve the index root for a code-nav op. Prefers the explicit per-session
@@ -1070,6 +1133,22 @@ fn resolve_index_for_workspace(
     let (handle, _was_new) = ws.get_or_create_codebase_index(index_root.clone());
     Ok((handle, index_root))
 }
+fn resolve_index_for_file(
+    ws: &WorkspaceHandle,
+    root: Option<&std::path::Path>,
+    file: &str,
+) -> WorkspaceResult<(
+    std::sync::Arc<xai_codebase_graph::IndexManagerHandle>,
+    std::path::PathBuf,
+)> {
+    if root.is_none() {
+        let file_path = std::path::Path::new(file);
+        if let Some(handle) = ws.get_covering_codebase_index(file_path) {
+            return Ok((handle, file_path.to_path_buf()));
+        }
+    }
+    resolve_index_for_workspace(ws, root)
+}
 #[async_trait]
 impl WorkspaceOp for CodeGotoDefinitionReq {
     async fn execute(
@@ -1077,7 +1156,7 @@ impl WorkspaceOp for CodeGotoDefinitionReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let (handle, _root) = resolve_index_for_workspace(ws, self.root.as_deref())?;
+        let (handle, _root) = resolve_index_for_file(ws, self.root.as_deref(), &self.file)?;
         let result = handle
             .goto_definition(std::path::PathBuf::from(&self.file), self.line, self.col)
             .await
@@ -1092,7 +1171,7 @@ impl WorkspaceOp for CodeGotoReferencesReq {
         ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        let (handle, _root) = resolve_index_for_workspace(ws, self.root.as_deref())?;
+        let (handle, _root) = resolve_index_for_file(ws, self.root.as_deref(), &self.file)?;
         let result = handle
             .goto_references(
                 std::path::PathBuf::from(&self.file),
@@ -1686,8 +1765,8 @@ mod tests {
     /// The reported bug: every window's git queries ran against the workspace
     /// launch directory. `git_op_cwd` must return the per-session repo the
     /// client sends, and only fall back to the workspace root when none is given.
-    #[test]
-    fn git_op_cwd_uses_explicit_git_root_per_window() {
+    #[tokio::test]
+    async fn git_op_cwd_uses_explicit_git_root_per_window() {
         let ops = WorkspaceOps::for_test();
         let WorkspaceOps::Local { handle } = &ops else {
             unreachable!("for_test builds a local handle");
@@ -1696,14 +1775,14 @@ mod tests {
         let window_a = std::path::PathBuf::from("/repos/xai-main");
         let window_b = std::path::PathBuf::from("/repos/xai-main-2");
         assert_eq!(
-            git_op_cwd(handle, &Some(window_a.clone())).unwrap(),
+            git_op_cwd(handle, &Some(window_a.clone())).await.unwrap(),
             window_a
         );
         assert_eq!(
-            git_op_cwd(handle, &Some(window_b.clone())).unwrap(),
+            git_op_cwd(handle, &Some(window_b.clone())).await.unwrap(),
             window_b
         );
-        assert_eq!(git_op_cwd(handle, &None).unwrap(), workspace_root);
+        assert_eq!(git_op_cwd(handle, &None).await.unwrap(), workspace_root);
     }
     #[tokio::test]
     async fn repos_list_reads_real_manifest_empty_one_and_many() {
@@ -2078,6 +2157,7 @@ mod tests {
                 E::SessionEnd => HookEventNameWire::SessionEnd,
                 E::Stop => HookEventNameWire::Stop,
                 E::StopFailure => HookEventNameWire::StopFailure,
+                E::StopCancelled => HookEventNameWire::StopCancelled,
                 E::PreToolUse => HookEventNameWire::PreToolUse,
                 E::PostToolUse => HookEventNameWire::PostToolUse,
                 E::PostToolUseFailure => HookEventNameWire::PostToolUseFailure,
@@ -2096,6 +2176,7 @@ mod tests {
             E::SessionEnd,
             E::Stop,
             E::StopFailure,
+            E::StopCancelled,
             E::PreToolUse,
             E::PostToolUse,
             E::PostToolUseFailure,

@@ -1017,7 +1017,7 @@ fn free_usage_error_detected_by_embedded_code() {
 }
 
 #[test]
-fn free_usage_upsell_shows_two_options_with_exact_labels() {
+fn free_usage_upsell_shows_three_options_with_exact_labels() {
     let mut app = test_app_with_agent();
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     open_free_usage_upsell(agent, None);
@@ -1057,6 +1057,11 @@ fn free_usage_upsell_shows_two_options_with_exact_labels() {
         (
             "Upgrade to SuperGrok",
             "For everyday coding and productivity tasks",
+            Some(UPSELL_URL_UPGRADE),
+        ),
+        (
+            "Upgrade to SuperGrok Plus",
+            "Significantly higher usage and rate limits",
             Some(UPSELL_URL_UPGRADE),
         ),
         (
@@ -1135,7 +1140,7 @@ fn free_usage_failure_opens_paywall_modal() {
     );
 }
 
-/// Answer translation: both upgrade options open their URL.
+/// Answer translation: every upgrade option opens the upgrade URL.
 #[test]
 fn free_usage_translate_local_submit_maps_options() {
     use crate::app::agent_view::translate_local_submit_for_test;
@@ -1150,7 +1155,7 @@ fn free_usage_translate_local_submit_maps_options() {
         source: xai_grok_telemetry::events::SuperGrokUpsell::FreeUsagePaywall,
     };
 
-    for idx in [0, 1] {
+    for idx in [0, 1, 2] {
         qv.selections[0] = QuestionSelection::Single(Some(idx));
         match translate_local_submit_for_test(&qv, kind(), false) {
             InputOutcome::Action(Action::OpenUrl(url)) => assert_eq!(url, UPSELL_URL_UPGRADE),
@@ -1161,10 +1166,10 @@ fn free_usage_translate_local_submit_maps_options() {
 
 // ── Restricted-command upsell tests ─────────────────────────────────
 
-/// Submitting a tier-restricted command opens the two-option SuperGrok
+/// Submitting a tier-restricted command opens the three-option SuperGrok
 /// upsell and neither runs the command nor leaks the text to the model.
 #[test]
-fn restricted_command_submit_opens_two_option_upsell() {
+fn restricted_command_submit_opens_three_option_upsell() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents
@@ -1196,11 +1201,13 @@ fn restricted_command_submit_opens_two_option_upsell() {
     ));
     let q = &qv.questions[0];
     assert_eq!(q.question, "Unlock all features with SuperGrok.");
-    assert_eq!(q.options.len(), 2);
+    assert_eq!(q.options.len(), 3);
     assert_eq!(q.options[0].label, "Upgrade to SuperGrok");
     assert_eq!(q.options[0].id.as_deref(), Some(UPSELL_URL_UPGRADE));
-    assert_eq!(q.options[1].label, "Upgrade to SuperGrok Heavy");
+    assert_eq!(q.options[1].label, "Upgrade to SuperGrok Plus");
     assert_eq!(q.options[1].id.as_deref(), Some(UPSELL_URL_UPGRADE));
+    assert_eq!(q.options[2].label, "Upgrade to SuperGrok Heavy");
+    assert_eq!(q.options[2].id.as_deref(), Some(UPSELL_URL_UPGRADE));
 }
 
 /// Aliases of a restricted command hit the same upsell (deny-list

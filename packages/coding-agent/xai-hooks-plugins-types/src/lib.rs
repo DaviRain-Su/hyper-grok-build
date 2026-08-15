@@ -87,6 +87,7 @@ pub enum HookEvent {
     SessionEnd,
     Stop,
     StopFailure,
+    StopCancelled,
     // Tool events
     PreToolUse,
     PostToolUse,
@@ -101,6 +102,42 @@ pub enum HookEvent {
     // Compaction
     PreCompact,
     PostCompact,
+    /// An event added after this client was built: it keeps one unrecognized name from blanking
+    /// the whole list. Lossy on re-serialize, so only deserialize through this type.
+    #[serde(other)]
+    Unknown,
+}
+
+impl HookEvent {
+    /// Never fails: a name this build does not know deserializes to [`Self::Unknown`] through the
+    /// `#[serde(other)]` variant. Avoids a `serde_json::Value` round trip on UI paths.
+    pub fn from_wire(name: &str) -> Self {
+        use serde::de::IntoDeserializer as _;
+        let name: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+            name.into_deserializer();
+        Self::deserialize(name).unwrap_or(Self::Unknown)
+    }
+
+    /// The events that report a turn ending, at most one of which fires per turn. Exhaustive, so
+    /// a fourth is a compile error rather than a silent miss in a consumer.
+    pub fn is_turn_end(self) -> bool {
+        match self {
+            Self::Stop | Self::StopFailure | Self::StopCancelled => true,
+            Self::SessionStart
+            | Self::SessionEnd
+            | Self::PreToolUse
+            | Self::PostToolUse
+            | Self::PostToolUseFailure
+            | Self::PermissionDenied
+            | Self::UserPromptSubmit
+            | Self::Notification
+            | Self::SubagentStart
+            | Self::SubagentStop
+            | Self::PreCompact
+            | Self::PostCompact
+            | Self::Unknown => false,
+        }
+    }
 }
 
 impl std::fmt::Display for HookEvent {
@@ -113,6 +150,7 @@ impl std::fmt::Display for HookEvent {
             Self::SessionEnd => write!(f, "Session End"),
             Self::Stop => write!(f, "Stop"),
             Self::StopFailure => write!(f, "Stop Failure"),
+            Self::StopCancelled => write!(f, "Stop Cancelled"),
             Self::Notification => write!(f, "Notification"),
             Self::UserPromptSubmit => write!(f, "Prompt Submit"),
             Self::PermissionDenied => write!(f, "Permission Denied"),
@@ -120,6 +158,7 @@ impl std::fmt::Display for HookEvent {
             Self::SubagentStop => write!(f, "Subagent Stop"),
             Self::PreCompact => write!(f, "Pre-Compact"),
             Self::PostCompact => write!(f, "Post-Compact"),
+            Self::Unknown => write!(f, "Unknown"),
         }
     }
 }
@@ -870,6 +909,7 @@ mod tests {
             (HookEvent::SessionEnd, r#""session_end""#),
             (HookEvent::Stop, r#""stop""#),
             (HookEvent::StopFailure, r#""stop_failure""#),
+            (HookEvent::StopCancelled, r#""stop_cancelled""#),
             (HookEvent::Notification, r#""notification""#),
             (HookEvent::UserPromptSubmit, r#""user_prompt_submit""#),
             (HookEvent::PermissionDenied, r#""permission_denied""#),
@@ -883,6 +923,18 @@ mod tests {
             let parsed: HookEvent = serde_json::from_str(&json).unwrap();
             assert_eq!(event, parsed);
         }
+    }
+
+    /// A newer shell can name an event this build has never heard of. Both readers must fall back
+    /// rather than fail, or one unknown name blanks the whole plugin list.
+    #[test]
+    fn an_unrecognized_event_name_reads_as_unknown() {
+        assert_eq!(
+            HookEvent::from_wire("some_future_event"),
+            HookEvent::Unknown
+        );
+        let parsed: HookEvent = serde_json::from_str(r#""some_future_event""#).unwrap();
+        assert_eq!(parsed, HookEvent::Unknown);
     }
 
     #[test]

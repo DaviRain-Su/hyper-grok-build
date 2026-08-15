@@ -223,6 +223,7 @@ impl ShellToolsetConfig {
             endpoint_path: None,
             auth_scheme: Default::default(),
             extra_headers: indexmap::IndexMap::new(),
+            extra_response_includes: Vec::new(),
             query_params: indexmap::IndexMap::new(),
             env_http_headers: indexmap::IndexMap::new(),
             context_window: 256_000,

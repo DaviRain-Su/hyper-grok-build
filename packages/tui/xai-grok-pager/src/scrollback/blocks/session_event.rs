@@ -309,7 +309,7 @@ impl SessionEvent {
 
     /// Whether this event marks the end of an agent turn (the "Turn
     /// completed/cancelled/failed" markers). These are the only events that
-    /// can carry the turn's stop/stop_failure hook runs inline.
+    /// can carry the turn's stop-family hook runs inline.
     ///
     /// [`SessionEvent::RequestFailed`] is intentionally excluded — same as
     /// [`SessionEvent::ReAuthRequired`]. RetryState may push it before
@@ -345,7 +345,7 @@ fn format_tokens(tokens: u64) -> String {
 pub struct SessionEventBlock {
     /// The typed event data.
     pub event: SessionEvent,
-    /// Stop/stop_failure hook runs folded into a turn-terminal marker
+    /// Stop-family hook runs folded into a turn-terminal marker
     /// (`(event_name, runs)` per hook batch). Rendered as a right-justified
     /// `stop  [hooks: N]` summary on the marker line, with per-hook detail
     /// on expand. Always empty for non-terminal events.

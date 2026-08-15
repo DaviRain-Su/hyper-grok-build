@@ -1702,6 +1702,11 @@ fn usage_results_populate_open_modal_not_scrollback() {
             session_id: "test-session".into(),
             info: Box::new(context_info_response()),
             text: "  Session ID: test-session".to_string(),
+            fields: vec![crate::views::usage_modal::SessionInfoField {
+                label: "Session ID",
+                value: "test-session".to_string(),
+                compact: false,
+            }],
             nonce,
         }),
         &mut app,
@@ -1719,10 +1724,12 @@ fn usage_results_populate_open_modal_not_scrollback() {
     assert_eq!(agent_scrollback_len(&app), before);
     let state = usage_modal_state(&app);
     assert!(state.session_usage_text.is_some());
-    assert_eq!(
-        state.session_text.as_deref(),
-        Some("  Session ID: test-session")
-    );
+    let fields = state
+        .session_fields
+        .as_ref()
+        .expect("session fields populated");
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].value, "test-session");
     assert!(state.context.is_some());
 }
 
@@ -1768,11 +1775,16 @@ fn reply_from_previous_modal_open_is_dropped() {
             session_id: "test-session".into(),
             info: Box::new(context_info_response()),
             text: "  Session ID: from-old-open".to_string(),
+            fields: vec![crate::views::usage_modal::SessionInfoField {
+                label: "Session ID",
+                value: "from-old-open".to_string(),
+                compact: false,
+            }],
             nonce: old_nonce,
         }),
         &mut app,
     );
-    assert!(usage_modal_state(&app).session_text.is_none());
+    assert!(usage_modal_state(&app).session_fields.is_none());
 }
 
 #[test]
@@ -1786,11 +1798,16 @@ fn stale_session_info_does_not_populate_modal() {
             session_id: "old-session".into(),
             info: Box::new(context_info_response()),
             text: "  Session ID: old-session".to_string(),
+            fields: vec![crate::views::usage_modal::SessionInfoField {
+                label: "Session ID",
+                value: "old-session".to_string(),
+                compact: false,
+            }],
             nonce,
         }),
         &mut app,
     );
-    assert!(usage_modal_state(&app).session_text.is_none());
+    assert!(usage_modal_state(&app).session_fields.is_none());
 }
 
 #[test]

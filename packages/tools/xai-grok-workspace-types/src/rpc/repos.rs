@@ -78,6 +78,42 @@ impl RepoManifest {
     pub fn to_json_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec_pretty(self)
     }
+
+    /// Every distinct provisioned mount, or `[workspace_root]` when the
+    /// manifest is empty (single-tree / no repos.json). Prompt, graph, and
+    /// fs-notify walk this list so multi-repo workspaces are not primary-only.
+    pub fn materialized_mounts(&self, workspace_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out: Vec<std::path::PathBuf> = Vec::new();
+        for repo in &self.repos {
+            let raw = repo.mount_path.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            let mount = std::path::PathBuf::from(raw);
+            // Confine to the workspace: a compromised/malicious `.grok/repos.json`
+            // must not point prompt/graph/fs-notify walks at paths outside the
+            // sandbox workspace. Reject `..` traversal and any mount that is not
+            // under `workspace_root` (mirrors the confinement `unnamed_cwd` /
+            // `confine_mount_under_workspace` already apply on the other paths).
+            if mount
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+                || !mount.starts_with(workspace_root)
+            {
+                continue;
+            }
+            if !out
+                .iter()
+                .any(|existing| existing.components().eq(mount.components()))
+            {
+                out.push(mount);
+            }
+        }
+        if out.is_empty() {
+            out.push(workspace_root.to_path_buf());
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -110,5 +146,90 @@ mod tests {
         let bytes = manifest.to_json_bytes().expect("serialize");
         let recovered = RepoManifest::from_json_bytes(&bytes).expect("parse");
         assert_eq!(manifest, recovered);
+    }
+
+    #[test]
+    fn materialized_mounts_empty_falls_back_to_workspace_root() {
+        let mounts =
+            RepoManifest::new(Vec::new()).materialized_mounts(std::path::Path::new("/workspace"));
+        assert_eq!(mounts, vec![std::path::PathBuf::from("/workspace")]);
+    }
+
+    #[test]
+    fn materialized_mounts_lists_every_distinct_repo() {
+        let mounts =
+            nested_two_repo_manifest().materialized_mounts(std::path::Path::new("/workspace"));
+        assert_eq!(
+            mounts,
+            vec![
+                std::path::PathBuf::from("/workspace/app"),
+                std::path::PathBuf::from("/workspace/lib"),
+            ]
+        );
+    }
+
+    #[test]
+    fn materialized_mounts_rejects_out_of_workspace_and_traversal() {
+        // A compromised repos.json must not escape the workspace; unsafe mounts
+        // are dropped and the safe workspace-root fallback is used.
+        let manifest = RepoManifest::new(vec![
+            ProvisionedRepo {
+                name: "evil".into(),
+                repository: "acme/evil".into(),
+                mount_path: "/etc".into(),
+                base_branch: "main".into(),
+                session_branch: "conv/1".into(),
+            },
+            ProvisionedRepo {
+                name: "traverse".into(),
+                repository: "acme/traverse".into(),
+                mount_path: "/workspace/../etc".into(),
+                base_branch: "main".into(),
+                session_branch: "conv/1".into(),
+            },
+        ]);
+        let mounts = manifest.materialized_mounts(std::path::Path::new("/workspace"));
+        assert_eq!(mounts, vec![std::path::PathBuf::from("/workspace")]);
+    }
+
+    #[test]
+    fn materialized_mounts_keeps_safe_and_drops_unsafe() {
+        let manifest = RepoManifest::new(vec![
+            ProvisionedRepo {
+                name: "app".into(),
+                repository: "acme/app".into(),
+                mount_path: "/workspace/app".into(),
+                base_branch: "main".into(),
+                session_branch: "conv/1".into(),
+            },
+            ProvisionedRepo {
+                name: "evil".into(),
+                repository: "acme/evil".into(),
+                mount_path: "/tmp/evil".into(),
+                base_branch: "main".into(),
+                session_branch: "conv/1".into(),
+            },
+        ]);
+        let mounts = manifest.materialized_mounts(std::path::Path::new("/workspace"));
+        assert_eq!(mounts, vec![std::path::PathBuf::from("/workspace/app")]);
+    }
+
+    fn nested_two_repo_manifest() -> RepoManifest {
+        RepoManifest::new(vec![
+            ProvisionedRepo {
+                name: "app".into(),
+                repository: "acme/app".into(),
+                mount_path: "/workspace/app".into(),
+                base_branch: "main".into(),
+                session_branch: "conv/1".into(),
+            },
+            ProvisionedRepo {
+                name: "lib".into(),
+                repository: "acme/lib".into(),
+                mount_path: "/workspace/lib".into(),
+                base_branch: "main".into(),
+                session_branch: "feat/x".into(),
+            },
+        ])
     }
 }

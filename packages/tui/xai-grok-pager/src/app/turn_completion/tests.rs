@@ -387,6 +387,50 @@ fn repro_terminal_without_prompt_id_arms_reconcile_for_lost_pr() {
     );
 }
 
+/// Armed, the overdue reconcile would force-finish the live turn mid-write.
+#[test]
+fn driver_missing_prompt_id_ignored_during_tool_call_write() {
+    let mut agent = running_driver("p1");
+    assert!(
+        agent
+            .session
+            .tracker
+            .note_tool_call_arguments_delta(Some("spawn_subagent"), 0)
+    );
+    assert!(matches!(
+        agent.session.tracker.activity(),
+        Some(crate::acp::tracker::TurnActivity::WritingToolCall(_))
+    ));
+
+    let outcome = finalize_turn_from_terminal(&mut agent, "s1", None, Some("end_turn"), None, None);
+    assert!(matches!(outcome, TerminalApply::Ignored));
+    assert!(
+        agent.pending_turn_end_reconcile.is_none(),
+        "mid-write terminal must not arm the lost-PR reconcile"
+    );
+    assert!(matches!(agent.session.state, AgentState::TurnRunning));
+}
+
+/// A dead stream mid-write must not block lost-response recovery.
+#[test]
+fn driver_missing_prompt_id_arms_when_tool_call_write_is_stale() {
+    let mut agent = running_driver("p1");
+    agent
+        .session
+        .tracker
+        .note_tool_call_arguments_delta(Some("spawn_subagent"), 0);
+    agent.session.tracker.backdate_last_tool_call_delta(
+        crate::acp::tracker::WRITING_DELTA_STALE_AFTER + std::time::Duration::from_secs(1),
+    );
+
+    let outcome = finalize_turn_from_terminal(&mut agent, "s1", None, Some("end_turn"), None, None);
+    assert!(matches!(outcome, TerminalApply::ReconcileArmed));
+    assert_eq!(
+        agent.pending_turn_end_reconcile.as_ref().unwrap().prompt_id,
+        "p1"
+    );
+}
+
 /// Exact pid still arms (control).
 #[test]
 fn recovery_mode_matching_turn_completed_arms_reconcile_for_lost_pr() {
