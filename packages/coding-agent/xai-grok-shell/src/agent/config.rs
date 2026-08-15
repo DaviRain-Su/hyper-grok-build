@@ -6494,10 +6494,18 @@ pub fn managed_api_key_provider(model_id: &str) -> Option<&'static xai_grok_mode
 }
 
 /// True when this turn must never install the xAI session [`WireValidBearerResolver`](crate::auth)
-/// or fall through to the session JWT: either the request URL is a known open
-/// platform host, or the catalog id is a managed API-key provider.
+/// or fall through to the session JWT.
+///
+/// Official `[model.*]` BYOK is any non–first-party `base_url` plus the model's
+/// own `api_key`/`env_key`. Hyper previously only recognized registry hosts
+/// (`ollama.com`, OpenRouter, …) and managed catalog ids (`ollama/*`). A
+/// user `[model.foo]` pointed at vLLM / LiteLLM / a reverse proxy then
+/// classified `NotByok`, installed the xAI JWT, 401'd, and looped on a
+/// false "recovery succeeded" refresh of the *wrong* credential.
 pub fn is_third_party_api_key_route(model_id: &str, base_url: &str) -> bool {
-    open_platform_endpoint(base_url).is_some() || managed_api_key_provider(model_id).is_some()
+    !crate::util::is_xai_api_url(base_url)
+        || open_platform_endpoint(base_url).is_some()
+        || managed_api_key_provider(model_id).is_some()
 }
 
 /// JWT access tokens start with a shared base64 header (`eyJ…`). Never forward
@@ -9245,6 +9253,26 @@ api_key = "per-model-key"
             .get("moonshot-cn/kimi-k2-turbo-preview")
             .expect("entry");
         assert_eq!(entry.api_key.as_deref(), Some("per-model-key"));
+    }
+
+    #[test]
+    fn third_party_api_key_route_covers_arbitrary_custom_base_url() {
+        assert!(
+            is_third_party_api_key_route("my-vllm", "https://llm.example.com/v1"),
+            "official-style [model.*] hosts must fail-close the xAI session bearer"
+        );
+        assert!(
+            is_third_party_api_key_route("local", "http://127.0.0.1:8000/v1"),
+            "loopback custom endpoints are third-party"
+        );
+        assert!(
+            is_third_party_api_key_route("ollama/glm-5.2", "http://127.0.0.1:11434/v1"),
+            "managed catalog id still matches even on an unrecognized host"
+        );
+        assert!(
+            !is_third_party_api_key_route("grok-4", "https://api.x.ai/v1"),
+            "first-party xAI remains a session-token route"
+        );
     }
 
 }

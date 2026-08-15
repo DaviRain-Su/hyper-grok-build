@@ -422,8 +422,14 @@ impl ModelByok {
 /// demote on `Unknown`). It refreshes when `endpoint_is_first_party` — the
 /// request targets a first-party host (cli-chat-proxy / first-party API),
 /// where sending the session token cannot leak to a third-party BYOK
-/// endpoint. A definite `NotByok` always refreshes (it only ever routes to
-/// the session endpoint); a definite `Byok` never does.
+/// endpoint.
+///
+/// `NotByok` is the same host check: official grok-build assumes those models
+/// only hit the xAI session endpoint, but Hyper `[model.*]` entries with a
+/// custom `base_url` and no resolved own key still classify `NotByok`.
+/// Refreshing there installs the xAI JWT on vLLM / LiteLLM / reverse proxies
+/// and loops on a false "recovery succeeded". A definite `Byok` never
+/// refreshes.
 pub(crate) fn session_token_auth_gate(
     is_session_based_method: bool,
     model_byok: ModelByok,
@@ -431,9 +437,8 @@ pub(crate) fn session_token_auth_gate(
 ) -> bool {
     is_session_based_method
         && match model_byok {
-            ModelByok::NotByok => true,
+            ModelByok::NotByok | ModelByok::Unknown => endpoint_is_first_party,
             ModelByok::Byok => false,
-            ModelByok::Unknown => endpoint_is_first_party,
         }
 }
 

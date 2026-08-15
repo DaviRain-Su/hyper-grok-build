@@ -631,13 +631,15 @@ impl SessionActor {
         let gate =
             SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
         // A third-party BYOK / managed API-key route must never carry the xAI
-        // session bearer. URL matching alone is not enough: local Ollama
-        // (`http://127.0.0.1:11434/v1`) and reverse proxies are not in the
-        // registry host list, but `ollama/*` catalog ids still must fail
-        // closed. A live-only catalog entry can also classify `NotByok` and
-        // activate the session gate — without this guard the AuthManager
-        // resolver replaces the platform key with the xAI JWT → third-party
-        // 401 → false "recovery succeeded" retry loop.
+        // session bearer. Registry host matching alone is not enough: local
+        // Ollama (`http://127.0.0.1:11434/v1`), reverse proxies, and arbitrary
+        // `[model.*]` `base_url`s (vLLM / LiteLLM / 中转站) are not in the
+        // host list. Catalog ids (`ollama/*`) and any non–first-party URL
+        // still must fail closed. A live-only / offline-miss catalog entry
+        // can also classify `NotByok` and activate the session gate — without
+        // this guard the AuthManager resolver replaces the platform key with
+        // the xAI JWT → third-party 401 → false "recovery succeeded" retry
+        // loop.
         let third_party_api_key_route =
             crate::agent::config::is_third_party_api_key_route(cfg.model.as_str(), &cfg.base_url);
         let use_bearer_resolver = gate.active() && !third_party_api_key_route;
@@ -741,12 +743,13 @@ impl SessionActor {
             }
         }
         // Platform OAuth (Kimi / OpenAI Codex) always wins over the xAI session
-        // resolver. `session_token_auth_gate` is true whenever the user is on
-        // cached_token/grok.com/oidc AND the model is NotByok — common for
-        // openai-codex/* when the catalog stamp is not yet memoized as Byok.
-        // Preferring AuthManager here previously sent the xAI OIDC JWT to
-        // chatgpt.com → 401 "Could not parse your authentication token" while
-        // recovery "succeeded" by refreshing the *wrong* token.
+        // resolver. `session_token_auth_gate` is true for cached_token/grok.com/
+        // oidc only on a first-party host when the model is NotByok/Unknown —
+        // common for openai-codex/* when the catalog stamp is not yet memoized
+        // as Byok *and* the request still targets an xAI URL. Preferring
+        // AuthManager here previously sent the xAI OIDC JWT to chatgpt.com →
+        // 401 "Could not parse your authentication token" while recovery
+        // "succeeded" by refreshing the *wrong* token.
         let (api_key, bearer_resolver) = if codex_oauth_route {
             // The resolver is authoritative and performs the sole auth lookup
             // for each HTTP attempt, including the companion account header.
@@ -793,8 +796,9 @@ impl SessionActor {
             // API-key route is the explicit non-OAuth exception.
             (None, None)
         } else if third_party_api_key_route {
-            // Ollama / OpenRouter / Fireworks / OpenCode Go / … : never install
-            // the xAI session resolver. Prefer, in order:
+            // Ollama / OpenRouter / Fireworks / OpenCode Go / arbitrary
+            // `[model.*]` hosts: never install the xAI session resolver.
+            // Prefer, in order:
             // 1) auth.json / env re-resolved from the **request base URL**
             //    (authoritative for OpenCode Go host; must beat bare-slug
             //    catalog hits that pull OLLAMA_API_KEY etc.)
@@ -804,11 +808,15 @@ impl SessionActor {
             // recovery loop that refreshes the wrong credential.
             let from_endpoint =
                 crate::agent::config::resolve_open_platform_api_key_from_endpoint(&cfg.base_url);
+            // Official BYOK sends the stamped `[model.*]` key as-is, including
+            // JWT-shaped third-party tokens. Only drop the *xAI session* JWT
+            // left in chat-state after a first-party turn — a blanket
+            // `looks_like_jwt` filter rejected 中转站 / Cloudflare-style keys
+            // and the request went out unauthenticated.
             let chat_key = creds.api_key.filter(|key| {
-                !crate::agent::config::looks_like_jwt_access_token(key)
-                    && session_token
-                        .as_deref()
-                        .is_none_or(|session| session != key.as_str())
+                session_token
+                    .as_deref()
+                    .is_none_or(|session| session != key.as_str())
             });
             (
                 from_endpoint.or(live_platform_key).or(chat_key),
@@ -1611,37 +1619,63 @@ impl SessionActor {
                 "{detailed_message}\n\nThe OAuth proxy matches both Kimi Code and OpenAI Codex, but the selected catalog platform could not be recovered. Reselect the model and retry."
             );
         } else if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
-            && let Some(platform) = crate::agent::config::open_platform_endpoint(&failed_base_url)
-                .or_else(|| {
-                    crate::agent::config::managed_api_key_provider(failed_model_id.as_str())
-                })
+            && crate::agent::config::is_third_party_api_key_route(
+                failed_model_id.as_str(),
+                &failed_base_url,
+            )
         {
             // Same wrong-credential trap as Kimi/Codex: refreshing the xAI
             // session cannot fix a third-party BYOK 401 — the retry re-sends
             // a credential the platform must reject again, looping to the
             // misleading "Auth recovery succeeded but ... 401" terminal
-            // error. Surface the 401 with the platform's setup hint so the
-            // user re-checks the platform key instead.
+            // error. Surface the 401 with a setup hint so the user re-checks
+            // the platform / `[model.*]` key instead.
             //
-            // Catalog-id matching covers local Ollama / custom base URLs that
-            // `open_platform_endpoint` cannot recognize by host alone.
-            tracing::warn!(
-                session_id = % self.session_info.id.0,
-                platform = platform.as_str(),
-                "auth recovery: sampler 401 on open-platform endpoint — \
-                 not refreshable via xAI session"
-            );
-            xai_grok_telemetry::unified_log::warn(
-                "auth recovery: sampler 401 on open-platform endpoint — not refreshable via xAI session",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({ "platform" : platform.as_str() })),
-            );
-            detailed_message = format!(
-                "{detailed_message}\n\n\
-                 The request was rejected by {} — check the platform API key: {}.",
-                platform.display_name,
-                platform.setup_hint()
-            );
+            // Catalog-id matching covers local Ollama; any non–first-party
+            // `base_url` covers official-style custom models (vLLM, LiteLLM,
+            // reverse proxies) that `open_platform_endpoint` cannot recognize.
+            if let Some(platform) = crate::agent::config::open_platform_endpoint(&failed_base_url)
+                .or_else(|| {
+                    crate::agent::config::managed_api_key_provider(failed_model_id.as_str())
+                })
+            {
+                tracing::warn!(
+                    session_id = % self.session_info.id.0,
+                    platform = platform.as_str(),
+                    "auth recovery: sampler 401 on open-platform endpoint — \
+                     not refreshable via xAI session"
+                );
+                xai_grok_telemetry::unified_log::warn(
+                    "auth recovery: sampler 401 on open-platform endpoint — not refreshable via xAI session",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({ "platform" : platform.as_str() })),
+                );
+                detailed_message = format!(
+                    "{detailed_message}\n\n\
+                     The request was rejected by {} — check the platform API key: {}.",
+                    platform.display_name,
+                    platform.setup_hint()
+                );
+            } else {
+                tracing::warn!(
+                    session_id = % self.session_info.id.0,
+                    base_url = %failed_base_url,
+                    "auth recovery: sampler 401 on custom model endpoint — \
+                     not refreshable via xAI session"
+                );
+                xai_grok_telemetry::unified_log::warn(
+                    "auth recovery: sampler 401 on custom model endpoint — not refreshable via xAI session",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({ "base_url": failed_base_url })),
+                );
+                detailed_message = format!(
+                    "{detailed_message}\n\n\
+                     The custom model endpoint rejected this request. Check \
+                     `api_key` / `env_key` on the `[model.*]` entry in \
+                     ~/.grok/config.toml — the xAI session token is not sent \
+                     to third-party hosts."
+                );
+            }
         } else if auth_recovery_eligible
             && crate::auth::devbox_login::is_devbox_environment()
             && let Some(ref am) = self.auth_manager

@@ -124,6 +124,14 @@ async fn make_actor_with_method_and_credentials(
             auth_type,
             ..Default::default()
         });
+    // Session-auth tests default to a first-party host. `create_test_actor`
+    // seeds `http://localhost`, which is a third-party BYOK route and must
+    // not install the xAI session resolver. Cases that need a custom /
+    // open-platform URL overwrite `base_url` after construction.
+    if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+        cfg.base_url = "https://api.x.ai/v1".into();
+        actor.chat_state_handle.update_sampling_config(cfg);
+    }
     (Arc::new(actor), persistence_rx)
 }
 
@@ -864,16 +872,15 @@ fn session_token_auth_gate_truth_table() {
         assert!(!gate(false, ModelByok::NotByok, fp));
         assert!(!gate(false, ModelByok::Byok, fp));
         assert!(!gate(false, ModelByok::Unknown, fp));
-        // Session method: a definite classification ignores the endpoint —
-        // NotByok always refreshes (only ever routes to the session endpoint),
-        // a genuine per-model Byok never does.
-        assert!(gate(true, ModelByok::NotByok, fp));
+        // A genuine per-model Byok never refreshes the xAI session token.
         assert!(!gate(true, ModelByok::Byok, fp));
     }
-    // Session method + Unknown BYOK: refresh only against a first-party xAI
-    // host, so a transiently-unclassifiable config can't demote a live session
-    // (the stale-token 401 regression) yet the session token never leaks to a
-    // third-party BYOK endpoint. This arm was unconditionally `false` pre-fix.
+    // Session method + NotByok / Unknown: refresh only against a first-party
+    // xAI host. Official grok-build assumed NotByok only hits the session
+    // endpoint; Hyper `[model.*]` custom URLs still classify NotByok when the
+    // catalog miss / own-key lookup fails, and must not leak the session JWT.
+    assert!(gate(true, ModelByok::NotByok, true));
+    assert!(!gate(true, ModelByok::NotByok, false));
     assert!(gate(true, ModelByok::Unknown, true));
     assert!(!gate(true, ModelByok::Unknown, false));
 }
@@ -1761,6 +1768,148 @@ async fn sampler_401_on_open_platform_endpoint_skips_session_recovery() {
             assert!(
                 rendered.contains("Ollama Cloud"),
                 "terminal error should name the platform setup hint, got: {rendered}"
+            );
+        })
+        .await;
+}
+
+/// Official `[model.*]` BYOK: an arbitrary host (vLLM / LiteLLM / reverse
+/// proxy) is not in the open-platform registry. Reconstruct must still keep
+/// the xAI session resolver off and sign with the stamped custom key — the
+/// same shape official grok-build uses for custom models.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn reconstruct_full_config_no_session_resolver_for_custom_model_url() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let auth_path = dir.path().join("auth.json");
+            let _home_guard =
+                xai_grok_test_support::EnvGuard::set("GROK_HOME", dir.path().to_str().unwrap());
+            let _auth_guard =
+                xai_grok_test_support::EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap());
+            let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+
+            let (_am_dir, am) = auth_manager_with_valid_token("xai-session-jwt");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::ApiKey,
+                "sk-custom-model-key".to_string(),
+            )
+            .await;
+
+            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                cfg.base_url = "https://llm.example.com/v1".into();
+                cfg.model = "my-vllm".into();
+                actor.chat_state_handle.update_sampling_config(cfg);
+            }
+
+            let cfg = actor.reconstruct_full_config().await;
+            assert!(
+                cfg.bearer_resolver.is_none(),
+                "custom [model.*] host must not wire the xAI session bearer resolver"
+            );
+            assert_eq!(
+                cfg.api_key.as_deref(),
+                Some("sk-custom-model-key"),
+                "must sign with the stamped custom key, not the xAI session JWT"
+            );
+        })
+        .await;
+}
+
+/// A 401 from an arbitrary custom-model host must not run xAI session
+/// recovery. The refresher "succeeds" on the wrong credential and the UI
+/// sits on Retrying until the runaway guard trips.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn sampler_401_on_custom_model_url_skips_session_recovery() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysSucceedRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::ApiKey,
+                "sk-custom-model-key".to_string(),
+            )
+            .await;
+            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                cfg.base_url = "https://llm.example.com/v1".into();
+                cfg.model = "my-vllm".into();
+                actor.chat_state_handle.update_sampling_config(cfg);
+            }
+
+            let result = actor.handle_sampling_failure(auth_error()).await;
+
+            let Err(err) = result else {
+                panic!(
+                    "custom-model 401 must surface as a terminal error, not xAI session recovery"
+                );
+            };
+            assert!(
+                !called.load(Ordering::SeqCst),
+                "xAI session refresher must not run for a custom [model.*] endpoint"
+            );
+            let rendered = format!("{err:?}");
+            assert!(
+                rendered.contains("[model.*]") || rendered.contains("custom model"),
+                "terminal error should tell the user to check [model.*] credentials, got: {rendered}"
+            );
+        })
+        .await;
+}
+
+/// Pre-flight must not rewrite chat-state with the xAI session token when
+/// the active model is an arbitrary custom host (same trap as Ollama).
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn pre_flight_refresh_skips_custom_model_url() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysSucceedRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::ApiKey,
+                "sk-custom-model-key".to_string(),
+            )
+            .await;
+            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                cfg.base_url = "https://llm.example.com/v1".into();
+                cfg.model = "my-vllm".into();
+                actor.chat_state_handle.update_sampling_config(cfg);
+            }
+
+            actor.refresh_token_if_expired().await;
+
+            assert!(
+                !called.load(Ordering::SeqCst),
+                "pre-flight session refresh must NOT fire for a custom [model.*] endpoint"
+            );
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .get_credentials()
+                    .await
+                    .api_key
+                    .as_deref(),
+                Some("sk-custom-model-key"),
+                "stamped custom key must not be overwritten by the session token"
             );
         })
         .await;
