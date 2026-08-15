@@ -297,7 +297,9 @@ pub fn build_request(
                 .map(|t| GoogleFunctionDeclaration {
                     name: t.name.clone(),
                     description: t.description.clone(),
-                    parameters_json_schema: t.parameters.clone(),
+                    parameters_json_schema: xai_grok_sampling_types::strip_empty_json_schema_enum_values(
+                        t.parameters.clone(),
+                    ),
                 })
                 .collect(),
         }])

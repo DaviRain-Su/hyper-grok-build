@@ -738,7 +738,7 @@ pub async fn run_update_if_available(
 ) -> Result<bool> {
     #[cfg(feature = "community-build")]
     {
-        let _ = update_config;
+        let _ = (update_config, trigger);
         return crate::community::run_update_if_available(run_mode, interactive).await;
     }
 
@@ -1029,7 +1029,7 @@ pub async fn run_install_script(
 ) -> Result<()> {
     #[cfg(feature = "community-build")]
     {
-        let _ = (installer, update_config);
+        let _ = (installer, update_config, trigger);
         return crate::community::run_install_target(target).await;
     }
 
@@ -2757,7 +2757,7 @@ pub async fn run_update(
 ) -> Result<Option<String>> {
     #[cfg(feature = "community-build")]
     {
-        let _ = update_config;
+        let _ = (update_config, trigger);
         return crate::community::run_update(force, pinned_version, channel_switch).await;
     }
 

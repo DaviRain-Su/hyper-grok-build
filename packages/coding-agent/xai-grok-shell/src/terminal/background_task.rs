@@ -261,7 +261,7 @@ impl BackgroundTaskRegistry {
 
 /// Error when a background-task output path cannot be formed safely.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnsafeTaskPathId {
+pub(super) struct UnsafeTaskPathId {
     pub field: &'static str,
     pub value: String,
 }
@@ -285,7 +285,10 @@ impl std::error::Error for UnsafeTaskPathId {}
 /// Both `session_id` and `task_id` must be safe path segments
 /// ([`xai_tool_types::is_safe_task_id`]). Unsafe ids are **rejected**
 /// (no shared quarantine name that could collide).
-pub fn get_task_output_path(session_id: &str, task_id: &str) -> Result<PathBuf, UnsafeTaskPathId> {
+pub(super) fn get_task_output_path(
+    session_id: &str,
+    task_id: &str,
+) -> Result<PathBuf, UnsafeTaskPathId> {
     get_task_output_path_in(&crate::util::grok_home::grok_home(), session_id, task_id)
 }
 

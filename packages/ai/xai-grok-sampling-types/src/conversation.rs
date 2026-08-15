@@ -722,6 +722,40 @@ impl From<ToolDefinition> for ToolSpec {
     }
 }
 
+/// Gemini `GenerateContent` rejects empty / null `enum` entries
+/// (`enum[N]: cannot be empty`). schemars emits `null` for `Option<Enum>`
+/// (e.g. `todo_write` `todos[].status`); OpenAI-compatible proxies such as
+/// cliproxy then forward that as `""`. Drop those values so chat-completions
+/// and native Gemini requests stay valid. Absence of the field still means
+/// unset.
+pub fn strip_empty_json_schema_enum_values(mut schema: serde_json::Value) -> serde_json::Value {
+    strip_empty_json_schema_enum_values_in_place(&mut schema);
+    schema
+}
+
+fn strip_empty_json_schema_enum_values_in_place(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::Array(enum_values)) = map.get_mut("enum") {
+                enum_values.retain(|entry| match entry {
+                    serde_json::Value::Null => false,
+                    serde_json::Value::String(s) => !s.is_empty(),
+                    _ => true,
+                });
+            }
+            for child in map.values_mut() {
+                strip_empty_json_schema_enum_values_in_place(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                strip_empty_json_schema_enum_values_in_place(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 // ============================================================================
 // Conversation Request
 // ============================================================================
@@ -2514,7 +2548,13 @@ impl From<ConversationRequest> for ChatCompletionRequest {
             Some(
                 req.tools
                     .into_iter()
-                    .map(|t| ToolDefinition::function(t.name, t.description, t.parameters))
+                    .map(|t| {
+                        ToolDefinition::function(
+                            t.name,
+                            t.description,
+                            strip_empty_json_schema_enum_values(t.parameters),
+                        )
+                    })
                     .collect(),
             )
         };
@@ -4501,6 +4541,29 @@ mod tests {
     use super::*;
     use crate::tool_overrides::*;
     use assert_matches::assert_matches;
+
+    #[test]
+    fn strip_empty_json_schema_enum_values_drops_null_and_blank() {
+        let schema = serde_json::json!({
+            "properties": {
+                "todos": {
+                    "items": {
+                        "properties": {
+                            "status": {
+                                "type": ["string", "null"],
+                                "enum": ["pending", "in_progress", "completed", "cancelled", null, ""]
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let cleaned = strip_empty_json_schema_enum_values(schema);
+        assert_eq!(
+            cleaned["properties"]["todos"]["items"]["properties"]["status"]["enum"],
+            serde_json::json!(["pending", "in_progress", "completed", "cancelled"])
+        );
+    }
 
     /// Keeps `forwards_prompt_cache_key()` honest against each mapping: a key that never reaches the wire looks like a 0% cache hit, not a bug.
     #[test]
