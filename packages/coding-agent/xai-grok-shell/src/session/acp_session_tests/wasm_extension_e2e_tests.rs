@@ -526,6 +526,7 @@ async fn session_actor_register_command_slash_hello_wasm() {
                 slash_commands::CommandAvailability::default(),
                 &[],
                 &cmds,
+                &[],
             );
             assert!(
                 catalog.iter().any(|c| c.name == "hello_wasm"),
@@ -545,6 +546,7 @@ async fn session_actor_register_command_slash_hello_wasm() {
                 &[],
                 LoopFireMode::Detached,
                 &cmds,
+                &[],
             );
             let action = match outcome {
                 Err(SlashCommandOutcome::Builtin(a)) => a,

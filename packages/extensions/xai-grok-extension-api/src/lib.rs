@@ -154,6 +154,54 @@ impl WasmToolDescriptor {
     }
 }
 
+/// One model-visible tool advertised by a scheme extension
+/// (`register-tool!` in the plugin script). Same contract as
+/// [`WasmToolDescriptor`], with `scheme_*` client names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemeToolDescriptor {
+    pub extension: String,
+    pub name: String,
+    pub description: String,
+    /// JSON Schema object (as string). Empty → default empty object schema.
+    pub input_schema_json: String,
+}
+
+impl SchemeToolDescriptor {
+    /// Client-facing tool name, optionally session-scoped:
+    /// `scheme_{session}_{extension}_{name}` (tokens sanitized).
+    pub fn client_name_for_session(&self, session_key: Option<&str>) -> String {
+        let ext = sanitize_tool_token(&self.extension);
+        let name = sanitize_tool_token(&self.name);
+        match session_key
+            .map(short_session_token)
+            .filter(|s| !s.is_empty())
+        {
+            Some(sk) => format!("scheme_{sk}_{ext}_{name}"),
+            None => format!("scheme_{ext}_{name}"),
+        }
+    }
+
+    pub fn parsed_schema(&self) -> serde_json::Value {
+        serde_json::from_str(&self.input_schema_json)
+            .unwrap_or_else(|_| serde_json::json!({"type": "object", "properties": {}}))
+    }
+}
+
+/// One slash command advertised by a scheme extension (`register-command!`).
+/// Same host-side collision rules as [`WasmCommandDescriptor`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemeCommandDescriptor {
+    pub extension: String,
+    pub name: String,
+    pub description: String,
+}
+
+impl SchemeCommandDescriptor {
+    pub fn slash_name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// Max length for a guest-advertised short tool name.
 pub const MAX_TOOL_NAME_LEN: usize = 64;
 
@@ -324,6 +372,11 @@ pub struct RuntimeManifest {
     /// Expected WIT package, e.g. `hyper:extension@0.1.0`.
     #[serde(default = "default_wit")]
     pub wit: String,
+    /// Relative path to a Gambit/Gerbil scheme policy script for the
+    /// community scheme live runtime. `None` = this plugin ships no scheme
+    /// extension. Shares `capabilities` / `gate_fail` with the wasm guest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
     /// Per-extension gate fail mode. When set, overrides the process default
@@ -345,6 +398,7 @@ impl Default for RuntimeManifest {
         Self {
             wasm: default_wasm_path(),
             wit: default_wit(),
+            scheme: None,
             capabilities: Vec::new(),
             gate_fail: None,
         }
@@ -391,6 +445,33 @@ impl ExtensionSpec {
     /// Effective gate fail mode for this spec.
     pub fn effective_gate_fail(&self, runtime_default: GateFailMode) -> GateFailMode {
         self.gate_fail.unwrap_or(runtime_default)
+    }
+}
+
+/// How a scheme policy script was discovered for loading into the community
+/// scheme live runtime. Same trust and capability contract as
+/// [`ExtensionSpec`]; `scheme_path` points at the `.ss` file inside the
+/// plugin root (containment is validated by the manifest layer).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemeSpec {
+    pub name: String,
+    pub scheme_path: PathBuf,
+    pub capabilities: Vec<Capability>,
+    pub trusted: bool,
+    /// Per-extension gate fail mode; `None` inherits the runtime/process default.
+    pub gate_fail: Option<GateFailMode>,
+    /// Absolute plugin data directory (`~/.grok/plugin-data/<id>/`), if known.
+    pub plugin_data_dir: Option<PathBuf>,
+}
+
+impl SchemeSpec {
+    /// Untrusted plugins must not be loaded (design R5).
+    pub fn may_load(&self) -> bool {
+        self.trusted
+    }
+
+    pub fn allows(&self, cap: Capability) -> bool {
+        self.capabilities.contains(&cap)
     }
 }
 
@@ -762,6 +843,9 @@ mod tests {
         assert_eq!(m.wasm, "extension.wasm");
         assert_eq!(m.wit, WIT_PACKAGE_FULL);
         assert_eq!(m.gate_fail, None);
+        assert_eq!(m.scheme, None);
+        let ms: RuntimeManifest = serde_json::from_str(r#"{"scheme":"policy.ss"}"#).unwrap();
+        assert_eq!(ms.scheme.as_deref(), Some("policy.ss"));
         let m2: RuntimeManifest =
             serde_json::from_str(r#"{"gate_fail":"closed","capabilities":["pre_tool_gate"]}"#)
                 .unwrap();

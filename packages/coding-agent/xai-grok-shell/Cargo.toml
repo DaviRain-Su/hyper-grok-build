@@ -171,6 +171,7 @@ xai-grok-memory = { workspace = true }
 xai-grok-hooks = { path = "../xai-grok-hooks" }
 xai-grok-extension-api = { path = "../../extensions/xai-grok-extension-api" }
 xai-grok-extension-runtime = { path = "../../extensions/xai-grok-extension-runtime" }
+xai-grok-scheme-runtime = { path = "../../extensions/xai-grok-scheme-runtime" }
 xai-hooks-plugins-types = { path = "../xai-hooks-plugins-types" }
 xai-grok-plugin-marketplace = { path = "../../extensions/xai-grok-plugin-marketplace" }
 xai-file-utils = { path = "../../platform/xai-file-utils" }

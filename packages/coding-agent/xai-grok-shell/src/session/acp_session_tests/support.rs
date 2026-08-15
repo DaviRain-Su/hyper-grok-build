@@ -425,8 +425,11 @@ pub(crate) async fn create_test_actor_with_terminal(
         extension_runtime: std::cell::RefCell::new(
             xai_grok_extension_runtime::ExtensionRuntime::new(),
         ),
+        scheme_runtime: crate::session::scheme_ext::inert_for_tests(),
         wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
         wasm_registered_commands: std::cell::RefCell::new(Vec::new()),
+        scheme_registered_tools: std::cell::RefCell::new(Vec::new()),
+        scheme_registered_commands: std::cell::RefCell::new(Vec::new()),
         events: crate::session::events::EventTracker::new(cwd.as_path()),
         observability_bridge: noop_observability_bridge(),
         current_turn_number: std::cell::Cell::new(0),

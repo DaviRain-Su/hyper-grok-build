@@ -215,6 +215,36 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         resolve: |_args| BuiltinAction::PluginsReload,
     },
     BuiltinCommand {
+        name: "live",
+        description: "Manage the scheme live runtime (status, redefine, eval, commit, discard, recover)",
+        argument_hint: Some("status | redefine <plugin> <event> <lambda> | eval <expr> | commit | discard | recover"),
+        aliases: &[],
+        gate: BuiltinGate::Plugins,
+        resolve: |args| {
+            let trimmed = args.trim();
+            if let Some(rest) = trimmed.strip_prefix("redefine") {
+                let (plugin, rest) = split_first_token(rest);
+                let (event, source) = split_first_token(rest);
+                BuiltinAction::LiveRedefine {
+                    plugin: plugin.to_string(),
+                    event: event.to_string(),
+                    source: source.to_string(),
+                }
+            } else if let Some(src) = trimmed.strip_prefix("eval") {
+                BuiltinAction::LiveEval {
+                    source: src.trim().to_string(),
+                }
+            } else {
+                match trimmed {
+                    "commit" => BuiltinAction::LiveCommit,
+                    "discard" => BuiltinAction::LiveDiscard,
+                    "recover" => BuiltinAction::LiveRecover,
+                    _ => BuiltinAction::LiveStatus,
+                }
+            }
+        },
+    },
+    BuiltinCommand {
         name: "session-info",
         description: "Show session details (model, turns, context usage)",
         argument_hint: None,
@@ -301,6 +331,16 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         },
     },
 ];
+/// Split off the first whitespace-separated token, returning
+/// `(token, rest-trimmed-left)`. Used by `/live redefine <plugin> <event> <src>`
+/// where `<src>` is arbitrary scheme source that must keep internal whitespace.
+fn split_first_token(s: &str) -> (&str, &str) {
+    let s = s.trim_start();
+    match s.find(char::is_whitespace) {
+        Some(i) => (&s[..i], s[i..].trim_start()),
+        None => (s, ""),
+    }
+}
 /// Split a trailing `--budget <tokens>` flag off a `/goal` objective.
 ///
 /// Only a TRAILING, standalone flag is consumed: the flag must be its own
@@ -700,13 +740,15 @@ pub(super) fn available_commands(
     availability: CommandAvailability,
     workflows: &[crate::session::workflow::registry::WorkflowListing],
     wasm_commands: &[xai_grok_extension_api::WasmCommandDescriptor],
+    scheme_commands: &[xai_grok_extension_api::SchemeCommandDescriptor],
 ) -> Vec<acp::AvailableCommand> {
     let catalog = EffectiveCommandCatalog::build(skills, availability, workflows);
     let mut commands = Vec::with_capacity(
         catalog.builtins.len()
             + catalog.skills.len()
             + catalog.workflows.len()
-            + wasm_commands.len(),
+            + wasm_commands.len()
+            + scheme_commands.len(),
     );
     commands.extend(catalog.builtins.iter().map(|builtin| {
         acp::AvailableCommand::new(builtin.name.to_string(), builtin.description.to_string()).input(
@@ -791,6 +833,21 @@ pub(super) fn available_commands(
                 ))
             }))
             .meta(meta)
+    }));
+    // Scheme slash commands after wasm (same collision rules: earlier wins).
+    commands.extend(scheme_commands.iter().map(|cmd| {
+        let desc = if cmd.description.is_empty() {
+            format!("Scheme extension `{}`", cmd.extension)
+        } else {
+            cmd.description.clone()
+        };
+        let meta = serde_json::json!({
+            "schemeExtension": cmd.extension,
+            "source": "scheme",
+        })
+        .as_object()
+        .cloned();
+        acp::AvailableCommand::new(cmd.name.clone(), desc).meta(meta)
     }));
     commands
 }
@@ -1156,7 +1213,7 @@ pub(crate) async fn list_commands(
         }
         let skills = product_skill_infos(auth).await.unwrap_or_default();
         return Ok(ListCommandsResponse {
-            commands: available_commands(&skills, availability, &[], &[]),
+            commands: available_commands(&skills, availability, &[], &[], &[]),
             tools: None,
         });
     }
@@ -1174,7 +1231,7 @@ pub(crate) async fn list_commands(
             .map(std::path::Path::new),
     );
     Ok(ListCommandsResponse {
-        commands: available_commands(&skills, availability, &workflows, &[]),
+        commands: available_commands(&skills, availability, &workflows, &[], &[]),
         tools: None,
     })
 }
@@ -1285,6 +1342,31 @@ pub(super) enum BuiltinAction {
         name: String,
         args: String,
     },
+    /// Slash command registered by a trusted scheme extension (`register-command!`).
+    SchemeCommand {
+        extension: String,
+        name: String,
+        args: String,
+    },
+    /// `/live` — scheme live runtime status (journal, image, plugins).
+    LiveStatus,
+    /// `/live redefine <plugin> <event> <lambda-source>` (journaled as pending).
+    LiveRedefine {
+        plugin: String,
+        event: String,
+        source: String,
+    },
+    /// `/live eval <source>` — host-driven eval in the image (user CLI only,
+    /// never model-visible; debugging affordance).
+    LiveEval {
+        source: String,
+    },
+    /// `/live commit` — clean-probe replay, then promote pending redefines.
+    LiveCommit,
+    /// `/live discard` — quarantine pending redefines, restart from committed.
+    LiveDiscard,
+    /// `/live recover` — discard + reset the image respawn budget.
+    LiveRecover,
 }
 impl BuiltinAction {
     pub(crate) fn command_name(&self) -> &str {
@@ -1320,6 +1402,13 @@ impl BuiltinAction {
             BuiltinAction::WorkflowManage { .. } => "workflow",
             BuiltinAction::WorkflowLaunch { .. } => "workflow",
             BuiltinAction::WasmCommand { name, .. } => name.as_str(),
+            BuiltinAction::SchemeCommand { name, .. } => name.as_str(),
+            BuiltinAction::LiveStatus
+            | BuiltinAction::LiveRedefine { .. }
+            | BuiltinAction::LiveEval { .. }
+            | BuiltinAction::LiveCommit
+            | BuiltinAction::LiveDiscard
+            | BuiltinAction::LiveRecover => "live",
         }
     }
     pub(crate) fn args_provided(&self) -> bool {
@@ -1355,6 +1444,13 @@ impl BuiltinAction {
             BuiltinAction::WorkflowManage { .. } => true,
             BuiltinAction::WorkflowLaunch { input, .. } => !input.is_empty(),
             BuiltinAction::WasmCommand { args, .. } => !args.is_empty(),
+            BuiltinAction::SchemeCommand { args, .. } => !args.is_empty(),
+            BuiltinAction::LiveStatus => false,
+            BuiltinAction::LiveRedefine { .. }
+            | BuiltinAction::LiveEval { .. }
+            | BuiltinAction::LiveCommit
+            | BuiltinAction::LiveDiscard
+            | BuiltinAction::LiveRecover => true,
         }
     }
 }
@@ -1544,6 +1640,7 @@ pub(super) fn resolve(
     workflows: &[crate::session::workflow::registry::WorkflowListing],
     loop_fire_mode: LoopFireMode,
     wasm_commands: &[xai_grok_extension_api::WasmCommandDescriptor],
+    scheme_commands: &[xai_grok_extension_api::SchemeCommandDescriptor],
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
     let Some((command_name, args)) = parse_slash_prefix(&prompt_blocks) else {
         return Ok(prompt_blocks);
@@ -1617,6 +1714,13 @@ pub(super) fn resolve(
     }
     if let Some(cmd) = wasm_commands.iter().find(|c| c.name == command_name) {
         return Err(SlashCommandOutcome::Builtin(BuiltinAction::WasmCommand {
+            extension: cmd.extension.clone(),
+            name: cmd.name.clone(),
+            args: args.to_string(),
+        }));
+    }
+    if let Some(cmd) = scheme_commands.iter().find(|c| c.name == command_name) {
+        return Err(SlashCommandOutcome::Builtin(BuiltinAction::SchemeCommand {
             extension: cmd.extension.clone(),
             name: cmd.name.clone(),
             args: args.to_string(),

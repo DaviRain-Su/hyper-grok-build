@@ -37,6 +37,7 @@ members = [
     "packages/extensions/xai-grok-extension-macros",
     "packages/extensions/xai-grok-extension-runtime",
     "packages/extensions/xai-grok-extension-sdk",
+    "packages/extensions/xai-grok-scheme-runtime",
     "packages/ai/xai-grok-http",
     "packages/tui/xai-grok-markdown",
     "packages/tui/xai-grok-markdown-core",
@@ -350,6 +351,7 @@ xai-grok-mermaid = { path = "packages/tui/xai-grok-mermaid" }
 xai-grok-models = { path = "packages/ai/xai-grok-models" }
 xai-grok-pager-diff = { path = "packages/tui/xai-grok-pager-diff" }
 xai-grok-sampler = { path = "packages/ai/xai-grok-sampler" }
+xai-grok-scheme-runtime = { path = "packages/extensions/xai-grok-scheme-runtime" }
 xai-grok-secrets = { path = "packages/platform/xai-grok-secrets" }
 xai-grok-session-events = { path = "packages/platform/xai-grok-session-events" }
 xai-grok-session-search = { path = "packages/coding-agent/xai-grok-session-search" }

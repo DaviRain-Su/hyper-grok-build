@@ -1030,12 +1030,21 @@ pub(crate) struct SessionActor {
     /// `extension.wasm` (see `docs/design-wasm-extensions.md`). Single-threaded
     /// session actor: `RefCell` is sufficient.
     pub(crate) extension_runtime: std::cell::RefCell<xai_grok_extension_runtime::ExtensionRuntime>,
+    /// Scheme live extension runtime (fourth dispatch segment, after wasm).
+    /// Internally synchronized and cheap to clone; the image child process
+    /// boots lazily on the first dispatch when ≥1 scheme plugin is loaded.
+    pub(crate) scheme_runtime: xai_grok_scheme_runtime::SchemeRuntime,
     /// Client tool names this session registered on the shared ToolBridge
     /// (session-scoped unregister; see Oracle review).
     pub(crate) wasm_registered_tools: std::cell::RefCell<Vec<String>>,
     /// Slash commands collected from loaded WASM extensions (`register_command`).
     pub(crate) wasm_registered_commands:
         std::cell::RefCell<Vec<xai_grok_extension_api::WasmCommandDescriptor>>,
+    /// Client tool names registered by scheme extensions (`register-tool!`).
+    pub(crate) scheme_registered_tools: std::cell::RefCell<Vec<String>>,
+    /// Slash commands collected from scheme extensions (`register-command!`).
+    pub(crate) scheme_registered_commands:
+        std::cell::RefCell<Vec<xai_grok_extension_api::SchemeCommandDescriptor>>,
     /// Centralized event tracking: event log, turn-end guard, active tool,
     /// doom loop terminate flag. All event-related state lives here.
     pub(crate) events: crate::session::events::EventTracker,

@@ -936,6 +936,68 @@ MOVED_STATE_ASIDE=0
 
 printf '\nhyper v%s installed to %s\n' "$RESOLVED_VERSION" "$ACTIVE_BIN"
 
+# ── Scheme live image (optional; fail-open) ──────────────────────────────────
+# Prebuilt `gsc -exe` Gambit image for plugins that declare `runtime.scheme`.
+# Runs AFTER the main install transaction commits: any failure here only warns
+# and never rolls back hyper. Without the image the scheme runtime falls back
+# to `gxi` / `gsi` discovered on PATH (or degrades silently).
+install_scheme_image() {
+    scheme_asset="hyper-scheme-image-${RESOLVED_VERSION}-${TRIPLE}.tar.gz"
+    scheme_url="$(find_asset_url "$scheme_asset")" || return 0 # not shipped for this platform
+    scheme_expected="$(awk -v want="$scheme_asset" '
+        {
+            name = $2
+            sub(/^\*/, "", name)
+            if (name == want) { print tolower($1); count++ }
+        }
+        END { if (count != 1) exit 1 }
+    ' "$TMP_DIR/SHA256SUMS")" || {
+        printf 'note: skipping scheme image (no unique SHA256SUMS entry for %s)\n' "$scheme_asset" >&2
+        return 0
+    }
+    case "$scheme_expected" in
+        *[!0-9a-f]*|'') printf 'note: skipping scheme image (bad digest)\n' >&2; return 0 ;;
+    esac
+    [ "${#scheme_expected}" -eq 64 ] || { printf 'note: skipping scheme image (bad digest)\n' >&2; return 0; }
+    fetch "$scheme_url" "$TMP_DIR/$scheme_asset" || {
+        printf 'note: scheme image download failed; continuing without it\n' >&2
+        return 0
+    }
+    scheme_actual="$(sha256_of "$TMP_DIR/$scheme_asset" | tr 'A-F' 'a-f')"
+    if [ "$scheme_actual" != "$scheme_expected" ]; then
+        printf 'note: scheme image checksum mismatch; continuing without it\n' >&2
+        return 0
+    fi
+    tar -xOzf "$TMP_DIR/$scheme_asset" hyper-scheme-image > "$TMP_DIR/hyper-scheme-image" 2>/dev/null || {
+        printf 'note: scheme image extraction failed; continuing without it\n' >&2
+        return 0
+    }
+    [ -s "$TMP_DIR/hyper-scheme-image" ] || {
+        printf 'note: scheme image archive was empty; continuing without it\n' >&2
+        return 0
+    }
+    scheme_bin_dir="$GROK_HOME/bin"
+    if [ -L "$scheme_bin_dir" ]; then
+        printf 'note: %s is a symlink; skipping scheme image\n' "$scheme_bin_dir" >&2
+        return 0
+    fi
+    mkdir -p "$scheme_bin_dir" 2>/dev/null || {
+        printf 'note: cannot create %s; skipping scheme image\n' "$scheme_bin_dir" >&2
+        return 0
+    }
+    scheme_stage="$scheme_bin_dir/.hyper-scheme-image.install.$$"
+    if cp "$TMP_DIR/hyper-scheme-image" "$scheme_stage" 2>/dev/null \
+        && chmod 0755 "$scheme_stage" 2>/dev/null \
+        && mv -f "$scheme_stage" "$scheme_bin_dir/hyper-scheme-image" 2>/dev/null; then
+        printf 'Scheme live image installed to %s\n' "$scheme_bin_dir/hyper-scheme-image"
+    else
+        rm -f "$scheme_stage" 2>/dev/null || true
+        printf 'note: could not install scheme image to %s; continuing without it\n' "$scheme_bin_dir" >&2
+    fi
+    return 0
+}
+install_scheme_image
+
 case ":$PATH:" in
     *":$BIN_DIR:"*)
         printf 'Run `hyper` to get started.\n'

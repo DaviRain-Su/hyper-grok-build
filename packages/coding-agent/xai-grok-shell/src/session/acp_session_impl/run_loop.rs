@@ -65,6 +65,16 @@ pub(super) async fn fire_session_end_hooks(session: &SessionActor, reason: &str)
             &ext_rt,
         );
     }
+    // Scheme extensions after wasm: session_end observe, then image teardown
+    // (`quit` → deadline → SIGKILL).
+    {
+        let scheme_rt = session.scheme_runtime.clone();
+        if !scheme_rt.is_empty() {
+            let results = scheme_rt.dispatch_session_end().await;
+            crate::session::scheme_ext::log_observe_failures("session_end", &results);
+        }
+        scheme_rt.shutdown_async().await;
+    }
     {
         let bridge = session.agent.borrow().tool_bridge().clone();
         let mut owned = session.wasm_registered_tools.borrow_mut();
@@ -72,6 +82,15 @@ pub(super) async fn fire_session_end_hooks(session: &SessionActor, reason: &str)
         session.wasm_registered_commands.borrow_mut().clear();
         if n > 0 {
             tracing::info!(wasm_tools = n, %reason, "unregistered session wasm tools");
+        }
+        let mut scheme_owned = session.scheme_registered_tools.borrow_mut();
+        let sn = crate::session::scheme_tools::unregister_session_scheme_tools(
+            &bridge,
+            &mut scheme_owned,
+        );
+        session.scheme_registered_commands.borrow_mut().clear();
+        if sn > 0 {
+            tracing::info!(scheme_tools = sn, %reason, "unregistered session scheme tools");
         }
     }
     session.dispatch_session_end_stop(reason).await;
@@ -1753,11 +1772,14 @@ pub(super) async fn run_session(
                                 session.build_command_availability(&tool_names, has_runs);
                             let (_, workflows) = session.named_workflow_snapshot();
                             let wasm_cmds = session.wasm_registered_commands.borrow().clone();
+                            let scheme_cmds =
+                                session.scheme_registered_commands.borrow().clone();
                             let commands = slash_commands::available_commands(
                                 &skills,
                                 availability,
                                 &workflows,
                                 &wasm_cmds,
+                                &scheme_cmds,
                             );
                             let _ = respond_to.send(slash_commands::ListCommandsResponse {
                                 commands,
@@ -1807,6 +1829,17 @@ pub(super) async fn run_session(
                                     );
                                 }
                             }
+                            // Scheme extensions after wasm (observe / fail-open).
+                            {
+                                let scheme_rt = session.scheme_runtime.clone();
+                                if !scheme_rt.is_empty() {
+                                    let results = scheme_rt.dispatch_session_start().await;
+                                    crate::session::scheme_ext::log_observe_failures(
+                                        "session_start",
+                                        &results,
+                                    );
+                                }
+                            }
                             // Register wasm_* tools and slash commands once extensions are warm.
                             let bridge = session.agent.borrow().tool_bridge().clone();
                             let mut owned = session.wasm_registered_tools.borrow_mut();
@@ -1824,6 +1857,33 @@ pub(super) async fn run_session(
                                     wasm_commands = cmd_n,
                                     "wasm extension tools/commands registered at session_start"
                                 );
+                            }
+                            drop(owned);
+                            // Scheme tools/commands after wasm (same session scoping).
+                            {
+                                let scheme_rt = session.scheme_runtime.clone();
+                                if !scheme_rt.is_empty() {
+                                    let mut scheme_owned =
+                                        session.scheme_registered_tools.borrow_mut();
+                                    let sn =
+                                        crate::session::scheme_tools::sync_scheme_tools_to_bridge(
+                                            &bridge,
+                                            &scheme_rt,
+                                            &mut scheme_owned,
+                                            sid,
+                                        )
+                                        .await;
+                                    let scmds = scheme_rt.collect_registered_commands().await;
+                                    let scmd_n = scmds.len();
+                                    *session.scheme_registered_commands.borrow_mut() = scmds;
+                                    if sn > 0 || scmd_n > 0 {
+                                        tracing::info!(
+                                            scheme_tools = sn,
+                                            scheme_commands = scmd_n,
+                                            "scheme extension tools/commands registered at session_start"
+                                        );
+                                    }
+                                }
                             }
                             crate::session::wasm_tools::emit_runtime_metrics(
                                 session.telemetry_enabled,

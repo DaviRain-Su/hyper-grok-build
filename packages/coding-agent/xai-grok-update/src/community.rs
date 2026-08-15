@@ -150,6 +150,18 @@ struct Candidate {
     asset_name: String,
     archive_url: String,
     sha256: String,
+    /// Optional prebuilt scheme live image for this platform (best-effort
+    /// component: absent asset or resolution failure never blocks the update).
+    scheme_image: Option<SchemeImageAsset>,
+}
+
+/// Release asset for the prebuilt `hyper-scheme-image` binary (the Gambit
+/// kernel compiled with `gsc -exe`; consumed by `xai-grok-scheme-runtime`).
+#[derive(Debug, Clone)]
+struct SchemeImageAsset {
+    asset_name: String,
+    archive_url: String,
+    sha256: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -717,11 +729,34 @@ async fn resolve_candidate(pinned_version: Option<&str>) -> Result<Candidate> {
     let sums = std::str::from_utf8(&sums).context("SHA256SUMS is not UTF-8")?;
     let sha256 = parse_manifest_checksum(sums, &asset_name)?;
 
+    // Optional scheme live image for this platform. Older releases (and
+    // platforms without a prebuilt image, e.g. Windows / x86_64 macOS) simply
+    // lack the asset; any resolution failure downgrades to "no image".
+    let scheme_asset_name = format!(
+        "hyper-scheme-image-{version}-{}.tar.gz",
+        platform.asset_triple
+    );
+    let scheme_image = match one_asset(&release, &scheme_asset_name) {
+        Ok(asset)
+            if validate_release_asset_url(&source, &asset.browser_download_url).is_ok() =>
+        {
+            parse_manifest_checksum(sums, &scheme_asset_name)
+                .ok()
+                .map(|sha256| SchemeImageAsset {
+                    asset_name: scheme_asset_name,
+                    archive_url: asset.browser_download_url.clone(),
+                    sha256,
+                })
+        }
+        _ => None,
+    };
+
     Ok(Candidate {
         version: version.to_string(),
         asset_name,
         archive_url: archive_asset.browser_download_url.clone(),
         sha256,
+        scheme_image,
     })
 }
 
@@ -938,6 +973,92 @@ async fn download_archive(candidate: &Candidate, destination: &Path) -> Result<S
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     Ok(digest)
+}
+
+/// Best-effort install of the prebuilt scheme live image into
+/// `$GROK_HOME/bin/hyper-scheme-image`. Optional component: every failure is
+/// reported as a note and swallowed — the scheme runtime falls back to
+/// `gxi`/`gsi` PATH discovery (see `xai-grok-scheme-runtime`).
+async fn install_scheme_image_best_effort(candidate: &Candidate) {
+    let Some(image) = candidate.scheme_image.clone() else {
+        return;
+    };
+    if let Err(error) = install_scheme_image(candidate, &image).await {
+        eprintln!("  Note: scheme live image install skipped: {error:#}");
+    }
+}
+
+async fn install_scheme_image(candidate: &Candidate, image: &SchemeImageAsset) -> Result<()> {
+    let bin_dir = community_grok_home().join("bin");
+    if path_exists_or_symlink(&bin_dir) {
+        reject_symlink(&bin_dir, "Grok bin directory")?;
+    }
+    std::fs::create_dir_all(&bin_dir).with_context(|| format!("creating {}", bin_dir.display()))?;
+
+    let archive_tmp = unique_sibling(&bin_dir.join(&image.asset_name), "download");
+    let _archive_guard = TempArtifact::new_file(archive_tmp.clone());
+    let download = Candidate {
+        version: candidate.version.clone(),
+        asset_name: image.asset_name.clone(),
+        archive_url: image.archive_url.clone(),
+        sha256: image.sha256.clone(),
+        scheme_image: None,
+    };
+    let actual = download_archive(&download, &archive_tmp).await?;
+    if actual != image.sha256 {
+        bail!(
+            "SHA-256 mismatch for {}: expected {}, got {actual}",
+            image.asset_name,
+            image.sha256
+        );
+    }
+
+    // Extract the single `hyper-scheme-image` regular-file member to a stage
+    // path in the destination directory (same-FS atomic rename).
+    let file = std::fs::File::open(&archive_tmp)
+        .with_context(|| format!("opening {}", archive_tmp.display()))?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    let stage = unique_sibling(&bin_dir.join("hyper-scheme-image"), "install");
+    let stage_guard = TempArtifact::new_file(stage.clone());
+    let mut extracted = false;
+    for entry in archive.entries().context("reading scheme image archive")? {
+        let mut entry = entry.context("reading scheme image archive entry")?;
+        let path = entry.path().context("scheme image entry path")?.into_owned();
+        let name = path.to_string_lossy().into_owned();
+        let name = name.trim_start_matches("./");
+        if entry.header().entry_type() != tar::EntryType::Regular || name != "hyper-scheme-image" {
+            continue;
+        }
+        let mut out = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&stage)
+            .with_context(|| format!("staging {}", stage.display()))?;
+        std::io::copy(&mut entry, &mut out).context("extracting scheme image binary")?;
+        extracted = true;
+        break;
+    }
+    if !extracted {
+        bail!(
+            "archive {} has no hyper-scheme-image member",
+            image.asset_name
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("chmod {}", stage.display()))?;
+    }
+    let dest = bin_dir.join("hyper-scheme-image");
+    if path_exists_or_symlink(&dest) {
+        reject_symlink(&dest, "scheme live image binary")?;
+    }
+    std::fs::rename(&stage, &dest).with_context(|| format!("activating {}", dest.display()))?;
+    let _ = stage_guard.keep();
+    eprintln!("  Scheme live image installed to {}", dest.display());
+    Ok(())
 }
 
 /// Windows reserved device names (case-insensitive stem before any extension).
@@ -2385,6 +2506,9 @@ async fn converge(force: bool, pinned_version: Option<&str>) -> Result<ConvergeO
     }
 
     install_candidate(&candidate).await?;
+    // After the main transaction commits: refresh the optional scheme live
+    // image (fail-open; never affects the just-installed hyper).
+    install_scheme_image_best_effort(&candidate).await;
     Ok(ConvergeOutcome {
         target: candidate.version,
         installed: true,
@@ -3216,6 +3340,7 @@ mod tests {
             asset_name: "asset".to_string(),
             archive_url: "https://example.invalid/asset".to_string(),
             sha256: new,
+            scheme_image: None,
         };
         assert!(
             candidate_requires_install(&candidate, Some(&active), &UpdateState::default()).unwrap()

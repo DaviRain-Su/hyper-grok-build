@@ -374,13 +374,20 @@ impl SessionActor {
                 } else {
                     String::new()
                 };
+                let scheme_ext = self.scheme_runtime.len();
+                let scheme_line = if scheme_ext > 0 {
+                    let names = self.scheme_runtime.names().join(", ");
+                    format!("\n\n**Scheme extensions:** {scheme_ext} loaded ({names})")
+                } else {
+                    String::new()
+                };
 
                 let text = format!(
                     "{}**Session ID:** {}\n\n\
                      **Working directory:** {}\n\n\
                      {}{}\n\n\
                      **Turn:** {}\n\n\
-                     **Context:** {} / {} tokens ({:.0}%){}",
+                     **Context:** {} / {} tokens ({:.0}%){}{}",
                     title_line,
                     self.session_info.id.0,
                     self.session_info.cwd,
@@ -391,6 +398,7 @@ impl SessionActor {
                     ctx.total,
                     context_pct,
                     wasm_line,
+                    scheme_line,
                 );
                 self.send_host_turn_slash_command_output(&text).await;
                 ok_end_turn(0, None)
@@ -919,6 +927,103 @@ impl SessionActor {
                 self.send_host_turn_slash_command_output(&msg).await;
                 ok_end_turn(0, None)
             }
+            BuiltinAction::SchemeCommand {
+                extension,
+                name,
+                args,
+            } => {
+                let msg = match self
+                    .scheme_runtime
+                    .invoke_registered_command(&extension, &name, &args)
+                    .await
+                {
+                    Ok(out) if out.is_empty() => {
+                        format!("/{name} completed (scheme:{extension}).")
+                    }
+                    Ok(out) => out,
+                    Err(e) => format!("/{name} failed (scheme:{extension}): {e}"),
+                };
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::LiveStatus => {
+                let msg = self.live_status_text().await;
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::LiveRedefine {
+                plugin,
+                event,
+                source,
+            } => {
+                let msg = if plugin.is_empty() || event.is_empty() || source.is_empty() {
+                    "Usage: /live redefine <plugin> <event> <lambda-source>".to_string()
+                } else {
+                    match self
+                        .scheme_runtime
+                        .live_redefine(&plugin, &event, &source)
+                        .await
+                    {
+                        Ok(()) => format!(
+                            "Redefined `{event}` for `{plugin}` (pending). \
+                             Use /live commit to persist or /live discard to roll back."
+                        ),
+                        Err(e) => format!("/live redefine failed: {e}"),
+                    }
+                };
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::LiveEval { source } => {
+                let msg = if source.is_empty() {
+                    "Usage: /live eval <scheme-expression>".to_string()
+                } else {
+                    match self.scheme_runtime.live_eval(&source).await {
+                        Ok(out) => format!("=> {out}"),
+                        Err(e) => format!("/live eval failed: {e}"),
+                    }
+                };
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::LiveCommit => {
+                let msg = match self.scheme_runtime.live_commit().await {
+                    Ok(s) if s.pending == 0 && s.committed == 0 => {
+                        "Nothing to commit: no live redefines recorded.".to_string()
+                    }
+                    Ok(s) => format!(
+                        "Committed. Journal: {} committed, {} pending.",
+                        s.committed, s.pending
+                    ),
+                    Err(e) => format!("/live commit failed: {e}"),
+                };
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::LiveDiscard => {
+                let msg = match self.scheme_runtime.live_discard().await {
+                    Ok(s) => format!(
+                        "Pending redefines discarded; image restarts from committed state. \
+                         Journal: {} committed, {} pending.",
+                        s.committed, s.pending
+                    ),
+                    Err(e) => format!("/live discard failed: {e}"),
+                };
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::LiveRecover => {
+                let msg = match self.scheme_runtime.live_recover().await {
+                    Ok(s) => format!(
+                        "Recovered: pending redefines quarantined, respawn budget reset. \
+                         Journal: {} committed, {} pending.",
+                        s.committed, s.pending
+                    ),
+                    Err(e) => format!("/live recover failed: {e}"),
+                };
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
             BuiltinAction::GoalStatus => {
                 let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
                 let goal_tokens = self.goal_tokens_used(current_tokens);
@@ -1005,6 +1110,54 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
         }
+    }
+
+    /// `/live` (status) output: image state, loaded plugins, journal counters.
+    async fn live_status_text(self: &Arc<Self>) -> String {
+        if crate::session::scheme_ext::live_runtime_disabled() {
+            return "Scheme live runtime is disabled (`[live] disabled = true` or GROK_LIVE_DISABLED)."
+                .to_string();
+        }
+        let s = self.scheme_runtime.live_status().await;
+        if s.plugins.is_empty() {
+            return "No scheme extensions loaded. Add `runtime.scheme` to a trusted plugin's plugin.json."
+                .to_string();
+        }
+        let mut lines = vec!["**Scheme live runtime**".to_string()];
+        lines.push(match (&s.image_running, &s.kernel_version) {
+            (true, Some(v)) => format!("Image: running ({v})"),
+            (true, None) => "Image: running".to_string(),
+            (false, _) => "Image: not running (boots lazily on next dispatch)".to_string(),
+        });
+        if let Some(cmd) = &s.image_command {
+            lines.push(format!("Backend: {cmd}"));
+        }
+        if s.respawns > 0 {
+            lines.push(format!("Respawns this session: {}", s.respawns));
+        }
+        lines.push(format!(
+            "Journal: {} committed, {} pending{}",
+            s.journal.committed,
+            s.journal.pending,
+            if s.journal.pending > 0 {
+                " — /live commit to persist, /live discard to roll back"
+            } else {
+                ""
+            }
+        ));
+        lines.push(format!("Extensions ({}):", s.plugins.len()));
+        for (name, load_failed) in &s.plugins {
+            lines.push(format!(
+                "  {} {}",
+                if *load_failed { "✗" } else { "•" },
+                if *load_failed {
+                    format!("{name} (load failed)")
+                } else {
+                    name.clone()
+                }
+            ));
+        }
+        lines.join("\n")
     }
 
     async fn execute_feedback_command(self: &Arc<Self>, text: String) -> PromptTurnResult {

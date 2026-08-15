@@ -1158,6 +1158,7 @@ enabled = false
             mcp_config_path: Some(mcp_json),
             lsp_config_path: None,
             runtime_wasm: None,
+            runtime_scheme: None,
             conflict: None,
         };
         let registry = PluginRegistry::from_discovered(vec![dp], &[], &["sentry".to_string()]);
@@ -1228,6 +1229,7 @@ enabled = false
             mcp_config_path: Some(mcp_json),
             lsp_config_path: None,
             runtime_wasm: None,
+            runtime_scheme: None,
             conflict: None,
         };
         let registry = PluginRegistry::from_discovered(vec![dp], &[], &["sentry".to_string()]);
@@ -1304,6 +1306,7 @@ enabled = false
             mcp_config_path: Some(mcp_json),
             lsp_config_path: None,
             runtime_wasm: None,
+            runtime_scheme: None,
             conflict: None,
         };
         let registry = PluginRegistry::from_discovered(vec![dp], &[], &["slack".to_string()]);

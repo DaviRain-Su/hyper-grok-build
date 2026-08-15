@@ -1727,8 +1727,12 @@ pub(crate) async fn spawn_session_actor(
             // (async); see run_loop DispatchSessionStartHook + hooks_plugins.
             rt
         }),
+        // Specs load right after construction (async); see rebuild_for_session below.
+        scheme_runtime: crate::session::scheme_ext::new_session_scheme_runtime(),
         wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
         wasm_registered_commands: std::cell::RefCell::new(Vec::new()),
+        scheme_registered_tools: std::cell::RefCell::new(Vec::new()),
+        scheme_registered_commands: std::cell::RefCell::new(Vec::new()),
         events: crate::session::events::EventTracker::new(
             &crate::session::persistence::session_dir(&session_info),
         ),
@@ -1752,6 +1756,14 @@ pub(crate) async fn spawn_session_actor(
         workspace_ops: workspace_ops.clone(),
         trace_config_template: std::cell::RefCell::new(None),
     });
+    // Scheme runtime: load trusted `runtime.scheme` plugin scripts (the image
+    // process itself boots lazily on the first dispatch).
+    crate::session::scheme_ext::rebuild_for_session(
+        &session.scheme_runtime,
+        plugin_registry.as_deref(),
+        session.session_info.id.0.as_ref(),
+    )
+    .await;
     if owns_permission_manager {
         session.wire_permission_prompt_notification();
     }

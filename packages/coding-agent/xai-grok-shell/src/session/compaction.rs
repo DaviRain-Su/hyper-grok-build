@@ -929,6 +929,18 @@ impl SessionActor {
                     .await;
             }
         }
+        // Scheme extensions after wasm (observe, fail-open).
+        {
+            let scheme_rt = self.scheme_runtime.clone();
+            if !scheme_rt.is_empty() {
+                let results = scheme_rt
+                    .dispatch_pre_compact(&xai_grok_extension_api::PreCompactIn {
+                        reason: compact_source.to_string(),
+                    })
+                    .await;
+                crate::session::scheme_ext::log_observe_failures("pre_compact", &results);
+            }
+        }
         let max_retries = 3u32;
         let retry_delay_secs = 3u64;
         let (conv_len, system_message, full_conversation) = tokio::join!(

@@ -411,6 +411,7 @@ impl SessionActor {
             LoopFireMode::InSession
         };
         let wasm_cmds = self.wasm_registered_commands.borrow().clone();
+        let scheme_cmds = self.scheme_registered_commands.borrow().clone();
         let prompt_blocks = match slash_commands::resolve(
             prompt_blocks,
             &slash_skills,
@@ -419,6 +420,7 @@ impl SessionActor {
             &named_workflows,
             loop_fire_mode,
             &wasm_cmds,
+            &scheme_cmds,
         ) {
             Ok(blocks) => blocks,
             Err(SlashCommandOutcome::Builtin(action)) => {
@@ -921,6 +923,16 @@ impl SessionActor {
             None,
         )
         .await;
+        // Scheme extensions observe the submitted prompt (fail-open, no gating).
+        {
+            let scheme_rt = self.scheme_runtime.clone();
+            if !scheme_rt.is_empty() {
+                let results = scheme_rt
+                    .dispatch_user_prompt_submit(&prompt_text_for_hook)
+                    .await;
+                crate::session::scheme_ext::log_observe_failures("user_prompt_submit", &results);
+            }
+        }
         // Pi-style before_agent_start: wasm guests may inject context / append
         // system notes (design-wasm-extensions Phase 2). Uses system-reminder
         // messages so we do not rewrite the durable system prompt blob.
@@ -946,6 +958,34 @@ impl SessionActor {
                         session_id = %self.session_info.id.0,
                         bytes = sys.len(),
                         "wasm before_agent_start append_system applied"
+                    );
+                }
+            }
+        }
+        // Scheme extensions after wasm: same before_agent_start inject contract
+        // (system-reminder messages, host-capped, fail-open).
+        {
+            let scheme_rt = self.scheme_runtime.clone();
+            if !scheme_rt.is_empty() {
+                let d = scheme_rt
+                    .dispatch_before_agent_start(&xai_grok_extension_api::BeforeAgentStartIn {
+                        prompt: prompt_text_for_hook.clone(),
+                    })
+                    .await;
+                if let Some(ctx) = d.out.inject_context.as_deref() {
+                    self.push_system_reminder(ctx);
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        bytes = ctx.len(),
+                        "scheme before_agent_start inject_context applied"
+                    );
+                }
+                if let Some(sys) = d.out.append_system.as_deref() {
+                    self.push_system_reminder_with_tag(sys, "system-extension");
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        bytes = sys.len(),
+                        "scheme before_agent_start append_system applied"
                     );
                 }
             }
@@ -1582,6 +1622,36 @@ impl SessionActor {
         let mut round_user_text = user_text.to_string();
         let mut outer_round: u32 = 0;
         loop {
+            // Per-round extension inject (`BeforeModelInject`): wasm then scheme,
+            // both as system reminders — never a history rewrite. Fires on every
+            // outer round (incl. goal/stop continuations), unlike the once-per-
+            // prompt before_agent_start inject.
+            {
+                let input = xai_grok_extension_api::BeforeAgentStartIn {
+                    prompt: round_user_text.clone(),
+                };
+                let ext_rt = self.extension_runtime.borrow().clone();
+                if ext_rt.has_capability(xai_grok_extension_api::Capability::BeforeModelInject) {
+                    let d = ext_rt.dispatch_before_model(&input).await;
+                    if let Some(ctx) = d.out.inject_context.as_deref() {
+                        self.push_system_reminder(ctx);
+                    }
+                    if let Some(sys) = d.out.append_system.as_deref() {
+                        self.push_system_reminder_with_tag(sys, "system-extension");
+                    }
+                }
+                let scheme_rt = self.scheme_runtime.clone();
+                if scheme_rt.has_capability(xai_grok_extension_api::Capability::BeforeModelInject)
+                {
+                    let d = scheme_rt.dispatch_before_model(&input).await;
+                    if let Some(ctx) = d.out.inject_context.as_deref() {
+                        self.push_system_reminder(ctx);
+                    }
+                    if let Some(sys) = d.out.append_system.as_deref() {
+                        self.push_system_reminder_with_tag(sys, "system-extension");
+                    }
+                }
+            }
             if self.goal_harness_enabled() {
                 let goal_loop_active = self.goal_tracker.lock().status()
                     == Some(crate::session::goal_tracker::GoalStatus::Active);

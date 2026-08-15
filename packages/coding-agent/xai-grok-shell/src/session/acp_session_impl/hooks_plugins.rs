@@ -793,10 +793,12 @@ impl SessionActor {
         let wasm_ext = self.extension_runtime.borrow().len();
         let wasm_tools = self.wasm_registered_tools.borrow().len();
         let wasm_cmds = self.wasm_registered_commands.borrow().len();
+        let scheme_ext = self.scheme_runtime.len();
         format!(
             "Plugin registry rebuilt: {count} plugin(s), {hooks_reloaded} hook(s) reloaded, \
              {mcp_status}, {skill_count} skill(s) refreshed, \
-             {wasm_ext} wasm extension(s) ({wasm_tools} tool(s), {wasm_cmds} command(s))."
+             {wasm_ext} wasm extension(s) ({wasm_tools} tool(s), {wasm_cmds} command(s)), \
+             {scheme_ext} scheme extension(s)."
         )
     }
 
@@ -906,6 +908,25 @@ impl SessionActor {
                 &bridge, &new_rt, &mut owned, sid,
             )
             .await;
+            // Scheme runtime rebuild after wasm, with the same lifecycle:
+            // old session_end → rebuild (image respawns lazily) → session_start.
+            {
+                let scheme_rt = self.scheme_runtime.clone();
+                if !scheme_rt.is_empty() {
+                    let _ = scheme_rt.dispatch_session_end().await;
+                }
+                crate::session::scheme_ext::rebuild_for_session(
+                    &scheme_rt,
+                    new_registry_snapshot.as_deref(),
+                    sid,
+                )
+                .await;
+                if !scheme_rt.is_empty() {
+                    let results = scheme_rt.dispatch_session_start().await;
+                    crate::session::scheme_ext::log_observe_failures("session_start", &results);
+                }
+            }
+
             let cmds = new_rt.collect_registered_commands().await;
             let cmd_n = cmds.len();
             *self.wasm_registered_commands.borrow_mut() = cmds;
@@ -915,6 +936,40 @@ impl SessionActor {
                 wasm_commands = cmd_n,
                 "wasm extension tools/commands synced"
             );
+            drop(owned);
+            // Scheme tools/commands re-sync after the scheme rebuild above.
+            {
+                let scheme_rt = self.scheme_runtime.clone();
+                let mut scheme_owned = self.scheme_registered_tools.borrow_mut();
+                let sn = if scheme_rt.is_empty() {
+                    crate::session::scheme_tools::unregister_session_scheme_tools(
+                        &bridge,
+                        &mut scheme_owned,
+                    );
+                    self.scheme_registered_commands.borrow_mut().clear();
+                    0
+                } else {
+                    let sn = crate::session::scheme_tools::sync_scheme_tools_to_bridge(
+                        &bridge,
+                        &scheme_rt,
+                        &mut scheme_owned,
+                        sid,
+                    )
+                    .await;
+                    let scmds = scheme_rt.collect_registered_commands().await;
+                    *self.scheme_registered_commands.borrow_mut() = scmds;
+                    sn
+                };
+                let scmd_n = self.scheme_registered_commands.borrow().len();
+                if sn > 0 || scmd_n > 0 {
+                    tracing::info!(
+                        session_id = %sid,
+                        scheme_tools = sn,
+                        scheme_commands = scmd_n,
+                        "scheme extension tools/commands synced"
+                    );
+                }
+            }
             crate::session::wasm_tools::emit_runtime_metrics(
                 self.telemetry_enabled,
                 "plugin_reload",

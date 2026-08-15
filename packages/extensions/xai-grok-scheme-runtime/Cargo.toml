@@ -1,0 +1,21 @@
+[package]
+license = "Apache-2.0"
+name = "xai-grok-scheme-runtime"
+version = "0.1.0"
+edition.workspace = true
+
+[features]
+default = ["scheme"]
+## Enable the external Gambit/Gerbil image backend. Disable to compile a
+## no-op runtime (loads nothing, every dispatch returns Unavailable).
+scheme = []
+
+[dependencies]
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+which = { workspace = true }
+xai-grok-extension-api = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

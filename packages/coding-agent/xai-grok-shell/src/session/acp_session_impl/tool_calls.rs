@@ -788,7 +788,7 @@ impl SessionActor {
                         tool_name: prepared.tool_name.clone(),
                         success: !tool_failed,
                         tool_input_json: prepared.raw_arguments.clone(),
-                        tool_result_preview: wasm_post_tool_preview,
+                        tool_result_preview: wasm_post_tool_preview.clone(),
                     };
                     let results = ext_rt.dispatch_post_tool_use(&post_in).await;
                     for r in &results {
@@ -806,6 +806,18 @@ impl SessionActor {
                             );
                         }
                     }
+                }
+                // Scheme extensions after wasm (observe, fail-open).
+                let scheme_rt = self.scheme_runtime.clone();
+                if !scheme_rt.is_empty() {
+                    let post_in = xai_grok_extension_api::PostToolIn {
+                        tool_name: prepared.tool_name.clone(),
+                        success: !tool_failed,
+                        tool_input_json: prepared.raw_arguments.clone(),
+                        tool_result_preview: wasm_post_tool_preview,
+                    };
+                    let results = scheme_rt.dispatch_post_tool_use(&post_in).await;
+                    crate::session::scheme_ext::log_observe_failures("post_tool_use", &results);
                 }
             }
             self.events.tool_finished();
@@ -1157,6 +1169,38 @@ impl SessionActor {
                         reason,
                     )
                     .await?));
+            }
+        }
+        // Scheme extensions after wasm: same gate contract (first deny wins,
+        // GateFailMode on trap/timeout, fail-open when the image is missing).
+        {
+            let scheme_rt = self.scheme_runtime.clone();
+            if !scheme_rt.is_empty() {
+                let pre_in = xai_grok_extension_api::PreToolIn {
+                    tool_name: resolved_tool_name.clone(),
+                    tool_input_json: raw_input.to_string(),
+                };
+                let scheme_result = scheme_rt.dispatch_pre_tool_use(&pre_in).await;
+                if let xai_grok_extension_api::PreToolOut::Deny { reason } = scheme_result.decision
+                {
+                    let plugin = scheme_result.denied_by.unwrap_or_default();
+                    tracing::warn!(
+                        target: "scheme_extension",
+                        plugin = %plugin,
+                        tool = %resolved_tool_name,
+                        reason = %reason,
+                        "scheme extension denied tool"
+                    );
+                    return Ok(Err(self
+                        .deny_tool(
+                            &call.id,
+                            &tool_call_id,
+                            resolved_tool_name.clone(),
+                            format!("scheme:{plugin}"),
+                            reason,
+                        )
+                        .await?));
+                }
             }
         }
         let access_kind = AccessKind::from(&tool_input);

@@ -348,6 +348,106 @@ jobs:
           path: ${{ env.ARCHIVE }}
           if-no-files-found: error
 
+  # Prebuilt Gambit scheme live image (`hyper-scheme-image`): the kernel in
+  # packages/extensions/xai-grok-scheme-runtime/kernel/runtime.ss compiled to a
+  # standalone executable via `gsc -exe`. Optional runtime component — hosts
+  # without it fall back to gxi/gsi on PATH, and Windows is unsupported (the
+  # scheme runtime degrades silently there). Gambit is built from source with
+  # --enable-single-host so libgambit links statically (no distro package dep).
+  scheme-image:
+    name: scheme image (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      GAMBIT_VERSION: "v4.9.5"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache Gambit toolchain
+        id: gambit-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/gambit
+          key: gambit-${{ env.GAMBIT_VERSION }}-${{ matrix.target }}-v1
+
+      - name: Build Gambit from source
+        if: steps.gambit-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o gambit.tar.gz \
+            "https://github.com/gambit/gambit/archive/refs/tags/${GAMBIT_VERSION}.tar.gz"
+          mkdir -p gambit-src
+          tar -xzf gambit.tar.gz -C gambit-src --strip-components=1
+          cd gambit-src
+          ./configure --enable-single-host --prefix="$HOME/gambit"
+          make -j"$(getconf _NPROCESSORS_ONLN)"
+          make install
+
+      - name: Compile scheme image (gsc -exe)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/gambit/bin:$PATH"
+          gsc -v
+          gsc -exe -o hyper-scheme-image \
+            packages/extensions/xai-grok-scheme-runtime/kernel/runtime.ss
+          file hyper-scheme-image || true
+
+      - name: Smoke test image protocol
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import struct, subprocess
+          p = subprocess.Popen(["./hyper-scheme-image"], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+          def rpc(payload: str) -> str:
+              b = payload.encode()
+              p.stdin.write(struct.pack("<I", len(b)) + b)
+              p.stdin.flush()
+              hdr = p.stdout.read(4)
+              assert len(hdr) == 4, f"EOF from image; stderr: {p.stderr.read().decode()}"
+              (n,) = struct.unpack("<I", hdr)
+              return p.stdout.read(n).decode()
+          hello = rpc("(hello 1)")
+          assert hello.startswith("(hello-ok 1"), f"bad handshake: {hello}"
+          assert rpc('(eval "(+ 40 2)")').startswith('(ok "42"'), "eval failed"
+          assert rpc("(quit)") == "(bye)", "quit failed"
+          p.wait(timeout=5)
+          assert p.returncode == 0, f"nonzero exit {p.returncode}"
+          print("scheme image protocol smoke test OK:", hello)
+          PY
+
+      - name: Package scheme image archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          archive="hyper-scheme-image-${version}-${{ matrix.target }}.tar.gz"
+          staging="$(mktemp -d)"
+          cp hyper-scheme-image "$staging/hyper-scheme-image"
+          chmod 0755 "$staging/hyper-scheme-image"
+          tar -C "$staging" -czf "$archive" hyper-scheme-image
+          shasum -a 256 "$archive" || sha256sum "$archive"
+          echo "SCHEME_ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Upload scheme image artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.SCHEME_ARCHIVE }}
+          path: ${{ env.SCHEME_ARCHIVE }}
+          if-no-files-found: error
+
   # Note: the Windows install.ps1 integration job was removed — it cold-compiled
   # the full shell graph on GHA windows-2022, often hung/cancelled for hours, and
   # blocked publish. Windows CLI artifacts still come from matrix build target
@@ -546,7 +646,7 @@ jobs:
 
   release:
     name: publish GitHub Release
-    needs: [build, desktop, install-sh-macos, install-sh-linux]
+    needs: [build, desktop, scheme-image, install-sh-macos, install-sh-linux]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -564,7 +664,7 @@ jobs:
           merge-multiple: true
 
       # Require the five CLI archives + three desktop bundles (Linux x64/arm64,
-      # macOS arm64). Extra files are rejected.
+      # macOS arm64) + three scheme image binaries. Extra files are rejected.
       - name: Assert release asset set
         shell: bash
         run: |
@@ -579,6 +679,9 @@ jobs:
             "hyper-desktop-${version}-aarch64-apple-darwin.tar.gz"
             "hyper-desktop-${version}-x86_64-unknown-linux-gnu.tar.gz"
             "hyper-desktop-${version}-aarch64-unknown-linux-gnu.tar.gz"
+            "hyper-scheme-image-${version}-aarch64-apple-darwin.tar.gz"
+            "hyper-scheme-image-${version}-x86_64-unknown-linux-gnu.tar.gz"
+            "hyper-scheme-image-${version}-aarch64-unknown-linux-gnu.tar.gz"
           )
           cd dist
           ls -l
@@ -597,7 +700,7 @@ jobs:
               exit 1
             fi
           done
-          echo "CLI (5) + desktop (3) release archives present"
+          echo "CLI (5) + desktop (3) + scheme image (3) release archives present"
 
       - name: Generate SHA256SUMS
         working-directory: dist
@@ -614,9 +717,12 @@ jobs:
             "hyper-desktop-${version}-aarch64-apple-darwin.tar.gz" \
             "hyper-desktop-${version}-x86_64-unknown-linux-gnu.tar.gz" \
             "hyper-desktop-${version}-aarch64-unknown-linux-gnu.tar.gz" \
+            "hyper-scheme-image-${version}-aarch64-apple-darwin.tar.gz" \
+            "hyper-scheme-image-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+            "hyper-scheme-image-${version}-aarch64-unknown-linux-gnu.tar.gz" \
             > SHA256SUMS
           cat SHA256SUMS
-          test "$(wc -l < SHA256SUMS | tr -d '[:space:]')" -eq 8
+          test "$(wc -l < SHA256SUMS | tr -d '[:space:]')" -eq 11
 
       # Contract verifier applies to CLI hyper-* archives only (root binary +
       # bundled/**). Desktop bundles are bin/comet+hyper layout.
@@ -686,3 +792,8 @@ jobs:
 
             Desktop assets: `hyper-desktop-*-{aarch64-apple-darwin,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu}.tar.gz`
             (bundles `bin/comet` + `bin/hyper`; offline / no cloud sync).
+
+            Scheme live image (optional, for `runtime.scheme` plugins):
+            `hyper-scheme-image-*-{aarch64-apple-darwin,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu}.tar.gz`
+            — installers place it at `~/.grok/bin/hyper-scheme-image`; without it the
+            runtime falls back to `gxi`/`gsi` on PATH.

@@ -286,6 +286,33 @@ impl PluginManifest {
         }
     }
 
+    /// Resolve the scheme policy script path from `runtime.scheme`.
+    ///
+    /// Explicit-only (no convention fallback): returns `None` when there is
+    /// no runtime block, no `scheme` field, the path escapes the plugin root,
+    /// or the file is missing. Containment rules match [`Self::runtime_wasm_path`].
+    pub fn runtime_scheme_path(&self, plugin_root: &Path) -> Option<PathBuf> {
+        let rel = self.runtime.as_ref()?.scheme.as_deref()?;
+        let resolved = plugin_root.join(rel);
+        if !is_path_contained(&resolved, plugin_root) {
+            tracing::warn!(
+                path = %resolved.display(),
+                plugin_root = %plugin_root.display(),
+                "runtime.scheme path escapes plugin root; skipping"
+            );
+            return None;
+        }
+        if resolved.is_file() {
+            Some(resolved)
+        } else {
+            tracing::warn!(
+                path = %resolved.display(),
+                "plugin runtime.scheme missing; skipping scheme extension"
+            );
+            None
+        }
+    }
+
     /// Log informational messages about manifest features.
     ///
     /// Called during discovery. Inline hooks and MCP servers are now
@@ -886,6 +913,7 @@ mod tests {
             runtime: Some(xai_grok_extension_api::RuntimeManifest {
                 wasm: "ext.wasm".into(),
                 wit: xai_grok_extension_api::WIT_PACKAGE_FULL.into(),
+                scheme: None,
                 capabilities: vec!["pre_tool_gate".into()],
                 gate_fail: None,
             }),
@@ -900,6 +928,69 @@ mod tests {
                 .unwrap()
                 .has_capability(xai_grok_extension_api::Capability::PreToolGate)
         );
+    }
+
+    #[test]
+    fn runtime_scheme_path_resolution_and_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let script = root.join("policy.ss");
+        std::fs::write(&script, ";; policy").unwrap();
+        let outside = tmp.path().parent().unwrap().join("outside.ss");
+
+        let with_scheme = |rel: &str| PluginManifest {
+            name: "scheme-test".into(),
+            version: None,
+            description: None,
+            author: None,
+            homepage: None,
+            repository: None,
+            license: None,
+            keywords: vec![],
+            skills: None,
+            commands: None,
+            agents: None,
+            hooks: None,
+            mcp_servers: None,
+            lsp_servers: None,
+            runtime: Some(xai_grok_extension_api::RuntimeManifest {
+                scheme: Some(rel.into()),
+                ..Default::default()
+            }),
+        };
+
+        // Explicit path inside the root resolves.
+        assert_eq!(
+            with_scheme("policy.ss").runtime_scheme_path(root).as_deref(),
+            Some(script.as_path())
+        );
+        // Missing file → None.
+        assert!(with_scheme("nope.ss").runtime_scheme_path(root).is_none());
+        // Escaping path → None even if the file exists.
+        std::fs::write(&outside, ";; outside").unwrap();
+        assert!(
+            with_scheme("../outside.ss").runtime_scheme_path(root).is_none(),
+            "runtime.scheme escaping plugin root must be rejected"
+        );
+        // No runtime block → no convention fallback.
+        let plain = PluginManifest {
+            name: "plain".into(),
+            version: None,
+            description: None,
+            author: None,
+            homepage: None,
+            repository: None,
+            license: None,
+            keywords: vec![],
+            skills: None,
+            commands: None,
+            agents: None,
+            hooks: None,
+            mcp_servers: None,
+            lsp_servers: None,
+            runtime: None,
+        };
+        assert!(plain.runtime_scheme_path(root).is_none());
     }
 
     fn manifest_with_inline_mcp(servers: serde_json::Value) -> PluginManifest {

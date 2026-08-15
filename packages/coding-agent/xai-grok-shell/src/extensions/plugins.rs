@@ -229,6 +229,7 @@ mod tests {
             inline_mcp_servers: None,
             inline_lsp_servers: None,
             runtime_wasm: None,
+            runtime_scheme: None,
             runtime_capabilities: vec![],
             runtime_gate_fail: None,
             has_runtime: false,

@@ -364,6 +364,8 @@ pub mod tool_index;
 pub(crate) mod turn_completion;
 pub mod unified_list;
 pub(crate) mod user_message;
+pub(crate) mod scheme_ext;
+pub mod scheme_tools;
 pub mod wasm_tools;
 pub(crate) mod wire_tags;
 pub(crate) mod workflow;

@@ -842,6 +842,10 @@ impl SessionActor {
         title: Option<String>,
         level: Option<String>,
     ) {
+        let scheme_notification_text = format!(
+            "{notification_type}: {}",
+            message.as_deref().unwrap_or_default()
+        );
         let envelope = self.fire_hook(
             xai_grok_hooks::event::HookEventName::Notification,
             None,
@@ -852,6 +856,16 @@ impl SessionActor {
                 level,
             },
         );
+        // Scheme extensions observe notifications (fail-open).
+        {
+            let scheme_rt = self.scheme_runtime.clone();
+            if !scheme_rt.is_empty() {
+                let results = scheme_rt
+                    .dispatch_notification(&scheme_notification_text)
+                    .await;
+                crate::session::scheme_ext::log_observe_failures("notification", &results);
+            }
+        }
         let hook_registry_snapshot = self.hook_registry.borrow().clone();
         let Some(registry) = hook_registry_snapshot else {
             return;

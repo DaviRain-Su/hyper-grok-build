@@ -75,11 +75,13 @@ pub struct LoadedPlugin {
     pub inline_lsp_servers: Option<serde_json::Value>,
     /// Absolute path to the plugin's WASM extension module, if present.
     pub runtime_wasm: Option<PathBuf>,
+    /// Absolute path to the plugin's scheme policy script (`runtime.scheme`), if present.
+    pub runtime_scheme: Option<PathBuf>,
     /// Capability strings from `plugin.json` `runtime.capabilities`.
     pub runtime_capabilities: Vec<String>,
     /// Per-extension gate fail mode from `runtime.gate_fail` (overrides env default).
     pub runtime_gate_fail: Option<xai_grok_extension_api::GateFailMode>,
-    /// Whether a WASM runtime module was discovered.
+    /// Whether a runtime extension (WASM module or scheme script) was discovered.
     pub has_runtime: bool,
     /// Warning if this plugin won a name collision with another plugin.
     pub conflict: Option<String>,
@@ -118,6 +120,29 @@ impl LoadedPlugin {
         Some(xai_grok_extension_api::ExtensionSpec {
             name: self.name.clone(),
             wasm_path,
+            capabilities,
+            trusted: true,
+            gate_fail: self.runtime_gate_fail,
+            plugin_data_dir: Some(self.data_dir()),
+        })
+    }
+
+    /// Build an [`xai_grok_extension_api::SchemeSpec`] when this plugin is
+    /// enabled, trusted, and declares `runtime.scheme`. Shares the same
+    /// capability / gate_fail declarations as the wasm guest.
+    pub fn scheme_spec(&self) -> Option<xai_grok_extension_api::SchemeSpec> {
+        if !self.enabled || !self.trusted {
+            return None;
+        }
+        let scheme_path = self.runtime_scheme.clone()?;
+        let capabilities = self
+            .runtime_capabilities
+            .iter()
+            .filter_map(|s| xai_grok_extension_api::Capability::parse(s))
+            .collect();
+        Some(xai_grok_extension_api::SchemeSpec {
+            name: self.name.clone(),
+            scheme_path,
             capabilities,
             trusted: true,
             gate_fail: self.runtime_gate_fail,
@@ -212,7 +237,8 @@ impl PluginRegistry {
                 .unwrap_or_default();
             let runtime_gate_fail = dp.manifest.runtime.as_ref().and_then(|r| r.gate_fail);
             let runtime_wasm = dp.runtime_wasm.clone();
-            let has_runtime = runtime_wasm.is_some();
+            let runtime_scheme = dp.runtime_scheme.clone();
+            let has_runtime = runtime_wasm.is_some() || runtime_scheme.is_some();
 
             // Determine enabled status.
             // Every plugin should be in either the `enabled` or `disabled` list
@@ -256,6 +282,7 @@ impl PluginRegistry {
                 inline_mcp_servers,
                 inline_lsp_servers,
                 runtime_wasm,
+                runtime_scheme,
                 runtime_capabilities,
                 runtime_gate_fail,
                 has_runtime,
@@ -712,6 +739,7 @@ mod tests {
             mcp_config_path: None,
             lsp_config_path: None,
             runtime_wasm: None,
+            runtime_scheme: None,
             conflict: None,
         }
     }

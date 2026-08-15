@@ -16736,6 +16736,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-grok-scheme-runtime"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "which",
+ "xai-grok-extension-api",
+]
+
+[[package]]
 name = "xai-grok-secrets"
 version = "0.1.0"
 dependencies = [
@@ -16931,6 +16943,7 @@ dependencies = [
  "xai-grok-sampler",
  "xai-grok-sampling-types",
  "xai-grok-sandbox",
+ "xai-grok-scheme-runtime",
  "xai-grok-session-events",
  "xai-grok-session-search",
  "xai-grok-shared",

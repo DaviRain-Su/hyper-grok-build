@@ -19,6 +19,8 @@ fn resolve(
         skill_rewrite,
         workflows,
         LoopFireMode::Detached,
+        &[],
+        &[],
     )
 }
 
@@ -448,6 +450,8 @@ fn resolve_loop_expands_for_the_sessions_fire_mode() {
             SkillSlashRewrite::default(),
             &[],
             mode,
+            &[],
+            &[],
         )
         .unwrap_err();
         let SlashCommandOutcome::InvokeSkill { blocks, .. } = outcome else {
@@ -554,7 +558,7 @@ fn resolve_builtin_shadows_same_named_skill() {
 #[test]
 fn available_commands_orders_builtins_first() {
     let skills = vec![make_skill("commit", true), make_skill("deploy", true)];
-    let commands = available_commands(&skills, all_gated(), &[]);
+    let commands = available_commands(&skills, all_gated(), &[], &[], &[]);
     let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
         names,
@@ -585,7 +589,7 @@ fn available_commands_orders_builtins_first() {
 }
 
 fn advertised_names(availability: CommandAvailability) -> Vec<String> {
-    available_commands(&[], availability, &[])
+    available_commands(&[], availability, &[], &[], &[])
         .into_iter()
         .map(|c| c.name)
         .collect()
@@ -844,7 +848,7 @@ fn pre_session_builtin_commands_advertises_goal_when_flag_enabled() {
 #[test]
 fn available_commands_populates_acp_fields() {
     let skills = vec![make_skill("commit", true)];
-    let commands = available_commands(&skills, all_gated(), &[]);
+    let commands = available_commands(&skills, all_gated(), &[], &[], &[]);
 
     let builtin = commands.iter().find(|c| c.name == "compact").unwrap();
     assert!(builtin.input.is_some());
@@ -867,7 +871,7 @@ fn available_commands_populates_acp_fields() {
 #[test]
 fn pager_blocked_shell_command_skill_is_advertised_qualified() {
     let skills = vec![make_skill("hooks-add", true)];
-    let commands = available_commands(&skills, CommandAvailability::default(), &[]);
+    let commands = available_commands(&skills, CommandAvailability::default(), &[], &[], &[]);
     assert!(
         !commands.iter().any(|c| c.name == "hooks-add"),
         "pager-blocked name must not be advertised bare"
@@ -883,7 +887,7 @@ fn pager_blocked_shell_command_skill_is_advertised_qualified() {
 fn plugin_skill_colliding_with_pager_builtin_is_advertised_qualified() {
     let mut skill = make_scoped_skill("login", SkillScope::Plugin);
     skill.plugin_name = Some("acme".into());
-    let commands = available_commands(&[skill], all_gated(), &[]);
+    let commands = available_commands(&[skill], all_gated(), &[], &[], &[]);
 
     assert!(
         !commands.iter().any(|c| c.name == "login"),
@@ -1086,7 +1090,7 @@ fn resolve_qualified_skill_name() {
 fn resolve_accepts_qualified_form_of_bare_advertised_skill() {
     let skills = vec![make_scoped_skill("deploy", SkillScope::Local)];
     // Advertised bare (no collision, no duplicate).
-    let names: Vec<String> = available_commands(&skills, all_gated(), &[])
+    let names: Vec<String> = available_commands(&skills, all_gated(), &[], &[], &[])
         .into_iter()
         .map(|c| c.name)
         .collect();
@@ -1117,7 +1121,7 @@ fn available_commands_uses_qualified_names_for_duplicates() {
         make_scoped_skill("commit", SkillScope::User),
         make_skill("deploy", true),
     ];
-    let commands = available_commands(&skills, all_gated(), &[]);
+    let commands = available_commands(&skills, all_gated(), &[], &[], &[]);
     let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
     // Duplicate "commit" skills should use qualified names.
     assert!(names.contains(&"local:commit"));
@@ -1138,7 +1142,7 @@ fn available_commands_qualifies_builtin_colliding_skill() {
         make_scoped_skill("compact", SkillScope::Local),
         make_skill("deploy", true),
     ];
-    let commands = available_commands(&skills, all_gated(), &[]);
+    let commands = available_commands(&skills, all_gated(), &[], &[], &[]);
     let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
     assert!(
         names.contains(&"local:compact"),
@@ -1230,7 +1234,7 @@ fn inspect_reserved_names_exclude_gated_shell_builtins() {
 #[test]
 fn mixed_case_pager_collision_is_advertised_qualified_lowercase() {
     let skills = vec![make_scoped_skill("Login", SkillScope::Local)];
-    let commands = available_commands(&skills, all_gated(), &[]);
+    let commands = available_commands(&skills, all_gated(), &[], &[], &[]);
     let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
     assert!(
         !names.contains(&"Login") && !names.contains(&"login"),
@@ -1253,6 +1257,8 @@ fn mixed_case_unique_skill_advertises_lowercase_bare_name() {
     let names: Vec<String> = available_commands(
         &[make_scoped_skill("Deploy", SkillScope::Local)],
         all_gated(),
+        &[],
+        &[],
         &[],
     )
     .into_iter()
@@ -1304,7 +1310,7 @@ fn same_bare_name_differing_only_by_case_qualifies_both() {
         make_scoped_skill("Commit", SkillScope::Local),
         make_scoped_skill("commit", SkillScope::User),
     ];
-    let names: Vec<String> = available_commands(&skills, all_gated(), &[])
+    let names: Vec<String> = available_commands(&skills, all_gated(), &[], &[], &[])
         .into_iter()
         .map(|c| c.name)
         .collect();
@@ -1320,7 +1326,7 @@ fn same_qualified_name_differing_only_by_case_is_withheld() {
         make_scoped_skill("Commit", SkillScope::Local),
         make_scoped_skill("commit", SkillScope::Local),
     ];
-    let names: Vec<String> = available_commands(&skills, all_gated(), &[])
+    let names: Vec<String> = available_commands(&skills, all_gated(), &[], &[], &[])
         .into_iter()
         .map(|c| c.name)
         .collect();
@@ -1335,7 +1341,7 @@ fn same_qualified_name_differing_only_by_case_is_withheld() {
 #[test]
 fn mixed_case_workflow_does_not_take_reserved_name() {
     let workflows = vec![listing("Login"), listing("Review")];
-    let names: Vec<String> = available_commands(&[], all_gated(), &workflows)
+    let names: Vec<String> = available_commands(&[], all_gated(), &workflows, &[], &[])
         .into_iter()
         .map(|c| c.name)
         .collect();
@@ -1399,7 +1405,7 @@ fn feedback_resolves_when_enabled() {
 
 /// Collect the advertised command names for the given availability.
 fn advertised_names_with(availability: CommandAvailability) -> Vec<String> {
-    available_commands(&[], availability, &[])
+    available_commands(&[], availability, &[], &[], &[])
         .into_iter()
         .map(|c| c.name)
         .collect()
@@ -1694,7 +1700,7 @@ fn listing(name: &str) -> crate::session::workflow::registry::WorkflowListing {
 #[test]
 fn named_workflows_advertise_and_resolve() {
     let workflows = vec![listing("triage-flakes"), listing("goal")];
-    let commands = available_commands(&[], all_gated(), &workflows);
+    let commands = available_commands(&[], all_gated(), &workflows, &[], &[]);
     let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
     assert!(names.contains(&"triage-flakes"), "{names:?}");
     assert_eq!(names.iter().filter(|n| **n == "goal").count(), 1);
@@ -1749,7 +1755,7 @@ fn workflow_collision_policy_includes_aliases_and_ambiguous_skills() {
         listing("commit"),
         listing("review"),
     ];
-    let names: Vec<_> = available_commands(&skills, all_gated(), &workflows)
+    let names: Vec<_> = available_commands(&skills, all_gated(), &workflows, &[], &[])
         .into_iter()
         .map(|command| command.name)
         .collect();
@@ -1794,7 +1800,7 @@ fn duplicate_qualified_skills_are_omitted_and_do_not_first_match() {
     second.path = "/other/commit/SKILL.md".into();
     let skills = vec![first, second];
     assert!(
-        available_commands(&skills, all_gated(), &[])
+        available_commands(&skills, all_gated(), &[], &[], &[])
             .iter()
             .all(|command| command.name != "same-plugin:commit")
     );
@@ -1818,7 +1824,7 @@ fn existing_runs_keep_management_but_hide_launch_catalog() {
         ..CommandAvailability::all_enabled()
     };
     let workflows = vec![listing("review")];
-    let names: Vec<_> = available_commands(&[], availability, &workflows)
+    let names: Vec<_> = available_commands(&[], availability, &workflows, &[], &[])
         .into_iter()
         .map(|command| command.name)
         .collect();

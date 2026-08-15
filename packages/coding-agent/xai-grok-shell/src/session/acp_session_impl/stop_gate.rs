@@ -277,6 +277,9 @@ impl SessionActor {
                 .extension_runtime
                 .borrow()
                 .has_capability(xai_grok_extension_api::Capability::StopGate)
+            && !self
+                .scheme_runtime
+                .has_capability(xai_grok_extension_api::Capability::StopGate)
         {
             return StopGateDecision::AllowStop;
         }
@@ -374,6 +377,32 @@ impl SessionActor {
                 .await;
                 return StopGateDecision::KeepWorking { feedback: reason };
             }
+        }
+
+        // Scheme extensions after wasm: same stop-gate contract.
+        let scheme_rt = self.scheme_runtime.clone();
+        if scheme_rt.has_capability(xai_grok_extension_api::Capability::StopGate) {
+            let scheme = scheme_rt
+                .dispatch_stop(&xai_grok_extension_api::StopIn {
+                    stop_hook_active: continuations_this_turn > 0,
+                })
+                .await;
+            if let xai_grok_extension_api::StopOut::Block { reason } = scheme.decision {
+                drop(claim);
+                self.send_hook_annotation(&format!(
+                    "\u{21a9} Stop blocked by scheme extension, continuing: {reason}"
+                ))
+                .await;
+                return StopGateDecision::KeepWorking { feedback: reason };
+            }
+        }
+
+        // Subagent turns additionally notify scheme extensions with the
+        // observe-only `subagent-stop` event (fail-open, after the gate).
+        if event == event::HookEventName::SubagentStop && !scheme_rt.is_empty() {
+            let agent = self.subagent_type_label().unwrap_or_default();
+            let results = scheme_rt.dispatch_subagent_stop(&agent).await;
+            crate::session::scheme_ext::log_observe_failures("subagent_stop", &results);
         }
 
         // A gate whose hooks all skipped or crashed told nobody the turn ended, so it
