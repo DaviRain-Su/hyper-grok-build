@@ -4,6 +4,20 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.3-r1] — 2026-08-15
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `eb267fe`
+  (monorepo `SOURCE_REV` `e6a67a5…`), rebasing Hyper on upstream **1.0.3**.
+
+### Fixed
+- Custom `[model.*]` hosts (vLLM, LiteLLM, reverse proxies) no longer receive
+  the xAI session JWT. Unknown `base_url`s were treated as first-party, so a
+  logged-in session 401'd and looped on a false "recovery succeeded" refresh
+  of the wrong credential. Any non-`*.x.ai` URL is now BYOK; session-token
+  401 recovery is skipped there; JWT-shaped third-party keys stay on the
+  wire the way official grok-build sends them.
+
 ## [1.0.1-r1] — 2026-08-12
 
 ### Changed
