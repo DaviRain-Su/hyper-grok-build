@@ -181,7 +181,11 @@ impl SessionActor {
 
         // Drop stale workflow-completion synthetic fronts (already reported).
         loop {
-            let stale = match state.pending_inputs.front().map(|item| &item.origin) {
+            let stale = match state
+                .pending_inputs
+                .front()
+                .map(|item| item.input_origin.as_prompt_origin())
+            {
                 Some(super::PromptOrigin::WorkflowCompleted { completion_id }) => {
                     match completion_id
                         .rsplit_once('-')
@@ -270,7 +274,7 @@ impl SessionActor {
             verbatim,
             send_now,
             json_schema,
-            origin,
+            input_origin,
             running_display,
             tool_overrides_update,
         ) = {
@@ -291,13 +295,13 @@ impl SessionActor {
                 front.verbatim,
                 front.send_now,
                 front.json_schema.clone(),
-                front.origin.clone(),
+                front.input_origin.clone(),
                 running_display,
                 front.tool_overrides_update.take(),
             )
         };
         self.apply_tool_overrides_update(tool_overrides_update);
-        if matches!(origin, super::PromptOrigin::User) {
+        if input_origin.policy().authority.is_human_intent() {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(false);
             }
@@ -350,19 +354,22 @@ impl SessionActor {
         self.turn_report.start_next_turn();
         state.running_task = Some(AgentTask::new_prompt(
             self.clone(),
-            prompt_id,
-            prompt_blocks,
-            prompt_mode,
-            trace_gcs_config,
-            artifact_tracker,
-            client_identifier,
-            screen_mode,
-            verbatim,
-            send_now,
-            json_schema,
+            TurnInputRequest {
+                prompt_id,
+                input_origin,
+                prompt_blocks,
+                prompt_mode,
+                trace_gcs_config,
+                artifact_tracker,
+                client_identifier,
+                screen_mode,
+                verbatim,
+                send_now,
+                json_schema,
+                persist_ack,
+                parsed_prompt_tx,
+            },
             completion_tx,
-            persist_ack,
-            parsed_prompt_tx,
         ));
     }
 
@@ -701,13 +708,14 @@ impl SessionActor {
             screen_mode: None,
             verbatim: true,
             json_schema: None,
-            origin: super::PromptOrigin::NotificationDrain,
+            input_origin: InputOrigin::new(super::PromptOrigin::NotificationDrain),
             task_wake_fallback: None,
             tool_overrides_update: None,
             respond_to,
             persist_ack: None,
             parsed_prompt_tx: None,
             queue_meta: None,
+            queue_mutation_policy: QueueMutationPolicy::hidden(),
             send_now: false,
         });
 

@@ -53,10 +53,6 @@ impl AgentView {
                     }
                     return InputOutcome::Changed;
                 }
-                if self.hit_queue_badge.contains(mouse.column, mouse.row) {
-                    self.toggle_queue_pane();
-                    return InputOutcome::Changed;
-                }
                 if self.hit_bg_status.contains(mouse.column, mouse.row) {
                     self.tasks.overlay.toggle();
                     self.tasks.on_state_change();
@@ -265,16 +261,6 @@ impl AgentView {
                 if self.hit_cwd.contains(mouse.column, mouse.row) {
                     let path = self.session.cwd.display().to_string();
                     self.copy_to_clipboard(&path);
-                    return InputOutcome::Changed;
-                }
-                if self.hit_badge.contains(mouse.column, mouse.row) {
-                    self.todo.overlay.toggle();
-                    self.todo.on_state_change();
-                    if self.todo.overlay.focused {
-                        self.set_active_pane(AgentPane::Todo, false);
-                    } else if self.active_pane == AgentPane::Todo {
-                        self.set_active_pane(AgentPane::Scrollback, false);
-                    }
                     return InputOutcome::Changed;
                 }
                 if self.hit_follow_indicator.contains(mouse.column, mouse.row) {
@@ -1063,12 +1049,10 @@ impl AgentView {
                 }
                 changed |= self
                     .set_hovered_follow_up_chip(self.follow_up_chip_at(mouse.column, mouse.row));
-                changed |= self.hit_badge.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_context.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_credits.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_todo_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_queue_close.update_hover(mouse.column, mouse.row);
-                changed |= self.hit_queue_badge.update_hover(mouse.column, mouse.row);
                 if matches!(
                     self.pane_areas.hit_test(mouse.column, mouse.row),
                     Some(AgentPane::Queue)

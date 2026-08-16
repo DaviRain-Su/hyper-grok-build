@@ -50,6 +50,12 @@ fn ids(wire: &[crate::session::prompt_queue::QueueEntryWire]) -> Vec<String> {
     wire.iter().map(|e| e.id.clone()).collect()
 }
 
+fn protected_item(id: &str) -> InputItem {
+    let mut item = user_item(id, "protected");
+    item.queue_mutation_policy = QueueMutationPolicy::new(true, false);
+    item
+}
+
 /// A queued user bash item (`!cmd`), mirroring `queue_input`'s derivation.
 fn bash_item(id: &str, owner: &str, command: &str) -> InputItem {
     let mut item = user_item(id, owner);
@@ -128,6 +134,17 @@ fn combine_front_merges_consecutive_plain_prompts() {
                 ..
             }))
         ));
+    }
+}
+
+#[test]
+fn combine_front_rejects_protected_rows() {
+    for mut pending in [
+        std::collections::VecDeque::from([protected_item("parent"), user_item("user", "A")]),
+        std::collections::VecDeque::from([user_item("user", "A"), protected_item("parent")]),
+    ] {
+        SessionActor::combine_front_pending_inputs(&mut pending, &[]);
+        assert_eq!(pending.len(), 2);
     }
 }
 
@@ -318,6 +335,64 @@ async fn two_enqueues_drain_fifo_and_stale_edit_is_noop() {
                 last.entries.is_empty(),
                 "final broadcast must show empty queue"
             );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn protected_rows_reject_generic_mutations() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let held_at = std::time::Instant::now();
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("user-1", "A"));
+                state.pending_inputs.push_back(protected_item("parent"));
+                state.pending_inputs.push_back(user_item("user-2", "A"));
+                state.edit_holds.insert("parent".into(), held_at);
+            }
+            actor.handle_remove_queued_prompt("parent", 0, None).await;
+            actor
+                .handle_remove_queued_prompt("parent", 0, Some("parent"))
+                .await;
+            actor
+                .handle_remove_queued_prompt("parent", 0, Some("forged"))
+                .await;
+            actor
+                .handle_edit_queued_prompt("parent", "changed".into(), None)
+                .await;
+            assert!(
+                !actor
+                    .handle_interject_queued_prompt("parent", 0, None, Some("changed again"))
+                    .await
+            );
+            actor.handle_hold_edit("parent".into()).await;
+            actor.handle_release_edit("parent").await;
+            actor
+                .handle_reorder_queue(&["user-2".into(), "parent".into(), "user-1".into()])
+                .await;
+            {
+                let state = actor.state.lock().await;
+                assert_eq!(
+                    state
+                        .pending_inputs
+                        .iter()
+                        .map(|item| item.prompt_id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["user-2", "parent", "user-1"]
+                );
+            }
+            actor.handle_clear_queue(None).await;
+            let state = actor.state.lock().await;
+            assert_eq!(state.pending_inputs.len(), 1);
+            assert_eq!(state.pending_inputs[0].prompt_id, "parent");
+            let meta = state.pending_inputs[0].queue_meta.as_ref().unwrap();
+            assert_eq!(meta.text, "text for parent");
+            assert_eq!(meta.version, 0);
+            assert_eq!(state.edit_holds.get("parent"), Some(&held_at));
+            assert_eq!(ids(&actor.build_queue_wire(&state)), vec!["parent"]);
         })
         .await;
 }
@@ -564,6 +639,7 @@ async fn repeated_hold_refreshes_leak_bound() {
     local
         .run_until(async {
             let (actor, _rx) = build_actor().await;
+            actor.state.lock().await.pending_inputs.push_back(user_item("p1", "A"));
             actor.handle_hold_edit("p1".to_string()).await;
             {
                 let mut state = actor.state.lock().await;
@@ -1746,6 +1822,120 @@ async fn promote_queued_as_interjections_does_not_steal_other_owners_next_turn()
         .await;
 }
 
+/// Protected (visible, non-editable) rows pin their slot: ordinary editable
+/// prefix still promotes, but the protected row is not dequeued/interjected
+/// and stops FIFO so later editable rows stay behind the pin.
+#[tokio::test]
+async fn promote_queued_as_interjections_keeps_protected_rows_pinned() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.pending_inputs.push_back(user_item("m1", "A"));
+                state.pending_inputs.push_back(protected_item("parent"));
+                state.pending_inputs.push_back(user_item("m2", "A"));
+                state.running_task = Some(running_task_stub("running"));
+            }
+
+            actor.promote_queued_as_interjections().await;
+
+            let state = actor.state.lock().await;
+            let order: Vec<&str> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.as_str())
+                .collect();
+            assert_eq!(
+                order,
+                vec!["running", "parent", "m2"],
+                "protected pin stays; only the editable prefix promotes"
+            );
+            assert!(
+                state.pending_inputs[1].is_queue_protected(),
+                "parent row must remain protected after promote"
+            );
+            drop(state);
+            let interjections: Vec<String> = actor
+                .pending_interjections
+                .drain_all()
+                .into_iter()
+                .map(|entry| entry.text)
+                .collect();
+            assert_eq!(interjections, vec!["text for m1"]);
+        })
+        .await;
+}
+
+/// A protected row at the head of held work blocks steer promotion entirely.
+#[tokio::test]
+async fn promote_queued_as_interjections_stops_when_protected_is_next() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.pending_inputs.push_back(protected_item("parent"));
+                state.pending_inputs.push_back(user_item("m1", "A"));
+                state.running_task = Some(running_task_stub("running"));
+            }
+
+            actor.promote_queued_as_interjections().await;
+
+            let state = actor.state.lock().await;
+            let order: Vec<&str> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.as_str())
+                .collect();
+            assert_eq!(order, vec!["running", "parent", "m1"]);
+            drop(state);
+            assert!(
+                actor.pending_interjections.is_empty(),
+                "must not interject past or through a protected pin"
+            );
+        })
+        .await;
+}
+
+/// Steer-on safe-point drain must not treat a protected pin as promotable held
+/// work (pair with direct promote tests above).
+#[tokio::test]
+async fn drain_at_safe_point_with_steer_on_leaves_protected_row_queued() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            crate::util::config::set_follow_up_steer_cache(true);
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.pending_inputs.push_back(protected_item("parent"));
+                state.pending_inputs.push_back(user_item("held", "A"));
+                state.running_task = Some(running_task_stub("running"));
+            }
+
+            assert!(
+                !actor.drain_interjections_at_safe_point().await,
+                "protected-only held prefix must not arm steer promotion"
+            );
+            let state = actor.state.lock().await;
+            let order: Vec<&str> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.as_str())
+                .collect();
+            assert_eq!(order, vec!["running", "parent", "held"]);
+            drop(state);
+            assert!(actor.pending_interjections.is_empty());
+        })
+        .await;
+}
+
 /// An edited interject of a bash row refuses the interject but keeps the edit.
 #[tokio::test]
 async fn interject_queued_bash_row_with_new_text_saves_edit() {
@@ -2044,6 +2234,72 @@ async fn queue_input_auto_send_now_when_wait_and_held_queue_empty() {
                     .find(|i| i.prompt_id == "second")
                     .is_some_and(|i| i.send_now),
                 "second prompt is a plain held append"
+            );
+        })
+        .await;
+}
+
+/// Hidden user-origin interjection fallbacks still count as held work: a mid-wait
+/// prompt must not auto-send-now / cancel the running turn just because the
+/// fallback is queue-hidden.
+#[tokio::test]
+async fn queue_input_auto_send_now_blocked_by_hidden_user_fallback() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                // Queue-hidden user fallback (same shape as interjection fallback).
+                let mut fallback = input_with_origin_rx(
+                    "interject-fallback-held",
+                    crate::session::PromptOrigin::User,
+                )
+                .0;
+                fallback.queue_mutation_policy = QueueMutationPolicy::hidden();
+                assert!(
+                    !fallback.is_queue_visible(),
+                    "fallback under test must be queue-hidden"
+                );
+                assert!(
+                    matches!(
+                        fallback.input_origin.policy().shutdown,
+                        crate::session::ShutdownPolicy::Drain
+                    ),
+                    "fallback remains Drain-held user work"
+                );
+                state.pending_inputs.push_back(fallback);
+                state.running_task = Some(running_task_stub("running"));
+                state.front_message_committed = true;
+            }
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("running".into());
+            actor.tool_context.blocking_wait_depth.set_depth_for_test(1);
+
+            let (respond_to, _p) = oneshot::channel();
+            let cancel = actor
+                .queue_input(queue_input_request(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new("mid-wait"))],
+                    "d-mid",
+                    respond_to,
+                ))
+                .await;
+            assert!(
+                !cancel,
+                "hidden user fallback must block auto-send-now cancel"
+            );
+            let state = actor.state.lock().await;
+            let mid = state
+                .pending_inputs
+                .iter()
+                .find(|i| i.prompt_id == "d-mid")
+                .expect("mid-wait row queued");
+            assert!(
+                !mid.send_now,
+                "mid-wait row must append as ordinary held work, not send-now"
             );
         })
         .await;

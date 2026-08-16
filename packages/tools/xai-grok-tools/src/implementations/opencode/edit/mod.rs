@@ -87,27 +87,34 @@ pub struct EditInput {
     pub replace_all: bool,
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// ToolInput conversions (via Dynamic variant)
-// ───────────────────────────────────────────────────────────────────────────
-
 impl TryFrom<crate::types::tool_io::ToolInput> for EditInput {
     type Error = String;
     fn try_from(value: crate::types::tool_io::ToolInput) -> Result<Self, Self::Error> {
         match value {
+            crate::types::tool_io::ToolInput::SearchReplace(sr) => Ok(Self {
+                file_path: sr.file_path,
+                old_string: sr.old_string,
+                new_string: sr.new_string,
+                replace_all: sr.replace_all,
+            }),
             crate::types::tool_io::ToolInput::Dynamic(v) => {
                 serde_json::from_value(v).map_err(|e| format!("EditInput: {e}"))
             }
-            _ => Err("expected Dynamic variant for EditInput".into()),
+            _ => Err("expected SearchReplace or Dynamic variant for EditInput".into()),
         }
     }
 }
 
+// Prefer SearchReplace over Dynamic so AccessKind maps to Edit(path).
 impl From<EditInput> for crate::types::tool_io::ToolInput {
     fn from(value: EditInput) -> Self {
-        crate::types::tool_io::ToolInput::Dynamic(
-            serde_json::to_value(value).expect("EditInput serializes to JSON"),
-        )
+        crate::implementations::grok_build::search_replace::SearchReplaceInput {
+            file_path: value.file_path,
+            old_string: value.old_string,
+            new_string: value.new_string,
+            replace_all: value.replace_all,
+        }
+        .into()
     }
 }
 
@@ -520,6 +527,21 @@ mod tests {
             new_string: new_string.to_string(),
             replace_all: false,
         }
+    }
+
+    #[test]
+    fn tool_input_roundtrip_is_search_replace() {
+        use crate::types::tool_io::ToolInput;
+        let input = make_input("/tmp/denied.txt", "old", "new");
+        let tool_input = ToolInput::from(input.clone());
+        assert!(matches!(
+            tool_input,
+            ToolInput::SearchReplace(ref sr) if sr.file_path == "/tmp/denied.txt"
+        ));
+        let back = EditInput::try_from(tool_input).expect("SearchReplace converts back");
+        assert_eq!(back.file_path, "/tmp/denied.txt");
+        assert_eq!(back.old_string, "old");
+        assert_eq!(back.new_string, "new");
     }
 
     #[test]

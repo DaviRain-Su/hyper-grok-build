@@ -101,6 +101,9 @@ pub enum SyntheticReason {
     /// model was actively running.  Injected between tool batches so the
     /// model sees it as steering context without canceling the turn.
     Interjection,
+    /// Model-authored input sent by another agent.
+    #[serde(alias = "parent_agent_message")]
+    AgentMessage,
     /// Auto-wake synthetic prompt injected when a background bash task
     /// completed.  Wakes the agent for a new turn.
     TaskCompleted,
@@ -149,7 +152,9 @@ impl SyntheticReason {
     /// in-turn case; marker-carrying items don't rely on this predicate.
     pub fn starts_prompt_turn(&self) -> bool {
         match self {
-            Self::TaskCompleted
+            Self::AgentMessage
+            | Self::Unknown
+            | Self::TaskCompleted
             | Self::SubagentCompleted
             | Self::NotificationDrain
             | Self::GoalClassifierNudge
@@ -162,8 +167,7 @@ impl SyntheticReason {
             | Self::Interjection
             | Self::GoalSummary
             | Self::StopHookFeedback
-            | Self::WorkingDirectorySwitch
-            | Self::Unknown => false,
+            | Self::WorkingDirectorySwitch => false,
         }
     }
 }

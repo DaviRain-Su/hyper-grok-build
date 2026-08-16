@@ -12,7 +12,7 @@ use xai_grok_sampling_types::ConversationItem;
 /// Serializes `items` the way a main turn would, so auxiliary calls can be compared against the real wire shape.
 fn main_turn_input(items: Vec<ConversationItem>) -> Vec<serde_json::Value> {
     let request = xai_grok_sampling_types::ConversationRequest {
-        items,
+        items: xai_chat_state::compaction_utils::ModelRequestHistory::from_raw(items).into_items(),
         model: Some("test-model".to_string()),
         ..Default::default()
     };
@@ -50,6 +50,55 @@ fn assert_rides_parent_prefix(
 }
 
 /// Reasoning effort sits ahead of the conversation in the prompt, so an auxiliary call that drops it diverges from the main turn right away.
+#[tokio::test(flavor = "current_thread")]
+async fn side_question_projects_agent_messages_without_mutating_history() {
+    use xai_grok_test_support::MockInferenceServer;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _grx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+
+            let server = MockInferenceServer::start().await.unwrap();
+            server.set_response("an answer");
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.base_url = server.url();
+            cfg.api_backend = xai_grok_sampling_types::ApiBackend::Responses;
+            actor.chat_state_handle.update_sampling_config(cfg);
+
+            let raw = vec![
+                ConversationItem::system("you are a coding agent"),
+                ConversationItem::agent_message("agent context"),
+            ];
+            let raw_bytes = serde_json::to_vec(&raw).unwrap();
+            actor.chat_state_handle.replace_conversation(raw);
+
+            actor
+                .handle_side_question("what context matters?")
+                .await
+                .expect("side question must succeed");
+
+            let requests = server.requests();
+            let body = requests
+                .iter()
+                .rev()
+                .find(|request| request.path.contains("responses"))
+                .and_then(|request| request.body.as_ref())
+                .expect("btw body must be JSON")
+                .to_string();
+            assert!(body.contains(xai_chat_state::compaction_utils::AGENT_MESSAGE_MODEL_LABEL));
+            assert_eq!(
+                serde_json::to_vec(&actor.chat_state_handle.get_conversation().await).unwrap(),
+                raw_bytes
+            );
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn auxiliary_calls_send_the_session_reasoning_effort() {
     use xai_grok_test_support::MockInferenceServer;

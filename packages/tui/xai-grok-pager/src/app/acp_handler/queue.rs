@@ -43,6 +43,10 @@ pub(super) struct PromptCompletePayload {
     /// "Turn cancelled" marker); stamped top-level, absent on older shells.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) cancel_trigger: Option<String>,
+    /// Why a cancelled turn was cancelled (`"HookDenied"` picks the
+    /// blocked-by-hook marker); stamped top-level, absent on older shells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) cancellation_category: Option<String>,
     /// `_meta` extension point — parsed defensively as a trigger fallback.
     #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub(super) meta: Option<serde_json::Value>,
@@ -54,9 +58,25 @@ impl PromptCompletePayload {
     /// `_meta.cancelTrigger` (the envelope shape of the durable rail).
     /// `None` (older shells) means a normal cancel.
     pub(super) fn cancel_trigger(&self) -> Option<&str> {
-        self.cancel_trigger
-            .as_deref()
-            .or_else(|| self.meta.as_ref()?.get("cancelTrigger")?.as_str())
+        self.cancel_trigger.as_deref().or_else(|| {
+            self.meta
+                .as_ref()?
+                .get(super::super::turn_completion::CANCEL_TRIGGER_KEY)?
+                .as_str()
+        })
+    }
+
+    /// The cancellation category (`"HookDenied"` picks the blocked-by-hook
+    /// marker), wherever it was stamped: the top-level field (the shell's
+    /// broadcast) with the `_meta` envelope shape as fallback. `None` (older
+    /// shells / plain user cancels) keeps the user-cancel copy.
+    pub(super) fn cancellation_category(&self) -> Option<&str> {
+        self.cancellation_category.as_deref().or_else(|| {
+            self.meta
+                .as_ref()?
+                .get(super::super::turn_completion::CANCELLATION_CATEGORY_KEY)?
+                .as_str()
+        })
     }
 }
 
@@ -463,10 +483,13 @@ pub(super) fn handle_prompt_complete(notif: &acp::ExtNotification, app: &mut App
     let outcome = super::super::turn_completion::finalize_turn_from_terminal(
         agent,
         session_id,
-        payload.prompt_id.as_deref(),
-        payload.stop_reason.as_deref(),
-        payload.agent_result.as_deref(),
-        payload.cancel_trigger(),
+        super::super::turn_completion::TerminalSignal {
+            prompt_id: payload.prompt_id.as_deref(),
+            stop_reason: payload.stop_reason.as_deref(),
+            agent_result: payload.agent_result.as_deref(),
+            cancel_trigger: payload.cancel_trigger(),
+            cancellation_category: payload.cancellation_category(),
+        },
     );
     let result = super::super::turn_completion::apply_terminal_outcome(outcome, app, id, is_active);
 

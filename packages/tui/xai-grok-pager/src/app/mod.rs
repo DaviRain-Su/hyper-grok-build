@@ -15,6 +15,7 @@ pub mod agent_view;
 pub mod app_view;
 pub mod bundle;
 pub mod cli;
+pub mod consent;
 pub use crate::link_opener;
 /// Off-thread full-file syntax highlight upgrade for edit diffs.
 pub mod edit_highlight_worker;
@@ -76,6 +77,7 @@ use std::io::{self, Write};
 use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
+pub(crate) use turn_completion::CANCELLATION_CATEGORY_KEY;
 use xai_grok_shell::util::config;
 /// Tracks the extra Kitty keyboard layer pushed while the `/gboom` game is
 /// open (see [`push_gboom_keyboard_flags`]). Kept separate from the base layer
@@ -200,44 +202,36 @@ pub(crate) fn voice_keybind_enabled() -> bool {
 pub fn set_voice_keybind_enabled_for_test(on: bool) {
     VOICE_KEYBIND_ENABLED.store(on, Ordering::Release);
 }
+fn voice_mode_in(layer: &toml::Value) -> Option<bool> {
+    layer
+        .get("features")?
+        .get(xai_grok_shell::agent::config::Feature::VoiceMode.key())?
+        .as_bool()
+}
 /// `[features] voice_mode` from merged `requirements.toml`.
 pub(crate) fn voice_mode_requirement_pin() -> Option<bool> {
-    xai_grok_config::load_merged_requirements().and_then(|req| {
-        req.get("features")
-            .and_then(|f| f.get("voice_mode"))
-            .and_then(|v| v.as_bool())
-    })
+    voice_mode_in(&xai_grok_config::load_merged_requirements()?)
 }
 /// `[features] voice_mode` from effective config (user + managed).
 pub(crate) fn voice_mode_config_value() -> Option<bool> {
-    xai_grok_shell::config::load_effective_config()
-        .ok()
-        .and_then(|cfg| {
-            cfg.get("features")
-                .and_then(|f| f.get("voice_mode"))
-                .and_then(|v| v.as_bool())
-        })
+    voice_mode_in(&xai_grok_shell::config::load_effective_config().ok()?)
 }
-/// Resolve voice availability.
-///
-/// Precedence: requirements > `GROK_VOICE_MODE` > config/managed
-/// `[features] voice_mode` > remote `voice_mode_enabled` > default on.
-///
-/// When `is_api_key` and the only off-source is remote, force on. Requirement /
-/// env / config `false` still wins.
+/// The registry owns the precedence and the default. One rule has no row there:
+/// with `is_api_key`, a remote-only off is forced back on. A requirement, env,
+/// or config `false` still wins.
 pub(crate) fn resolve_voice_mode_enabled(
     requirement: Option<bool>,
     config: Option<bool>,
     remote: Option<bool>,
     is_api_key: bool,
 ) -> bool {
-    use xai_grok_shell::agent::config::{BoolFlag, ConfigSource};
-    let resolved = BoolFlag::env("GROK_VOICE_MODE")
-        .requirement(requirement)
-        .config(config)
-        .feature_flag(remote)
-        .default(true)
-        .resolve();
+    use xai_grok_shell::agent::config::{ConfigSource, Feature, FeatureSources};
+    let resolved = Feature::VoiceMode.resolve(FeatureSources {
+        pin: requirement,
+        config,
+        remote,
+        ..FeatureSources::from_process_env(Feature::VoiceMode)
+    });
     if resolved.value {
         return true;
     }
@@ -568,7 +562,7 @@ async fn bounded_connect(
         target,
         attempt,
         version: xai_grok_version::display_version_with_commit(
-            env!("VERSION_WITH_COMMIT"),
+            xai_grok_version::full_version(),
             xai_grok_update::channel_label(),
         ),
         log_path: xai_grok_telemetry::unified_log::path(),
@@ -801,8 +795,8 @@ pub async fn run(
     );
     let connect_flags = crate::acp::ConnectFlags {
         subagents: !args.no_subagents,
-        experimental_memory: args.experimental_memory,
-        no_memory: args.no_memory,
+        memory_enabled_override: args.memory_enabled_override(),
+        memory_override_flag: args.memory_override_flag(),
         disable_web_search: args.disable_web_search,
         todo_gate: args.todo_gate,
         laziness_debug_log: None,
@@ -914,7 +908,7 @@ pub async fn run(
     xai_grok_telemetry::external::init(
         xai_grok_shell::agent::config::resolve_external_otel_config(
             xai_grok_telemetry::external::config::ExternalClientInfo {
-                service_version: env!("VERSION_WITH_COMMIT").to_owned(),
+                service_version: xai_grok_version::full_version().to_owned(),
                 client_version: xai_grok_version::VERSION.to_owned(),
                 app_entrypoint: "tui".to_owned(),
             },
@@ -1964,6 +1958,25 @@ mod tests {
         let args = try_parse_pager(&["grok-pager", "--no-leader"]).unwrap();
         assert!(!args.leader);
         assert!(args.no_leader);
+    }
+    #[test]
+    fn cli_hidden_memory_compat_flags_parse_and_collapse() {
+        let enabled = try_parse_pager(&["grok-pager", "--experimental-memory"]).unwrap();
+        assert_eq!(enabled.memory_enabled_override(), Some(true));
+        assert_eq!(
+            enabled.memory_override_flag(),
+            Some("--experimental-memory")
+        );
+        let disabled = try_parse_pager(&["grok-pager", "--no-memory"]).unwrap();
+        assert_eq!(disabled.memory_enabled_override(), Some(false));
+        assert_eq!(disabled.memory_override_flag(), Some("--no-memory"));
+        let deferred = try_parse_pager(&["grok-pager"]).unwrap();
+        assert_eq!(deferred.memory_enabled_override(), None);
+        assert_eq!(deferred.memory_override_flag(), None);
+    }
+    #[test]
+    fn cli_hidden_memory_compat_flags_conflict() {
+        assert!(try_parse_pager(&["grok-pager", "--experimental-memory", "--no-memory"]).is_err());
     }
     #[test]
     fn cli_neither_leader_flag_defaults_false() {

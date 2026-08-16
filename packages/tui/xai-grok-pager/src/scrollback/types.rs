@@ -322,6 +322,21 @@ pub fn derive_selection_text(line: &BlockLine) -> String {
     }
 }
 
+/// The exact text painted in `line`'s selectable columns, in logical order.
+///
+/// This is the slice of the full painted line (`line.content`) that
+/// `set_line_safe_bidi` reorders within the selectable region, so selection maps
+/// visual drag columns 1:1 against it. Unlike [`derive_selection_text`] it never
+/// trims trailing padding or substitutes a copy override — those are copy-text
+/// concerns, not painted-cell geometry — so snapping and slicing share one
+/// coordinate space with the drawn cells.
+pub fn painted_selectable_region(line: &BlockLine) -> String {
+    match selectable_cols(&line.content, &line.selectable) {
+        Some(cols) => slice_display_cols(&line_plain_text(&line.content), cols.start, cols.end),
+        None => String::new(),
+    }
+}
+
 /// Slice `text` to the graphemes overlapping the display-column range `[start, end)`. A wide grapheme is kept whole when the
 /// range covers any of its cells; graphemes that only touch a boundary (start at `end` or end at `start`) stay excluded.
 pub fn slice_display_cols(text: &str, start: u16, end: u16) -> String {
@@ -377,11 +392,13 @@ pub fn grapheme_cells_at(text: &str, col: u16) -> Option<std::ops::Range<u16>> {
     None
 }
 
-/// Exclusive display column just past the grapheme occupying `col`, or the text's total width when `col` is past the last one.
+/// Exclusive display column just past the grapheme occupying `col`, or the text's total painted width when `col` is past the last one.
 pub fn col_past_grapheme(text: &str, col: u16) -> u16 {
     match grapheme_cells_at(text, col) {
         Some(cells) => cells.end,
-        None => u16::try_from(text.width()).unwrap_or(u16::MAX),
+        // Per-grapheme total (matches `grapheme_cells_at`), so a ligature row's
+        // last cell isn't dropped when `col` snaps to the row end.
+        None => u16::try_from(str_display_cells(text)).unwrap_or(u16::MAX),
     }
 }
 
@@ -410,6 +427,20 @@ pub fn shift_selection_metadata_for_prefix(line: &mut BlockLine, prefix_span_cou
 
 fn grapheme_width(grapheme: &str) -> usize {
     UnicodeWidthStr::width(grapheme)
+}
+
+/// Terminal cells `s` occupies when painted: the sum of its grapheme widths.
+/// This can exceed `UnicodeWidthStr::width(s)` for ligature-forming sequences
+/// (Arabic lam-alef `لا`), which measure narrower than the per-grapheme cells
+/// the renderer actually draws. This is the single width measure the selection
+/// path uses, so hit-testing and slicing match the painted cells (otherwise the
+/// last cell of such a line can't be selected or copied).
+pub(crate) fn str_display_cells(s: &str) -> usize {
+    s.graphemes(true).map(grapheme_width).sum()
+}
+
+fn span_display_cells(span: &Span) -> usize {
+    str_display_cells(&span.content)
 }
 
 /// Complete output produced by a block for rendering.
@@ -586,11 +617,11 @@ pub(crate) fn prewrap_index_per_row(lines: &[BlockLine]) -> Vec<usize> {
 pub(crate) fn selectable_cols_usize(line: &Line, selectable: &Selectable) -> Option<Range<usize>> {
     match selectable {
         Selectable::None => None,
-        Selectable::All => Some(0..line.width()),
+        Selectable::All => Some(0..line.spans.iter().map(span_display_cells).sum()),
         sel @ Selectable::Spans(_) => {
             let r = sel.clamped_span_range(line.spans.len())?;
-            let start_col = line.spans[..r.start].iter().map(|s| s.width()).sum();
-            let end_col = line.spans[..r.end].iter().map(|s| s.width()).sum();
+            let start_col = line.spans[..r.start].iter().map(span_display_cells).sum();
+            let end_col = line.spans[..r.end].iter().map(span_display_cells).sum();
             Some(start_col..end_col)
         }
     }
@@ -600,6 +631,43 @@ pub(crate) fn selectable_cols_usize(line: &Line, selectable: &Selectable) -> Opt
 pub fn selectable_cols(line: &Line, selectable: &Selectable) -> Option<Range<u16>> {
     let cols = selectable_cols_usize(line, selectable)?;
     Some(u16::try_from(cols.start).ok()?..u16::try_from(cols.end).ok()?)
+}
+
+/// The selectable region's **visual** column span in the painted (reordered)
+/// row, for hit-testing.
+///
+/// [`selectable_cols`] returns the region's *logical* columns, but
+/// `set_line_safe_bidi` reorders the whole line — including non-selectable
+/// content outside the region (e.g. a trailing truncation ellipsis), which can
+/// shift the region's painted position under an RTL base. Map the logical window
+/// through the full painted line so the on-screen columns match the drawn cells.
+///
+/// Identity when reordering is off or the row isn't reordered. The region maps
+/// to one contiguous visual block (outside content is only the left-anchored
+/// chrome prefix and the trailing suffix, never interleaved between the region's
+/// own runs), so the envelope of the mapped ranges is the region's span. Width
+/// is preserved by reordering, so only the start offset can change.
+pub fn visual_selectable_cols(line: &BlockLine) -> Option<Range<u16>> {
+    let logical = selectable_cols(&line.content, &line.selectable)?;
+    if !crate::render::bidi::is_enabled() {
+        return Some(logical);
+    }
+    let plain = line_plain_text(&line.content);
+    let ranges = crate::render::bidi::logical_cols_to_visual(
+        &plain,
+        logical.start as usize,
+        logical.end as usize,
+    );
+    let mut it = ranges.into_iter();
+    let Some((first_start, first_end)) = it.next() else {
+        return Some(logical);
+    };
+    let (mut vstart, mut vend) = (first_start, first_end);
+    for (s, e) in it {
+        vstart = vstart.min(s);
+        vend = vend.max(e);
+    }
+    Some(u16::try_from(vstart).unwrap_or(logical.start)..u16::try_from(vend).unwrap_or(logical.end))
 }
 
 #[cfg(test)]

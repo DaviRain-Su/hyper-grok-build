@@ -7,7 +7,10 @@ use agent_client_protocol as acp;
 use xai_grok_shell::auth::{AuthManager, GrokComConfig};
 use xai_grok_shell::session::info::Info;
 use xai_grok_shell::session::persistence::delete_session_history;
-use xai_grok_shell::session::storage::search::{SessionSearchRequest, execute_search};
+use xai_grok_shell::session::storage::search::{
+    IndexDecision, SearchIndex, SearchIndexManager, SessionSearchRequest, execute_search,
+    start_if_enabled,
+};
 use xai_grok_shell::session::storage::{JsonlStorageAdapter, StorageAdapter};
 use xai_grok_test_support::EnvGuard;
 
@@ -20,6 +23,18 @@ fn home() -> &'static std::path::Path {
     })
     .0
     .path()
+}
+
+/// The feature is the only door to a manager, so the test walks through it with
+/// the switch left at its default rather than reaching past it.
+fn start_index() -> SearchIndexManager {
+    let _default_on = EnvGuard::unset("GROK_SESSION_SEARCH");
+    match start_if_enabled(&xai_grok_shell::agent::config::Config::default()) {
+        SearchIndex::Started(index) => index,
+        SearchIndex::Off { reason } => {
+            panic!("session search is on by default, got off: {reason}")
+        }
+    }
 }
 
 /// Titles are one made-up token, searched back verbatim: a query of ordinary words ORs its
@@ -44,7 +59,7 @@ fn title_for(id: &str) -> String {
     format!("zzqq{id}")
 }
 
-async fn finds(root: &std::path::Path, id: &str) -> bool {
+async fn finds(index: &SearchIndexManager, root: &std::path::Path, id: &str) -> bool {
     let req = SessionSearchRequest {
         query: title_for(id),
         cwd: None,
@@ -52,51 +67,90 @@ async fn finds(root: &std::path::Path, id: &str) -> bool {
         offset: 0,
         include_content: false,
     };
-    !execute_search(root, &req).await.unwrap().results.is_empty()
+    !execute_search(IndexDecision::On(index), root, &req)
+        .await
+        .unwrap()
+        .results
+        .is_empty()
 }
 
 #[tokio::test]
 #[serial_test::serial]
 async fn deleting_a_session_clears_only_its_own_search_row() {
     let root = home();
+    let index = start_index();
 
     // All three up front: only the first search bootstraps.
     seed_session(root, "orphan", "/ws-a").await;
     seed_session(root, "elsewhere", "/ws-b").await;
     seed_session(root, "scoped", "/ws-c").await;
-    assert!(finds(root, "orphan").await, "precondition: indexed");
-    assert!(finds(root, "elsewhere").await, "precondition: indexed");
-    assert!(finds(root, "scoped").await, "precondition: indexed");
+    assert!(finds(&index, root, "orphan").await, "precondition: indexed");
+    assert!(
+        finds(&index, root, "elsewhere").await,
+        "precondition: indexed"
+    );
+    assert!(finds(&index, root, "scoped").await, "precondition: indexed");
 
     let auth = Arc::new(AuthManager::new(root, GrokComConfig::default()));
 
     let session_dir =
         xai_grok_shell::util::grok_home::sessions_cwd_dir_in(root, "/ws-a").join("orphan");
     std::fs::remove_dir_all(&session_dir).unwrap();
-    let deletion = delete_session_history("orphan", None, false, auth.clone())
+    let deletion = delete_session_history("orphan", None, false, auth.clone(), Some(&index))
         .await
         .unwrap();
     assert!(!deletion.any_removed(), "nothing was left to remove");
     assert!(
-        !finds(root, "orphan").await,
+        !finds(&index, root, "orphan").await,
         "a delete with no workspace must clear a row nothing else will ever prune",
     );
 
-    delete_session_history("elsewhere", Some("/ws-a"), false, auth.clone())
-        .await
-        .unwrap();
+    delete_session_history(
+        "elsewhere",
+        Some("/ws-a"),
+        false,
+        auth.clone(),
+        Some(&index),
+    )
+    .await
+    .unwrap();
     assert!(
-        finds(root, "elsewhere").await,
+        finds(&index, root, "elsewhere").await,
         "a delete scoped to another workspace must not evict this session",
     );
 
-    let deletion = delete_session_history("scoped", Some("/ws-c"), false, auth)
+    let deletion = delete_session_history("scoped", Some("/ws-c"), false, auth, Some(&index))
         .await
         .unwrap();
     assert!(deletion.local_removed, "the session was there to remove");
     assert!(
-        !finds(root, "scoped").await,
+        !finds(&index, root, "scoped").await,
         "a delete that removed the session must take its row too",
+    );
+}
+
+/// A host that keeps no index still prunes a row from an index built earlier.
+/// The manager here only reads the row back; the delete runs with `None`.
+#[tokio::test]
+#[serial_test::serial]
+async fn deleting_a_session_evicts_its_row_without_a_handle() {
+    let root = home();
+    let index = start_index();
+
+    seed_session(root, "indexless", "/ws-d").await;
+    assert!(
+        finds(&index, root, "indexless").await,
+        "precondition: indexed"
+    );
+
+    let auth = Arc::new(AuthManager::new(root, GrokComConfig::default()));
+    let deletion = delete_session_history("indexless", Some("/ws-d"), false, auth, None)
+        .await
+        .unwrap();
+    assert!(deletion.local_removed, "the session was there to remove");
+    assert!(
+        !finds(&index, root, "indexless").await,
+        "a delete from a host with no index must still take the row",
     );
 }
 
@@ -111,9 +165,13 @@ fn loading_config_applies_requirement_pins() {
     std::fs::remove_file(&pin).unwrap();
     let config = loaded.expect("config loads");
 
-    assert_eq!(
-        config.requirements.session_search.pinned(),
-        Some(false),
+    let resolved = config.feature(xai_grok_shell::agent::config::Feature::SessionSearch);
+    assert!(
+        !resolved.value,
         "a one-shot command must apply pins, or the environment outranks them",
+    );
+    assert_eq!(
+        resolved.source,
+        xai_grok_shell::agent::config::ConfigSource::Requirement
     );
 }

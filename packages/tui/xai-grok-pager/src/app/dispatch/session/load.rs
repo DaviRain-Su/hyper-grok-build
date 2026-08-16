@@ -102,7 +102,7 @@ pub(in crate::app::dispatch) fn focus_if_session_already_open(
         Some(*id)
     })?;
     if let Some(agent) = app.agents.get_mut(&existing_id) {
-        agent.active_subagent = None;
+        agent.close_subagent_fullscreen();
     }
     let retarget_overlay = match app.active_view {
         ActiveView::AgentDashboard => true,

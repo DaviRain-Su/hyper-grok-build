@@ -56,6 +56,8 @@ mod recap_header_not_in_selection_pty;
 mod resize_preserves_scroll_position;
 #[path = "pty_e2e/response_top_indicator_pty.rs"]
 mod response_top_indicator_pty;
+#[path = "pty_e2e/rtl_bidi_drag_copy_logical_pty.rs"]
+mod rtl_bidi_drag_copy_logical_pty;
 #[path = "pty_e2e/scroll_debug_hud_env_toggles_overlay.rs"]
 mod scroll_debug_hud_env_toggles_overlay;
 #[path = "pty_e2e/scroll_does_not_crash.rs"]

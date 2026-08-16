@@ -17,6 +17,8 @@ mod bash_mode_file_completion_shell_like;
 mod bash_mode_strips_redundant_session_cd_from_chrome;
 #[path = "pty_e2e/bash_mode_tab_completion_dropdown.rs"]
 mod bash_mode_tab_completion_dropdown;
+#[path = "pty_e2e/consent_gate_blocks_session_pty.rs"]
+mod consent_gate_blocks_session_pty;
 #[path = "pty_e2e/edit_collapsed_oneliner_pty.rs"]
 mod edit_collapsed_oneliner_pty;
 #[path = "pty_e2e/edit_hl_inplace_refresh_pty.rs"]

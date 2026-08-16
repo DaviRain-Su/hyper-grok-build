@@ -19,7 +19,7 @@
 //! 6. Setting `is_flushing = false`
 
 use crate::config::MemoryFlushConfig;
-use crate::sampling::{ChatRequestMessage, Role};
+use xai_grok_sampling_types::ConversationItem;
 // Pure text helpers moved into the memory subsystem (breaks the
 // dream <-> memory_flush module cycle).
 use crate::session::memory::text_utils::{has_markdown_headers, is_no_reply};
@@ -294,24 +294,24 @@ pub async fn is_semantically_duplicate(
     false
 }
 
-/// Select a recent window from simplified chat messages for the flush model.
+/// Select a recent typed-history window for the flush model.
 ///
 /// Starts with the last `recent_message_count` messages, then expands backward
 /// to the nearest `User` message so the window always starts on a user
 /// boundary. The returned window may be larger than `recent_message_count`.
 /// System messages are excluded since the flush adds its own system prompt.
 pub fn select_flush_window(
-    messages: Vec<ChatRequestMessage>,
+    messages: Vec<ConversationItem>,
     recent_message_count: usize,
-) -> Vec<ChatRequestMessage> {
+) -> Vec<ConversationItem> {
     let messages: Vec<_> = messages
         .into_iter()
-        .filter(|m| m.role != Role::System)
+        .filter(|item| !matches!(item, ConversationItem::System(_)))
         .collect();
 
     let total = messages.len();
     let mut start = total.saturating_sub(recent_message_count);
-    while start > 0 && messages[start].role != Role::User {
+    while start > 0 && !matches!(messages[start], ConversationItem::User(_)) {
         start -= 1;
     }
     messages.into_iter().skip(start).collect()
@@ -529,46 +529,64 @@ mod tests {
 
     #[test]
     fn test_select_flush_window_expands_to_user_boundary() {
-        let mut messages = vec![ChatRequestMessage::user("early question")];
+        let mut messages = vec![ConversationItem::user("early question")];
         for i in 0..20 {
-            messages.push(ChatRequestMessage::assistant(
-                format!("response {i}"),
-                "",
-                None,
-            ));
+            messages.push(ConversationItem::assistant(format!("response {i}")));
         }
 
         let window = select_flush_window(messages, 20);
 
         assert_eq!(window.len(), 21);
-        assert_eq!(window[0].role, Role::User);
+        assert!(matches!(window[0], ConversationItem::User(_)));
     }
 
     #[test]
     fn test_select_flush_window_filters_system_messages() {
         let messages = vec![
-            ChatRequestMessage::system("you are helpful"),
-            ChatRequestMessage::user("hi"),
-            ChatRequestMessage::assistant("hello", "", None),
+            ConversationItem::system("you are helpful"),
+            ConversationItem::user("hi"),
+            ConversationItem::assistant("hello"),
         ];
 
         let window = select_flush_window(messages, 20);
 
-        assert!(window.iter().all(|m| m.role != Role::System));
+        assert!(
+            window
+                .iter()
+                .all(|item| !matches!(item, ConversationItem::System(_)))
+        );
         assert_eq!(window.len(), 2);
     }
 
     #[test]
     fn test_select_flush_window_short_conversation() {
         let messages = vec![
-            ChatRequestMessage::user("hi"),
-            ChatRequestMessage::assistant("hello", "", None),
+            ConversationItem::user("hi"),
+            ConversationItem::assistant("hello"),
         ];
 
         let window = select_flush_window(messages, 20);
 
         assert_eq!(window.len(), 2);
-        assert_eq!(window[0].role, Role::User);
+        assert!(matches!(window[0], ConversationItem::User(_)));
+    }
+
+    #[test]
+    fn flush_window_preserves_agent_provenance_until_request_projection() {
+        let human = ConversationItem::user("human request");
+        let agent = ConversationItem::agent_message("agent context");
+        let window = select_flush_window(vec![human.clone(), agent], 20);
+        let projected =
+            xai_chat_state::compaction_utils::ModelRequestHistory::from_raw(window).into_items();
+
+        assert_eq!(projected[0].text_content(), human.text_content());
+        assert_eq!(
+            projected[1].text_content(),
+            format!(
+                "{}\nagent context",
+                xai_chat_state::compaction_utils::AGENT_MESSAGE_MODEL_LABEL
+            )
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -680,7 +680,7 @@ pub fn render_hook_hover_popup(
         if y >= inner.y + inner.height {
             break;
         }
-        buf.set_line_safe(inner.x, y, &line.content, inner.width);
+        buf.set_line_safe_bidi(inner.x, y, &line.content, inner.width);
     }
 }
 /// Selection/hover chrome for a side pane (todo / queue / tasks). Focused panes get a dismiss control.
@@ -785,121 +785,6 @@ pub fn render_scrollbar(
             thumb_style,
         );
     }
-}
-use crate::appearance::TodoBadgeFormat;
-/// Build the todo badge as styled spans (without rendering).
-///
-/// Returns `None` if there are no items to display.
-pub fn render_todo_badge_spans(
-    counts: &super::todo_pane::TodoCounts,
-    hovered: bool,
-    flash: bool,
-    format: TodoBadgeFormat,
-    theme: &Theme,
-) -> Option<Vec<Span<'static>>> {
-    use ratatui::style::Modifier;
-    if counts.total() == 0 {
-        return None;
-    }
-    let highlighted = hovered || flash;
-    let count_style = if highlighted {
-        Style::default()
-            .fg(theme.text_primary)
-            .bg(theme.bg_base)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.text_secondary).bg(theme.bg_base)
-    };
-    let dim_style = if highlighted {
-        Style::default().fg(theme.text_secondary).bg(theme.bg_base)
-    } else {
-        Style::default().fg(theme.gray_dim).bg(theme.bg_base)
-    };
-    if matches!(format, TodoBadgeFormat::Default) {
-        let total = counts.total_excluding_cancelled();
-        if total == 0 {
-            return None;
-        }
-        return Some(vec![
-            Span::styled(counts.completed.to_string(), count_style),
-            Span::styled("/", dim_style),
-            Span::styled(total.to_string(), count_style),
-            Span::styled(
-                format!(" {}", crate::glyphs::check_mark()),
-                Style::default().fg(theme.text_secondary).bg(theme.bg_base),
-            ),
-        ]);
-    }
-    let icon_mod = if highlighted {
-        Modifier::BOLD
-    } else {
-        Modifier::empty()
-    };
-    let statuses: [(usize, &str, ratatui::style::Color); 4] = [
-        (counts.in_progress, "▶", theme.warning),
-        (counts.pending, "□", theme.text_secondary),
-        (
-            counts.completed,
-            crate::glyphs::check_mark(),
-            theme.accent_success,
-        ),
-        (
-            counts.cancelled,
-            crate::glyphs::ballot_x(),
-            theme.accent_error,
-        ),
-    ];
-    let parts: Vec<(usize, &str, ratatui::style::Color)> =
-        statuses.into_iter().filter(|(n, _, _)| *n > 0).collect();
-    if parts.is_empty() {
-        return None;
-    }
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(parts.len() * 4);
-    for (i, (count, icon, color)) in parts.iter().enumerate() {
-        let icon_style = Style::default()
-            .fg(*color)
-            .bg(theme.bg_base)
-            .add_modifier(icon_mod);
-        let num_style = match format {
-            TodoBadgeFormat::Default => {
-                let mut s = Style::default().fg(*color).bg(theme.bg_base);
-                if highlighted {
-                    s = s.add_modifier(Modifier::BOLD);
-                }
-                s
-            }
-            _ => count_style,
-        };
-        match format {
-            TodoBadgeFormat::Default => {
-                if i > 0 {
-                    spans.push(Span::styled(" ", dim_style));
-                }
-                spans.push(Span::styled(format!("{count}"), num_style));
-            }
-            TodoBadgeFormat::Colon => {
-                if i > 0 {
-                    spans.push(Span::styled(" ", dim_style));
-                }
-                spans.push(Span::styled(*icon, icon_style));
-                spans.push(Span::styled(":", dim_style));
-                spans.push(Span::styled(format!("{count}"), num_style));
-            }
-            TodoBadgeFormat::Comma => {
-                if i > 0 {
-                    spans.push(Span::styled(", ", dim_style));
-                }
-                spans.push(Span::styled(format!("{count}"), num_style));
-                spans.push(Span::styled(" ", dim_style));
-                spans.push(Span::styled(*icon, icon_style));
-            }
-        }
-    }
-    spans.push(Span::styled(
-        format!(" {}", crate::glyphs::check_mark()),
-        Style::default().fg(theme.text_secondary).bg(theme.bg_base),
-    ));
-    Some(spans)
 }
 /// The scrollback's default focus hint: `Space` leaves for the prompt. A
 /// parked blocking card replaces it with its own (pinned) route back.
@@ -2401,75 +2286,5 @@ mod tests {
         let layout = layout_with_rows(area, 0, 0, 1);
         assert_eq!(layout.follow_ups, Rect::default());
         assert!(layout.scrollback.height >= 5);
-    }
-    /// Default todo badge is a `done/total` fraction: numerator = completed,
-    /// denominator = all tasks except cancelled.
-    #[test]
-    fn todo_badge_default_renders_done_over_total_fraction() {
-        let theme = Theme::current();
-        let counts = super::super::todo_pane::TodoCounts {
-            in_progress: 1,
-            pending: 2,
-            completed: 2,
-            cancelled: 0,
-        };
-        let spans =
-            render_todo_badge_spans(&counts, false, false, TodoBadgeFormat::Default, &theme)
-                .expect("badge renders when there are todos");
-        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            text.starts_with("2/5"),
-            "expected a 2/5 done/total fraction, got {text:?}"
-        );
-        let with_cancelled = super::super::todo_pane::TodoCounts {
-            in_progress: 0,
-            pending: 1,
-            completed: 2,
-            cancelled: 1,
-        };
-        let spans = render_todo_badge_spans(
-            &with_cancelled,
-            false,
-            false,
-            TodoBadgeFormat::Default,
-            &theme,
-        )
-        .expect("badge renders");
-        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            text.starts_with("2/3"),
-            "cancelled tasks are excluded from the total, got {text:?}"
-        );
-    }
-    /// No todos → no badge.
-    #[test]
-    fn todo_badge_absent_when_no_todos() {
-        let theme = Theme::current();
-        let empty = super::super::todo_pane::TodoCounts::default();
-        assert!(
-            render_todo_badge_spans(&empty, false, false, TodoBadgeFormat::Default, &theme)
-                .is_none()
-        );
-    }
-    /// All-cancelled list → no badge (denominator would be 0; nothing to track).
-    #[test]
-    fn todo_badge_absent_when_all_cancelled() {
-        let theme = Theme::current();
-        let all_cancelled = super::super::todo_pane::TodoCounts {
-            in_progress: 0,
-            pending: 0,
-            completed: 0,
-            cancelled: 3,
-        };
-        assert!(
-            render_todo_badge_spans(
-                &all_cancelled,
-                false,
-                false,
-                TodoBadgeFormat::Default,
-                &theme
-            )
-            .is_none()
-        );
     }
 }

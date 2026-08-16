@@ -185,9 +185,38 @@ impl WritingToolCall {
             Some(name) if xai_grok_tools::is_task_tool_id(name) => {
                 format!("Writing subagent prompt{ordinal}…")
             }
+            Some(xai_grok_tools::USE_TOOL_NAME) => {
+                format!("Preparing MCP tool{ordinal}…")
+            }
+            Some(xai_grok_tools::SEARCH_TOOL_NAME) => {
+                format!("Searching MCP tools{ordinal}…")
+            }
             Some(name) => {
-                let name = xai_grok_workspace::permission::mcp_pretty_name_if_qualified(name);
-                format!("Preparing {}{ordinal}…", clamp_activity_subject(&name))
+                use xai_grok_tools::types::tool::ToolKind;
+                let copy =
+                    xai_grok_tools::tool_taxonomy::writing_tool_kind(name).and_then(|kind| {
+                        match kind {
+                            ToolKind::Write => Some("Writing file"),
+                            ToolKind::Edit => Some("Writing edit"),
+                            ToolKind::Execute => Some("Writing command"),
+                            ToolKind::Plan => Some("Updating todo list"),
+                            ToolKind::Workflow => Some("Writing workflow"),
+                            ToolKind::ImageGen => Some("Writing image prompt"),
+                            ToolKind::ImageToVideo | ToolKind::ReferenceToVideo => {
+                                Some("Writing video prompt")
+                            }
+                            ToolKind::AskUser => Some("Preparing question"),
+                            _ => None,
+                        }
+                    });
+                match copy {
+                    Some(copy) => format!("{copy}{ordinal}…"),
+                    None => {
+                        let name =
+                            xai_grok_workspace::permission::mcp_pretty_name_if_qualified(name);
+                        format!("Preparing {}{ordinal}…", clamp_activity_subject(&name))
+                    }
+                }
             }
             None => format!("Preparing tool call{ordinal}…"),
         }
@@ -1431,7 +1460,11 @@ impl AcpUpdateTracker {
                 .and_then(|m| m.get(user_message_chunk_meta::PROMPT_INDEX))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
-            if let Some(pi) = prompt_index {
+            let replay_ts = meta
+                .is_replay
+                .then(|| meta.turn_start_ms.or(meta.agent_timestamp_ms))
+                .flatten();
+            if prompt_index.is_some() || replay_ts.is_some() {
                 for idx in (0..scrollback.len()).rev() {
                     if let Some(entry) = scrollback.get_mut(idx)
                         && let RenderBlock::UserPrompt(ref mut block) = entry.block
@@ -1439,8 +1472,13 @@ impl AcpUpdateTracker {
                         if block.is_interjection {
                             continue;
                         }
-                        if block.prompt_index.is_none() {
+                        if let Some(pi) = prompt_index
+                            && block.prompt_index.is_none()
+                        {
                             block.prompt_index = Some(pi);
+                        }
+                        if let Some(ms) = replay_ts {
+                            entry.created_at = Some(utc_ms_to_local(ms));
                         }
                         break;
                     }

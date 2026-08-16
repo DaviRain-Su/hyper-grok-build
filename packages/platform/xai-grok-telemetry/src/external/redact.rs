@@ -39,6 +39,8 @@ pub(crate) struct ExportHealth {
     pub export_failures: AtomicU64,
     /// Successful export attempts, both signals.
     pub export_successes: AtomicU64,
+    /// Most recent transport error message (for shutdown-time diagnostics).
+    pub last_export_error: parking_lot::Mutex<Option<String>>,
 }
 
 fn gate_open(gates: &ContentGates, gate: Gate) -> bool {
@@ -140,8 +142,13 @@ impl<E: LogExporter> LogExporter for RedactingLogExporter<E> {
             }
             let result = self.inner.export(LogBatch::new(&clean)).await;
             match &result {
-                Ok(()) => self.health.export_successes.fetch_add(1, Ordering::Relaxed),
-                Err(_) => self.health.export_failures.fetch_add(1, Ordering::Relaxed),
+                Ok(()) => {
+                    self.health.export_successes.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    self.health.export_failures.fetch_add(1, Ordering::Relaxed);
+                    *self.health.last_export_error.lock() = Some(e.to_string());
+                }
             };
             result
         }
@@ -227,8 +234,13 @@ impl<E: PushMetricExporter> PushMetricExporter for ValidatingMetricExporter<E> {
             }
             let result = self.inner.export(metrics).await;
             match &result {
-                Ok(()) => self.health.export_successes.fetch_add(1, Ordering::Relaxed),
-                Err(_) => self.health.export_failures.fetch_add(1, Ordering::Relaxed),
+                Ok(()) => {
+                    self.health.export_successes.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    self.health.export_failures.fetch_add(1, Ordering::Relaxed);
+                    *self.health.last_export_error.lock() = Some(e.to_string());
+                }
             };
             result
         }

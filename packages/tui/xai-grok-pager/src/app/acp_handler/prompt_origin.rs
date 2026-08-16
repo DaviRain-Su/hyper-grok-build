@@ -92,17 +92,22 @@ pub(super) fn viewer_turn_anchor(turn_start_ms: Option<i64>) -> std::time::Insta
 /// with one; silence closes with none — except failures, which surface even
 /// when silent (the user's standing instruction stopped executing invisibly).
 /// Silent rate limits defer to the retry notifications, like the real-turn
-/// rails.
+/// rails. A hook-denied wake follows the cancelled policy (no failure
+/// carve-out): the `HookAnnotation` warning attributes the deny but is not
+/// turn output, so a silent block closes without a marker.
 ///
 /// `cancel_trigger` is the signal's `_meta.cancelTrigger`. `"send_now"` marks
 /// an internal cancel-and-send, so the `TurnCancelled` marker is suppressed
 /// (wire trigger wins; `expect_send_now_cancel` is the older-shell fallback).
+/// `cancellation_category` is the signal's `_meta.cancellationCategory`;
+/// `"HookDenied"` picks the blocked-by-a-hook marker.
 pub(super) fn finish_wake_turn(
     agent: &mut AgentView,
     prompt_id: &str,
     stop_reason: &str,
     agent_result: Option<&str>,
     cancel_trigger: Option<&str>,
+    cancellation_category: Option<&str>,
 ) {
     use crate::scrollback::blocks::SessionEvent;
 
@@ -160,9 +165,10 @@ pub(super) fn finish_wake_turn(
         "cancelled" if !had_output => None,
         // Send-now cancel: no marker (the sender's new prompt is the next turn).
         "cancelled" if send_now_cancel => None,
-        "cancelled" => Some(SessionEvent::TurnCancelled {
-            elapsed: elapsed.unwrap_or_default(),
-        }),
+        "cancelled" => Some(crate::app::turn_completion::cancelled_turn_event(
+            cancellation_category,
+            elapsed.unwrap_or_default(),
+        )),
         _ if !had_output => None,
         _ => Some(SessionEvent::TurnCompleted { elapsed }),
     };

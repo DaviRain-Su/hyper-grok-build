@@ -160,15 +160,58 @@ pub fn print_stats(stats: &DbStats, out: &mut impl Write) -> std::io::Result<()>
 
 pub fn print_gc(report: &GcReport, out: &mut impl Write) -> std::io::Result<()> {
     writeln!(out, "GC report:")?;
-    writeln!(out, "  Dead records removed:    {}", report.dead_removed)?;
+    writeln!(out, "  Dead records removed:      {}", report.dead_removed)?;
     writeln!(
         out,
         "  Expired worktrees removed: {}",
         report.expired_removed
     )?;
-    writeln!(out, "  Skipped (alive process): {}", report.skipped_alive)?;
+    if report.no_repo_paths > 0 {
+        writeln!(out, "  Non-repository paths:      {}", report.no_repo_paths)?;
+    }
+    writeln!(out, "  Skipped (guarded):         {}", report.skipped_alive)?;
+    if report.never_expiring > 0 {
+        writeln!(
+            out,
+            "  Kept (never expires):      {}",
+            report.never_expiring
+        )?;
+    }
+    if report.kept_unsafe > 0 {
+        writeln!(out, "  Kept (not reclaimable):    {}", report.kept_unsafe)?;
+        for (reason, count) in &report.kept_reasons {
+            writeln!(out, "    {reason}: {count}")?;
+        }
+        // Named, so `grok worktree rm <path>` needs no log reading. The
+        // remainder counts from the total: the report itself carries only the
+        // first hundred, and each keep is logged.
+        const MAX_KEPT_PRINTED: usize = 20;
+        let printed = report.kept.len().min(MAX_KEPT_PRINTED);
+        for kept in report.kept.iter().take(MAX_KEPT_PRINTED) {
+            writeln!(out, "      {}  ({})", kept.path, kept.reason)?;
+        }
+        let rest = usize::try_from(report.kept_unsafe)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(printed);
+        if rest > 0 {
+            writeln!(out, "      and {rest} more, named in the log")?;
+        }
+    }
+    if report.names_collected > 0 {
+        writeln!(
+            out,
+            "  Reclaimed names dropped:   {}",
+            report.names_collected
+        )?;
+    }
+    if report.not_judged > 0 {
+        writeln!(out, "  Not judged this pass:      {}", report.not_judged)?;
+    }
+    if report.unnamed > 0 {
+        writeln!(out, "  Naming failed (kept):      {}", report.unnamed)?;
+    }
     if report.remove_failed > 0 {
-        writeln!(out, "  Removal failures:        {}", report.remove_failed)?;
+        writeln!(out, "  Removal failures:          {}", report.remove_failed)?;
     }
     Ok(())
 }

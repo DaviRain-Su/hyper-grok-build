@@ -633,7 +633,12 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         agent.session.finish_turn(&mut agent.scrollback);
         let event = if was_cancelling {
             // Send-now cancel renders no marker (the new prompt is the next turn).
-            (!send_now_cancel).then_some(SessionEvent::TurnCancelled { elapsed })
+            (!send_now_cancel).then(|| {
+                crate::app::turn_completion::cancelled_turn_event(
+                    pending.cancellation_category.as_deref(),
+                    elapsed,
+                )
+            })
         } else {
             match pending.stop_reason.as_deref() {
                 // Rate limits drive a dedicated driver UX via the retry

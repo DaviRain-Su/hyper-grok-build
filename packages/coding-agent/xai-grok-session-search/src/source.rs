@@ -45,18 +45,3 @@ pub type SessionSourceFactory = fn(PathBuf) -> Box<dyn SessionSource>;
 /// Blocking extraction of a transcript's searchable text plus the bytes read.
 /// Always called from a blocking thread.
 pub type ContentExtractor = fn(&Path) -> io::Result<(String, u64)>;
-
-/// Asked before this crate creates the database, indexes into it, or reads it. Deletes ignore it.
-/// Asked at each decision rather than read once, because a host can turn the index off long
-/// after the manager has started.
-pub type IndexEnabled = fn() -> bool;
-
-#[cfg(test)]
-pub(crate) fn index_on() -> bool {
-    true
-}
-
-#[cfg(test)]
-pub(crate) fn index_off() -> bool {
-    false
-}

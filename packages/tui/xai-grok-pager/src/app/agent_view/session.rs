@@ -4,7 +4,8 @@
 use super::test_agent_view;
 use super::{
     ActivePane, AgentView, InlineMediaHitAreas, InputMode, PaneAreas, PluginCtaState,
-    PromptInputMode, PromptMode, REWOUND_PROMPT_ID_CAP, SELF_ORIGINATED_PROMPT_CAP, SessionReload,
+    PromptInputMode, PromptMode, REWOUND_PROMPT_ID_CAP, ReplayRebuiltState,
+    SELF_ORIGINATED_PROMPT_CAP, SessionReload,
 };
 use crate::app::agent::AgentSession;
 use crate::app::app_view::InputOutcome;
@@ -223,7 +224,6 @@ impl AgentView {
             last_clipboard_toast_at: None,
             last_context_click_at: None,
             hovered_prompt: false,
-            hit_badge: Default::default(),
             hit_context: Default::default(),
             hit_credits: Default::default(),
             hit_todo_close: Default::default(),
@@ -236,7 +236,6 @@ impl AgentView {
             hit_bg_button: Default::default(),
             last_bg_click: None,
             hit_queue_close: Default::default(),
-            hit_queue_badge: Default::default(),
             hit_plan_button: Default::default(),
             hit_plan_approval_status: Default::default(),
             hit_follow_indicator: Default::default(),
@@ -268,6 +267,7 @@ impl AgentView {
             video_viewer: None,
             gboom: None,
             inline_media_cache: std::collections::HashMap::new(),
+            inline_media_load_failed: std::collections::HashMap::new(),
             inline_media_ids: std::collections::HashMap::new(),
             inline_media_iterm_emitted: std::collections::HashMap::new(),
             next_inline_media_id: 2,
@@ -481,6 +481,41 @@ impl AgentView {
         self.cleared_workflow_runs.clear();
         self.workflow_runs.clear();
     }
+    /// Swap every replay-rebuilt field for a fresh value and return the old
+    /// state. Reset together so stale revision gates cannot suppress the
+    /// replayed updates.
+    pub(crate) fn take_replay_rebuilt_state(&mut self) -> ReplayRebuiltState {
+        let fresh = self.scrollback.fresh_continuation();
+        ReplayRebuiltState {
+            scrollback: std::mem::replace(&mut self.scrollback, fresh),
+            tracker: std::mem::replace(
+                &mut self.session.tracker,
+                crate::acp::tracker::AcpUpdateTracker::new(),
+            ),
+            todo: std::mem::take(&mut self.todo),
+            workflow_blocks: std::mem::take(&mut self.workflow_blocks),
+            workflow_runs: std::mem::take(&mut self.workflow_runs),
+            workflow_run_revisions: std::mem::take(&mut self.workflow_run_revisions),
+            cleared_workflow_runs: std::mem::take(&mut self.cleared_workflow_runs),
+        }
+    }
+    /// Put a taken [`ReplayRebuiltState`] back: the counterpart of
+    /// [`Self::take_replay_rebuilt_state`] for callers whose rebuild failed
+    /// and who would otherwise leave a bare view where content used to be.
+    /// Used by the subagent restore path and the reload failure outcome.
+    pub(crate) fn restore_replay_rebuilt_state(&mut self, mut taken: ReplayRebuiltState) {
+        taken.scrollback.raise_id_floor(self.scrollback.id_floor());
+        taken
+            .scrollback
+            .raise_invalidation_floor(self.scrollback.invalidation_generations());
+        self.scrollback = taken.scrollback;
+        self.session.tracker = taken.tracker;
+        self.todo = taken.todo;
+        self.workflow_blocks = taken.workflow_blocks;
+        self.workflow_runs = taken.workflow_runs;
+        self.workflow_run_revisions = taken.workflow_run_revisions;
+        self.cleared_workflow_runs = taken.cleared_workflow_runs;
+    }
     /// Open a reconnect reload window: stash the current transcript/tracker
     /// and point the live fields at fresh state for the incoming
     /// `session/load` replay. The transcript is NOT cleared — it stays
@@ -509,19 +544,10 @@ impl AgentView {
         }
         self.session.model_switch_pending = false;
         self.pending_adoption_updates.clear();
-        let fresh = self.scrollback.fresh_continuation();
+        let stash = self.take_replay_rebuilt_state();
         self.session_reload = Some(SessionReload {
             generation,
-            scrollback: std::mem::replace(&mut self.scrollback, fresh),
-            tracker: std::mem::replace(
-                &mut self.session.tracker,
-                crate::acp::tracker::AcpUpdateTracker::new(),
-            ),
-            todo: std::mem::take(&mut self.todo),
-            workflow_blocks: std::mem::take(&mut self.workflow_blocks),
-            workflow_runs: std::mem::take(&mut self.workflow_runs),
-            workflow_run_revisions: std::mem::take(&mut self.workflow_run_revisions),
-            cleared_workflow_runs: std::mem::take(&mut self.cleared_workflow_runs),
+            stash,
             last_seen_event_id: self.last_seen_event_id.clone(),
             last_seen_event_seq: self.last_seen_event_seq,
             last_applied_event_seq: self.last_applied_event_seq,
@@ -753,7 +779,8 @@ impl AgentView {
             self.scrollback.end_batch();
             dropped_heavy = true;
         } else if success {
-            let mut tail = std::mem::replace(&mut self.scrollback, reload.scrollback);
+            let stash = reload.stash;
+            let mut tail = std::mem::replace(&mut self.scrollback, stash.scrollback);
             let mut dedupe_budget: HashMap<String, usize> = HashMap::new();
             for entry_id in &reload.replayed_expiry_notices {
                 let staged_text = (0..tail.len()).find_map(|i| {
@@ -788,14 +815,14 @@ impl AgentView {
                 }
             }
             self.scrollback.append_entries_from(tail);
-            self.workflow_blocks.extend(reload.workflow_blocks);
+            self.workflow_blocks.extend(stash.workflow_blocks);
             {
                 let mut live_by_id: HashMap<String, _> = std::mem::take(&mut self.workflow_runs)
                     .into_iter()
                     .map(|run| (run.run_id.clone(), run))
                     .collect();
-                let mut merged = Vec::with_capacity(reload.workflow_runs.len() + live_by_id.len());
-                for run in reload.workflow_runs {
+                let mut merged = Vec::with_capacity(stash.workflow_runs.len() + live_by_id.len());
+                for run in stash.workflow_runs {
                     if let Some(live) = live_by_id.remove(&run.run_id) {
                         merged.push(live);
                     } else {
@@ -806,33 +833,22 @@ impl AgentView {
                 live_only.sort_by_key(|run| run.received_at);
                 merged.extend(live_only);
                 self.cleared_workflow_runs
-                    .extend(reload.cleared_workflow_runs);
+                    .extend(stash.cleared_workflow_runs);
                 merged.retain(|run| !self.cleared_workflow_runs.contains(&run.run_id));
                 self.workflow_runs = merged;
             }
-            for (run_id, rev) in reload.workflow_run_revisions {
+            for (run_id, rev) in stash.workflow_run_revisions {
                 self.workflow_run_revisions
                     .entry(run_id)
                     .and_modify(|live| *live = (*live).max(rev))
                     .or_insert(rev);
             }
             if !reload.saw_todo_update {
-                self.todo = reload.todo;
+                self.todo = stash.todo;
             }
             dropped_heavy = false;
         } else {
-            let floor = self.scrollback.id_floor();
-            let staging_generations = self.scrollback.invalidation_generations();
-            self.scrollback = reload.scrollback;
-            self.scrollback.raise_id_floor(floor);
-            self.scrollback
-                .raise_invalidation_floor(staging_generations);
-            self.session.tracker = reload.tracker;
-            self.todo = reload.todo;
-            self.workflow_blocks = reload.workflow_blocks;
-            self.workflow_runs = reload.workflow_runs;
-            self.workflow_run_revisions = reload.workflow_run_revisions;
-            self.cleared_workflow_runs = reload.cleared_workflow_runs;
+            self.restore_replay_rebuilt_state(reload.stash);
             self.last_seen_event_id = reload.last_seen_event_id;
             self.last_seen_event_seq = reload.last_seen_event_seq;
             self.last_applied_event_seq = reload.last_applied_event_seq;
@@ -2060,7 +2076,7 @@ mod resolve_turn_activity_tests {
                 prompt: None,
                 child_cwd: None,
                 worktree_path: None,
-                child_updates_replayed: false,
+                transcript: Default::default(),
             },
         );
         let meta = NotificationMeta::default();

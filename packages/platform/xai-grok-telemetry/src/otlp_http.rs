@@ -40,6 +40,12 @@ impl HttpClient for BlockingOtlpClient {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ClientIdentityPaths<'a> {
+    pub certificate: &'a str,
+    pub key: &'a str,
+}
+
 /// Build the blocking OTLP HTTP client on a dedicated thread.
 ///
 /// The blocking client can't be built inside a Tokio runtime, and the batch
@@ -54,6 +60,14 @@ impl HttpClient for BlockingOtlpClient {
 pub(crate) fn build_blocking_client(
     timeout: std::time::Duration,
     extra_ca_pem_files: &[&str],
+) -> Result<BlockingOtlpClient, String> {
+    build_blocking_client_with_identity(timeout, extra_ca_pem_files, None)
+}
+
+pub(crate) fn build_blocking_client_with_identity(
+    timeout: std::time::Duration,
+    extra_ca_pem_files: &[&str],
+    client_identity: Option<ClientIdentityPaths<'_>>,
 ) -> Result<BlockingOtlpClient, String> {
     let mut extra_roots = Vec::new();
     for path in extra_ca_pem_files {
@@ -71,6 +85,37 @@ pub(crate) fn build_blocking_client(
         }
         extra_roots.extend(certs);
     }
+    let identity_pem = match client_identity {
+        Some(paths) => {
+            let mut cert = std::fs::read(paths.certificate).map_err(|e| {
+                format!(
+                    "reading OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE {:?}: {e}",
+                    paths.certificate
+                )
+            })?;
+            let key = std::fs::read(paths.key).map_err(|e| {
+                format!("reading OTEL_EXPORTER_OTLP_CLIENT_KEY {:?}: {e}", paths.key)
+            })?;
+            if !crate::external::providers::pem_contains_certificate(&cert) {
+                return Err(format!(
+                    "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE {:?} contains no certificates",
+                    paths.certificate
+                ));
+            }
+            if !crate::external::providers::pem_contains_private_key(&key) {
+                return Err(format!(
+                    "OTEL_EXPORTER_OTLP_CLIENT_KEY {:?} contains no private key",
+                    paths.key
+                ));
+            }
+            if !cert.ends_with(b"\n") {
+                cert.push(b'\n');
+            }
+            cert.extend_from_slice(&key);
+            Some(cert)
+        }
+        None => None,
+    };
     std::thread::Builder::new()
         .name("otlp-client-build".into())
         .spawn(move || {
@@ -79,16 +124,35 @@ pub(crate) fn build_blocking_client(
             // handled inside xai-grok-extra-ca) and the external stream's
             // per-call `OTEL_EXPORTER_OTLP_CERTIFICATE` files (fail-closed,
             // validated above).
-            let mut builder = xai_grok_extra_ca::with_extra_root_certificates_blocking(
-                reqwest::blocking::Client::builder().timeout(timeout),
-            );
+            let mut builder = reqwest::blocking::Client::builder().timeout(timeout);
+            // Pin rustls only when attaching a PEM client identity: this
+            // shared builder is also used by the internal firehose, and
+            // Identity::from_pem is a rustls PEM identity that native-tls
+            // rejects under Bazel feature unification ("incompatible TLS
+            // identity type"). Without an identity, leave the backend alone.
+            if identity_pem.is_some() {
+                builder = builder.use_rustls_tls();
+            }
+            let mut builder = xai_grok_extra_ca::with_extra_root_certificates_blocking(builder);
             for cert in extra_roots {
                 builder = builder.add_root_certificate(cert);
             }
-            builder
-                .build()
-                .map(BlockingOtlpClient)
-                .map_err(|e| format!("building blocking OTLP HTTP client: {e}"))
+            if let Some(pem) = identity_pem {
+                let identity = reqwest::Identity::from_pem(&pem).map_err(|e| {
+                    format!("parsing OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE/KEY: {e}")
+                })?;
+                builder = builder.identity(identity);
+            }
+            builder.build().map(BlockingOtlpClient).map_err(|e| {
+                let mut detail = e.to_string();
+                let mut source = std::error::Error::source(&e);
+                while let Some(s) = source {
+                    detail.push_str(": ");
+                    detail.push_str(&s.to_string());
+                    source = s.source();
+                }
+                format!("building blocking OTLP HTTP client: {detail}")
+            })
         })
         .map_err(|e| format!("spawning OTLP client builder thread: {e}"))?
         .join()
@@ -134,5 +198,60 @@ mod tests {
         )
         .expect_err("certificate-less bundle must fail construction");
         assert!(err.contains("no certificates"), "{err}");
+    }
+
+    #[test]
+    fn blocking_otlp_client_fails_closed_on_missing_client_cert() {
+        let err = build_blocking_client_with_identity(
+            std::time::Duration::from_secs(5),
+            &[],
+            Some(ClientIdentityPaths {
+                certificate: "/nonexistent/client.crt",
+                key: "/nonexistent/client.key",
+            }),
+        )
+        .expect_err("missing client cert must fail construction");
+        assert!(
+            err.contains("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn blocking_otlp_client_builds_with_generated_client_identity() {
+        // Dual-linked ring + aws-lc-rs: pin a process default before any TLS
+        // client construction (matches CLI startup + gRPC mTLS tests).
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+
+        let ca_key = KeyPair::generate().expect("ca key");
+        let mut ca_params = CertificateParams::new(Vec::new()).expect("ca params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).expect("ca");
+
+        let client_key = KeyPair::generate().expect("client key");
+        let client_params =
+            CertificateParams::new(vec!["grok-client".into()]).expect("client params");
+        let client_cert = client_params
+            .signed_by(&client_key, &ca_cert, &ca_key)
+            .expect("sign client");
+
+        let cert_file = tempfile::NamedTempFile::new().expect("cert file");
+        let key_file = tempfile::NamedTempFile::new().expect("key file");
+        let ca_file = tempfile::NamedTempFile::new().expect("ca file");
+        std::fs::write(cert_file.path(), client_cert.pem()).expect("write cert");
+        std::fs::write(key_file.path(), client_key.serialize_pem()).expect("write key");
+        std::fs::write(ca_file.path(), ca_cert.pem()).expect("write ca");
+
+        build_blocking_client_with_identity(
+            std::time::Duration::from_secs(5),
+            &[ca_file.path().to_str().expect("utf-8")],
+            Some(ClientIdentityPaths {
+                certificate: cert_file.path().to_str().expect("utf-8"),
+                key: key_file.path().to_str().expect("utf-8"),
+            }),
+        )
+        .expect("HTTP client with mTLS identity must build");
     }
 }

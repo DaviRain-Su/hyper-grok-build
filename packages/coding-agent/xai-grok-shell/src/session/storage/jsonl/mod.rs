@@ -1027,11 +1027,35 @@ impl StorageAdapter for JsonlStorageAdapter {
         )
         .await
     }
+    async fn regenerate_generated_title(
+        &self,
+        info: &Info,
+        session_title: String,
+    ) -> io::Result<bool> {
+        self.apply_summary_patch_reporting(
+            info,
+            super::summary_write::SummaryPatch {
+                generated_title_regenerate: Some(session_title),
+                ..Default::default()
+            },
+        )
+        .await
+    }
     async fn reset_title_to_auto(&self, info: &Info) -> io::Result<bool> {
         self.apply_summary_patch_reporting(
             info,
             super::summary_write::SummaryPatch {
                 reset_title_to_auto: true,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    async fn set_last_recap(&self, info: &Info, recap: Option<String>) -> io::Result<()> {
+        self.apply_summary_patch(
+            info,
+            super::summary_write::SummaryPatch {
+                last_recap: Some(recap),
                 ..Default::default()
             },
         )

@@ -242,6 +242,9 @@ fn session_meta_auto_mode_key_resolution() {
     let meta2 = serde_json::json!({"auto_mode": true});
     assert!(resolve_session_auto_mode(meta2.as_object(), false, false));
 
+    let ask = serde_json::json!({"autoMode": false});
+    assert!(!resolve_session_auto_mode(ask.as_object(), true, false));
+
     // Meta absent → fall back to the config default, but yolo wins (suppresses it).
     assert!(
         !resolve_session_auto_mode(None, true, true),
@@ -251,6 +254,22 @@ fn session_meta_auto_mode_key_resolution() {
         resolve_session_auto_mode(None, true, false),
         "default auto seeds when meta absent and no yolo"
     );
+}
+
+#[test]
+fn explicit_auto_request_overrides_stale_launch_yolo() {
+    use crate::agent::mvp_agent::resolve_session_auto_mode;
+
+    let meta = serde_json::json!({"yoloMode": false, "autoMode": true});
+    let request_meta = meta.as_object();
+    let session_yolo_mode = request_meta
+        .and_then(|m| m.get("yoloMode"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let session_auto_mode = resolve_session_auto_mode(request_meta, false, session_yolo_mode);
+
+    assert!(!session_yolo_mode);
+    assert!(session_auto_mode);
 }
 
 // ── neutralize_transcript_user_text (transcript injection defense) ──────────

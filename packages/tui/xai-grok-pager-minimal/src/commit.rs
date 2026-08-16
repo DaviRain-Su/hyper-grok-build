@@ -41,9 +41,7 @@ use xai_grok_pager::theme::Theme;
 /// scrollback — otherwise the prompt would shift on every commit.
 pub(crate) const MINIMAL_BLOCK_GAP: u16 = 0;
 
-/// Whether the entry at the commit frontier may be committed to native
-/// scrollback yet. `is_last` is whether it is the final entry in the scrollback
-/// (the only one that may still be actively streaming).
+/// Whether the entry at index `i` may be committed to native scrollback yet.
 ///
 /// While a turn is **running**, a block is committable once it has finished
 /// running AND is not awaiting user input. The pending-input gate is what makes
@@ -56,13 +54,15 @@ pub(crate) const MINIMAL_BLOCK_GAP: u16 = 0;
 /// the tracker leaves an agent message's `is_running` flag set until turn end —
 /// `handle_tool_call` resets `current_agent_msg` to `None` *without* finishing
 /// the entry when a tool follows. That stale flag would wedge the frontier at
-/// the message, piling the rest of the turn into the fixed-height live tail
-/// (which then scrolls/caps). But an agent message that has a *later* block is
-/// provably complete (the tracker moved past it and will never append to it
-/// again), so we commit it anyway. The commit pass finalizes it before
-/// rendering, so it prints in finished form. Only agent messages get this
-/// relaxation: a running **tool** may still update its result, so it keeps the
-/// strict `is_running` gate, and the **last** entry always stays live.
+/// the message, piling the rest of the turn into the live tail. A later
+/// *turn-progress* block (tool / next message / session event / …) proves the
+/// tracker moved on and will never append again, so we commit it. Interleaved
+/// **thinking** does not: `handle_thought_chunk` pushes a thinking entry
+/// *after* the message without resetting `current_agent_msg`, so later tokens
+/// still append. Treating that as "done" print-once-freezes the first word(s)
+/// on the terminal (GBS-28). Only agent messages get this relaxation: a
+/// running **tool** may still update its result, so it keeps the strict
+/// `is_running` gate, and the **last** entry always stays live.
 ///
 /// **Background-task lifecycle blocks commit even while "running".** A fresh
 /// background task is pushed as a `BgTask` "started" block with the entry's
@@ -89,7 +89,10 @@ pub(crate) const MINIMAL_BLOCK_GAP: u16 = 0;
 /// by this rule — any later in-place fill of that entry never reaches the
 /// terminal. Handlers that fill placeholders (e.g. `SessionRecap`) must check
 /// `ScrollbackState::is_committed` and append a fresh block instead.
-pub fn is_committable(entry: &ScrollbackEntry, turn_running: bool, is_last: bool) -> bool {
+pub fn is_committable(state: &ScrollbackState, i: usize, turn_running: bool) -> bool {
+    let Some(entry) = state.get(i) else {
+        return false;
+    };
     // A block awaiting user input (permission / ask_user_question) holds the
     // frontier in EVERY turn state, not just mid-turn: its rendered form is
     // still going to change when the prompt resolves, so committing it
@@ -107,11 +110,28 @@ pub fn is_committable(entry: &ScrollbackEntry, turn_running: bool, is_last: bool
     }
     // Running, mid-turn. Two block kinds are safe to commit despite a set
     // `is_running` flag: a BgTask lifecycle block (finalized event; flag is
-    // animation-only — see above), and a non-last agent message (the tracker has
-    // provably moved past it). A running **tool** may still update its result,
-    // and the **last** non-BgTask entry may still be streaming, so both stay live.
+    // animation-only — see above), and an agent message whose later sibling
+    // proves the tracker moved on ([`agent_message_stream_closed`]). A running
+    // **tool** may still update its result, and a still-open agent stream
+    // (last, or only followed by interleaved thinking) must stay live.
     matches!(entry.block, RenderBlock::BgTask(_))
-        || (!is_last && matches!(entry.block, RenderBlock::AgentMessage(_)))
+        || (matches!(entry.block, RenderBlock::AgentMessage(_))
+            && agent_message_stream_closed(state, i))
+}
+
+/// Whether a later entry proves the tracker will not append to the agent
+/// message at `i` again.
+///
+/// `handle_tool_call` / a new stream / turn-end push a tool, another message,
+/// or a session event *and* drop `current_agent_msg`. Interleaved thinking
+/// does not — it is inserted after the live message while chunks still
+/// append — so it must not trip print-once (GBS-28).
+fn agent_message_stream_closed(state: &ScrollbackState, i: usize) -> bool {
+    ((i + 1)..state.len()).any(|j| {
+        state
+            .get(j)
+            .is_some_and(|e| !matches!(e.block, RenderBlock::Thinking(_)))
+    })
 }
 
 /// The display mode a block should be committed in (minimal mode, print-once).
@@ -159,11 +179,10 @@ enum Step {
 
 /// Classify the entry at `i` relative to the commit frontier.
 fn classify(state: &ScrollbackState, i: usize, turn_running: bool) -> Step {
-    let is_last = i + 1 >= state.len();
     match state.get(i) {
         None => Step::Stop,
         Some(e) if minimal_api::is_committed(state, e) => Step::Skip,
-        Some(e) if !is_committable(e, turn_running, is_last) => Step::Stop,
+        Some(_) if !is_committable(state, i, turn_running) => Step::Stop,
         Some(_) => Step::Commit,
     }
 }

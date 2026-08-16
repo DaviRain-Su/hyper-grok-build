@@ -11,6 +11,69 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
+/// Identity of a media file's contents at load time, keying the failed-load
+/// negative cache. On Unix, inode + ctime also catch a same-length in-place
+/// rewrite whose mtime is too coarse to move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MediaFileStamp {
+    len: u64,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    ctime: (i64, i64),
+}
+
+impl MediaFileStamp {
+    /// `None` when the platform reports no mtime: a `(len, no-mtime)` marker
+    /// would match every future rewrite of the same length, so such failures
+    /// are never negative-cached (the load is retried instead).
+    fn from_metadata(meta: &std::fs::Metadata) -> Option<Self> {
+        let modified = meta.modified().ok()?;
+        #[cfg(unix)]
+        let (ino, ctime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.ino(), (meta.ctime(), meta.ctime_nsec()))
+        };
+        Some(Self {
+            len: meta.len(),
+            modified,
+            #[cfg(unix)]
+            ino,
+            #[cfg(unix)]
+            ctime,
+        })
+    }
+}
+
+/// Insert `bytes` into the bounded cache, evicting arbitrary entries to fit.
+/// An oversized payload (≥ `max_bytes`) is returned to the caller instead of
+/// inserted: it is used transiently for the current transmit/place, so one
+/// giant image can neither flush the whole cache nor accumulate unbounded
+/// bytes across frames.
+fn cache_inline_media_bytes(
+    cache: &mut std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
+    path: &std::path::Path,
+    bytes: Vec<u8>,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
+    if bytes.len() >= max_bytes {
+        return Some(bytes);
+    }
+    let mut total: usize = cache.values().map(Vec::len).sum::<usize>() + bytes.len();
+    while total > max_bytes {
+        // HashMap iteration order is arbitrary; treat as random eviction.
+        let Some(victim) = cache.keys().next().cloned() else {
+            break;
+        };
+        if let Some(evicted) = cache.remove(&victim) {
+            total -= evicted.len();
+        }
+    }
+    cache.insert(path.to_path_buf(), bytes);
+    None
+}
+
 impl AgentView {
     // -- Image viewer input --------------------------------------------------
 
@@ -82,51 +145,70 @@ impl AgentView {
         // the next time the path is seen `needs_transmit` would be false and only
         // `place` (no `transmit`) would emit — leaving a blank image.
         let needs_transmit = !self.inline_media_ids.contains_key(path);
-        let mut transmit_esc = String::new();
 
-        if needs_transmit {
-            // Load bytes from disk (or use cached bytes if available).
-            if !self.inline_media_cache.contains_key(path) {
-                let bytes = if placement.info.is_video {
-                    let (frame_bytes, _, _) = crate::prompt_images::extract_poster_frame(path)?;
-                    crate::terminal::image::prepare_overlay_image_bytes(&frame_bytes)?
-                } else {
-                    let raw = std::fs::read(path).ok()?;
-                    crate::terminal::image::prepare_overlay_image_bytes(&raw)?
-                };
-                // Bound the cache: a long image-heavy session must not pin
-                // every encoded image for its lifetime. Evicting drops only
-                // CPU-side bytes — Kitty placements already transmitted stay
-                // valid on the GPU (`inline_media_ids` is kept); an evicted
-                // path re-reads from disk if it needs a re-transmit.
-                const INLINE_MEDIA_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
-                let incoming = bytes.len();
-                if incoming < INLINE_MEDIA_CACHE_MAX_BYTES {
-                    let mut total: usize = self
-                        .inline_media_cache
-                        .values()
-                        .map(Vec::len)
-                        .sum::<usize>()
-                        + incoming;
-                    while total > INLINE_MEDIA_CACHE_MAX_BYTES {
-                        // HashMap iteration order is arbitrary — treat as random eviction.
-                        let Some(victim) = self.inline_media_cache.keys().next().cloned() else {
-                            break;
-                        };
-                        if let Some(evicted) = self.inline_media_cache.remove(&victim) {
-                            total -= evicted.len();
-                        }
+        // Cache bytes before any id allocation: place-only frames after an
+        // eviction (id kept, cache dropped) must reload or they dead-end on
+        // a permanent spinner.
+        let mut oversized: Option<Vec<u8>> = None;
+        if !self.inline_media_cache.contains_key(path) {
+            // A missing file keeps polling cheaply (generation may still be
+            // writing it) and never reaches the decode/ffmpeg work below.
+            let meta = std::fs::metadata(path).ok()?;
+            // A failure is retried only when the file changed since: a file
+            // caught mid-write self-heals; a genuinely broken one doesn't
+            // re-run decode/extraction every frame. No stamp (no mtime) means
+            // no change signal: never negative-cache, keep retrying.
+            let stamp = MediaFileStamp::from_metadata(&meta);
+            if let Some(stamp) = stamp
+                && self.inline_media_load_failed.get(path) == Some(&stamp)
+            {
+                return None;
+            }
+            let loaded = if placement.info.is_video {
+                crate::prompt_images::extract_poster_frame(path).and_then(|(frame_bytes, _, _)| {
+                    crate::terminal::image::prepare_overlay_image_bytes(&frame_bytes)
+                })
+            } else {
+                std::fs::read(path)
+                    .ok()
+                    .and_then(|raw| crate::terminal::image::prepare_overlay_image_bytes(&raw))
+            };
+            let Some(bytes) = loaded else {
+                match stamp {
+                    Some(stamp) => {
+                        self.inline_media_load_failed.insert(path.clone(), stamp);
+                    }
+                    None => {
+                        self.inline_media_load_failed.remove(path);
                     }
                 }
-                self.inline_media_cache.insert(path.clone(), bytes);
-            }
-            let image_id = self.get_or_alloc_media_id(path);
-            let bytes = self.inline_media_cache.get(path)?;
-            transmit_esc = crate::terminal::image::transmit_inline_image(bytes, image_id)?;
+                return None;
+            };
+            self.inline_media_load_failed.remove(path);
+            // Bound the cache: a long image-heavy session must not pin
+            // every encoded image for its lifetime. Evicting drops only
+            // CPU-side bytes; Kitty placements already transmitted stay
+            // valid on the GPU (`inline_media_ids` is kept); an evicted
+            // path re-reads from disk if it needs a re-transmit.
+            const INLINE_MEDIA_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+            oversized = cache_inline_media_bytes(
+                &mut self.inline_media_cache,
+                path,
+                bytes,
+                INLINE_MEDIA_CACHE_MAX_BYTES,
+            );
         }
-
+        // Every failure above returned `None` before this, preserving the
+        // no-id-without-bytes invariant.
         let image_id = self.get_or_alloc_media_id(path);
-        let image_data = self.inline_media_cache.get(path)?;
+        let image_data: &[u8] = match &oversized {
+            Some(bytes) => bytes,
+            None => self.inline_media_cache.get(path)?,
+        };
+        let mut transmit_esc = String::new();
+        if needs_transmit {
+            transmit_esc = crate::terminal::image::transmit_inline_image(image_data, image_id)?;
+        }
         let (w, h) = decode_image_dimensions(image_data)
             .unwrap_or((placement.info.width, placement.info.height));
 
@@ -773,6 +855,41 @@ mod tests {
         );
         crate::memory_release::run_deferred_release();
         assert_eq!(test_support::calls(), before + 1);
+    }
+
+    /// Oversized payloads (≥ cap) are handed back for transient use and never
+    /// inserted, so repeated oversized loads cannot grow the cache.
+    #[test]
+    fn oversized_media_bytes_stay_transient_and_never_accumulate() {
+        let mut cache = std::collections::HashMap::new();
+        let p = |s: &str| std::path::PathBuf::from(s);
+
+        assert!(
+            super::cache_inline_media_bytes(&mut cache, &p("/small"), vec![0; 4], 16).is_none()
+        );
+        assert!(cache.contains_key(&p("/small")));
+
+        let back = super::cache_inline_media_bytes(&mut cache, &p("/big-1"), vec![0; 16], 16);
+        assert_eq!(
+            back.as_ref().map(Vec::len),
+            Some(16),
+            "oversized returned transient"
+        );
+        assert!(!cache.contains_key(&p("/big-1")), "oversized never cached");
+
+        let _ = super::cache_inline_media_bytes(&mut cache, &p("/big-2"), vec![0; 64], 16);
+        let _ = super::cache_inline_media_bytes(&mut cache, &p("/big-2"), vec![0; 64], 16);
+        assert_eq!(
+            cache.len(),
+            1,
+            "successive oversized loads accumulate nothing"
+        );
+
+        // Under-cap inserts still evict down to the bound.
+        assert!(
+            super::cache_inline_media_bytes(&mut cache, &p("/small-2"), vec![0; 15], 16).is_none()
+        );
+        assert!(cache.values().map(Vec::len).sum::<usize>() <= 16);
     }
 
     /// Closing the image viewer drops the decoded overlay image — purge

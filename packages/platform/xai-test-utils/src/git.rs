@@ -66,58 +66,37 @@ macro_rules! require_git {
 ///
 /// Calls [`ensure_hermetic_git_on_path`] first so the hermetic binary is used.
 pub fn init_git_repo(path: &Path) {
-    ensure_hermetic_git_on_path();
-    std::process::Command::new("git")
-        .current_dir(path)
-        .args(["init"])
-        .output()
-        .unwrap();
-
-    std::process::Command::new("git")
-        .current_dir(path)
-        .args(["config", "user.email", "test@test.com"])
-        .output()
-        .unwrap();
-
-    std::process::Command::new("git")
-        .current_dir(path)
-        .args(["config", "user.name", "Test"])
-        .output()
-        .unwrap();
+    run_git(path, &["init"]);
+    run_git(path, &["config", "user.email", "test@test.com"]);
+    run_git(path, &["config", "user.name", "Test"]);
 }
 
-/// Stage all files and create a commit.
-///
-/// Calls [`ensure_hermetic_git_on_path`] first so the hermetic binary is used.
+/// Stage everything and commit. Panics unless the commit succeeded or there
+/// was nothing staged, since a silent no-op leaves the test asserting against
+/// a state it never reached.
 pub fn git_commit_all(path: &Path, message: &str) {
-    ensure_hermetic_git_on_path();
-    std::process::Command::new("git")
-        .current_dir(path)
-        .args(["add", "."])
+    run_git(path, &["add", "."]);
+    let output = git_command_with_identity(path, &["commit", "-m", message])
         .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .current_dir(path)
-        .args(["commit", "-m", message])
-        .output()
-        .unwrap();
+        .unwrap_or_else(|e| panic!("git commit failed to spawn: {e}"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() || stdout.contains("nothing to commit"),
+        "git commit failed: {}{}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
-/// Run a git command in `dir` with a deterministic author/committer, assert
-/// success, and return trimmed stdout.
-///
-/// Calls [`ensure_hermetic_git_on_path`] first so the hermetic binary is used.
+/// Run git in `dir`, assert success, and return trimmed stdout.
 pub fn run_git(dir: &Path, args: &[&str]) -> String {
     run_git_with_env(dir, args, &[])
 }
 
-/// Like [`run_git`], with extra environment variables (e.g.
-/// `GIT_SEQUENCE_EDITOR`). Hermetic beyond the binary and author identity:
-/// the developer's global/system git config is masked (a local
-/// `commit.gpgsign`/`core.hooksPath`/`rebase.autoSquash` must not change
-/// test behavior) and credential prompts are disabled. `envs` is applied
-/// last, so callers can override any of this.
-pub fn run_git_with_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> String {
+/// Git with a fixed identity and the machine's own configuration masked, so a
+/// repository with no local identity still commits and a developer's global
+/// settings cannot change what a test observes.
+fn git_command_with_identity(dir: &Path, args: &[&str]) -> std::process::Command {
     ensure_hermetic_git_on_path();
     let mut cmd = std::process::Command::new("git");
     cmd.args(args)
@@ -131,7 +110,17 @@ pub fn run_git_with_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Str
             if cfg!(windows) { "NUL" } else { "/dev/null" },
         )
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // Callers assert on git's own wording, so pin the language the same way
+        // the configuration is pinned.
+        .env("LC_ALL", "C");
+    cmd
+}
+
+/// [`run_git`] with extra environment variables, applied last so a caller can
+/// override any of the defaults.
+pub fn run_git_with_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> String {
+    let mut cmd = git_command_with_identity(dir, args);
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -145,6 +134,63 @@ pub fn run_git_with_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Str
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// `git init -b main` plus `core.excludesFile=/dev/null`, the shared preamble
+/// for a seeded source repo.
+pub fn git_init_seed(dir: &Path) {
+    run_git(dir, &["init", "-b", "main"]);
+    run_git(dir, &["config", "core.excludesFile", "/dev/null"]);
+}
+
+/// Create `<temp>/repo` with one committed `tracked.txt` and return its path.
+pub fn seed_repo(temp: &Path) -> PathBuf {
+    let repo = temp.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    init_git_repo(&repo);
+    std::fs::write(repo.join("tracked.txt"), "original").unwrap();
+    git_commit_all(&repo, "initial");
+    repo
+}
+
+/// [`seed_repo`] plus a bare `origin` remote holding `refs/heads/main`.
+/// Returns `(repo, remote)`.
+pub fn seed_repo_with_remote(temp: &Path) -> (PathBuf, PathBuf) {
+    let repo = seed_repo(temp);
+    let remote = temp.join("remote.git");
+    run_git(temp, &["init", "--bare", remote.to_str().unwrap()]);
+    run_git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    run_git(&repo, &["push", "origin", "HEAD:refs/heads/main"]);
+    run_git(&repo, &["fetch", "origin"]);
+    (repo, remote)
+}
+
+/// Commit a modification to `tracked.txt`, then `reset --hard HEAD~1` so only
+/// the reflog names the discarded commit. `when` pins the author/committer date
+/// (e.g. to age the commit); `None` uses the current time. Returns the discarded
+/// commit's SHA and asserts no ref reaches it.
+pub fn reflog_only_commit(worktree: &Path, when: Option<&str>) -> String {
+    std::fs::write(worktree.join("tracked.txt"), "three hours of work\n").unwrap();
+    let dates = when.map(|w| [("GIT_AUTHOR_DATE", w), ("GIT_COMMITTER_DATE", w)]);
+    run_git_with_env(
+        worktree,
+        &["commit", "-am", "work only this worktree saw"],
+        dates.as_ref().map(|d| &d[..]).unwrap_or(&[]),
+    );
+    let discarded = run_git(worktree, &["rev-parse", "HEAD"]);
+    run_git(worktree, &["reset", "--hard", "HEAD~1"]);
+    assert_eq!(
+        run_git(
+            worktree,
+            &["rev-list", "--max-count=1", &discarded, "--not", "--all"]
+        ),
+        discarded,
+        "no ref names it, so only the reflog does"
+    );
+    discarded
 }
 
 /// Write a grouped fan-out tree of ~`files` files (`files_per_dir` per

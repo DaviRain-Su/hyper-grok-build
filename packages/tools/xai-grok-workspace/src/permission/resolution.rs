@@ -843,6 +843,11 @@ fn parse_mcp_entries(json: &serde_json::Value, key: &str) -> Vec<AllowedMcpServe
     let mut entries = Vec::new();
     for entry in arr {
         if let Some(url) = entry.get("serverUrl").and_then(|u| u.as_str()) {
+            if key == ALLOWED_MCP_SERVERS_KEY {
+                warn_on_unmatchable_allow_url(url);
+            } else {
+                warn_on_unmatchable_deny_url(url);
+            }
             entries.push(AllowedMcpServer::Http {
                 url_pattern: url.to_string(),
             });
@@ -862,6 +867,149 @@ fn parse_mcp_entries(json: &serde_json::Value, key: &str) -> Vec<AllowedMcpServe
         }
     }
     entries
+}
+
+/// Allow matching compares schemes literally ([`url_allow_matches`]), so a
+/// pattern with no scheme or a glob in the scheme (`*://host/*`,
+/// `*.corp.com/*`) can never match a runtime URL. That fails closed, but a
+/// fleet policy written this way silently loses its grants — tell the admin.
+fn warn_on_unmatchable_allow_url(pattern: &str) {
+    match split_scheme(pattern) {
+        (None, _) => warn!(
+            pattern,
+            "allowedMcpServers serverUrl has no scheme; schemes match literally, so this entry can never match — write e.g. https://{pattern}"
+        ),
+        (Some(scheme), _) if scheme.contains(['*', '?', '[']) => {
+            warn!(
+                pattern,
+                "allowedMcpServers serverUrl has a glob in its scheme; schemes match literally, so this entry can never match — write the scheme out (e.g. https://)"
+            );
+        }
+        (Some(_), rest) => {
+            let (authority, _) = split_authority_path(rest);
+            let authority = authority.rsplit('@').next().unwrap_or(authority);
+            if is_bracketed_ipv6(authority) {
+                // Bracketed IPv6 compares by parsed address — any spelling
+                // of the same address matches. Its port still matches as a
+                // literal number, so a glob or non-numeric port grants
+                // nothing, same as on a domain host.
+                let suffix = authority.split_once(']').map_or("", |(_, rest)| rest);
+                let port_ok = suffix.is_empty()
+                    || suffix
+                        .strip_prefix(':')
+                        .is_some_and(|p| p.parse::<u16>().is_ok());
+                if !port_ok {
+                    warn!(
+                        pattern,
+                        "allowedMcpServers serverUrl port is not a number; ports match literally, so this entry can never match"
+                    );
+                }
+                return;
+            }
+            // Warn against the MATCHER's view of the pattern (host = before
+            // the last `:`, trailing dots trimmed like canonicalization) —
+            // a shape the matcher already handles must not warn: a false
+            // "can never match" trains admins to ignore load-bearing warns.
+            let (host, port) = match authority.rsplit_once(':') {
+                Some((h, p)) => (h, Some(p)),
+                None => (authority, None),
+            };
+            let host = host.trim_end_matches('.');
+            // Ports are literal numbers; a glob or non-numeric port grants
+            // nothing — the pre-split whole-URL glob semantics honored
+            // `:*`, so legacy configs must hear about the change.
+            if !host.contains(':')
+                && let Some(p) = port
+                && p.parse::<u16>().is_err()
+            {
+                warn!(
+                    pattern,
+                    "allowedMcpServers serverUrl port is not a number; ports match literally, so this entry can never match"
+                );
+                return;
+            }
+            if host.is_empty() {
+                warn!(
+                    pattern,
+                    "allowedMcpServers serverUrl has no host; this entry can never match"
+                );
+            } else if let Ok(v6) = host.parse::<std::net::Ipv6Addr>() {
+                // The matcher's host text works iff it equals the canonical
+                // spelling the runtime side reports (`…::1:443` with a
+                // canonical address + port works; `2001:0db8::1:443` not).
+                if v6.to_string() != host {
+                    warn!(
+                        pattern,
+                        canonical = %v6,
+                        "allowedMcpServers serverUrl IPv6 host is not in canonical form and can never match — write the canonical spelling or bracket the address"
+                    );
+                }
+            } else if host.contains(':') && !host.contains(['*', '?', '[']) {
+                // A colon-bearing LITERAL that isn't a valid address (the
+                // port split ate part of an unbracketed IPv6); a glob host
+                // like `2001:db8*` can still match and stays silent.
+                warn!(
+                    pattern,
+                    "allowedMcpServers serverUrl IPv6 host must be bracketed; as written this entry can never match"
+                );
+            } else if let Some(ip) = parse_ip_host(host)
+                && ip.to_string() != host
+            {
+                // Allow hosts glob-match the canonical runtime host, so an
+                // IP in a non-canonical spelling (`127.1`, `0xa9fea9fe`)
+                // can never match its connect target.
+                warn!(
+                    pattern,
+                    canonical = %ip,
+                    "allowedMcpServers serverUrl IP host is not in canonical form and can never match — write the canonical spelling"
+                );
+            } else if glob::Pattern::new(&canonicalize_pattern_host(host)).is_err() {
+                warn!(
+                    pattern,
+                    "allowedMcpServers serverUrl host glob does not compile; this entry can never match"
+                );
+            } else {
+                warn_on_dead_unicode_glob_label(pattern, host, "allowedMcpServers");
+            }
+        }
+    }
+}
+
+/// A deny entry that can never match is silent zero enforcement — tell the
+/// admin. Covers a host-less pattern, a host glob that doesn't compile
+/// (matching nothing, since no parseable runtime host contains `[`), and a
+/// label mixing Unicode with glob chars.
+fn warn_on_unmatchable_deny_url(pattern: &str) {
+    let (host, _) = split_host_path(pattern);
+    match host {
+        None => warn!(
+            pattern,
+            "deniedMcpServers serverUrl has no host; this entry can never match"
+        ),
+        Some(host) => {
+            if glob::Pattern::new(&canonicalize_pattern_host(&host)).is_err() {
+                warn!(
+                    pattern,
+                    "deniedMcpServers serverUrl host glob does not compile; the entry matches nothing"
+                );
+            }
+            warn_on_dead_unicode_glob_label(pattern, &host, "deniedMcpServers");
+        }
+    }
+}
+
+/// A host label mixing non-ASCII with glob metacharacters can never match:
+/// runtime hosts are punycoded, and a partial label can't be.
+fn warn_on_dead_unicode_glob_label(pattern: &str, host: &str, key: &str) {
+    if host
+        .split('.')
+        .any(|label| !label.is_ascii() && label.contains(['*', '?', '[']))
+    {
+        warn!(
+            pattern,
+            "{key} serverUrl mixes Unicode and glob characters in one host label; runtime hosts are punycoded, so this entry can never match"
+        );
+    }
 }
 
 fn parse_managed_settings_permissions(
@@ -1095,7 +1243,7 @@ impl McpServerAllowlist {
         }
         self.url_patterns
             .iter()
-            .any(|pat| url_glob_matches(pat, url))
+            .any(|pat| url_allow_matches(pat, url))
     }
 
     /// Command-only (no name-deny check); use `is_server_allowed` for policy. Test-only.
@@ -1137,6 +1285,10 @@ impl McpServerAllowlist {
                 .any(|pat| mcp_name_matches(pat, mcp_server_name(server)));
         }
 
+        // Emptiness checks live INSIDE the arms: a match guard that fails
+        // would fall through to `_`, and the `_` arm's fail-closed gate must
+        // catch only genuinely unknown transports — a command-only allowlist
+        // restricts stdio, never HTTP (per-dimension union).
         match server {
             agent_client_protocol::McpServer::Http(agent_client_protocol::McpServerHttp {
                 url,
@@ -1145,23 +1297,32 @@ impl McpServerAllowlist {
             | agent_client_protocol::McpServer::Sse(agent_client_protocol::McpServerSse {
                 url,
                 ..
-            }) if !self.url_patterns.is_empty() => {
-                restricted = true;
-                matched |= self
-                    .url_patterns
-                    .iter()
-                    .any(|pat| url_glob_matches(pat, url));
+            }) => {
+                if !self.url_patterns.is_empty() {
+                    restricted = true;
+                    matched |= self
+                        .url_patterns
+                        .iter()
+                        .any(|pat| url_allow_matches(pat, url));
+                }
             }
             agent_client_protocol::McpServer::Stdio(agent_client_protocol::McpServerStdio {
                 command,
                 ..
-            }) if !self.commands.is_empty() => {
-                restricted = true;
-                let command = command.to_string_lossy();
-                matched |= self.commands.iter().any(|c| *c == command);
+            }) => {
+                if !self.commands.is_empty() {
+                    restricted = true;
+                    let command = command.to_string_lossy();
+                    matched |= self.commands.iter().any(|c| *c == command);
+                }
             }
-            // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
-            _ => {}
+            // `McpServer` is #[non_exhaustive] as of acp 0.10. A transport
+            // we can't inspect must not slip a URL/command lockdown (fail
+            // closed); name allows were already checked above.
+            _ => {
+                restricted =
+                    restricted || !self.url_patterns.is_empty() || !self.commands.is_empty();
+            }
         }
 
         !restricted || matched
@@ -1231,91 +1392,470 @@ fn mcp_server_name(server: &agent_client_protocol::McpServer) -> &str {
     }
 }
 
-/// Match a policy `serverName` against a runtime server name.
-///
-/// Both sides reduce to one key (strip `grok_com_`, [`normalize_managed_name`],
-/// truncate to the cap) compared by exact equality — never substring, so deny
-/// `foo` can't leak onto `foobar`; an empty key never matches.
+/// Match a policy `serverName` against a runtime server name: both sides
+/// reduce to one key (strip `grok_com_`, [`normalize_managed_name`]) and
+/// compare by exact equality — never substring; an empty key never matches.
 fn mcp_name_matches(pattern: &str, name: &str) -> bool {
     fn key(s: &str) -> String {
-        let bare = s.strip_prefix(MANAGED_MCP_PREFIX).unwrap_or(s);
-        let normalized = normalize_managed_name(bare);
-        // Mirror to_managed_name's prefix-inclusive truncation on the bare part.
+        normalize_managed_name(s.strip_prefix(MANAGED_MCP_PREFIX).unwrap_or(s))
+    }
+    // Mirror the legacy injected-name truncation: `grok_com_*` runtime
+    // names were capped at MANAGED_MCP_NAME_MAX_CHARS total (prefix-inclusive
+    // on the bare part).
+    fn truncate(key: String) -> String {
         let max_bare = MANAGED_MCP_NAME_MAX_CHARS - MANAGED_MCP_PREFIX.len();
-        match normalized.char_indices().nth(max_bare) {
-            Some((i, _)) => normalized[..i].to_string(),
-            None => normalized,
+        match key.char_indices().nth(max_bare) {
+            Some((i, _)) => key[..i].to_string(),
+            None => key,
         }
     }
-    let pattern_key = key(pattern);
-    !pattern_key.is_empty() && pattern_key == key(name)
+    let mut pattern_key = key(pattern);
+    let mut name_key = key(name);
+    // Truncate only for the shape runtime truncation produces (a managed
+    // name at exactly the cap), so a long entry never becomes a prefix grant
+    // over decoys. Residual: a decoy spelled exactly like the truncated
+    // managed name is string-identical — no name matcher can tell them apart.
+    if name.starts_with(MANAGED_MCP_PREFIX) && name.chars().count() == MANAGED_MCP_NAME_MAX_CHARS {
+        pattern_key = truncate(pattern_key);
+        name_key = truncate(name_key);
+    }
+    !pattern_key.is_empty() && pattern_key == name_key
 }
 
-/// Glob-match an ALLOW pattern against a URL. Query string and fragment are
-/// stripped before matching to prevent embedded-URL bypass attacks.
-/// Matching is literal over scheme/port/path: `https://*.x.com/*` won't match
-/// `:8080`. This is safe for the allowlist because an imprecise allow merely
-/// over-blocks (fail-closed). Deny matching must NOT reuse this — see
-/// [`url_deny_matches`].
-fn url_glob_matches(pattern: &str, url: &str) -> bool {
-    let cleaned = strip_url_query(url);
-    let opts = glob::MatchOptions {
-        case_sensitive: false,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
+/// Glob options for hosts and DENY paths: case-insensitive (hosts are, and
+/// an insensitive deny only over-blocks), `*` spans `/` — path scoping is
+/// enforced by the authority/path split, not by the glob.
+const POLICY_GLOB_OPTS: glob::MatchOptions = glob::MatchOptions {
+    case_sensitive: false,
+    require_literal_separator: false,
+    require_literal_leading_dot: false,
+};
+
+/// Glob options for ALLOW paths: case-sensitive — URL paths name
+/// case-sensitive resources, and an allow match is a positive grant, so
+/// `/mcp/*` must not grant `/MCP/*`.
+const ALLOW_PATH_GLOB_OPTS: glob::MatchOptions = glob::MatchOptions {
+    case_sensitive: true,
+    require_literal_separator: false,
+    require_literal_leading_dot: false,
+};
+
+/// Split `authority/path…` at the first `/` into `(authority, path)`.
+fn split_authority_path(s: &str) -> (&str, &str) {
+    match s.find('/') {
+        Some(i) => (&s[..i], &s[i..]),
+        None => (s, ""),
+    }
+}
+
+/// A runtime MCP URL reduced to its connect-time components by the WHATWG
+/// parser reqwest uses — hand-parsing diverges from the connect target,
+/// which is the gap behind every dodge in this class (`\` authority ends,
+/// `%2e%2e` segments, userinfo, default ports, alternate IP spellings).
+/// Patterns must NOT use this: they may hold globs the parser rejects.
+struct RuntimeUrl {
+    scheme: String,
+    host: url::Host<String>,
+    /// `None` when elided or equal to the scheme default, like the client.
+    port: Option<u16>,
+    /// WHATWG-normalized: never empty, dot segments resolved, no query.
+    path: String,
+}
+
+impl RuntimeUrl {
+    fn parse(url: &str) -> Option<Self> {
+        let parsed = url::Url::parse(url).ok()?;
+        let host = parsed.host()?.to_owned();
+        Some(Self {
+            scheme: parsed.scheme().to_string(),
+            host,
+            port: parsed.port(),
+            path: decode_unreserved_escapes(parsed.path()),
+        })
+    }
+
+    /// Canonical bare host (lowercase, trailing dot stripped, unbracketed
+    /// IPv6) — the same shape [`split_host_path`] yields for patterns.
+    fn host_text(&self) -> String {
+        match &self.host {
+            url::Host::Domain(d) => d.trim_end_matches('.').to_ascii_lowercase(),
+            url::Host::Ipv4(a) => a.to_string(),
+            url::Host::Ipv6(a) => a.to_string(),
+        }
+    }
+
+    /// Canonical `host[:port]` for allow matching; IPv6 stays bracketed so it
+    /// lines up with `[...]` patterns.
+    fn authority(&self) -> String {
+        let host = match &self.host {
+            url::Host::Ipv6(a) => format!("[{a}]"),
+            _ => self.host_text(),
+        };
+        match self.port {
+            Some(port) => format!("{host}:{port}"),
+            None => host,
+        }
+    }
+}
+
+/// Glob-match an ALLOW pattern: scheme, host, port, and path matched
+/// separately so a wildcard can't cross a component boundary (an allow match
+/// is a positive grant under the lockdown). Scheme and port stay literal,
+/// except a scheme-default `:443`/`:80` matches the port-less spelling. The
+/// URL side is parsed as the client connects ([`RuntimeUrl`]); unparseable =
+/// no grant. Deny matching must NOT reuse this — see [`url_deny_matches`].
+fn url_allow_matches(pattern: &str, url: &str) -> bool {
+    let Some(runtime) = RuntimeUrl::parse(url) else {
+        return false;
     };
-    glob::Pattern::new(pattern)
-        .map(|p| p.matches_with(&cleaned, opts))
+    let (pat_scheme, pat_rest) = split_scheme(pattern);
+    match pat_scheme {
+        Some(p) if p.eq_ignore_ascii_case(&runtime.scheme) => {}
+        // Scheme-less and glob-scheme patterns never match (warned at parse).
+        _ => return false,
+    }
+    let (pat_authority, pat_path) = split_authority_path(pat_rest);
+    // Userinfo in a pattern drops like the connect-time parser drops it —
+    // before bracket detection, so `token@[::1]` still reads as IPv6.
+    let pat_authority = pat_authority.rsplit('@').next().unwrap_or(pat_authority);
+    let url_authority = runtime.authority();
+    // A bracketed IPv6 PATTERN isn't a valid glob (`[` opens a class):
+    // compare parsed addresses, ports literal, so alternate spellings can't
+    // dodge. Only the pattern side chooses this branch — a host glob like
+    // `*` must still see IPv6 runtimes or wildcard allows lose those grants.
+    // A leading `[` whose content isn't an address opens a glob character
+    // class and matches below, like the deny side.
+    if is_bracketed_ipv6(pat_authority) {
+        let pat_authority = strip_pattern_default_port(pat_authority, &runtime.scheme);
+        if !ipv6_authorities_equal(pat_authority, &url_authority) {
+            return false;
+        }
+        return allow_path_matches(&canonicalize_pattern_path(pat_path), &runtime.path);
+    }
+    // Host and port match separately so a trailing host wildcard can't
+    // absorb a port constraint. No pattern port = scheme-default only; an
+    // explicit port matches the effective connect port either spelling.
+    let (pat_host, pat_port) = match pat_authority.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (pat_authority, None),
+    };
+    let glob_match = |pat: &str, s: &str| {
+        glob::Pattern::new(pat)
+            .map(|p| p.matches_with(s, POLICY_GLOB_OPTS))
+            .unwrap_or(false)
+    };
+    if !glob_match(&canonicalize_pattern_host(pat_host), &runtime.host_text()) {
+        return false;
+    }
+    // Ports are literal numbers — a glob or non-numeric port grants nothing
+    // (fail closed), and leading zeros compare numerically.
+    let port_ok = match (pat_port, runtime.port) {
+        (None, None) => true,
+        (None, Some(_)) => false,
+        (Some(p), Some(port)) => p.parse::<u16>() == Ok(port),
+        (Some(p), None) => scheme_default_port(&runtime.scheme)
+            .is_some_and(|default| p.parse::<u16>().ok() == default.parse::<u16>().ok()),
+    };
+    if !port_ok {
+        return false;
+    }
+    allow_path_matches(&canonicalize_pattern_path(pat_path), &runtime.path)
+}
+
+/// Canonicalize a pattern host like the WHATWG parser: IDNA/punycode
+/// (`bücher.example` → `xn--bcher-kva.example`), percent-decoding
+/// (`%61dmin.example` → `admin.example`), lowercase, trailing dot dropped.
+/// Per label; glob labels stay literal.
+fn canonicalize_pattern_host(host: &str) -> String {
+    let host = host.trim_end_matches('.');
+    if host.is_ascii() && !host.contains('%') {
+        return host.to_ascii_lowercase();
+    }
+    host.split('.')
+        .map(|label| {
+            if label.contains(['*', '?', '[']) || (label.is_ascii() && !label.contains('%')) {
+                label.to_ascii_lowercase()
+            } else {
+                match url::Host::parse(label) {
+                    Ok(url::Host::Domain(canonical)) => canonical,
+                    _ => label.to_ascii_lowercase(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// Decode percent escapes of UNRESERVED bytes (RFC 3986 alphanumeric +
+/// `-._~`), which the WHATWG parser leaves as-is — otherwise `/%61dmin/x`
+/// dodges a `/admin/*` deny. Reserved escapes (`%2F`) stay encoded (decoding
+/// them would change the path structure) but normalize to uppercase hex:
+/// the parser preserves pre-existing escape case, and allow paths match
+/// case-sensitively, so `%2f` and `%2F` must compare equal. Escaped dot
+/// segments are already resolved on the runtime side, so a remaining `%2e`
+/// can't re-create one.
+fn decode_unreserved_escapes(path: &str) -> String {
+    fn hex_val(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+        {
+            let decoded = hi * 16 + lo;
+            if decoded.is_ascii_alphanumeric() || matches!(decoded, b'-' | b'.' | b'_' | b'~') {
+                out.push(decoded);
+            } else {
+                out.push(b'%');
+                out.push(bytes[i + 1].to_ascii_uppercase());
+                out.push(bytes[i + 2].to_ascii_uppercase());
+            }
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // Only ASCII bytes were substituted, so the result stays valid UTF-8.
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Resolve literal `.`/`..` segments in a PATTERN path the way the WHATWG
+/// parser resolves the runtime path, so a deny spelled `/x/../admin/*`
+/// scopes to `/admin/*` instead of never matching (the runtime side always
+/// arrives resolved). `..` clamps at root; a trailing dot segment keeps the
+/// directory slash, like the serializer. A glob counts as one segment, so
+/// `..` pops it whole.
+fn resolve_pattern_dot_segments(path: &str) -> String {
+    if !path.contains("/.") {
+        return path.to_string();
+    }
+    let ends_dir = matches!(path.rsplit('/').next(), Some(".") | Some(".."));
+    let mut out: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "." => {}
+            ".." => {
+                if out.len() > 1 {
+                    out.pop();
+                }
+            }
+            s => out.push(s),
+        }
+    }
+    let mut joined = out.join("/");
+    if joined.is_empty() {
+        joined.push('/');
+    }
+    if ends_dir && !joined.ends_with('/') {
+        joined.push('/');
+    }
+    joined
+}
+
+/// Percent-encode a pattern path the way the WHATWG serializer emits
+/// runtime paths, so a Unicode policy path (`/café/*`) matches its connect
+/// spelling (`/caf%C3%A9/*`); unreserved escapes decode (kept escapes
+/// uppercase, both sides) and dot segments resolve first. `?` stays literal
+/// (glob metachar; a runtime path can't contain one).
+fn canonicalize_pattern_path(path: &str) -> String {
+    let path = resolve_pattern_dot_segments(&decode_unreserved_escapes(path));
+    fn needs_encoding(b: u8) -> bool {
+        !b.is_ascii()
+            || b < 0x20
+            || matches!(
+                b,
+                b' ' | b'"' | b'#' | b'<' | b'>' | b'`' | b'{' | b'}' | 0x7f
+            )
+    }
+    if !path.bytes().any(needs_encoding) {
+        return path;
+    }
+    let hex = |n: u8| {
+        char::from_digit(n as u32, 16)
+            .unwrap_or('0')
+            .to_ascii_uppercase()
+    };
+    let mut out = String::with_capacity(path.len());
+    for b in path.bytes() {
+        if needs_encoding(b) {
+            out.push('%');
+            out.push(hex(b >> 4));
+            out.push(hex(b & 0x0f));
+        } else {
+            out.push(b as char);
+        }
+    }
+    out
+}
+
+/// Default port the WHATWG parser elides for a scheme; `None` for unknown
+/// schemes (their pattern ports stay literal, failing closed on a mismatch).
+fn scheme_default_port(scheme: &str) -> Option<&'static str> {
+    match scheme {
+        "http" | "ws" => Some("80"),
+        "https" | "wss" => Some("443"),
+        _ => None,
+    }
+}
+
+/// Strip an explicit scheme-default port (numerically, so `:0443` counts)
+/// from a bracketed-IPv6 pattern authority — the WHATWG parser elides it on
+/// the URL side, and both spellings name the same connect target. The `]`
+/// guard keeps a port-less address ending in a default-port hextet intact.
+fn strip_pattern_default_port<'a>(authority: &'a str, scheme: &str) -> &'a str {
+    let Some(default) = scheme_default_port(scheme).and_then(|d| d.parse::<u16>().ok()) else {
+        return authority;
+    };
+    match authority.rsplit_once(':') {
+        Some((host, port)) if host.ends_with(']') && port.parse::<u16>() == Ok(default) => host,
+        _ => authority,
+    }
+}
+
+/// Allow-side path match: an authority-only pattern matches only the root
+/// path; `/*` spans nested segments. The URL path arrives WHATWG-normalized,
+/// so the glob sees what the server will actually receive.
+fn allow_path_matches(pat_path: &str, url_path: &str) -> bool {
+    if pat_path.is_empty() || pat_path == "/" {
+        return url_path == "/";
+    }
+    glob::Pattern::new(pat_path)
+        .map(|p| p.matches_with(url_path, ALLOW_PATH_GLOB_OPTS))
         .unwrap_or(false)
 }
 
-/// Host-normalized, scheme/port-agnostic match of a DENY pattern against a URL.
-///
-/// Deny matching is deliberately *asymmetric* with allow matching
-/// ([`url_glob_matches`]): an `allowedMcpServers` entry may stay literal because
-/// an imprecise allow merely over-blocks, which is fail-closed and therefore
-/// safe. A `deniedMcpServers` entry is a security control that must never fail
-/// *open*, so we ignore scheme and port and compare the parsed host
-/// independently (lowercased, trailing dot stripped), then apply only the
-/// pattern's path portion as a glob. A deny pattern of `host` or
-/// `scheme://host/*` blocks that host on ANY scheme, port, and path.
+/// True when a pattern authority is a bracketed IPv6 literal, `[v6]` or
+/// `[v6]:port`. A leading `[` whose content doesn't parse as an address
+/// opens a glob character class instead (`[ab]host.example`).
+fn is_bracketed_ipv6(authority: &str) -> bool {
+    authority
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once(']'))
+        .is_some_and(|(addr, _)| addr.parse::<std::net::Ipv6Addr>().is_ok())
+}
+
+/// Compare two bracketed-IPv6 authorities by parsed address (ports numeric
+/// when both parse, so `:0443` ≡ `:443`), so alternate spellings of one
+/// address (`[2001:0db8::1]`, `[2001:db8:0:0:0:0:0:1]`) can't dodge a
+/// policy entry. When either side isn't a parseable bracketed literal, fall
+/// back to the literal comparison (an imprecise allow only over-blocks).
+fn ipv6_authorities_equal(a: &str, b: &str) -> bool {
+    fn parse(authority: &str) -> Option<(std::net::Ipv6Addr, &str)> {
+        let rest = authority.strip_prefix('[')?;
+        let end = rest.find(']')?;
+        let addr: std::net::Ipv6Addr = rest[..end].parse().ok()?;
+        Some((addr, &rest[end + 1..]))
+    }
+    fn ports_equal(a: &str, b: &str) -> bool {
+        match (
+            a.strip_prefix(':').map(str::parse::<u16>),
+            b.strip_prefix(':').map(str::parse::<u16>),
+        ) {
+            (Some(Ok(pa)), Some(Ok(pb))) => pa == pb,
+            _ => a == b,
+        }
+    }
+    match (parse(a), parse(b)) {
+        (Some((addr_a, port_a)), Some((addr_b, port_b))) => {
+            addr_a == addr_b && ports_equal(port_a, port_b)
+        }
+        _ => a.eq_ignore_ascii_case(b),
+    }
+}
+
+/// Split `scheme://rest` into `(Some(scheme), rest)`, or `(None, s)`.
+fn split_scheme(s: &str) -> (Option<&str>, &str) {
+    match s.find("://") {
+        Some(i) => (Some(&s[..i]), &s[i + 3..]),
+        None => (None, s),
+    }
+}
+
+/// Host-normalized, scheme/port-agnostic match of a DENY pattern against a
+/// URL. Deliberately asymmetric with [`url_allow_matches`]: an imprecise
+/// allow only over-blocks (safe), but a deny must never fail open — so
+/// scheme and port are ignored and a `host` / `scheme://host/*` entry blocks
+/// that host on ANY scheme, port, and path. A URL [`RuntimeUrl`] rejects is
+/// denied outright: a spelling we can't interpret must not slip past.
 fn url_deny_matches(pattern: &str, url: &str) -> bool {
     let (Some(pat_host), pat_path) = split_host_path(pattern) else {
         return false;
     };
-    let (Some(url_host), url_path) = split_host_path(&strip_url_query(url)) else {
-        return false;
+    let Some(runtime) = RuntimeUrl::parse(url) else {
+        return true;
     };
-    let opts = glob::MatchOptions {
-        case_sensitive: false,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
+    let url_host = runtime.host_text();
+    // An invalid deny HOST glob still denies by literal comparison.
+    let glob_match = |pat: &str, s: &str| match glob::Pattern::new(pat) {
+        Ok(p) => p.matches_with(s, POLICY_GLOB_OPTS),
+        Err(_) => pat.eq_ignore_ascii_case(s),
     };
-    let glob_match = |pat: &str, s: &str| {
-        glob::Pattern::new(pat)
-            .map(|p| p.matches_with(s, opts))
-            .unwrap_or(false)
-    };
-    if !glob_match(&pat_host, &url_host) {
+    // IP-named entries compare parsed addresses so alternate spellings of
+    // one connect target (`0xa9fea9fe`, `127.1`) are still denied; globs
+    // never parse as an IP and fall through.
+    if let (Some(pat_ip), Some(url_ip)) = (parse_ip_host(&pat_host), parse_ip_host(&url_host)) {
+        if pat_ip != url_ip {
+            return false;
+        }
+    } else if !glob_match(&canonicalize_pattern_host(&pat_host), &url_host) {
         return false;
     }
-    // A host-only pattern (no path) blocks every path on that host. Otherwise
-    // apply the pattern's path as a glob, normalizing an empty URL path to "/"
-    // so a `/*` pattern still matches a path-less URL (e.g. `https://host`).
-    if pat_path.is_empty() {
+    // A host-only pattern blocks every path on that host — including every
+    // spelling whose CANONICAL path is `/` (`https://host/`, `/.`,
+    // `/mcp/..`), all WHATWG-equal to the pathless form. Otherwise glob the
+    // canonical pattern path against the WHATWG-normalized URL path, so
+    // `/admin/*` can't be dodged by spelling the URL `/mcp/../admin/x`.
+    let pat_path = canonicalize_pattern_path(&pat_path);
+    if pat_path.is_empty() || pat_path == "/" {
         return true;
     }
-    let url_path = if url_path.is_empty() {
-        "/"
-    } else {
-        url_path.as_str()
-    };
-    glob_match(&pat_path, url_path)
+    match glob::Pattern::new(&pat_path) {
+        Ok(p) => p.matches_with(&runtime.path, POLICY_GLOB_OPTS),
+        // Host matched + broken path glob: deny the whole host, never
+        // fail open.
+        Err(e) => {
+            warn!(
+                pattern,
+                error = %e,
+                "invalid deniedMcpServers path glob; denying every path on the matched host"
+            );
+            true
+        }
+    }
 }
 
-/// Split a URL or URL pattern into `(host, path)`, dropping scheme, userinfo,
-/// port, query, and fragment. The host is lowercased with a trailing dot
-/// stripped; the path keeps its original case and any glob metacharacters.
+/// Parse a bare host as an IP, accepting every spelling the WHATWG parser
+/// canonicalizes at connect time (hex, shortened, decimal, unbracketed
+/// IPv6). IPv4-mapped IPv6 canonicalizes to the IPv4 it reaches on a
+/// dual-stack socket. Domains and glob patterns return `None`.
+fn parse_ip_host(host: &str) -> Option<std::net::IpAddr> {
+    let addr = if let Ok(v6) = host.parse::<std::net::Ipv6Addr>() {
+        std::net::IpAddr::V6(v6)
+    } else {
+        match url::Host::parse(host) {
+            Ok(url::Host::Ipv4(a)) => std::net::IpAddr::V4(a),
+            Ok(url::Host::Ipv6(a)) => std::net::IpAddr::V6(a),
+            _ => return None,
+        }
+    };
+    Some(addr.to_canonical())
+}
+
+/// Split a URL PATTERN into `(host, path)`, dropping scheme, userinfo, and
+/// port. The host is lowercased with a trailing dot stripped; the path keeps
+/// its original case and any glob metacharacters. Runtime URLs must be parsed
+/// with [`RuntimeUrl`] instead — hand-splitting a runtime URL diverges from
+/// the connect target.
 fn split_host_path(s: &str) -> (Option<String>, String) {
     let after_scheme = match s.find("://") {
         Some(i) => &s[i + 3..],
@@ -1325,25 +1865,44 @@ fn split_host_path(s: &str) -> (Option<String>, String) {
         Some(i) => (&after_scheme[..i], &after_scheme[i..]),
         None => (after_scheme, ""),
     };
-    // Drop userinfo (`user:pass@host`) then the port (`host:443`).
+    // Drop userinfo then the port; IPv6 keeps its colons whether bracketed
+    // or not (a naive `:`-split truncates `2001:db8::1` to `2001`). A
+    // decimal suffix is also a valid hextet; the `host:port` reading wins
+    // that ambiguity (`…::1:443` is a copied URL's host + port, and reading
+    // it as an address under-blocks the intended host). `:ffff` is a hextet.
+    // A leading `[` only means IPv6 when its content parses as one —
+    // otherwise it opens a glob character class (`[ab]evil.example`).
     let authority = authority.rsplit('@').next().unwrap_or(authority);
-    let host = authority.split(':').next().unwrap_or(authority);
+    let bracket_ipv6 = authority.strip_prefix('[').and_then(|rest| {
+        let content = match rest.find(']') {
+            Some(i) => &rest[..i],
+            None => rest,
+        };
+        content
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok()
+            .then_some(content)
+    });
+    let host = if let Some(content) = bracket_ipv6 {
+        content
+    } else if let Some((before_port, port)) = authority.rsplit_once(':')
+        && !port.is_empty()
+        && port.bytes().all(|b| b.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
+        && before_port.parse::<std::net::Ipv6Addr>().is_ok()
+    {
+        before_port
+    } else if authority.parse::<std::net::Ipv6Addr>().is_ok() {
+        authority
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host.is_empty() {
         (None, path.to_string())
     } else {
         (Some(host), path.to_string())
     }
-}
-
-fn strip_url_query(url: &str) -> String {
-    // Strip query string and fragment: "https://x.com/path?q=1#f" -> "https://x.com/path"
-    let without_fragment = url.split('#').next().unwrap_or(url);
-    without_fragment
-        .split('?')
-        .next()
-        .unwrap_or(without_fragment)
-        .to_string()
 }
 
 /// When non-empty, only git marketplace sources matching an allowed URL are

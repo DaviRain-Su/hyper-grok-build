@@ -88,6 +88,7 @@ impl ChatStateActor {
         if let Some(reminder) = memory_reminder {
             inject_memory_reminder(&mut items, &reminder);
         }
+        items = crate::compaction_utils::ModelRequestHistory::from_raw(items).into_items();
 
         // Step 4: Assemble request
         ConversationRequest {

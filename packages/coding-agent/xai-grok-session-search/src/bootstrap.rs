@@ -19,7 +19,7 @@ use crate::db::{
 use crate::doc::{UpsertOutcome, build_session_doc, should_skip_session, upsert_unless_unchanged};
 use crate::fts::{META_KEY_BOOTSTRAP_CLAIM, META_KEY_LAST_BOOTSTRAP, SessionSearchIndex};
 use crate::recovery;
-use crate::source::{ContentExtractor, IndexEnabled, IndexableSession, SessionSource};
+use crate::source::{ContentExtractor, IndexableSession, SessionSource};
 
 const BOOTSTRAP_MAX_CONCURRENT: usize = 4;
 const BOOTSTRAP_PER_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -129,14 +129,12 @@ pub(crate) async fn bootstrap_with_lease(
     root_dir: &Path,
     source: &dyn SessionSource,
     extract: ContentExtractor,
-    enabled: IndexEnabled,
     progress: &Arc<BootstrapProgress>,
 ) -> io::Result<BootstrapOutcome> {
     bootstrap_with_lease_inner(
         root_dir,
         source,
         extract,
-        enabled,
         progress,
         &TIMING,
         BootstrapRole::Launch,
@@ -152,14 +150,12 @@ pub(crate) async fn try_bootstrap_with_lease(
     root_dir: &Path,
     source: &dyn SessionSource,
     extract: ContentExtractor,
-    enabled: IndexEnabled,
     progress: &Arc<BootstrapProgress>,
 ) -> io::Result<BootstrapOutcome> {
     bootstrap_with_lease_inner(
         root_dir,
         source,
         extract,
-        enabled,
         progress,
         &TIMING,
         BootstrapRole::Recheck,
@@ -188,15 +184,10 @@ async fn bootstrap_with_lease_inner(
     root_dir: &Path,
     source: &dyn SessionSource,
     extract: ContentExtractor,
-    enabled: IndexEnabled,
     progress: &Arc<BootstrapProgress>,
     timing: &BootstrapTiming,
     role: BootstrapRole,
 ) -> io::Result<BootstrapOutcome> {
-    // Before `search_db_path`, which creates the sessions directory.
-    if !enabled() {
-        return Ok(BootstrapOutcome::Done);
-    }
     let db_path = search_db_path(root_dir);
     let token = ClaimToken::new();
     let started = Instant::now();
@@ -207,12 +198,6 @@ async fn bootstrap_with_lease_inner(
     let deadline = started + peer_wait;
     let mut peer_seen = false;
     loop {
-        // Re-read before every attempt: the wait for a peer runs a minute, and claiming the
-        // lease writes to the database.
-        if !enabled() {
-            return Ok(BootstrapOutcome::Done);
-        }
-
         // Skipped on the first iteration so a launch always reindexes.
         if peer_seen && has_completed_bootstrap_marker(root_dir).await == Some(true) {
             tracing::info!(
@@ -246,7 +231,6 @@ async fn bootstrap_with_lease_inner(
                 root_dir,
                 source,
                 extract,
-                enabled,
                 progress,
                 &token,
                 refresher.claim_lost(),
@@ -474,7 +458,6 @@ async fn reindex_all(
     root_dir: &Path,
     source: &dyn SessionSource,
     extract: ContentExtractor,
-    enabled: IndexEnabled,
     progress: &Arc<BootstrapProgress>,
     claim_token: &ClaimToken,
     claim_lost: Arc<AtomicBool>,
@@ -533,7 +516,7 @@ async fn reindex_all(
 
             // A successor owns the index once the claim is lost. These upserts are idempotent,
             // not fenced, so stopping just avoids contending with it.
-            if claim_lost.load(Ordering::Acquire) || !enabled() {
+            if claim_lost.load(Ordering::Acquire) {
                 return;
             }
 
@@ -581,10 +564,6 @@ async fn reindex_all(
                     return Ok(UpsertOutcome::NoContent);
                 };
 
-                // The read above takes seconds, and a write the timeout abandoned still lands.
-                if !enabled() {
-                    return Ok(UpsertOutcome::Declined);
-                }
                 let doc = build_session_doc(&session, content);
                 let db_path = search_db_path(&root);
 
@@ -610,8 +589,6 @@ async fn reindex_all(
                         progress.bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
                     }
                     UpsertOutcome::NoContent => {}
-                    // Not indexed and not a failure: the switch closed under it.
-                    UpsertOutcome::Declined => return,
                 },
                 Ok(Err(e)) => {
                     log_session_index_failure(
@@ -637,15 +614,6 @@ async fn reindex_all(
         if let Err(e) = result {
             tracing::warn!(error = %e, "session indexing task panicked");
         }
-    }
-
-    if !enabled() {
-        tracing::info!(
-            indexed = progress.indexed.load(Ordering::Relaxed),
-            total = progress.total.load(Ordering::Relaxed),
-            "session search turned off mid-bootstrap; abandoning the reindex with no marker"
-        );
-        return Ok(BootstrapOutcome::Done);
     }
 
     if claim_lost.load(Ordering::Acquire) {

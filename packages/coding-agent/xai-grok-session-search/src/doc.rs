@@ -23,8 +23,6 @@ pub(crate) enum UpsertOutcome {
     },
     /// Nothing to write: the store exposes no updates file.
     NoContent,
-    /// The switch closed while the transcript was being read, so nothing was written.
-    Declined,
 }
 
 /// Upsert `doc` unless the stored content hash already matches.

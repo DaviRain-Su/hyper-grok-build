@@ -1594,6 +1594,34 @@ async fn build_request_includes_all_messages() {
 }
 
 #[tokio::test]
+async fn build_request_projects_agent_message_for_model_without_mutating_history() {
+    let raw = format!(
+        "{}\npayload starts with the exact label",
+        crate::compaction_utils::AGENT_MESSAGE_MODEL_LABEL
+    );
+    let raw_item = ConversationItem::agent_message(&raw);
+    let raw_bytes = serde_json::to_vec(&raw_item).unwrap();
+    let h = TestHarness::with_conversation(vec![raw_item]);
+
+    let request = h
+        .handle
+        .build_request(vec![], None, false, None, "c".into(), "r".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        request.items[0].text_content(),
+        format!(
+            "{}\n{raw}",
+            crate::compaction_utils::AGENT_MESSAGE_MODEL_LABEL
+        )
+    );
+
+    let persisted = h.handle.get_conversation().await;
+    assert_eq!(persisted[0].text_content(), raw);
+    assert_eq!(serde_json::to_vec(&persisted[0]).unwrap(), raw_bytes);
+}
+
+#[tokio::test]
 async fn build_request_with_empty_conversation() {
     let h = TestHarness::new();
     let request = h

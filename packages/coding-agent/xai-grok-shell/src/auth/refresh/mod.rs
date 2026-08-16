@@ -86,47 +86,6 @@ pub(crate) fn resolve_refresh_credential(
         })
 }
 
-/// Identity of a refresh token whose IdP-side fate is unknown: it was on the
-/// wire when the exchange straddled a system suspend past the rotation
-/// grace. Rides [`RefreshOutcome::TransientFailure`] so `refresh_chain` can
-/// persist the cross-process sentinel (see `manager::consumed_sentinel`).
-#[derive(Clone)]
-pub(crate) struct SuspectConsumedRt {
-    refresh_token: String,
-    suspended_ms: u64,
-}
-
-impl SuspectConsumedRt {
-    pub(crate) fn new(refresh_token: String, suspended_ms: u64) -> Self {
-        Self {
-            refresh_token,
-            suspended_ms,
-        }
-    }
-
-    pub(crate) fn refresh_token(&self) -> &str {
-        &self.refresh_token
-    }
-
-    pub(crate) fn suspended_ms(&self) -> u64 {
-        self.suspended_ms
-    }
-}
-
-/// Redacted: `RefreshOutcome` derives `Debug` and is formatted into logs and
-/// test panics; the full RT must never ride along.
-impl std::fmt::Debug for SuspectConsumedRt {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SuspectConsumedRt")
-            .field(
-                "rt_suffix",
-                &xai_grok_auth::bearer_suffix(&self.refresh_token),
-            )
-            .field("suspended_ms", &self.suspended_ms)
-            .finish()
-    }
-}
-
 /// Outcome of a refresh attempt. Data only -- `refresh_chain` handles mutations.
 #[derive(Debug)]
 #[must_use = "RefreshOutcome encodes a state transition; route it through refresh_chain"]
@@ -156,15 +115,10 @@ pub(crate) enum RefreshOutcome {
         /// which RT it sent (external binary flow).
         tried_refresh_token: Option<String>,
     },
-    /// Transient / unknown failure. Caller may retry later. The underlying
-    /// cause is logged structurally at the refresher, then flattened to
-    /// `message` (the retry decision needs recoverability, not the source
-    /// chain). A [`SuspectConsumedRt`] means `refresh_chain` must persist
-    /// the sentinel instead of letting any process blindly re-present it.
-    TransientFailure {
-        message: String,
-        suspect_consumed_rt: Option<SuspectConsumedRt>,
-    },
+    /// Transient / unknown failure. Caller may retry later. Message-only: the
+    /// underlying cause is logged structurally at the refresher, then flattened
+    /// here (the retry decision needs recoverability, not the source chain).
+    TransientFailure { message: String },
 }
 
 impl RefreshOutcome {
@@ -212,20 +166,6 @@ impl RefreshOutcome {
     pub(crate) fn transient(message: impl Into<String>) -> Self {
         Self::TransientFailure {
             message: message.into(),
-            suspect_consumed_rt: None,
-        }
-    }
-
-    /// A transient failure whose exchange straddled a suspend past the
-    /// rotation grace: the RT presented may already be consumed at the IdP.
-    /// `refresh_chain` persists the sentinel and stops — never a blind retry.
-    pub(crate) fn transient_suspect_consumed(
-        message: impl Into<String>,
-        suspect: SuspectConsumedRt,
-    ) -> Self {
-        Self::TransientFailure {
-            message: message.into(),
-            suspect_consumed_rt: Some(suspect),
         }
     }
 }

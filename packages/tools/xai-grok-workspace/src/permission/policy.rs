@@ -1135,6 +1135,51 @@ mod tests {
     }
 
     #[test]
+    fn write_scoped_access_respects_edit_deny_and_not_read_allow() {
+        use crate::permission::rules::parse_permission_rule;
+        use xai_grok_tools::implementations::opencode::edit::EditInput;
+        use xai_grok_tools::types::ToolInput;
+        use xai_tool_types::TaskToolInput;
+
+        let edit = AccessKind::from(&ToolInput::from(EditInput {
+            file_path: "/tmp/denied.txt".into(),
+            old_string: "ORIGINAL".into(),
+            new_string: "BYPASS".into(),
+            replace_all: false,
+        }));
+        let task = AccessKind::from(&ToolInput::Task(TaskToolInput {
+            prompt: "edit config.toml".into(),
+            description: "spawn".into(),
+            subagent_type: "general-purpose".into(),
+            run_in_background: false,
+            capability_mode: None,
+            isolation: None,
+            resume_from: None,
+            cwd: None,
+            model: None,
+            task_id: None,
+        }));
+
+        let deny_edits = CompiledPolicy::new(PermissionConfig::new(vec![
+            parse_permission_rule("Edit(*)", RuleAction::Deny).unwrap(),
+        ]));
+        assert!(matches!(
+            deny_edits.evaluate(&edit),
+            Some(Decision::Reject(_))
+        ));
+        assert!(matches!(
+            deny_edits.evaluate(&task),
+            Some(Decision::Reject(_))
+        ));
+
+        let allow_read = CompiledPolicy::new(PermissionConfig::new(vec![
+            parse_permission_rule("Read", RuleAction::Allow).unwrap(),
+        ]));
+        assert!(allow_read.evaluate(&task).is_none());
+        assert!(allow_read.evaluate(&edit).is_none());
+    }
+
+    #[test]
     fn test_web_fetch_domain_matching() {
         let access = AccessKind::WebFetch("https://api.example.com/v1/data".to_string());
         assert!(matches(&access, &domain_rule("example.com")));

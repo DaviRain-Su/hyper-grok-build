@@ -431,6 +431,7 @@ fn nexus_wire_to_entry(
         show_model_fingerprint: false,
         stream_tool_calls: None,
         laziness_detector: Default::default(),
+        model_family: None,
     }
 }
 
@@ -558,6 +559,7 @@ pub(crate) fn platform_wire_model_to_entry(
         show_model_fingerprint: false,
         stream_tool_calls: None,
         laziness_detector: Default::default(),
+        model_family: None,
     }
 }
 
@@ -913,6 +915,7 @@ fn radius_wire_model_to_entry(base_url: &str, wire: RadiusWireModel) -> Option<M
         show_model_fingerprint: false,
         stream_tool_calls: None,
         laziness_detector: Default::default(),
+        model_family: None,
     })
 }
 

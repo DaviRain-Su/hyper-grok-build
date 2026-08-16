@@ -36,7 +36,50 @@ fn reserved_tool_headroom_triggers_small_history_once() {
 }
 
 #[test]
-fn no_image_history_is_unchanged_before_prompt() {
+fn compaction_summary_input_projects_agent_message_once_and_keeps_source_raw() {
+    let raw = format!(
+        "{}\npayload starts with the exact label",
+        xai_chat_state::compaction_utils::AGENT_MESSAGE_MODEL_LABEL
+    );
+    let source = vec![ConversationItem::agent_message(&raw)];
+    let source_serialized = serde_json::to_vec(&source).unwrap();
+
+    let prepared = build_compaction_chat_history(source.clone(), None, true, 0);
+    let final_boundary = CompactionHistoryInput::from(prepared).prepare(0);
+
+    assert_eq!(
+        final_boundary.items[0].text_content(),
+        format!(
+            "{}\n{raw}",
+            xai_chat_state::compaction_utils::AGENT_MESSAGE_MODEL_LABEL
+        )
+    );
+    assert_eq!(serde_json::to_vec(&source).unwrap(), source_serialized);
+}
+
+#[test]
+fn prepared_image_only_agent_history_cannot_be_projected_again() {
+    let agent_message = ConversationItem::agent_message("");
+    let ConversationItem::User(mut image_only) = agent_message else {
+        panic!("agent_message must construct a user item");
+    };
+    image_only.content = vec![data_image(100)];
+
+    let prepared =
+        build_compaction_chat_history(vec![ConversationItem::User(image_only)], None, true, 0);
+    let final_boundary = CompactionHistoryInput::from(prepared).prepare(0);
+    let ConversationItem::User(user) = &final_boundary.items[0] else {
+        panic!("prepared agent message must stay a user item");
+    };
+    assert!(matches!(
+        user.content.as_slice(),
+        [ContentPart::Text { text }, ContentPart::Image { .. }]
+            if text.as_ref() == xai_chat_state::compaction_utils::AGENT_MESSAGE_MODEL_LABEL
+    ));
+}
+
+#[test]
+fn no_image_history_preserves_non_agent_message_prefix_before_prompt() {
     let source = vec![
         ConversationItem::system("system text"),
         ConversationItem::user("user text"),

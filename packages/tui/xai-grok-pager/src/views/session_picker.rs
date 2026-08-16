@@ -761,13 +761,25 @@ pub(crate) fn build_session_entry_data(
                 if entry.num_messages > 0 {
                     field_data.push(("Messages".into(), entry.num_messages.to_string()));
                 }
+                // Recap ("where was I") and the last-turn summary, whenever
+                // available. Truncated to the card width like the Prompt line.
+                let max_w = content_width.saturating_sub(4 + 12) as usize;
+                if let Some(recap) = entry.last_recap.as_deref().map(str::trim)
+                    && !recap.is_empty()
+                {
+                    field_data.push(("Recap".into(), truncate_str(recap, max_w)));
+                }
+                if let Some(last_turn) = entry.last_turn_summary.as_deref().map(str::trim)
+                    && !last_turn.is_empty()
+                {
+                    field_data.push(("Last turn".into(), truncate_str(last_turn, max_w)));
+                }
                 if let Some(ref detail) = entry.card_detail {
                     field_data.push((
                         "Turns".into(),
                         format!("{}    Tools  {}", detail.turn_count, detail.tool_call_count),
                     ));
                     if !detail.first_prompt_preview.is_empty() {
-                        let max_w = content_width.saturating_sub(4 + 12) as usize;
                         let preview = truncate_str(&detail.first_prompt_preview, max_w);
                         field_data.push(("Prompt".into(), preview));
                     }
@@ -1113,6 +1125,7 @@ mod tests {
             repo_name: repo.into(),
             worktree_label: None,
             last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }
     }
@@ -1589,6 +1602,41 @@ mod tests {
         let native = vec![entry_with_source("s0", "local")];
         assert!(hidden_external_hint(Some(&native), SourceFilter::Grok).is_none());
         assert!(hidden_external_hint(None, SourceFilter::Grok).is_none());
+    }
+
+    /// The expanded resume card surfaces the recap and last-turn summary when
+    /// present, and omits those rows when absent.
+    #[test]
+    fn expanded_card_shows_recap_and_last_turn_when_present() {
+        let mut entry = make_entry("s_recap", "repo");
+        entry.source = "local".into();
+        entry.last_recap = Some("Where we left off: auth refactor".into());
+        entry.last_turn_summary = Some("Wired retries into billing".into());
+        let mut state = PickerState::default();
+        state.expanded.insert(0);
+
+        let built = build_session_entry_data(&[entry], &[0], &state, 80);
+        let has = |label: &str, value: &str| {
+            built[0]
+                .field_data
+                .iter()
+                .any(|(l, v)| l == label && v.contains(value))
+        };
+        assert!(has("Recap", "auth refactor"), "recap row missing");
+        assert!(has("Last turn", "billing"), "last-turn row missing");
+
+        // Absent when the entry has neither.
+        let bare = make_entry("s_bare", "repo");
+        let mut state = PickerState::default();
+        state.expanded.insert(0);
+        let built = build_session_entry_data(&[bare], &[0], &state, 80);
+        assert!(
+            !built[0]
+                .field_data
+                .iter()
+                .any(|(l, _)| l == "Recap" || l == "Last turn"),
+            "recap/last-turn rows must be omitted when absent"
+        );
     }
 
     #[test]

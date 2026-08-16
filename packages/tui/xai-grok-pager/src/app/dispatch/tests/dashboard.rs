@@ -2700,8 +2700,8 @@ fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
         agent
             .subagent_sessions
             .get(&child_sid)
-            .is_some_and(|i| i.child_updates_replayed),
-        "dashboard attach must mark the child as replayed"
+            .is_some_and(|i| !i.transcript.needs_replay()),
+        "dashboard attach must settle the child transcript state"
     );
     crate::app::subagent::set_replay_grok_home_for_tests(None);
 }

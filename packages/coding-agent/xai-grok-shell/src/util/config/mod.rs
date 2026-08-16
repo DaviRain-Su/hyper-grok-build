@@ -2,6 +2,7 @@
 
 mod announcements;
 mod campaigns;
+mod consent;
 mod hints;
 mod load;
 mod mcp;
@@ -19,6 +20,7 @@ pub use campaigns::{
     load_effective_config_disk_only, persist_models_default, remote_campaigns_from_settings,
     set_remote_campaigns_from_settings, sync_campaign_fields,
 };
+pub use consent::*;
 pub use hints::*;
 pub use load::*;
 pub use mcp::*;
@@ -32,6 +34,7 @@ pub use settings_writes::*;
 pub use tips::*;
 pub use worktree::*;
 pub use xai_grok_config_types::{
-    CampaignOverride, ContextualHintsRemote, DisplayRefreshSettings, DoomLoopRecoverySettings,
-    GoalRoleModel, RemoteSettings, WorktreeAutoGcSettings, WorktreeKindMaxAge,
+    CampaignOverride, ConsentGate, ContextualHintsRemote, DisplayRefreshSettings,
+    DoomLoopRecoverySettings, GoalRoleModel, RemoteSettings, WorktreeAutoGcSettings,
+    WorktreeKindMaxAge, deserialize_tolerant,
 };

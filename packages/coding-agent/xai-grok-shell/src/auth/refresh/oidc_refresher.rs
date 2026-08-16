@@ -5,7 +5,7 @@ use crate::auth::error::RefreshTokenFailedReason;
 use crate::auth::manager::RefreshReason;
 use crate::auth::oidc::OidcRefreshResult;
 
-use super::{AuthSnapshot, DiagnosticUploader, RefreshOutcome, SuspectConsumedRt, TokenRefresher};
+use super::{AuthSnapshot, DiagnosticUploader, RefreshOutcome, TokenRefresher};
 
 #[cfg(test)]
 use crate::auth::manager::AuthManager;
@@ -62,19 +62,7 @@ impl OidcRefresher {
         message: String,
         tried_key: Option<String>,
         network_unreachable: bool,
-        suspected_consumed_rt: Option<SuspectConsumedRt>,
     ) -> RefreshOutcome {
-        // A straddled exchange is poison, not evidence: the machine slept
-        // mid-call, so the failure says nothing about the credential and
-        // must not consume the transient → permanent escalation budget.
-        if let Some(suspect) = suspected_consumed_rt {
-            tracing::warn!(
-                %message,
-                suspended_ms = suspect.suspended_ms(),
-                "auth: transient refresh failure straddled a suspend; surfacing suspect RT, not counting toward escalation"
-            );
-            return RefreshOutcome::transient_suspect_consumed(message, suspect);
-        }
         // Never reached the IdP → proves nothing about the credential: don't
         // consume the escalation budget (and don't reset it — only real
         // refresh progress does). See `OidcRefreshResult::Failed`.
@@ -169,18 +157,9 @@ impl OidcRefresher {
                 );
                 Some(RefreshOutcome::permanent_for(reason, &disk_now))
             }
-            OidcRefreshResult::Failed {
-                suspected_consumed_rt,
-                ..
-            } => Some(match suspected_consumed_rt {
-                // The disk RT was on the wire across a straddle too — it must
-                // reach the sentinel like the primary exchange's RT would.
-                Some(suspect) => RefreshOutcome::transient_suspect_consumed(
-                    "OIDC disk-retry refresh failed",
-                    suspect,
-                ),
-                None => RefreshOutcome::transient("OIDC disk-retry refresh failed"),
-            }),
+            OidcRefreshResult::Failed { .. } => {
+                Some(RefreshOutcome::transient("OIDC disk-retry refresh failed"))
+            }
         }
     }
 }
@@ -275,14 +254,12 @@ impl TokenRefresher for OidcRefresher {
             }
             OidcRefreshResult::Failed {
                 network_unreachable,
-                suspected_consumed_rt,
             } => {
                 tracing::warn!(
                     refresh_reason = ?reason,
                     user_id = %auth.user_id,
                     has_refresh_token = auth.refresh_token.is_some(),
                     network_unreachable,
-                    suspected_consumed = suspected_consumed_rt.is_some(),
                     issuer = ?auth.oidc_issuer,
                     client_id = ?auth.oidc_client_id,
                     expires_at = ?auth.expires_at,
@@ -295,7 +272,6 @@ impl TokenRefresher for OidcRefresher {
                         "has_refresh_token": auth.refresh_token.is_some(),
                         "auth_mode": format!("{:?}", auth.auth_mode),
                         "network_unreachable": network_unreachable,
-                        "suspected_consumed": suspected_consumed_rt.is_some(),
                         "issuer": auth.oidc_issuer,
                         "client_id": auth.oidc_client_id,
                         "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
@@ -313,7 +289,6 @@ impl TokenRefresher for OidcRefresher {
                     "OIDC token refresh failed".into(),
                     Some(auth.key.clone()),
                     network_unreachable,
-                    suspected_consumed_rt,
                 )
             }
         }

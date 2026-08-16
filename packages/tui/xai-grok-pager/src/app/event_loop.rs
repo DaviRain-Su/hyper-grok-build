@@ -341,6 +341,29 @@ fn seed_trust_state(
     };
 }
 
+/// Must run before the first render, or the startup-intent block opens a session behind the gate
+/// and the first frame shows the normal welcome.
+pub(crate) fn seed_consent_state_from_gate(
+    app: &mut AppView,
+    gate: Option<&xai_grok_shell::util::config::ConsentGate>,
+) {
+    use crate::app::consent::{ConsentInputs, consent_verdict};
+    let stored = xai_grok_shell::config::load_from_disk()
+        .ok()
+        .map(|root| xai_grok_shell::util::config::load_config_from_toml(&root).consent)
+        .unwrap_or_default();
+    app.consent_state = consent_verdict(&ConsentInputs {
+        gate,
+        answered_this_run: app
+            .consent_answered
+            .as_ref()
+            .map(|(id, version)| (id.as_str(), *version)),
+        answers: &stored.answers,
+        account: app.account_email.as_deref(),
+        minimal: app.screen_mode.is_minimal(),
+    });
+}
+
 /// Pause terminal input and wait up to `timeout` for the reader to acknowledge.
 /// Returns with the pause still asserted; the handoff owner resumes the reader.
 fn park_input_reader(
@@ -1601,6 +1624,13 @@ pub(crate) async fn run(
     // Feature-off (kill-switch / opt-out / local build) resolves `Trusted`, so
     // this stays `TrustState::Done`.
     seed_trust_state(&mut app, remote_settings.as_ref());
+    seed_consent_state_from_gate(
+        &mut app,
+        remote_settings
+            .as_ref()
+            .and_then(|s| s.consent_gate.as_ref()),
+    );
+
     // Type-ahead captured while the app was still loading (see `init_terminal`),
     // replayed only when the composer is already the active input consumer; a
     // startup screen still being up means the keys are dropped, not replayed.
@@ -3747,29 +3777,22 @@ async fn drain_and_process(
                 had_non_resize_change = true;
             }
             InputOutcome::ActionThenForward(action) => {
-                // Dispatch the action (e.g. create session), then re-process
-                // the same event through the now-active view so the input
-                // (character, paste) lands in the session's prompt.
-                let effs = dispatch::dispatch(action, app);
-                if process_effects(effs, tasks, app, progress_tx) {
-                    return true;
-                }
-                if let InputOutcome::Action(follow_up) = app.handle_input_at_with_paste_provenance(
+                // One combined effect wave so forwarded state (e.g. CycleMode) shapes session/new meta.
+                let effs = dispatch_then_forward(
+                    action,
                     ev,
                     routed.arrived_at,
                     routed.paste_provenance,
-                ) {
-                    let effs = dispatch::dispatch(follow_up, app);
-                    if process_effects(effs, tasks, app, progress_tx) {
-                        return true;
-                    }
+                    app,
+                );
+                if process_effects(effs, tasks, app, progress_tx) {
+                    return true;
                 }
                 needs_draw = true;
                 had_non_resize_change = true;
             }
             InputOutcome::ActionPair(first, second) => {
-                // Dispatch both in order; first must fully resolve
-                // before second (e.g. revert preview then open reset).
+                // Effect barrier: first must fully resolve before second (e.g. revert preview then open reset).
                 let effs = dispatch::dispatch(first, app);
                 if process_effects(effs, tasks, app, progress_tx) {
                     return true;
@@ -4268,6 +4291,12 @@ pub(crate) fn retarget_suppress_code_restore(app: &mut AppView, from: &str, to: 
 }
 
 /// Shared [`SessionFlags`] builder (interactive loop + leader-cluster).
+///
+/// Permission seeds come from the global mirrors (`default_yolo`,
+/// `current_ui.permission_mode`). Pre-session `CycleMode` / `SetPermissionMode`
+/// update those synchronously, and `ActionThenForward` batches mode dispatch
+/// before this runs, so create meta sees the post-mode values without
+/// effect-shape sniffing.
 pub(crate) fn session_flags_for_effects(
     app: &mut AppView,
     #[cfg_attr(not(feature = "local-workspace"), allow(unused_variables))]
@@ -4319,6 +4348,24 @@ pub(crate) fn session_flags_for_effects(
         is_api_key_auth: app.is_api_key_auth,
         resume_local_miss: app.resume_local_miss.clone(),
     }
+}
+
+/// Dispatch `action`, re-process `event` through the updated view, return one combined effect list.
+/// Shared by the event-loop `ActionThenForward` arm and tests (batches; no effect barrier between).
+fn dispatch_then_forward(
+    action: Action,
+    event: &Event,
+    arrived_at: std::time::Instant,
+    paste_provenance: PasteProvenance,
+    app: &mut AppView,
+) -> Vec<Effect> {
+    let mut effects = dispatch::dispatch(action, app);
+    if let InputOutcome::Action(follow_up) =
+        app.handle_input_at_with_paste_provenance(event, arrived_at, paste_provenance)
+    {
+        effects.extend(dispatch::dispatch(follow_up, app));
+    }
+    effects
 }
 
 /// Spawn effects into the task set. Returns `true` if the app should quit.
@@ -4565,6 +4612,144 @@ mod tests {
         assert!(
             flags.local_workspace.is_none(),
             "conversation load must strip local stamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_create_uses_auto_selected_before_effect_execution() {
+        let mut app = crate::app::app_view::tests::test_app();
+        app.default_yolo = true;
+        app.current_ui.permission_mode = Some("always-approve".into());
+        let (acp_tx, mut acp_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.acp_tx = acp_tx;
+        let create_effects = dispatch::dispatch(Action::NewSession, &mut app);
+        let mode_effects = dispatch::dispatch(
+            Action::SetPermissionMode(crate::app::actions::PermissionModeKind::Auto),
+            &mut app,
+        );
+        assert!(mode_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::PersistPermissionMode {
+                canonical: "auto",
+                session_id: None,
+                ..
+            }
+        )));
+        let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = JoinSet::new();
+
+        assert!(!process_effects(
+            create_effects,
+            &mut tasks,
+            &mut app,
+            &progress_tx
+        ));
+
+        let request = match acp_rx.recv().await.expect("session/new request") {
+            xai_acp_lib::AcpAgentMessage::NewSession(args) => args.request,
+            other => panic!("expected session/new, got {other:?}"),
+        };
+        let meta = request.meta.expect("permission metadata");
+        assert_eq!(meta.get("yoloMode"), Some(&serde_json::json!(false)));
+        assert_eq!(meta.get("autoMode"), Some(&serde_json::json!(true)));
+        assert_eq!(app.current_ui.permission_mode.as_deref(), Some("auto"));
+        assert!(!app.default_yolo);
+    }
+
+    #[test]
+    fn welcome_shift_tab_applies_mode_before_session_new_is_sent() {
+        for (
+            initial_mode,
+            initial_yolo,
+            expected_mode,
+            expected_yolo,
+            expected_auto,
+            expected_canonical,
+        ) in [
+            ("always-approve", true, "ask", false, false, "ask"),
+            (
+                "auto",
+                false,
+                "always-approve",
+                true,
+                false,
+                "always-approve",
+            ),
+        ] {
+            let mut app = crate::app::app_view::tests::test_app();
+            app.default_yolo = initial_yolo;
+            app.current_ui.permission_mode = Some(initial_mode.into());
+            let event = Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+            let effects = dispatch_then_forward(
+                Action::NewSession,
+                &event,
+                std::time::Instant::now(),
+                PasteProvenance::Terminal,
+                &mut app,
+            );
+
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                Effect::PersistPermissionMode {
+                    canonical,
+                    session_id: None,
+                    ..
+                } if *canonical == expected_canonical
+            )));
+            let create = effects
+                .into_iter()
+                .find(|effect| matches!(effect, Effect::CreateSession { .. }))
+                .expect("create effect");
+            let flags = session_flags_for_effects(&mut app, std::slice::from_ref(&create));
+            let meta = flags.to_meta().expect("permission metadata");
+
+            assert_eq!(
+                meta.get("yoloMode"),
+                Some(&serde_json::json!(expected_yolo))
+            );
+            assert_eq!(
+                meta.get("autoMode"),
+                Some(&serde_json::json!(expected_auto))
+            );
+            assert_eq!(
+                app.current_ui.permission_mode.as_deref(),
+                Some(expected_mode)
+            );
+            assert_eq!(app.default_yolo, expected_yolo);
+        }
+    }
+
+    #[tokio::test]
+    async fn welcome_paste_preserves_create_and_forwarded_prompt() {
+        let mut app = crate::app::app_view::tests::test_app();
+        let (acp_tx, mut acp_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.acp_tx = acp_tx;
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(input_tx);
+        let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = JoinSet::new();
+        let mut csi_filter = super::super::csi_filter::CsiFragmentFilter::new();
+        let mut xt_filter = super::super::xt_filter::XtversionFilter::new();
+
+        let result = drain_and_process(
+            TimedInputEvent::now(Event::Paste("fix the bug".into())),
+            &mut input_rx,
+            &mut app,
+            &mut tasks,
+            &progress_tx,
+            &mut csi_filter,
+            &mut xt_filter,
+        )
+        .await;
+
+        assert!(!result.should_quit);
+        assert!(matches!(
+            acp_rx.recv().await.expect("session/new request"),
+            xai_acp_lib::AcpAgentMessage::NewSession(_)
+        ));
+        assert_eq!(
+            app.agents[&crate::app::agent::AgentId(0)].prompt.text(),
+            "fix the bug"
         );
     }
 

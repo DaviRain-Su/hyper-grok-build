@@ -13,6 +13,7 @@ use compat::{
 };
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -290,14 +291,20 @@ pub(crate) struct ConfigLayer {
 
 pub async fn inspect(cwd: &Path, json: bool) -> anyhow::Result<()> {
     let report = build_report(cwd).await;
+    write_inspect(&report, json, &mut std::io::stdout().lock())
+}
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+/// Write the report. A closed stdout (`grok inspect | head`) is a clean stop.
+fn write_inspect(report: &InspectReport, json: bool, out: &mut impl Write) -> anyhow::Result<()> {
+    let written = if json {
+        writeln!(out, "{}", serde_json::to_string_pretty(report)?)
     } else {
-        print_human(&report);
+        print_human(report, out)
+    };
+    match written {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other.map_err(Into::into),
     }
-
-    Ok(())
 }
 
 async fn build_report(cwd: &Path) -> InspectReport {
@@ -311,8 +318,11 @@ async fn build_report(cwd: &Path) -> InspectReport {
     if let Some(table) = config_without_compat.as_table_mut() {
         table.remove("compat");
     }
-    let parsed_config =
-        crate::agent::config::Config::new_from_toml_cfg(&config_without_compat).ok();
+    let parsed_config = crate::agent::config::Config::new_from_toml_cfg(&config_without_compat);
+    // A config that does not parse is the answer `inspect` exists to give, so
+    // keep the reason rather than reporting an empty config as a clean one.
+    let config_parse_error = parsed_config.as_ref().err().cloned();
+    let parsed_config = parsed_config.ok();
 
     let git_root = git2::Repository::discover(cwd)
         .ok()
@@ -388,10 +398,19 @@ async fn build_report(cwd: &Path) -> InspectReport {
     }
     let lsp = list_lsp_servers(cwd, &discovered_plugins);
     let configs = list_config_sources(cwd);
-    let config_warnings = parsed_config
+    let mut config_warnings = parsed_config
         .as_ref()
         .map(|c| c.config_warnings.clone())
         .unwrap_or_default();
+    if let Some(error) = config_parse_error {
+        config_warnings.push(
+            crate::agent::config_model_override_parse::ConfigWarning::config_key(
+                "config".to_owned(),
+                crate::agent::config_model_override_parse::ConfigWarningKind::InvalidValue,
+                format!("the config does not load: {error}"),
+            ),
+        );
+    }
     let mcp_config_problems = crate::util::config::load_mcp_server_problems_with_project(cwd);
 
     InspectReport {
@@ -1098,6 +1117,30 @@ fn list_config_sources(cwd: &Path) -> ConfigSources {
         }
     }
 
+    let inline_env = crate::config::GROK_CONFIG_ENV;
+    let path_env = crate::config::GROK_CONFIG_PATH_ENV;
+    if let Some(overlay) = crate::config::resolved_env_overlay() {
+        if !overlay.sections.is_empty() {
+            let path = match overlay.source {
+                crate::config::OverlaySource::Inline => format!("${inline_env} (inline)"),
+                crate::config::OverlaySource::Path(p) => p.display().to_string(),
+            };
+            layers.push(ConfigLayer {
+                role: "env_overlay".to_string(),
+                path,
+                note: Some(format!("sections: {}", overlay.sections.join(", "))),
+            });
+        }
+    } else if std::env::var_os(inline_env).is_some_and(|v| !v.to_string_lossy().trim().is_empty())
+        || std::env::var_os(path_env).is_some_and(|v| !v.is_empty())
+    {
+        layers.push(ConfigLayer {
+            role: "env_overlay".to_string(),
+            path: format!("${inline_env} / ${path_env}"),
+            note: Some("set but ignored (empty, malformed, or unreadable)".to_string()),
+        });
+    }
+
     // Requirements: user then system (order they appear in requirements_layers)
     if let Some(home) = crate::config::user_grok_home() {
         let p = home.join("requirements.toml");
@@ -1213,35 +1256,43 @@ fn requirements_layer_contributes(
     })
 }
 
-fn print_section<T>(title: &str, items: &[T], format_item: impl Fn(&T) -> String) {
-    println!();
-    println!("  {} ({})", title, items.len());
+fn print_section<T>(
+    out: &mut impl Write,
+    title: &str,
+    items: &[T],
+    format_item: impl Fn(&T) -> String,
+) -> std::io::Result<()> {
+    writeln!(out)?;
+    writeln!(out, "  {} ({})", title, items.len())?;
     if items.is_empty() {
-        println!("  {TREE} (none)");
+        writeln!(out, "  {TREE} (none)")?;
     }
     for item in items {
-        println!("  {TREE} {}", format_item(item));
+        writeln!(out, "  {TREE} {}", format_item(item))?;
     }
+    Ok(())
 }
 
 /// Print items in a two-column layout: name on the left, source label on the right.
 fn print_columns<T>(
+    out: &mut impl Write,
     title: &str,
     items: &[T],
     name: impl Fn(&T) -> String,
     label: impl Fn(&T) -> String,
-) {
-    println!();
-    println!("  {} ({})", title, items.len());
+) -> std::io::Result<()> {
+    writeln!(out)?;
+    writeln!(out, "  {} ({})", title, items.len())?;
     if items.is_empty() {
-        println!("  {TREE} (none)");
-        return;
+        writeln!(out, "  {TREE} (none)")?;
+        return Ok(());
     }
     let names: Vec<String> = items.iter().map(&name).collect();
-    let pad = names.iter().map(|n| n.len()).max().unwrap_or(0).min(50);
+    let pad = names.iter().map(String::len).max().unwrap_or(0).min(50);
     for (item, n) in items.iter().zip(&names) {
-        println!("  {TREE} {:<pad$}  {}", n, label(item));
+        writeln!(out, "  {TREE} {:<pad$}  {}", n, label(item))?;
     }
+    Ok(())
 }
 
 /// Render the team pin for the human view: single value, comma-joined list,
@@ -1343,20 +1394,21 @@ fn render_harness_compatibility(report: &ExternalCompatReport) -> String {
     out
 }
 
-fn print_human(r: &InspectReport) {
-    println!();
-    println!("  Environment");
-    println!("  {TREE} Version: {} [{}]", r.grok_version, r.channel);
-    println!("  {TREE} CWD: {}", r.cwd);
+fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
+    writeln!(out)?;
+    writeln!(out, "  Environment")?;
+    writeln!(out, "  {TREE} Version: {} [{}]", r.grok_version, r.channel)?;
+    writeln!(out, "  {TREE} CWD: {}", r.cwd)?;
     if let Some(ref root) = r.project_root {
-        println!("  {TREE} Git root: {}", root);
+        writeln!(out, "  {TREE} Git root: {}", root)?;
     }
-    println!(
+    writeln!(
+        out,
         "  {TREE} Project trusted: {}",
         if r.project_trusted { "yes" } else { "no" }
-    );
+    )?;
 
-    print_section("Project Instructions", &r.project_instructions, |f| {
+    print_section(out, "Project Instructions", &r.project_instructions, |f| {
         let status = disabled_compat_tags(f.disabled, f.compatibility_status);
         format!(
             "{} ({}, ~{} tokens){}{}",
@@ -1366,10 +1418,10 @@ fn print_human(r: &InspectReport) {
             vendor_tag(&f.vendor),
             status,
         )
-    });
+    })?;
 
-    println!();
-    println!("  Permissions");
+    writeln!(out)?;
+    writeln!(out, "  Permissions")?;
     if r.permissions.managed_settings_exists
         && let Some(ref p) = r.permissions.managed_settings_path
     {
@@ -1378,67 +1430,74 @@ fn print_human(r: &InspectReport) {
         } else {
             "not loaded"
         };
-        println!("  {TREE} Managed settings: {p} ({status})");
+        writeln!(out, "  {TREE} Managed settings: {p} ({status})")?;
     }
     if r.permissions.sources.is_empty() {
-        println!("  {TREE} Source: (none)");
+        writeln!(out, "  {TREE} Source: (none)")?;
     } else {
         for src in &r.permissions.sources {
-            println!("  {TREE} Source: {src}");
+            writeln!(out, "  {TREE} Source: {src}")?;
         }
     }
-    println!(
+    writeln!(
+        out,
         "  {TREE} {} loaded, {} skipped",
         r.permissions.loaded,
         r.permissions.skipped.len()
-    );
+    )?;
     for s in &r.permissions.skipped {
-        println!("    {TREE} {} -- {}", s.rule, s.reason);
+        writeln!(out, "    {TREE} {} -- {}", s.rule, s.reason)?;
     }
     if !r.permissions.enforced.is_empty() {
-        println!("  {TREE} Enforced by policy");
+        writeln!(out, "  {TREE} Enforced by policy")?;
         for e in &r.permissions.enforced {
-            println!("    {TREE} {} ({})", enforced_label(e), e.source);
+            writeln!(out, "    {TREE} {} ({})", enforced_label(e), e.source)?;
         }
     }
     if !r.permissions.mcp_server_allowlist.is_empty() {
-        println!(
+        writeln!(
+            out,
             "  {TREE} MCP server allowlist ({} patterns)",
             r.permissions.mcp_server_allowlist.len()
-        );
+        )?;
         for pat in &r.permissions.mcp_server_allowlist {
-            println!("    {TREE} {}", pat);
+            writeln!(out, "    {TREE} {}", pat)?;
         }
     }
     if !r.permissions.marketplace_allowlist.is_empty() {
-        println!(
+        writeln!(
+            out,
             "  {TREE} Marketplace allowlist ({} sources)",
             r.permissions.marketplace_allowlist.len()
-        );
+        )?;
         for url in &r.permissions.marketplace_allowlist {
-            println!("    {TREE} {}", url);
+            writeln!(out, "    {TREE} {}", url)?;
         }
     }
 
-    println!();
-    println!("  Login Policy");
-    println!(
+    writeln!(out)?;
+    writeln!(out, "  Login Policy")?;
+    writeln!(
+        out,
         "  {TREE} disable_api_key_auth: {}",
         match r.login_policy.disable_api_key_auth {
             Some(v) => v.to_string(),
             None => "(unset)".to_string(),
         }
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "  {TREE} force_login_team_uuid: {}",
         format_force_login_team(&r.login_policy.force_login_team_uuid)
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "  {TREE} api_key_auth_disabled: {}",
         r.login_policy.api_key_auth_disabled
-    );
+    )?;
 
     print_columns(
+        out,
         "Skills",
         &r.skills,
         |s| s.name.clone(),
@@ -1461,16 +1520,18 @@ fn print_human(r: &InspectReport) {
                 collision,
             )
         },
-    );
+    )?;
 
     print_columns(
+        out,
         "Agents",
         &r.agents,
         |a| a.name.clone(),
         |a| a.source.display_label(),
-    );
+    )?;
 
     print_columns(
+        out,
         "Plugins",
         &r.plugins,
         |p| {
@@ -1497,21 +1558,22 @@ fn print_human(r: &InspectReport) {
                 parts.join(", ")
             }
         },
-    );
+    )?;
 
-    print_section("Marketplaces", &r.marketplaces, |m| {
+    print_section(out, "Marketplaces", &r.marketplaces, |m| {
         format!(
             "{} ({}, {} enabled plugins)",
             m.name, m.path, m.enabled_plugins
         )
-    });
+    })?;
 
     if r.mcp_servers.is_empty() {
-        println!();
-        println!("  MCP Servers (0)");
-        println!("  {TREE} (none) \u{2014} see `grok mcp add --help`");
+        writeln!(out)?;
+        writeln!(out, "  MCP Servers (0)")?;
+        writeln!(out, "  {TREE} (none) \u{2014} see `grok mcp add --help`")?;
     } else {
         print_columns(
+            out,
             "MCP Servers",
             &r.mcp_servers,
             |m| {
@@ -1530,10 +1592,11 @@ fn print_human(r: &InspectReport) {
                     status,
                 )
             },
-        );
+        )?;
     }
 
     print_columns(
+        out,
         "LSP Servers",
         &r.lsp_servers,
         |l| format!("{} ({} {})", l.name, l.command, l.args.join(" ")),
@@ -1541,9 +1604,10 @@ fn print_human(r: &InspectReport) {
             let untrusted = if l.untrusted { " [untrusted]" } else { "" };
             format!("{}{}", l.source.display_label(), untrusted)
         },
-    );
+    )?;
 
     print_columns(
+        out,
         "Hooks",
         &r.hooks,
         |h| {
@@ -1563,10 +1627,10 @@ fn print_human(r: &InspectReport) {
                 status,
             )
         },
-    );
+    )?;
 
-    println!();
-    println!("  Config Sources");
+    writeln!(out)?;
+    writeln!(out, "  Config Sources")?;
     // User is always emitted (with (none) when absent) for the primary user config.
     if let Some(user_l) = r.config_sources.layers.iter().find(|l| l.role == "user") {
         let tag = match user_l.note.as_deref() {
@@ -1574,9 +1638,9 @@ fn print_human(r: &InspectReport) {
             Some("parse error") => " (parse error)",
             _ => "",
         };
-        println!("  {TREE} User: {}{}", user_l.path, tag);
+        writeln!(out, "  {TREE} User: {}{}", user_l.path, tag)?;
     } else {
-        println!("  {TREE} User: (none)");
+        writeln!(out, "  {TREE} User: (none)")?;
     }
     for layer in &r.config_sources.layers {
         if layer.role == "user" {
@@ -1596,16 +1660,21 @@ fn print_human(r: &InspectReport) {
             "project" => "Project",
             other => other,
         };
-        println!("  {TREE} {}: {}{}", label, layer.path, tag);
+        writeln!(out, "  {TREE} {}: {}{}", label, layer.path, tag)?;
     }
     if !r.config_sources.layers.iter().any(|l| l.role == "project") {
-        println!("  {TREE} Project: (none)");
+        writeln!(out, "  {TREE} Project: (none)")?;
     }
 
-    print!("{}", render_config_warnings(&r.config_warnings));
-    print!("{}", render_mcp_config_problems(&r.mcp_config_problems));
+    write!(out, "{}", render_config_warnings(&r.config_warnings))?;
+    write!(
+        out,
+        "{}",
+        render_mcp_config_problems(&r.mcp_config_problems)
+    )?;
 
-    print!("{}", render_harness_compatibility(&r.external_compat));
+    write!(out, "{}", render_harness_compatibility(&r.external_compat))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2174,5 +2243,89 @@ mod tests {
             !entries.iter().any(|e| e.name == "inspect-cfg-ignored"),
             "[skills].ignore must hide the skill"
         );
+    }
+
+    struct FailAfter {
+        remaining: usize,
+        kind: std::io::ErrorKind,
+    }
+
+    impl Write for FailAfter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(std::io::Error::new(self.kind, "closed"));
+            }
+            let n = buf.len().min(self.remaining);
+            self.remaining -= n;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn empty_report() -> InspectReport {
+        InspectReport {
+            grok_version: "test".into(),
+            channel: "test".into(),
+            cwd: "/tmp".into(),
+            project_root: None,
+            project_trusted: true,
+            project_instructions: vec![],
+            permissions: PermissionsReport {
+                sources: vec![],
+                loaded: 0,
+                skipped: vec![],
+                mcp_server_allowlist: vec![],
+                marketplace_allowlist: vec![],
+                managed_settings_path: None,
+                managed_settings_exists: false,
+                managed_settings_active: false,
+                enforced: vec![],
+            },
+            login_policy: LoginPolicyReport {
+                disable_api_key_auth: None,
+                force_login_team_uuid: None,
+                api_key_auth_disabled: false,
+            },
+            hooks: vec![],
+            skills: vec![],
+            agents: vec![],
+            plugins: vec![],
+            marketplaces: vec![],
+            mcp_servers: vec![],
+            lsp_servers: vec![],
+            config_sources: ConfigSources { layers: vec![] },
+            external_compat: ExternalCompatReport {
+                remote_settings_loaded: false,
+                cells: vec![],
+            },
+            config_warnings: vec![],
+            mcp_config_problems: vec![],
+        }
+    }
+
+    #[test]
+    fn write_inspect_treats_broken_pipe_as_success() {
+        let report = empty_report();
+        for json in [false, true] {
+            let mut out = FailAfter {
+                remaining: 8,
+                kind: std::io::ErrorKind::BrokenPipe,
+            };
+            write_inspect(&report, json, &mut out).expect("broken pipe is a clean stop");
+        }
+    }
+
+    #[test]
+    fn write_inspect_surfaces_other_io_errors() {
+        let report = empty_report();
+        let mut out = FailAfter {
+            remaining: 0,
+            kind: std::io::ErrorKind::PermissionDenied,
+        };
+        write_inspect(&report, false, &mut out)
+            .expect_err("non-broken-pipe IO errors must surface");
     }
 }

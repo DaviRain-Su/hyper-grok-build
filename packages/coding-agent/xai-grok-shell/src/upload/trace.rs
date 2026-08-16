@@ -1151,8 +1151,8 @@ impl TraceExportSource for DynamicResolver {
                 ref mut user_token, ..
             } = config.upload_method
             {
-                match self.auth_manager.auth_background().await {
-                    Ok(auth) => *user_token = auth.key,
+                match self.auth_manager.get_valid_token().await {
+                    Ok(key) => *user_token = key,
                     Err(e) => {
                         tracing::warn!(
                             error = %e,

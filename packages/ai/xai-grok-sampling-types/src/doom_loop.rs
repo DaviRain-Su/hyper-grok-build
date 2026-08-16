@@ -88,7 +88,7 @@ impl DoomLoopRecoveryPolicy {
     pub const MAX_THRESHOLD_RANGE: std::ops::RangeInclusive<u32> = 2..=64;
     /// Clamp range for `max_retries`.
     pub const MAX_RETRIES_RANGE: std::ops::RangeInclusive<u32> = 0..=5;
-    pub const DEFAULT_MAX_THRESHOLD: u32 = 32;
+    pub const DEFAULT_MAX_THRESHOLD: u32 = 64;
     /// Default `max_retries`.
     pub const DEFAULT_MAX_RETRIES: u32 = 2;
     pub const DEFAULT_RECOVERY_WINDOW_TOKENS: u32 = 1024;
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn policy_default_matches_documented_tunables() {
         let p = DoomLoopRecoveryPolicy::default();
-        assert_eq!(p.max_threshold, 32);
+        assert_eq!(p.max_threshold, 64);
         assert_eq!(p.max_retries, 2);
         assert_eq!(p.window_tokens, 1024);
     }
@@ -478,7 +478,8 @@ mod tests {
         assert!(policy.is_confident(&DoomLoopSignal::parse("tail_repetition:8@thinking")));
         assert!(policy.is_confident(&DoomLoopSignal::parse("tail_repetition:2@thinking")));
         assert!(policy.is_confident(&DoomLoopSignal::parse("tail_repetition:32@thinking")));
-        assert!(!policy.is_confident(&DoomLoopSignal::parse("tail_repetition:33@thinking")));
+        assert!(policy.is_confident(&DoomLoopSignal::parse("tail_repetition:64@thinking")));
+        assert!(!policy.is_confident(&DoomLoopSignal::parse("tail_repetition:65@thinking")));
         assert!(!policy.is_confident(&DoomLoopSignal::parse("tail_repetition:2@response")));
         assert!(!policy.is_confident(&DoomLoopSignal::parse("low_logprob@thinking")));
         assert!(!policy.is_confident(&DoomLoopSignal::parse("novel_detector:2@thinking")));

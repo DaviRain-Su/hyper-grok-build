@@ -1,5 +1,6 @@
 //! Tests for session create, exit, trust, startup actions, worktree creation, and cloud lifecycle.
 use super::*;
+use crate::app::dispatch::session::lifecycle::dispatch_accept_consent;
 /// Simulate a release-stamped build so folder-trust is active (a local/dev
 /// build auto-trusts and persists nothing). Mirrors this module's raw env idiom.
 fn simulate_release_build() {
@@ -1158,6 +1159,93 @@ fn session_startup_allowed_requires_auth_and_trust() {
         !app.session_startup_allowed(),
         "both pending must block session startup",
     );
+}
+fn painted_notice(id: &str, version: i32) -> crate::app::consent::ConsentState {
+    use crate::app::consent::{ConsentLegibility, ConsentNotice, ConsentState};
+    ConsentState::Pending {
+        notice: ConsentNotice {
+            id: id.to_string(),
+            version,
+            title: "Updated terms".to_string(),
+            body: "Review them.".to_string(),
+            accept_label: "Got it".to_string(),
+        },
+        legibility: ConsentLegibility::Painted,
+        painted_at: Some(std::time::Instant::now()),
+    }
+}
+/// An unanswered notice must not let a buffered `a` reach the composer.
+#[test]
+fn session_startup_and_typeahead_require_consent() {
+    let mut app = test_app();
+    assert!(app.session_startup_allowed());
+    assert!(app.ready_for_startup_typeahead());
+    app.consent_state = painted_notice("tos-2026", 1);
+    assert!(
+        !app.session_startup_allowed(),
+        "a pending notice must block session startup",
+    );
+    assert!(
+        !app.ready_for_startup_typeahead(),
+        "keys typed before the notice must not be replayed into it",
+    );
+}
+/// An acceptance must never cover text that did not reach the screen, so the renderer's verdict
+/// gates the dispatch, not just the key.
+#[test]
+fn accept_is_refused_until_the_notice_paints() {
+    use crate::app::consent::{ConsentLegibility, ConsentState};
+    let mut app = test_app();
+    app.consent_state = painted_notice("tos-2026", 1);
+    if let ConsentState::Pending { legibility, .. } = &mut app.consent_state {
+        *legibility = ConsentLegibility::Illegible;
+    }
+    let effects = dispatch_accept_consent(&mut app);
+    assert!(effects.is_empty());
+    assert!(
+        matches!(app.consent_state, ConsentState::Pending { .. }),
+        "an unread notice must stay pending",
+    );
+}
+#[test]
+fn accepting_records_the_answer_and_replays_deferred_startup() {
+    use crate::app::consent::ConsentState;
+    let mut app = test_app();
+    app.account_email = Some("user@example.com".to_string());
+    app.consent_state = painted_notice("tos-2026", 3);
+    app.deferred_startup.session =
+        Some(crate::app::session_startup::DeferredSessionStartup::Load {
+            session_id: "deferred-session".into(),
+            session_cwd: None,
+            chat_kind: false,
+        });
+    let effects = dispatch_accept_consent(&mut app);
+    assert!(matches!(app.consent_state, ConsentState::Done));
+    assert_eq!(
+        app.consent_answered,
+        Some(("tos-2026".to_string(), 3)),
+        "the answer must hold for this run even if the write is slow",
+    );
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::PersistConsentAnswer { account, notice_id, version, acked }
+            if account.as_deref() == Some("user@example.com")
+                && notice_id == "tos-2026"
+                && *version == 3
+                && !acked
+    )));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::RecordConsentUpstream { .. })),
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::LoadSession { .. })),
+        "deferred startup must replay once the notice is answered",
+    );
+    assert!(app.deferred_startup.session.is_none());
 }
 /// Accepting the trust question (its `finish_trust` tail) resolves trust and
 /// replays the deferred startup when auth is already done. (Declining quits
@@ -3108,6 +3196,7 @@ mod welcome_workspace_mode {
             repo_name: String::new(),
             worktree_label: None,
             last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -3154,6 +3243,7 @@ mod welcome_workspace_mode {
             repo_name: String::new(),
             worktree_label: None,
             last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -3214,6 +3304,7 @@ mod welcome_workspace_mode {
             repo_name: String::new(),
             worktree_label: None,
             last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let _ = dispatch(Action::PickSessionInWorktree(0), &mut app);
@@ -3252,6 +3343,7 @@ mod welcome_workspace_mode {
             repo_name: String::new(),
             worktree_label: None,
             last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSessionInWorktree(0), &mut app);
@@ -3297,6 +3389,7 @@ mod welcome_workspace_mode {
             repo_name: String::new(),
             worktree_label: None,
             last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSessionInWorktree(0), &mut app);
@@ -3341,6 +3434,7 @@ mod welcome_workspace_mode {
             repo_name: String::new(),
             worktree_label: None,
             last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -3388,6 +3482,7 @@ mod welcome_workspace_mode {
             repo_name: String::new(),
             worktree_label: None,
             last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -3462,6 +3557,7 @@ mod welcome_workspace_mode {
             repo_name: String::new(),
             worktree_label: None,
             last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -3536,6 +3632,7 @@ mod welcome_workspace_mode {
             repo_name: String::new(),
             worktree_label: None,
             last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);

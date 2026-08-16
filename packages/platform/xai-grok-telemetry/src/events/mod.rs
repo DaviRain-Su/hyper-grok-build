@@ -296,6 +296,14 @@ pub enum PlanModeState {
     Active,
 }
 
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryRetrievalMode {
+    Disabled,
+    FtsOnly,
+    Hybrid,
+}
+
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryFlushTrigger {
@@ -1105,6 +1113,7 @@ pub struct SessionHarness {
     pub hook_names: Vec<String>,
     pub agents_md_dir_names: Vec<String>,
     pub memory_enabled: bool,
+    pub memory_retrieval_mode: MemoryRetrievalMode,
     /// Whether the session cwd is inside a git repo (same value `SessionNew`
     /// carries). Additive analytics-visible field, added for the external
     /// `session_start` event (design ‡ footnote).
@@ -2287,10 +2296,6 @@ telemetry_event!(
 );
 telemetry_event!(crate::memory_telemetry::MemorySearch, "memory_search");
 telemetry_event!(
-    crate::memory_telemetry::MemorySearchEmpty,
-    "memory_search_empty"
-);
-telemetry_event!(
     crate::memory_telemetry::MemoryFlushStart,
     "memory_flush_start"
 );
@@ -2336,6 +2341,19 @@ mod tests {
             clipboard_native_tool: "arboard".into(),
             clipboard_data_control: "n/a".into(),
         }
+    }
+
+    #[test]
+    fn memory_retrieval_mode_serializes_as_closed_snake_case_values() {
+        let modes = [
+            MemoryRetrievalMode::Disabled,
+            MemoryRetrievalMode::FtsOnly,
+            MemoryRetrievalMode::Hybrid,
+        ];
+        assert_eq!(
+            modes.map(|mode| serde_json::to_value(mode).unwrap()),
+            ["disabled", "fts_only", "hybrid"]
+        );
     }
 
     #[test]

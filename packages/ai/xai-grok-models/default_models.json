@@ -7,6 +7,7 @@
     {
       "id": "grok-4.6",
       "model": "grok-4.6",
+      "model_family": "xai",
       "name": "Grok 4.6",
       "description": "SpaceXAI's latest frontier model",
       "context_window": 500000,
@@ -46,6 +47,7 @@
     {
       "id": "grok-4.5",
       "model": "grok-4.5",
+      "model_family": "xai",
       "name": "Grok 4.5",
       "context_window": 500000,
       "api_backend": "responses",

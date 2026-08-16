@@ -303,6 +303,14 @@ impl ScheduledTask {
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         self.expires_at.is_some_and(|exp| now >= exp)
     }
+
+    /// The next run still to come; `None` for an expired task or a one-shot that already ran.
+    pub fn pending_fire_at(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        if self.is_expired(now) || (!self.recurring && self.last_fired_at.is_some()) {
+            return None;
+        }
+        Some(self.next_fire_at())
+    }
 }
 
 /// Persisted state for the scheduler, stored via Resources + ResourcesPersistence.

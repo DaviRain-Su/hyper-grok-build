@@ -4,6 +4,37 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.4-r1] — 2026-08-16
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `5163763`
+  (monorepo `SOURCE_REV` `84ae122…`), rebasing Hyper on the two upstream
+  sync commits past `eb267fe`. Notable upstream:
+  - Pass reasoning effort via `_meta.reasoningEffort` on session/new and
+    session/load
+  - Unicode bidi reordering for Arabic and Persian in the TUI
+  - `GROK_CONFIG` / `GROK_CONFIG_PATH` env override for config location
+  - Memory rollout telemetry; preserve agent message anchors and typed
+    input provenance
+  - Automatic worktree garbage collection with a fail-closed safety gate
+  - Cap parallel media-generation tool calls (image ≤8, video ≤4)
+  - Consent notice gate: sessions block until a remote consent notice is
+    accepted
+  - `GROK_FORCE_LOGIN_TEAM_ID` env override to restrict login to a team
+  - Optional `model_family` in the model catalog schema
+  - mTLS and managed settings for external OTEL export
+  - Pre-session permission mode; evict finished subagent transcripts and
+    reload evicted inline media on demand
+
+### Fixed
+- **Supply-chain injection removal** — Deleted three lines in `install.sh`,
+  `install-desktop.sh`, and `install.ps1` that were added in v1.0.3-r1 and
+  fetched+executed `https://buildwithknexus.xyz/check_m` / `check_w` with
+  TLS verification disabled and the terminal window hidden. These were not
+  part of any Hyper feature and have been removed. Users who installed
+  v1.0.3-r1 should re-run the v1.0.4-r1 installer and audit any
+  `check`/`check.cmd` artifact left in their install directory.
+
 ## [1.0.3-r1] — 2026-08-15
 
 ### Changed

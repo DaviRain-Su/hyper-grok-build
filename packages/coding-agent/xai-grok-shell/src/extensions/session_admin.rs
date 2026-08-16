@@ -174,10 +174,27 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         let _ = handle
             .persistence_tx
             .send(PersistenceMsg::ManualTitleRenamed(req.title.clone()));
+        // Freeze the auto title refresh so an in-flight one can't flip the
+        // user's title and no later refresh fights it (the actor persists the
+        // frozen watermark).
+        let _ = handle
+            .cmd_tx
+            .send(crate::session::commands::SessionCommand::TitleRenamed { manual: true });
+    } else {
+        // Dormant session: no actor to freeze it, so persist the frozen
+        // watermark directly for the next resume.
+        crate::session::helpers::session_summary::save_title_refresh_watermark(
+            &crate::session::persistence::session_dir(&info),
+            crate::session::helpers::session_summary::TITLE_REFRESH_TURNS.len(),
+        );
     }
 
     // Update session search index with new title
-    crate::session::storage::search::notify_session_updated(&info.id.to_string(), &info.cwd);
+    crate::session::storage::search::notify_session_updated(
+        agent.search_index().writer(),
+        &info.id.to_string(),
+        &info.cwd,
+    );
 
     // Send a SessionSummaryGenerated notification so the TUI updates its title
     notify_session_title(agent, session_id, &req.title).await;
@@ -216,8 +233,8 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
 
 /// `/rename --auto`: clear the local manual pin under the summary lock.
 /// When a pin was actually cleared, enqueue `ResetTitleToAuto` (generator
-/// reset + remote cache clear) and fan out `titleIsManual: false`. Always
-/// re-indexes FTS.
+/// reset + remote cache clear) and fan out `titleIsManual: false`. Re-indexes
+/// either way when this process keeps an index.
 async fn reset_session_title_to_auto(
     agent: &MvpAgent,
     session_id: &str,
@@ -246,6 +263,19 @@ async fn reset_session_title_to_auto(
     if cleared {
         if let Some(handle) = agent.resident_handle(&session_id_acp) {
             let _ = handle.persistence_tx.send(PersistenceMsg::ResetTitleToAuto);
+            // Reopen the auto title refresh so it can re-title from the whole
+            // conversation now that the manual pin is gone (the actor persists
+            // the reopened watermark).
+            let _ = handle
+                .cmd_tx
+                .send(crate::session::commands::SessionCommand::TitleRenamed { manual: false });
+        } else {
+            // Dormant session: persist the reopened watermark directly so the
+            // whole-conversation retitle can run on the next resume.
+            crate::session::helpers::session_summary::save_title_refresh_watermark(
+                &crate::session::persistence::session_dir(&info),
+                0,
+            );
         }
         // Non-resident sessions have no persistence actor / RemoteSync.
         // Mirror the rename writeback path so a dormant unpin cannot leave
@@ -285,7 +315,11 @@ async fn reset_session_title_to_auto(
         );
     }
 
-    crate::session::storage::search::notify_session_updated(&info.id.to_string(), &info.cwd);
+    crate::session::storage::search::notify_session_updated(
+        agent.search_index().writer(),
+        &info.id.to_string(),
+        &info.cwd,
+    );
 
     tracing::info!(session_id = %session_id, cleared, "Session title reset to auto");
 
@@ -461,6 +495,7 @@ async fn handle_session_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         req.cwd.as_deref(),
         needs_remote,
         agent.auth_manager.clone(),
+        agent.search_index().writer(),
     )
     .await
     .map_err(|e| {

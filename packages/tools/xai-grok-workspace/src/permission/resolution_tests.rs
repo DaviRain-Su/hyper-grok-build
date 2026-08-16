@@ -937,6 +937,451 @@ fn denied_mcp_servers_fail_closed_across_scheme_port_path() {
     assert!(al.is_http_allowed("https://other.example.com/mcp"));
 }
 
+/// Allow-URL wildcards must not cross the host boundary or loosen scheme.
+#[test]
+fn allow_url_wildcard_cannot_cross_host_boundary() {
+    let al = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://*.corp.com/*" } ]
+    }));
+    assert!(al.is_server_allowed(&http_named("ok", "https://mcp.corp.com/sse")));
+    assert!(al.is_server_allowed(&http_named("nested", "https://a.corp.com/x/y")));
+    // Embedded-host bypass: `*` must not span `evil.example/a`.
+    assert!(!al.is_server_allowed(&http_named("evil", "https://evil.example/a.corp.com/x")));
+    // Userinfo decoy: the connect host is evil.example, not the `@` prefix.
+    assert!(!al.is_server_allowed(&http_named("userinfo", "https://a.corp.com@evil.example/x")));
+    // Scheme and port stay literal.
+    assert!(!al.is_server_allowed(&http_named("http", "http://mcp.corp.com/sse")));
+    assert!(!al.is_server_allowed(&http_named("port", "https://mcp.corp.com:8080/sse")));
+}
+
+/// A `/*` allow pattern matches the path-less spelling of its own host —
+/// "" and "/" are the same request, and the deny side already treats them so.
+#[test]
+fn allow_glob_matches_pathless_url() {
+    let al = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.com/*" } ]
+    }));
+    assert!(al.is_server_allowed(&http_named("slash", "https://mcp.corp.com/")));
+    assert!(al.is_server_allowed(&http_named("bare", "https://mcp.corp.com")));
+    assert!(al.is_server_allowed(&http_named("deep", "https://mcp.corp.com/a/b")));
+}
+
+/// Dot segments resolve before matching on both sides: a path-scoped allow
+/// must not reach a sibling path, and a deny must not be dodged by an
+/// unnormalized spelling. Percent-encoded dot segments (`%2e%2e`) and empty
+/// segments resolve exactly like the connect-time parser.
+#[test]
+fn dot_segments_resolve_before_matching() {
+    let al = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://corp.com/mcp/*" } ]
+    }));
+    // Each spelling connects to /admin — outside the grant.
+    for dodge in [
+        "https://corp.com/mcp/../admin",
+        "https://corp.com/mcp/%2e%2e/admin",
+        "https://corp.com/mcp/.%2e/admin",
+        "https://corp.com/mcp/%2e./admin",
+        "https://corp.com/mcp/%2E%2E/admin",
+    ] {
+        assert!(
+            !al.is_server_allowed(&http_named("dotdot", dodge)),
+            "must not be granted: {dodge}"
+        );
+    }
+    // Benign single-dot segments still land inside the grant.
+    assert!(al.is_server_allowed(&http_named("dot", "https://corp.com/mcp/./tool")));
+
+    let deny = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://corp.com/admin/*" } ]
+    }));
+    // Each spelling connects under /admin — the deny must still hit.
+    for dodge in [
+        "https://corp.com/mcp/../admin/x",
+        "https://corp.com/mcp/%2e%2e/admin/x",
+        // Empty segments follow the connect-time parser: //../x pops only
+        // the empty segment, landing on /admin/x — still denied.
+        "https://corp.com/admin//../x",
+    ] {
+        assert!(
+            deny.is_server_denied(&http_named("dodge", dodge)),
+            "must be denied: {dodge}"
+        );
+    }
+}
+
+/// Special-scheme URLs treat `\` as a host terminator just like `/`
+/// (`https://evil.example\@a.corp.com/x` connects to evil.example). The
+/// matcher must see the connect host on both sides.
+#[test]
+fn backslash_terminates_authority_like_connect_time() {
+    let al = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://*.corp.com/*" } ]
+    }));
+    assert!(!al.is_server_allowed(&http_named("bs", "https://evil.example\\@a.corp.com/x")));
+
+    let deny = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://evil.example/*" } ]
+    }));
+    assert!(deny.is_server_denied(&http_named("bs", "https://evil.example\\@a.corp.com/x")));
+}
+
+/// IPv4 deny entries compare parsed addresses so the WHATWG alternate
+/// spellings the client canonicalizes at connect time (hex, shortened,
+/// decimal) are still denied.
+#[test]
+fn deny_matches_ipv4_alternate_spellings() {
+    let metadata = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "http://169.254.169.254/*" } ]
+    }));
+    assert!(metadata.is_server_denied(&http_named("hex", "http://0xa9fea9fe/latest/meta-data")));
+
+    let localhost = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "http://127.0.0.1/*" } ]
+    }));
+    assert!(localhost.is_server_denied(&http_named("short", "http://127.1/mcp")));
+    assert!(localhost.is_server_denied(&http_named("decimal", "http://2130706433/mcp")));
+    // A different address is untouched.
+    assert!(!localhost.is_server_denied(&http_named("other", "http://10.0.0.1/mcp")));
+}
+
+/// An IPv4 deny also blocks the IPv4-mapped IPv6 spelling of the same connect
+/// target (`[::ffff:169.254.169.254]`) and vice versa — a dual-stack socket
+/// reaches the mapped IPv4 address either way, a classic SSRF dodge.
+#[test]
+fn deny_matches_ipv4_mapped_ipv6_spellings() {
+    let metadata = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "http://169.254.169.254/*" } ]
+    }));
+    assert!(
+        metadata.is_server_denied(&http_named(
+            "mapped",
+            "http://[::ffff:169.254.169.254]/latest/meta-data"
+        )),
+        "IPv4-mapped spelling must not dodge an IPv4 deny"
+    );
+    assert!(
+        metadata.is_server_denied(&http_named(
+            "mapped-hex",
+            "http://[::ffff:a9fe:a9fe]/latest/meta-data"
+        )),
+        "hex-group IPv4-mapped spelling must not dodge an IPv4 deny"
+    );
+    // A genuine IPv6 address is not an alias for the denied IPv4 host.
+    assert!(!metadata.is_server_denied(&http_named("v6", "http://[2001:db8::1]/mcp")));
+
+    // The mirror direction: an IPv4-mapped deny entry blocks the IPv4 spelling.
+    let mapped = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "http://[::ffff:127.0.0.1]/*" } ]
+    }));
+    assert!(mapped.is_server_denied(&http_named("v4", "http://127.0.0.1/mcp")));
+}
+
+/// An explicit scheme-default port and no port name the same connect target;
+/// either spelling of the pattern matches either spelling of the URL. A
+/// non-default port stays literal.
+#[test]
+fn allow_matches_scheme_default_port_spellings() {
+    let al = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.com:443/*" } ]
+    }));
+    assert!(al.is_server_allowed(&http_named("bare", "https://mcp.corp.com/mcp")));
+    assert!(al.is_server_allowed(&http_named("port", "https://mcp.corp.com:443/mcp")));
+    assert!(!al.is_server_allowed(&http_named("other", "https://mcp.corp.com:8080/mcp")));
+}
+
+/// Host and port match separately, so a trailing host wildcard cannot absorb
+/// a non-default port — with or without an explicit port in the pattern.
+#[test]
+fn allow_host_wildcard_cannot_absorb_port() {
+    let bare = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.*/*" } ]
+    }));
+    assert!(bare.is_server_allowed(&http_named("ok", "https://mcp.corp.com/mcp")));
+    assert!(!bare.is_server_allowed(&http_named("port", "https://mcp.corp.com:8080/mcp")));
+
+    let with_port = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.*:443/*" } ]
+    }));
+    assert!(with_port.is_server_allowed(&http_named("ok", "https://mcp.corp.com/mcp")));
+    assert!(with_port.is_server_allowed(&http_named("default", "https://mcp.corp.com:443/mcp")));
+    assert!(!with_port.is_server_allowed(&http_named("port", "https://mcp.corp.com:8080/mcp")));
+}
+
+/// Unicode policy entries match their connect-time spelling on both sides:
+/// hosts canonicalize via IDNA/punycode and paths percent-encode, the same
+/// way the WHATWG parser rewrites the runtime URL.
+#[test]
+fn unicode_policy_entries_match_connect_spelling() {
+    let al = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://bücher.example/café/*" } ]
+    }));
+    // Both spellings of the URL connect to the same target.
+    assert!(al.is_server_allowed(&http_named("uni", "https://bücher.example/café/tool")));
+    assert!(al.is_server_allowed(&http_named(
+        "puny",
+        "https://xn--bcher-kva.example/caf%C3%A9/tool"
+    )));
+    assert!(!al.is_server_allowed(&http_named(
+        "other",
+        "https://xn--bcher-kva.example/other/tool"
+    )));
+
+    let deny = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://bücher.example/*" } ]
+    }));
+    assert!(deny.is_server_denied(&http_named("uni", "https://bücher.example/mcp")));
+    assert!(deny.is_server_denied(&http_named("puny", "https://xn--bcher-kva.example/mcp")));
+    assert!(!deny.is_server_denied(&http_named("other", "https://other.example/mcp")));
+
+    // A wildcard label stays a wildcard while the Unicode labels
+    // canonicalize around it.
+    let wild = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://*.bücher.example/*" } ]
+    }));
+    assert!(wild.is_server_denied(&http_named("sub", "https://mcp.xn--bcher-kva.example/x")));
+}
+
+/// A runtime URL the connect-time parser rejects fails closed on both sides:
+/// no allow grant, and any URL deny entry blocks it.
+#[test]
+fn unparseable_url_fails_closed() {
+    let al = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.com/*" } ]
+    }));
+    assert!(!al.is_server_allowed(&http_named("relative", "mcp.corp.com/mcp")));
+
+    let deny = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://blocked.example.com/*" } ]
+    }));
+    assert!(deny.is_server_denied(&http_named("relative", "mcp.corp.com/mcp")));
+}
+
+/// Deny matching must not fail open on IPv6 hosts, including alternate
+/// spellings of the same parsed address.
+#[test]
+fn deny_matches_ipv6_hosts() {
+    let al = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://[2001:db8::1]/*" } ]
+    }));
+    // Any scheme/port variant of the denied IPv6 host is still denied.
+    assert!(al.is_server_denied(&http_named("v6", "https://[2001:db8::1]/mcp")));
+    assert!(al.is_server_denied(&http_named("v6-port", "http://[2001:db8::1]:8080/mcp")));
+    // Alternate spellings canonicalize to the same address at connect time.
+    assert!(al.is_server_denied(&http_named("leading-zero", "https://[2001:0db8::1]/mcp")));
+    assert!(al.is_server_denied(&http_named(
+        "expanded",
+        "https://[2001:db8:0:0:0:0:0:1]/mcp"
+    )));
+    // A different address is untouched.
+    assert!(!al.is_server_denied(&http_named("other", "https://[2001:db8::2]/mcp")));
+}
+
+/// IPv6 allow entries compare by parsed address (port literal).
+#[test]
+fn allow_matches_ipv6_hosts_by_address() {
+    let al = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://[2001:db8::1]/*" } ]
+    }));
+    assert!(al.is_server_allowed(&http_named("v6", "https://[2001:db8::1]/mcp")));
+    // Same address, alternate spelling.
+    assert!(al.is_server_allowed(&http_named(
+        "expanded",
+        "https://[2001:db8:0:0:0:0:0:1]/mcp"
+    )));
+    assert!(!al.is_server_allowed(&http_named("other", "https://[2001:db8::2]/mcp")));
+    assert!(!al.is_server_allowed(&http_named("port", "https://[2001:db8::1]:8080/mcp")));
+
+    // An address whose last hextet spells the scheme-default port has no
+    // port to strip — default-port stripping must not corrupt it.
+    let tail = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://[2001:db8::443]/*" } ]
+    }));
+    assert!(tail.is_server_allowed(&http_named("tail", "https://[2001:db8::443]/mcp")));
+    assert!(tail.is_server_allowed(&http_named("tail-port", "https://[2001:db8::443]:443/mcp")));
+
+    // A zero-padded default port strips numerically; a non-default one
+    // stays literal (both-explicit spellings compare numerically).
+    let zero_pad = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://[::1]:0443/*" } ]
+    }));
+    assert!(zero_pad.is_server_allowed(&http_named("padded", "https://[::1]/mcp")));
+    let padded_high = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://[::1]:08080/*" } ]
+    }));
+    assert!(padded_high.is_server_allowed(&http_named("p8080", "https://[::1]:8080/mcp")));
+    assert!(!padded_high.is_server_allowed(&http_named("bare", "https://[::1]/mcp")));
+}
+
+/// `https://host/` (the copied-URL spelling) and `https://host` are the same
+/// WHATWG URL; a deny written either way blocks the whole host.
+#[test]
+fn deny_trailing_slash_blocks_whole_host() {
+    let al = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://blocked.example.com/" } ]
+    }));
+    assert!(al.is_server_denied(&http_named("deep", "https://blocked.example.com/mcp")));
+    assert!(al.is_server_denied(&http_named("root", "https://blocked.example.com/")));
+    assert!(!al.is_server_denied(&http_named("other", "https://ok.example.com/mcp")));
+}
+
+/// A leading `[…]` that isn't an IPv6 literal is a glob character class, not
+/// a bracketed address — the entry must keep working as a glob.
+#[test]
+fn deny_leading_character_class_globs_host() {
+    let al = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://[ab]evil.example/*" } ]
+    }));
+    assert!(al.is_server_denied(&http_named("a", "https://aevil.example/x")));
+    assert!(al.is_server_denied(&http_named("b", "https://bevil.example/x")));
+    assert!(!al.is_server_denied(&http_named("c", "https://cevil.example/x")));
+}
+
+/// The allow side reads a leading non-address `[…]` the same way: a glob
+/// character class, so the grant works instead of silently vanishing. A
+/// bracketed IPv6 allow keeps comparing by parsed address.
+#[test]
+fn allow_leading_character_class_globs_host() {
+    let al = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://[ab]host.corp.com/*" } ]
+    }));
+    assert!(al.is_server_allowed(&http_named("a", "https://ahost.corp.com/mcp")));
+    assert!(al.is_server_allowed(&http_named("b", "https://bhost.corp.com/mcp")));
+    assert!(!al.is_server_allowed(&http_named("c", "https://chost.corp.com/mcp")));
+
+    let v6 = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://[2001:0db8::1]/*" } ]
+    }));
+    assert!(v6.is_server_allowed(&http_named("v6", "https://[2001:db8::1]/mcp")));
+}
+
+/// Allow-pattern ports are literal, as documented: a port glob grants
+/// nothing, and leading zeros compare numerically.
+#[test]
+fn allow_port_is_literal_not_glob() {
+    let glob_port = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.com:4*/*" } ]
+    }));
+    assert!(!glob_port.is_server_allowed(&http_named("p443", "https://mcp.corp.com:443/mcp")));
+    assert!(!glob_port.is_server_allowed(&http_named("p4000", "https://mcp.corp.com:4000/mcp")));
+    let zero_pad = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.com:0443/*" } ]
+    }));
+    assert!(zero_pad.is_server_allowed(&http_named("pad", "https://mcp.corp.com:443/mcp")));
+}
+
+/// Percent-encoded pattern hosts decode like the connect-time parser, so a
+/// copy-pasted encoded deny still blocks its real host.
+#[test]
+fn percent_encoded_pattern_host_matches_decoded_spelling() {
+    let al = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://%61dmin.example/*" } ]
+    }));
+    assert!(al.is_server_denied(&http_named("plain", "https://admin.example/x")));
+    assert!(!al.is_server_denied(&http_named("other", "https://badmin.example/x")));
+}
+
+/// Dot segments in a PATTERN path resolve like the WHATWG serializer, so a
+/// deny spelled `/x/../admin/*` still scopes to `/admin/*`.
+#[test]
+fn pattern_path_dot_segments_resolve() {
+    let al = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://h.example/x/../admin/*" } ]
+    }));
+    assert!(al.is_server_denied(&http_named("hit", "https://h.example/admin/secret")));
+    assert!(!al.is_server_denied(&http_named("miss", "https://h.example/x/admin/secret")));
+}
+
+/// Allow PATH globs are case-sensitive: URL paths are case-sensitive
+/// resources, and an allow match is a positive grant. Hosts stay
+/// case-insensitive on both sides; deny paths stay insensitive (over-block).
+#[test]
+fn allow_path_glob_is_case_sensitive() {
+    let al = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://corp.com/mcp/*" } ]
+    }));
+    assert!(al.is_server_allowed(&http_named("lower", "https://corp.com/mcp/x")));
+    assert!(
+        !al.is_server_allowed(&http_named("upper", "https://corp.com/MCP/x")),
+        "a different-cased path is a different resource; no grant"
+    );
+    // Host case stays irrelevant.
+    assert!(al.is_server_allowed(&http_named("host", "https://CORP.com/mcp/x")));
+}
+
+/// A deny entry whose PATH glob is invalid (unclosed `[`) denies outright
+/// once the host matches — a broken character class must not disable the
+/// entry. A URL the connect-time parser rejects is denied regardless.
+#[test]
+fn invalid_deny_path_glob_fails_closed() {
+    let al = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://h.example/admin[x/*" } ]
+    }));
+    // Host matched + invalid path glob: deny.
+    assert!(al.is_server_denied(&http_named("bad", "https://h.example/admin[x/y")));
+    // Different host: the entry does not apply.
+    assert!(!al.is_server_denied(&http_named("other", "https://other.example/admin[x/y")));
+    // Unparseable URL (`[` in the host): denied on the unparseable branch.
+    assert!(al.is_server_denied(&http_named("unparseable", "https://host[x/y")));
+}
+
+/// Percent-encoded unreserved bytes name the same path at the server
+/// (`%61` = `a`), so both the runtime path and the pattern path decode them
+/// before matching. Reserved escapes (`%2F`) stay encoded — decoding them
+/// would change the path structure.
+#[test]
+fn percent_encoded_unreserved_path_bytes_match_decoded_spelling() {
+    let al = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://h.example/admin/*" } ]
+    }));
+    assert!(al.is_server_denied(&http_named("enc", "https://h.example/%61dmin/x")));
+    // A pattern spelled with the escape matches the plain runtime path too.
+    let enc_pattern = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://h.example/%61dmin/*" } ]
+    }));
+    assert!(enc_pattern.is_server_denied(&http_named("plain", "https://h.example/admin/x")));
+    // %2F is not a path separator; it stays encoded and does not match.
+    assert!(!al.is_server_denied(&http_named("slash", "https://h.example/a%2Fdmin/x")));
+}
+
+/// An unbracketed IPv6 deny entry denies the bracketed connect spelling and
+/// is not misread as a numeric IPv4 host by the `:` split.
+#[test]
+fn deny_unbracketed_ipv6_pattern_matches_address() {
+    let al = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://2001:db8::1/*" } ]
+    }));
+    assert!(al.is_server_denied(&http_named("v6", "https://[2001:db8::1]/mcp")));
+    // The old first-`:` split read host `2001` = IPv4 0.0.7.209 — wrong on
+    // both sides: the IPv6 target dodged and this IPv4 host was denied.
+    assert!(!al.is_server_denied(&http_named("v4", "https://0.0.7.209/mcp")));
+    // A trailing `:443`/`:8080` is a PORT, not a final hextet: the entry
+    // denies host `2001:db8::1` (deny is port-agnostic), not the different
+    // address `2001:db8::1:443`.
+    let with_port = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://2001:db8::1:443/*" } ]
+    }));
+    assert!(with_port.is_server_denied(&http_named("v6b", "https://[2001:db8::1]/mcp")));
+    assert!(with_port.is_server_denied(&http_named("v6c", "https://[2001:db8::1]:8080/mcp")));
+    assert!(!with_port.is_server_denied(&http_named("other", "https://[2001:db8::1:443]/mcp")));
+    // A non-decimal final group is a hextet, not a port: the whole string is
+    // the address.
+    let hextet = allowlist_from(serde_json::json!({
+        "deniedMcpServers": [ { "serverUrl": "https://2001:db8::1:ffff/*" } ]
+    }));
+    assert!(hextet.is_server_denied(&http_named("hex", "https://[2001:db8::1:ffff]/mcp")));
+}
+
+/// A host wildcard allow grants IPv6 runtimes too — the address-equality
+/// branch applies only when the PATTERN authority is bracketed.
+#[test]
+fn allow_host_wildcard_matches_ipv6_runtime() {
+    let al = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://*/*" } ]
+    }));
+    assert!(al.is_server_allowed(&http_named("v6", "https://[::1]/mcp")));
+    assert!(al.is_server_allowed(&http_named("v4", "https://10.0.0.1/mcp")));
+}
+
 /// Test sink that accumulates `tracing` output into a shared buffer.
 #[derive(Clone)]
 struct VecWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -966,6 +1411,160 @@ fn parse_mcp_entries_capturing_logs(
     let entries = tracing::subscriber::with_default(subscriber, || parse_mcp_entries(json, key));
     let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
     (entries, logs)
+}
+
+/// Allow patterns whose scheme can never match (glob or missing scheme) fail
+/// closed but must warn — a fleet policy written that way silently loses its
+/// grants.
+#[test]
+fn unmatchable_allow_url_patterns_warn() {
+    let json = serde_json::json!({
+        "allowedMcpServers": [
+            { "serverUrl": "*://mcp.corp.com/*" },
+            { "serverUrl": "*.corp.com/*" },
+            { "serverUrl": "https://mcp.corp.com/*" }
+        ]
+    });
+    let (entries, logs) = parse_mcp_entries_capturing_logs(&json, "allowedMcpServers");
+    // Entries are kept (fail-closed no-ops), but both bad shapes warn.
+    assert_eq!(entries.len(), 3);
+    assert_eq!(
+        logs.matches("can never match").count(),
+        2,
+        "expected warnings for the glob-scheme and scheme-less patterns, got: {logs:?}"
+    );
+}
+
+/// Allow entries in shapes that can never match — non-canonical IP
+/// spellings, unbracketed IPv6, Unicode-plus-glob labels — warn at load.
+#[test]
+fn unmatchable_allow_ip_and_label_shapes_warn() {
+    let json = serde_json::json!({
+        "allowedMcpServers": [
+            { "serverUrl": "http://127.1/*" },
+            { "serverUrl": "https://2001:db8::1/*" },
+            { "serverUrl": "https://bü*.example/*" },
+            // Working shapes the warn must NOT fire on: bracketed and
+            // canonical IPs, canonical-address-plus-port, trailing dot.
+            { "serverUrl": "https://[2001:0db8::1]/*" },
+            { "serverUrl": "https://127.0.0.1/*" },
+            { "serverUrl": "https://2001:db8::1:443/*" },
+            { "serverUrl": "https://127.0.0.1./*" },
+            { "serverUrl": "https://2001:db8*:443/*" },
+            // Dead shapes: no host, glob port — bracketed IPv6 included.
+            { "serverUrl": "https:///admin/*" },
+            { "serverUrl": "https://mcp.corp.com:*/mcp/*" },
+            { "serverUrl": "https://[::1]:*/*" },
+            { "serverUrl": "https://[::1]:http/*" },
+            // Working shape: bracketed address with a numeric port.
+            { "serverUrl": "https://[::1]:8080/*" }
+        ]
+    });
+    let (entries, logs) = parse_mcp_entries_capturing_logs(&json, "allowedMcpServers");
+    assert_eq!(entries.len(), 13);
+    assert_eq!(
+        logs.matches("can never match").count(),
+        7,
+        "expected warnings for 127.1, unbracketed IPv6, the Unicode+glob label, the host-less entry, and the three glob/non-numeric ports only, got: {logs:?}"
+    );
+    assert!(
+        logs.contains("has no host"),
+        "host-less allow must warn: {logs:?}"
+    );
+    assert!(
+        logs.contains("port is not a number"),
+        "glob port must warn: {logs:?}"
+    );
+}
+
+/// Deny entries that can never match — host-less patterns and
+/// non-compiling host globs — warn at load (silent zero enforcement).
+#[test]
+fn unmatchable_deny_url_shapes_warn() {
+    let json = serde_json::json!({
+        "deniedMcpServers": [
+            { "serverUrl": "/admin/*" },
+            { "serverUrl": "https://host[x/*" },
+            { "serverUrl": "https://blocked.example.com/*" }
+        ]
+    });
+    let (entries, logs) = parse_mcp_entries_capturing_logs(&json, "deniedMcpServers");
+    assert_eq!(entries.len(), 3);
+    assert!(
+        logs.contains("has no host"),
+        "host-less deny must warn, got: {logs:?}"
+    );
+    assert!(
+        logs.contains("host glob does not compile"),
+        "broken host glob must warn, got: {logs:?}"
+    );
+}
+
+/// Cross-dimension union at the production chokepoint: a command-only
+/// allowlist restricts stdio servers, never HTTP, and vice versa — pinned
+/// through `is_server_allowed`, where a match-guard fall-through once
+/// flipped exactly this behavior (the `#[cfg(test)]` helpers bypass it).
+#[test]
+fn allowlist_dimensions_are_union_at_server_level() {
+    let cmd_only = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "command": "npx" } ]
+    }));
+    assert!(cmd_only.is_server_allowed(&http_named("h", "https://any.example/mcp")));
+    assert!(cmd_only.is_server_allowed(&stdio_named("ok", "npx")));
+    assert!(!cmd_only.is_server_allowed(&stdio_named("no", "other")));
+
+    let url_only = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://ok.example/*" } ]
+    }));
+    assert!(url_only.is_server_allowed(&stdio_named("s", "anything")));
+    assert!(url_only.is_server_allowed(&http_named("ok", "https://ok.example/mcp")));
+    assert!(!url_only.is_server_allowed(&http_named("h", "https://other.example/x")));
+}
+
+/// A pattern's userinfo drops like the connect-time parser drops it — a
+/// copied `token@host` URL still grants its host, including bracketed IPv6.
+#[test]
+fn allow_pattern_userinfo_drops() {
+    let al = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [
+            { "serverUrl": "https://token@mcp.corp.com/*" },
+            { "serverUrl": "https://token@[::1]/*" }
+        ]
+    }));
+    assert!(al.is_server_allowed(&http_named("dom", "https://mcp.corp.com/x")));
+    assert!(al.is_server_allowed(&http_named("v6", "https://[::1]/x")));
+}
+
+/// Escape hex case never splits one connect target: `%c3%a9` and `%C3%A9`
+/// spellings match on both the pattern and the runtime side, even under
+/// case-sensitive allow paths.
+#[test]
+fn escape_hex_case_is_normalized_both_sides() {
+    let al = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverUrl": "https://h.example/caf%c3%a9/*" } ]
+    }));
+    assert!(al.is_server_allowed(&http_named("upper", "https://h.example/caf%C3%A9/x")));
+    assert!(al.is_server_allowed(&http_named("lower", "https://h.example/caf%c3%a9/x")));
+    assert!(al.is_server_allowed(&http_named("raw", "https://h.example/café/x")));
+}
+
+/// Every spelling whose canonical path is `/` denies the whole host, not
+/// just the literal trailing slash.
+#[test]
+fn deny_canonical_root_spellings_block_whole_host() {
+    for pattern in [
+        "https://blocked.example.com/.",
+        "https://blocked.example.com/mcp/..",
+        "https://blocked.example.com/./",
+    ] {
+        let al = allowlist_from(serde_json::json!({
+            "deniedMcpServers": [ { "serverUrl": pattern } ]
+        }));
+        assert!(
+            al.is_server_denied(&http_named("deep", "https://blocked.example.com/mcp")),
+            "{pattern} must deny the whole host"
+        );
+    }
 }
 
 #[test]
@@ -1066,6 +1665,46 @@ fn mcp_name_matches_mirrors_runtime_name_truncation() {
     let max_bare = MANAGED_MCP_NAME_MAX_CHARS - MANAGED_MCP_PREFIX.len();
     let runtime = format!("{MANAGED_MCP_PREFIX}{}", &long[..max_bare]);
     assert!(mcp_name_matches(&long, &runtime));
+}
+
+/// Truncation applies only to `grok_com_*` names — long plain names
+/// sharing a prefix must not match.
+#[test]
+fn long_plain_names_do_not_collide_via_truncation() {
+    assert!(!mcp_name_matches(
+        "corporate-approved-server-alpha-prod",
+        "corporate-approved-server-alpha-anything"
+    ));
+    // Exact long names still match.
+    assert!(mcp_name_matches(
+        "corporate-approved-server-alpha-prod",
+        "corporate-approved-server-alpha-prod"
+    ));
+}
+
+/// A long `grok_com_*` POLICY entry must not become a prefix grant over
+/// attacker-chosen plain runtime names: truncation applies only when the
+/// runtime name is managed, because that is the only side the runtime ever
+/// truncates.
+#[test]
+fn long_managed_allow_entry_does_not_grant_plain_prefix_names() {
+    let max_bare = MANAGED_MCP_NAME_MAX_CHARS - MANAGED_MCP_PREFIX.len();
+    let long_bare = "a".repeat(max_bare + 8);
+    let entry = format!("{MANAGED_MCP_PREFIX}{long_bare}");
+    // A plain runtime name sharing the truncated prefix must NOT match…
+    let attacker = format!("{}-decoy", &long_bare[..max_bare]);
+    assert!(!mcp_name_matches(&entry, &attacker));
+    // …while the entry's own truncated managed runtime name still does.
+    let runtime = format!("{MANAGED_MCP_PREFIX}{}", &long_bare[..max_bare]);
+    assert!(mcp_name_matches(&entry, &runtime));
+
+    // Truncation applies only to the shape runtime truncation produces: a
+    // managed name AT the cap. An attacker-chosen `grok_com_*` decoy that is
+    // longer or shorter than the cap must not prefix-match the long entry.
+    let over_cap_decoy = format!("{MANAGED_MCP_PREFIX}{}-decoy", &long_bare[..max_bare]);
+    assert!(!mcp_name_matches(&entry, &over_cap_decoy));
+    let short_decoy = format!("{MANAGED_MCP_PREFIX}{}", &long_bare[..max_bare - 4]);
+    assert!(!mcp_name_matches(&entry, &short_decoy));
 }
 
 #[test]

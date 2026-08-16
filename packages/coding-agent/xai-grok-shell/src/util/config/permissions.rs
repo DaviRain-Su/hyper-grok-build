@@ -119,7 +119,16 @@ pub fn resolved_display_permission_mode(
     clamped_display_permission_mode(mode)
 }
 
-/// Load selected permission mode for launch (effective TOML + explicit remote).
+fn permission_mode_from_layers(
+    layers: &crate::config::ConfigLayers,
+    remote: Option<&str>,
+) -> PermissionMode {
+    let merged = layers.effective_config_base_without_overlay();
+    let ui = merged.as_table().and_then(|t| t.get("ui"));
+    resolve_permission_mode(ui, remote)
+}
+
+/// Load selected permission mode for launch (overlay-free TOML + explicit remote).
 ///
 /// TOML `[ui]` keys win over remote; remote only when no TOML permission key.
 /// Missing/unknown → Ask. Config load failure → Ask.
@@ -132,12 +141,11 @@ pub fn resolved_display_permission_mode(
 ///   approval_mode = "always-approve"   (legacy)
 ///   yolo = true                        (legacy)
 pub fn load_permission_mode(remote_permission_mode: Option<&str>) -> PermissionMode {
-    let root: TomlValue = match crate::config::load_effective_config() {
-        Ok(r) => r,
+    let layers = match crate::config::ConfigLayers::load() {
+        Ok(l) => l,
         Err(_) => return PermissionMode::Ask,
     };
-    let ui = root.as_table().and_then(|t| t.get("ui"));
-    resolve_permission_mode(ui, remote_permission_mode)
+    permission_mode_from_layers(&layers, remote_permission_mode)
 }
 
 /// Result of [`effective_yolo_for_launch`].
@@ -251,22 +259,28 @@ fn resolve_launch_yolo(requested: bool, policy_block: Option<&'static str>) -> E
 /// `xai-grok-workspace`.
 use xai_grok_workspace::permission::resolution::yolo_disabled_by_policy;
 
-/// Load `[ui] require_plan_approval` from config.toml.
-///
-/// When `true`, the plan viewer always opens for explicit user approval
-/// when the agent calls `exit_plan_mode`, even in always-approve (YOLO)
-/// mode. Defaults to `false`.
-pub fn load_require_plan_approval() -> bool {
-    let root: TomlValue = match crate::config::load_effective_config() {
-        Ok(r) => r,
-        Err(_) => return false,
-    };
-    root.as_table()
+fn require_plan_approval_from_layers(layers: &crate::config::ConfigLayers) -> bool {
+    layers
+        .effective_config_base_without_overlay()
+        .as_table()
         .and_then(|t| t.get("ui"))
         .and_then(|v| v.as_table())
         .and_then(|ui| ui.get("require_plan_approval"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
+}
+
+/// Load `[ui] require_plan_approval` from the merged config layers (overlay-free).
+///
+/// When `true`, the plan viewer always opens for explicit user approval
+/// when the agent calls `exit_plan_mode`, even in always-approve (YOLO)
+/// mode. Defaults to `false`.
+pub fn load_require_plan_approval() -> bool {
+    let layers = match crate::config::ConfigLayers::load() {
+        Ok(l) => l,
+        Err(_) => return false,
+    };
+    require_plan_approval_from_layers(&layers)
 }
 
 #[cfg(test)]
@@ -276,6 +290,19 @@ mod tests {
     #[test]
     fn resolve_permission_mode_none_is_ask() {
         assert_eq!(resolve_permission_mode(None, None), PermissionMode::Ask);
+    }
+
+    #[test]
+    fn campaign_cannot_arm_permission_mode_gate() {
+        let mut layers = crate::config::ConfigLayers::default();
+        layers.campaigns.managed = vec![xai_grok_config::CampaignEntry {
+            id: "c1".into(),
+            patch: toml::from_str("[ui]\npermission_mode = \"always-approve\"\n").unwrap(),
+        }];
+        assert_eq!(
+            permission_mode_from_layers(&layers, None),
+            PermissionMode::Ask
+        );
     }
 
     #[test]
@@ -720,6 +747,47 @@ mod tests {
                 blocked_warning: None,
                 policy_block: None,
             },
+        );
+    }
+
+    fn ui_layer(body: &str) -> TomlValue {
+        toml::from_str(&format!("[ui]\n{body}\n")).unwrap()
+    }
+
+    #[test]
+    fn env_overlay_cannot_escalate_security_gates() {
+        let user_opt_out = crate::config::ConfigLayers {
+            user: ui_layer("permission_mode = \"ask\"\nrequire_plan_approval = true"),
+            env_overlay: Some(ui_layer(
+                "permission_mode = \"always-approve\"\nyolo = true\nrequire_plan_approval = false",
+            )),
+            ..Default::default()
+        };
+        assert_eq!(
+            permission_mode_from_layers(&user_opt_out, None),
+            PermissionMode::Ask,
+        );
+        assert!(require_plan_approval_from_layers(&user_opt_out));
+
+        let managed_opt_out = crate::config::ConfigLayers {
+            managed: ui_layer("permission_mode = \"ask\""),
+            env_overlay: Some(ui_layer("permission_mode = \"always-approve\"")),
+            ..Default::default()
+        };
+        assert_eq!(
+            permission_mode_from_layers(&managed_opt_out, None),
+            PermissionMode::Ask,
+        );
+
+        let requirements_clamp = crate::config::ConfigLayers {
+            user: ui_layer("permission_mode = \"always-approve\""),
+            env_overlay: Some(ui_layer("permission_mode = \"always-approve\"")),
+            user_requirements: Some(ui_layer("permission_mode = \"ask\"")),
+            ..Default::default()
+        };
+        assert_eq!(
+            permission_mode_from_layers(&requirements_clamp, None),
+            PermissionMode::Ask,
         );
     }
 }

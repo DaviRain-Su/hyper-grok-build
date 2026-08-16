@@ -66,7 +66,7 @@ use super::session::fork::{
     dispatch_startup_fork_session,
 };
 use super::session::lifecycle::{
-    clear_startup_actions, dispatch_agent_type_mismatch_answered,
+    clear_startup_actions, dispatch_accept_consent, dispatch_agent_type_mismatch_answered,
     dispatch_delete_current_session_answered, dispatch_exit_session, dispatch_new_session,
     dispatch_new_session_inner, dispatch_new_session_with_id, dispatch_new_worktree_session,
     dispatch_trust_folder, open_delete_current_session_question, open_new_session_question,
@@ -1308,6 +1308,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::TrustFolder => dispatch_trust_folder(app),
+        Action::AcceptConsent => dispatch_accept_consent(app),
         Action::TriggerDeepSearch => dispatch_trigger_deep_search(app, false),
         Action::ForceDeepSearch => dispatch_trigger_deep_search(app, true),
         Action::PickContentSession { session_id, cwd } => {

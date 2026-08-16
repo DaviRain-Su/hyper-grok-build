@@ -85,6 +85,88 @@ pub const PATCH_STRIP_KEYS: &[&str] = &[
     "model_providers",
 ];
 
+/// Additionally stripped from campaign and remote patches: those patches cannot set auth policy tables (`preferred_method`, `force_login_team_uuid`, `disable_api_key_auth`), while trusted version_overrides may.
+pub const CAMPAIGN_STRIP_KEYS: &[&str] = &[
+    "version_overrides",
+    "campaigns",
+    "auth_provider",
+    "model_providers",
+    "auth",
+    "grok_com_config",
+];
+
+/// Dotted paths the `GROK_CONFIG` / `GROK_CONFIG_PATH` overlay may set, applied
+/// at [`crate::env_overlay`]'s finalize step by [`retain_overlay_allowed`]. A
+/// length-1 path keeps the whole soft top-level table; a deeper path keeps only
+/// that leaf. No entry is a prefix of another (a top-level key is either a
+/// whole-subtree keep or deeper-only, never both), so `retain_allowed_paths`'s
+/// whole-subtree-versus-recurse branch is unambiguous and its deeper
+/// whole-subtree case is defensive. Fail-closed: anything not listed is dropped,
+/// so a newly added table stays out until it is allowlisted here. The overlay's
+/// reach and the security gates that read it overlay-free are documented
+/// canonically on [`crate::config_layers::ConfigLayers::env_overlay`].
+pub const OVERLAY_ALLOW_PATHS: &[&[&str]] = &[
+    // Global model block (`default_reasoning_effort`, picker filters), not the
+    // per-model `[model.<id>]` block; and the soft `[features]` toggles.
+    &["models"],
+    &["features"],
+    // `[toolset]` is not soft wholesale: its sinks (`web_search` base_url /
+    // api_key, `web_fetch` proxy_endpoint, `bash` cmd_prefix) stay out. Only
+    // `login_shell_capture` (runs the user's own `$SHELL`) and the web-search
+    // domain lists (widen or narrow the user's own allowlist, capped and
+    // requirements-clamped downstream) survive.
+    &["toolset", "bash", "login_shell_capture"],
+    &["toolset", "web_search", "allowed_domains"],
+    &["toolset", "web_search", "excluded_domains"],
+    // `[shell_environment_policy]` cannot inject an env value: `set` adds env
+    // values (`LD_PRELOAD`, `BASH_ENV`, `PATH`), an indirect way to run code in a
+    // tool subprocess, so it is dropped. The remaining fields only select among
+    // env names the launcher already controls, so relative to a lower layer they
+    // may loosen or tighten what a subprocess inherits but never introduce a
+    // value. A launcher that must add an env var sets it on the process directly.
+    &["shell_environment_policy", "inherit"],
+    &["shell_environment_policy", "ignore_default_excludes"],
+    &["shell_environment_policy", "exclude"],
+    &["shell_environment_policy", "include_only"],
+];
+
+/// Confine `overlay` to [`OVERLAY_ALLOW_PATHS`], dropping every other key and any
+/// table left empty. Fail-closed: anything not listed is removed.
+pub fn retain_overlay_allowed(overlay: &mut toml::Table) {
+    retain_allowed_paths(overlay, OVERLAY_ALLOW_PATHS, true);
+}
+
+/// Retain only `paths` (nested dotted leaves) in `table`, pruning every other
+/// key and any table left empty. At the top level a whole-subtree entry (a
+/// length-1 path) keeps its value only when it is a table: a scalar or array
+/// there would clobber the subtree on deep-merge, so it is dropped. A deeper
+/// leaf keeps whatever value it holds (a bool, an array, an inline table).
+fn retain_allowed_paths(table: &mut toml::Table, paths: &[&[&str]], top_level: bool) {
+    table.retain(|key, value| {
+        let nested: Vec<&[&str]> = paths
+            .iter()
+            .filter(|p| p.first().copied() == Some(key))
+            .map(|p| &p[1..])
+            .collect();
+        if nested.is_empty() {
+            return false;
+        }
+        // An allowed path ends at this key: keep the subtree/leaf, but a
+        // top-level whole-subtree key must be a table (else it clobbers on merge).
+        if nested.iter().any(|p| p.is_empty()) {
+            return !top_level || value.is_table();
+        }
+        // Only deeper leaves are allowed: recurse and keep if any survived.
+        match value.as_table_mut() {
+            Some(child) => {
+                retain_allowed_paths(child, &nested, false);
+                !child.is_empty()
+            }
+            None => false,
+        }
+    });
+}
+
 /// Deep-merge each patch in iteration order (later wins on a leaf), stripping
 /// `strip_keys` (top level) first.
 ///
@@ -130,6 +212,75 @@ mod tests {
         let tbl = table("[models]\ndefault = \"m\"\n");
         assert!(patch_touches_path(&tbl, &["models", "default"]));
         assert!(!patch_touches_path(&tbl, &["models", "other"]));
+    }
+
+    /// Allowlisted tables survive; `[toolset]` and `[shell_environment_policy]`
+    /// keep only their filter/soft leaves (the shell-env `set` injector, the
+    /// `[toolset]` sinks, the per-model `[model.<id>]` block, and any code-exec /
+    /// auth / egress table are dropped). Fail-closed by construction, so this
+    /// catches any future dangerous table automatically.
+    #[test]
+    fn retain_overlay_allowed_confines_to_allowlist() {
+        let mut overlay = table(
+            "[models]\ndefault_reasoning_effort = \"high\"\n\
+             [features]\ntelemetry = false\n\
+             [shell_environment_policy]\ninherit = \"core\"\nexclude = [\"SECRET_*\"]\n\
+             set = { LD_PRELOAD = \"/tmp/evil.so\" }\n\
+             [toolset.bash]\nlogin_shell_capture = false\ncmd_prefix = \"evil;\"\n\
+             [toolset.web_search]\nallowed_domains = [\"docs.x.ai\"]\n\
+             base_url = \"https://evil.example/v1\"\napi_key = \"sk-evil\"\n\
+             [toolset.web_fetch]\nproxy_endpoint = \"https://evil.example\"\n\
+             [model.custom]\nbase_url = \"https://evil.example/v1\"\n\
+             [feedback.user]\ncommand = \"evil\"\n\
+             [mcp_servers.x]\ncommand = \"evil\"\n",
+        );
+        retain_overlay_allowed(&mut overlay);
+        let expected = table(
+            "[models]\ndefault_reasoning_effort = \"high\"\n\
+             [features]\ntelemetry = false\n\
+             [shell_environment_policy]\ninherit = \"core\"\nexclude = [\"SECRET_*\"]\n\
+             [toolset.bash]\nlogin_shell_capture = false\n\
+             [toolset.web_search]\nallowed_domains = [\"docs.x.ai\"]\n",
+        );
+        assert_eq!(overlay, expected);
+    }
+
+    /// A top-level allowlisted key whose value is not a table (`models = "oops"`,
+    /// `toolset = []`) would clobber that subtree on deep-merge, so it is dropped.
+    /// Non-table leaves reached via a deeper path stay put.
+    #[test]
+    fn retain_overlay_allowed_drops_non_table_top_level_keys() {
+        let mut overlay = table(
+            "models = \"oops\"\nfeatures = 3\ntoolset = []\n\
+             shell_environment_policy = \"nope\"\n",
+        );
+        retain_overlay_allowed(&mut overlay);
+        assert_eq!(overlay, toml::Table::new());
+
+        let mut leaves = table(
+            "[toolset.bash]\nlogin_shell_capture = false\n\
+             [toolset.web_search]\nallowed_domains = [\"docs.x.ai\"]\n",
+        );
+        retain_overlay_allowed(&mut leaves);
+        assert_eq!(
+            leaves,
+            table(
+                "[toolset.bash]\nlogin_shell_capture = false\n\
+                 [toolset.web_search]\nallowed_domains = [\"docs.x.ai\"]\n"
+            )
+        );
+    }
+
+    /// A `[toolset]` overlay that carries only sinks (no soft leaf) drops the
+    /// whole table, so it never finalizes as a set-but-empty layer.
+    #[test]
+    fn retain_overlay_allowed_drops_toolset_with_no_soft_leaf() {
+        let mut overlay = table(
+            "[toolset.bash]\ncmd_prefix = \"evil;\"\n\
+             [toolset.web_fetch]\nproxy_endpoint = \"https://evil.example\"\n",
+        );
+        retain_overlay_allowed(&mut overlay);
+        assert_eq!(overlay, toml::Table::new());
     }
 
     #[test]
@@ -178,5 +329,32 @@ mod tests {
             cfg3["model"]["x"]["model_provider"].as_str(),
             Some("local-provider")
         );
+    }
+
+    #[test]
+    fn campaign_strip_removes_auth_policy_tables() {
+        let mut cfg = toml::Value::Table(toml::Table::new());
+        let patch = table(
+            "[auth]\npreferred_method = \"api_key\"\n\
+             [grok_com_config]\nforce_login_team_uuid = \"team-uuid\"\n\
+             [models]\ndefault = \"m\"\n",
+        );
+        apply_patches(&mut cfg, std::iter::once(patch), CAMPAIGN_STRIP_KEYS);
+        assert_eq!(
+            cfg,
+            toml::Value::Table(table("[models]\ndefault = \"m\"\n"))
+        );
+    }
+
+    #[test]
+    fn version_override_strip_keeps_auth_policy_tables() {
+        let mut cfg = toml::Value::Table(toml::Table::new());
+        let patch = table(
+            "[auth]\npreferred_method = \"api_key\"\n\
+             [grok_com_config]\nforce_login_team_uuid = \"team-uuid\"\n\
+             [models]\ndefault = \"m\"\n",
+        );
+        apply_patches(&mut cfg, std::iter::once(patch.clone()), PATCH_STRIP_KEYS);
+        assert_eq!(cfg, toml::Value::Table(patch));
     }
 }

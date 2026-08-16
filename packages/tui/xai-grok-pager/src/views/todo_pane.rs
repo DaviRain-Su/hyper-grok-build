@@ -136,8 +136,6 @@ impl ListItem for TodoListEntry {
 // TodoPane — self-contained pane owning items, state, and rendering
 // ---------------------------------------------------------------------------
 
-use std::time::{Duration, Instant};
-
 use crossterm::event::{KeyCode, KeyEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -150,14 +148,14 @@ use super::list_pane::{ListPane, ListPaneConfig, ListPaneState, ListPaneStyle, W
 use super::overlay::OverlayState;
 
 // ---------------------------------------------------------------------------
-// TodoCounts — aggregate status counts for the badge
+// TodoCounts — aggregate status counts
 // ---------------------------------------------------------------------------
 
 /// Counts of todo items by status.
 ///
-/// Used by the status bar badge to show plan progress at a glance.
+/// Feeds the empty-pane placeholder message.
 /// Counts ALL items regardless of `show_done` filter.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct TodoCounts {
     pub in_progress: usize,
     pub pending: usize,
@@ -169,13 +167,6 @@ impl TodoCounts {
     /// Total number of items across all statuses.
     pub fn total(&self) -> usize {
         self.in_progress + self.pending + self.completed + self.cancelled
-    }
-
-    /// Tasks that count toward completion progress — every status except
-    /// cancelled. Used as the denominator of the status-bar `done/total`
-    /// badge so cancelled tasks don't keep it from reaching `N/N`.
-    pub fn total_excluding_cancelled(&self) -> usize {
-        self.in_progress + self.pending + self.completed
     }
 }
 
@@ -189,9 +180,6 @@ fn empty_placeholder_message(todos_empty: bool, counts: TodoCounts) -> String {
         (d, c) => rust_i18n::t!("todo.done_cancelled", done = d, cancelled = c).to_string(),
     }
 }
-
-/// Duration for the badge flash animation on count changes.
-const BADGE_FLASH_DURATION: Duration = Duration::from_millis(1200);
 
 /// Absolute maximum height (in lines) the todo pane will request.
 const MAX_TODO_HEIGHT: u16 = 10;
@@ -220,10 +208,6 @@ pub struct TodoPane {
     show_done: bool,
     /// Shared visibility/focus state.
     pub overlay: OverlayState,
-    /// Previous counts snapshot for flash-on-change detection.
-    prev_counts: TodoCounts,
-    /// When the badge flash animation expires (500ms after a count change).
-    badge_flash_until: Option<Instant>,
     /// Last theme kind seen — used to detect theme switches and restyle.
     last_theme: ThemeKind,
 }
@@ -256,10 +240,7 @@ impl TodoPane {
             style: TodoPaneStyle::default(),
             list_style: ListPaneStyle::default(),
             show_done: true,
-            // Starts hidden — auto-shows when items arrive via update_todos.
             overlay: OverlayState::hidden(),
-            prev_counts: TodoCounts::default(),
-            badge_flash_until: None,
             last_theme: crate::theme::Theme::current_kind(),
         }
     }
@@ -273,17 +254,8 @@ impl TodoPane {
 
     /// Replace all todo items (called from ACP Plan handler).
     ///
-    /// Does NOT auto-show the todo pane — the badge in the status bar is
-    /// the primary indicator. Users toggle the pane with Ctrl-T or by
-    /// clicking the badge.
-    ///
-    /// Triggers a badge flash when counts change (including first arrival).
+    /// Does NOT auto-show the todo pane. Users toggle it with Ctrl-T.
     pub fn update_todos(&mut self, items: Vec<TodoItem>) {
-        let new_counts = Self::compute_counts(&items);
-        if new_counts != self.prev_counts {
-            self.badge_flash_until = Some(Instant::now() + BADGE_FLASH_DURATION);
-        }
-        self.prev_counts = new_counts;
         self.todos = items;
     }
 
@@ -303,38 +275,7 @@ impl TodoPane {
 
     /// Current status counts (across ALL items, ignoring `show_done`).
     pub fn counts(&self) -> TodoCounts {
-        self.prev_counts
-    }
-
-    /// Whether the badge flash animation is currently active.
-    pub fn badge_flash_active(&self) -> bool {
-        self.badge_flash_until.is_some_and(|t| Instant::now() < t)
-    }
-
-    /// Whether the badge needs animation ticks (flash expiry).
-    pub fn badge_needs_tick(&self) -> bool {
-        self.badge_flash_until.is_some()
-    }
-
-    /// Advance badge flash timer. Returns `true` if a redraw is needed
-    /// (flash just expired).
-    pub fn badge_tick(&mut self) -> bool {
-        if let Some(t) = self.badge_flash_until
-            && Instant::now() >= t
-        {
-            self.badge_flash_until = None;
-            return true;
-        }
-        false
-    }
-
-    /// Test-only: backdate an armed badge flash so it reads as expired, letting
-    /// a single `badge_tick()` clear it deterministically (no 1200ms sleep).
-    #[cfg(test)]
-    pub(crate) fn expire_badge_flash_for_test(&mut self) {
-        if self.badge_flash_until.is_some() {
-            self.badge_flash_until = Some(Instant::now() - Duration::from_millis(1));
-        }
+        Self::compute_counts(&self.todos)
     }
 
     /// Whether the pane should be visible in the layout.

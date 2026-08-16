@@ -792,8 +792,7 @@ pub async fn run_single_turn(
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: options.disable_web_search,
         todo_gate: false,
         laziness_debug_log: None,
@@ -1285,9 +1284,9 @@ pub async fn run_single_turn(
             let is_max_turns = resp
                 .meta
                 .as_ref()
-                .and_then(|m| m.get("cancellationCategory"))
+                .and_then(|m| m.get(crate::app::CANCELLATION_CATEGORY_KEY))
                 .and_then(|v| v.as_str())
-                == Some("max_turns_reached");
+                == Some(xai_grok_shell::session::commands::MAX_TURNS_REACHED_CATEGORY);
             if is_max_turns {
                 emitter.on_max_turns();
                 emitter.on_end(&stop_reason, sid, rid);

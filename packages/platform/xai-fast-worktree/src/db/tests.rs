@@ -2,20 +2,14 @@ use super::*;
 
 fn make_record(id: &str, path: &str, kind: WorktreeKind) -> WorktreeRecord {
     WorktreeRecord {
-        id: id.to_string(),
-        path: PathBuf::from(path),
         source_repo: PathBuf::from("/src/repo"),
-        repo_name: "repo".to_string(),
         kind,
-        creation_mode: "linked".to_string(),
         git_ref: Some("main".to_string()),
         head_commit: Some("abc123".to_string()),
         session_id: Some(format!("sess-{id}")),
         creator_pid: Some(12345),
         created_at: 1000,
-        last_accessed_at: None,
-        status: WorktreeStatus::Alive,
-        metadata: None,
+        ..crate::test_support::worktree_record(id, path)
     }
 }
 
@@ -68,7 +62,7 @@ fn unregister_by_id() {
 
     assert!(db.unregister("a").unwrap());
     assert!(db.get("a").unwrap().is_none());
-    assert!(!db.unregister("a").unwrap()); // second call returns false
+    assert!(!db.unregister("a").unwrap());
 }
 
 #[test]
@@ -805,34 +799,12 @@ fn read_only_handles_reject_writes_on_both_journal_arms() {
         .expect_err("Truncate-arm read-only handle must reject writes");
 }
 
-fn grok_dir_under(dir: &Path) -> PathBuf {
-    dunce::canonicalize(dir)
-        .unwrap_or_else(|_| dir.to_path_buf())
-        .join(".grok")
-}
-
 #[test]
-fn resolve_grok_home_uses_home_dir_when_grok_home_unset() {
-    let home = tempfile::TempDir::new().unwrap();
-    let resolved = resolve_grok_home_from(None, Some(home.path().to_path_buf())).unwrap();
-    assert_eq!(resolved, grok_dir_under(home.path()));
-}
-
-#[test]
-fn resolve_grok_home_prefers_grok_home() {
-    let grok = tempfile::TempDir::new().unwrap();
-    let resolved = resolve_grok_home_from(
-        Some(grok.path().as_os_str().to_owned()),
-        Some(PathBuf::from("/some/home")),
-    )
-    .unwrap();
-    assert_eq!(resolved, grok.path());
-}
-
-#[test]
-fn resolve_grok_home_treats_empty_grok_home_as_unset() {
-    let home = tempfile::TempDir::new().unwrap();
-    let resolved =
-        resolve_grok_home_from(Some(OsString::new()), Some(home.path().to_path_buf())).unwrap();
-    assert_eq!(resolved, grok_dir_under(home.path()));
+fn get_set_meta_round_trip() {
+    let db = WorktreeDb::open_in_memory().unwrap();
+    assert_eq!(db.get_meta("k").unwrap(), None);
+    db.set_meta("k", "v").unwrap();
+    assert_eq!(db.get_meta("k").unwrap().as_deref(), Some("v"));
+    db.set_meta("k", "v2").unwrap();
+    assert_eq!(db.get_meta("k").unwrap().as_deref(), Some("v2"));
 }

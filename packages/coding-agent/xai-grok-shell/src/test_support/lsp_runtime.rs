@@ -120,6 +120,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         subagents_max_depth: xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH,
         workflow_max_concurrent_agents:
             crate::session::workflow::host_service::DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS,
+        media_gen_batch_limits: xai_grok_tools::media_gen_limits::MediaGenBatchLimits::default(),
         inference_idle_timeout_secs: 600,
         auto_compact_threshold_tiers: crate::agent::subagent::AutoCompactThresholdTiers::default(),
         permission_handle: None,

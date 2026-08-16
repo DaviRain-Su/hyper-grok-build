@@ -367,6 +367,7 @@ mod link_click_tests {
             screen_x: 0,
             selectable_cols: 0..40,
             text: "selectable scrollback line for drag selection".into(),
+            painted_region: None,
             joiner_to_previous: None,
         });
         agent.update_scrollback_selection_state(model, Default::default());

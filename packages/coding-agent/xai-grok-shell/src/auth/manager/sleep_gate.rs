@@ -66,70 +66,6 @@ pub(super) const SLEEP_ACK_MAX_WAIT: StdDuration = StdDuration::from_secs(20);
 #[cfg(not(target_os = "macos"))]
 pub(super) const SLEEP_ACK_MAX_WAIT: StdDuration = StdDuration::from_secs(3);
 
-/// Dual-clock dark-wake deferral budget: tracks the current unbroken run of
-/// deferrals and exhausts once *either* clock passes [`DARK_WAKE_DEFER_MAX`]
-/// (the wall arm keeps counting through sleeps between dark wakes — see
-/// [`DualClock`]). The manager holds two instances: the general refresh run
-/// and the sentinel gate's own run (see the field docs for why they must
-/// not share one). One type so the two arms cannot drift.
-#[derive(Default)]
-pub(crate) struct DarkWakeBudget {
-    run: RwLock<Option<DualClock>>,
-}
-
-impl DarkWakeBudget {
-    /// Decide under one write guard — a read-then-write would let two
-    /// concurrent callers both restart the run. `true` while `dark` and
-    /// within budget. Clears the run when not dark, or on exhaustion
-    /// (emitting `exhausted_event`) so a still-continuous dark wake defers
-    /// afresh before the next forced attempt. `dark` is sampled by the
-    /// caller before the guard (an FFI read with no ordering relationship
-    /// to the budget).
-    pub(super) fn should_defer(&self, dark: bool, exhausted_event: &'static str) -> bool {
-        let mut run = self.run.write();
-        if !dark {
-            *run = None;
-            return false;
-        }
-        let Some(raise) = *run else {
-            *run = Some(DualClock::now());
-            return true;
-        };
-        let (mono, wall) = raise.elapsed();
-        if mono < DARK_WAKE_DEFER_MAX && wall < DARK_WAKE_DEFER_MAX {
-            return true;
-        }
-        *run = None;
-        drop(run);
-        xai_grok_telemetry::unified_log::warn(
-            exhausted_event,
-            None,
-            Some(serde_json::json!({
-                "mono_elapsed_ms": mono.as_millis() as u64,
-                "wall_elapsed_ms": wall.as_millis() as u64,
-            })),
-        );
-        false
-    }
-
-    /// End the current run (full wake, a not-deferring pass, or a new
-    /// sentinel episode arming a fresh budget).
-    pub(crate) fn reset(&self) {
-        *self.run.write() = None;
-    }
-
-    /// Interior access for backdating and state assertions.
-    #[cfg(test)]
-    pub(crate) fn write(&self) -> parking_lot::RwLockWriteGuard<'_, Option<DualClock>> {
-        self.run.write()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn read(&self) -> parking_lot::RwLockReadGuard<'_, Option<DualClock>> {
-        self.run.read()
-    }
-}
-
 /// A gate `refresh_chain` consults to avoid *starting* an IdP refresh just
 /// before sleep. Only *defers* a not-yet-started refresh; an in-flight one is
 /// left to finish (see [`AuthManager::refresh_chain`]).
@@ -262,9 +198,7 @@ impl AuthManager {
             // stuck in continuous dark wake. (`should_defer_for_dark_wake` also
             // clears lazily under the same `!is_dark_wake()` condition.)
             if !self.is_dark_wake() {
-                self.dark_wake_defer_since.reset();
-                // The sentinel gate's dark-wake budget follows the same rule.
-                self.sentinel_dark_wake_defer_since.reset();
+                *self.dark_wake_defer_since.write() = None;
             }
             // Re-arm the proactive-refresh loop; its monotonic timer did not
             // advance during the suspend (see [`AuthManager::notify_wake`]).
@@ -395,9 +329,41 @@ impl AuthManager {
     /// deferring forever and logging the user out. A full wake clears the run
     /// (here, or eagerly in [`Self::set_system_sleep_imminent`]).
     pub(crate) fn should_defer_for_dark_wake(&self) -> bool {
+        // Sample the power state before taking the lock (it's an FFI read with
+        // no ordering relationship to the budget), then one write guard for the
+        // whole decision: a read-then-write would let two concurrent callers
+        // both start a run and restart the budget indefinitely.
         let dark = self.is_dark_wake();
-        self.dark_wake_defer_since
-            .should_defer(dark, "auth.dark_wake.defer_budget_exhausted")
+        let mut run = self.dark_wake_defer_since.write();
+        if !dark {
+            // Full wake (or no signal): end any deferral run in progress.
+            *run = None;
+            return false;
+        }
+        let Some(raise) = *run else {
+            // First deferral of this dark-wake run: start the budget clock.
+            *run = Some(DualClock::now());
+            return true;
+        };
+        let (mono, wall) = raise.elapsed();
+        if mono < DARK_WAKE_DEFER_MAX && wall < DARK_WAKE_DEFER_MAX {
+            return true;
+        }
+        // Budget exhausted: force this refresh through and reset the clock so a
+        // still-continuous dark wake defers afresh (up to DARK_WAKE_DEFER_MAX)
+        // before the next forced refresh, rather than abandoning deferral
+        // entirely.
+        *run = None;
+        drop(run);
+        xai_grok_telemetry::unified_log::warn(
+            "auth.dark_wake.defer_budget_exhausted",
+            None,
+            Some(serde_json::json!({
+                "mono_elapsed_ms": mono.as_millis() as u64,
+                "wall_elapsed_ms": wall.as_millis() as u64,
+            })),
+        );
+        false
     }
 
     /// Force the [`AuthManager::is_dark_wake`] result in tests.

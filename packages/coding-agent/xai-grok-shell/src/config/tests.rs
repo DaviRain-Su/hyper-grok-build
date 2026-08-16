@@ -129,11 +129,24 @@ fn memory_config_default_disabled() {
     });
 }
 #[test]
-fn memory_config_cli_flag_enables() {
+fn memory_config_legacy_wrapper_matches_tri_state_override() {
     without_grok_memory(|| {
         let config = toml::Value::Table(toml::map::Map::new());
-        let mem = MemoryConfig::resolve(true, false, &config, None);
-        assert!(mem.enabled);
+        let enabled = MemoryConfig::resolve(true, false, &config, None);
+        let disabled = MemoryConfig::resolve(true, true, &config, None);
+        let deferred = MemoryConfig::resolve(false, false, &config, None);
+        assert_eq!(
+                enabled,
+                MemoryConfig::resolve_with_override(Some(true), &config, None)
+            );
+        assert_eq!(
+                disabled,
+                MemoryConfig::resolve_with_override(Some(false), &config, None)
+            );
+        assert_eq!(
+                deferred,
+                MemoryConfig::resolve_with_override(None, &config, None)
+            );
     });
 }
 #[test]
@@ -142,6 +155,59 @@ fn memory_config_from_toml() {
         let config: toml::Value = toml::from_str("[memory]\nenabled = true").unwrap();
         let mem = MemoryConfig::resolve(false, false, &config, None);
         assert!(mem.enabled);
+    });
+}
+#[test]
+fn public_memory_config_deserializes_with_skipped_defaults() {
+    let config: crate::config::MemoryConfig = toml::from_str(
+            "enabled = true\n[search]\nmax_results = 9\n[flush]\nenabled = false",
+        )
+        .unwrap();
+    assert!(config.enabled);
+    assert_eq!(config.search.max_results, 9);
+    assert_eq!(config.flush, MemoryFlushConfig::default());
+    assert_eq!(config.pruning, PruningConfig::default());
+    assert_eq!(config.root_dir_override, None);
+    assert!(!config.flat_memory_root);
+}
+#[test]
+fn memory_config_deserializes_through_config() {
+    let raw: toml::Value = toml::from_str(
+            "[memory]\nenabled = true\n[memory.search]\nmax_results = 9\nunknown_future = 'ignored'",
+        )
+        .unwrap();
+    let config = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
+    assert_eq!(config.memory.enabled, Some(true));
+    assert_eq!(
+            config
+                .memory
+                .search
+                .as_ref()
+                .and_then(|search| search.max_results),
+            Some(9)
+        );
+    let invalid: toml::Value = toml::from_str("[memory.search]\nmax_results = 'many'")
+        .unwrap();
+    assert!(crate::agent::config::Config::new_from_toml_cfg(&invalid).is_err());
+}
+#[test]
+fn memory_config_toml_sentinels_beat_remote_values() {
+    without_grok_memory(|| {
+        let raw: toml::Value = toml::from_str(
+                "[memory.embedding]\nmodel = ''\n[memory.dream]\ncheck_interval_secs = 0\n[compaction.memory_flush]\nidle_timeout_secs = 0",
+            )
+            .unwrap();
+        let config = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
+        let remote = crate::util::config::RemoteSettings {
+            memory_embedding_model: Some("remote-model".to_owned()),
+            dream_check_interval_secs: Some(900),
+            flush_idle_timeout_secs: Some(120),
+            ..Default::default()
+        };
+        let memory = config.resolve_memory(None, Some(&remote));
+        assert_eq!(memory.embedding.model, None);
+        assert_eq!(memory.dream.check_interval_secs, None);
+        assert_eq!(memory.flush.idle_timeout_secs, None);
     });
 }
 #[test]
@@ -249,21 +315,6 @@ fn memory_config_cli_flag_overrides_env_disable() {
     );
 }
 #[test]
-fn memory_config_no_memory_overrides_all() {
-    with_grok_memory(
-        "1",
-        || {
-            let config: toml::Value = toml::from_str("[memory]\nenabled = true")
-                .unwrap();
-            let mem = MemoryConfig::resolve(true, true, &config, None);
-            assert!(
-                !mem.enabled,
-                "--no-memory should override --experimental-memory, GROK_MEMORY=1, and TOML enabled=true"
-            );
-        },
-    );
-}
-#[test]
 fn memory_config_no_memory_alone_disables() {
     without_grok_memory(|| {
         let config = toml::Value::Table(toml::map::Map::new());
@@ -287,10 +338,7 @@ fn memory_config_no_memory_overrides_toml_enabled() {
     without_grok_memory(|| {
         let config: toml::Value = toml::from_str("[memory]\nenabled = true").unwrap();
         let mem = MemoryConfig::resolve(false, true, &config, None);
-        assert!(
-                !mem.enabled,
-                "--no-memory should override TOML enabled=true"
-            );
+        assert!(!mem.enabled, "--no-memory should override TOML enabled=true");
     });
 }
 #[test]
@@ -319,25 +367,25 @@ fn memory_config_defaults_are_correct() {
         assert_eq!(mem.embedding.model, None);
         assert_eq!(mem.embedding.dimensions, 1024);
         assert_eq!(mem.search.max_results, 6);
-        assert!((mem.search.min_score - 0.35).abs() < f32::EPSILON);
+        assert!((mem.search.min_score - 0.7).abs() < f32::EPSILON);
         assert!((mem.search.vector_weight - 0.7).abs() < f32::EPSILON);
         assert!((mem.search.text_weight - 0.3).abs() < f32::EPSILON);
         assert!((mem.search.recency_decay - 0.95).abs() < f32::EPSILON);
         assert!(mem.search.temporal_decay.enabled);
-        assert!((mem.search.temporal_decay.half_life_days - 7.0).abs() < f64::EPSILON);
-        assert!(!mem.search.mmr.enabled);
+        assert!((mem.search.temporal_decay.half_life_days - 30.0).abs() < f64::EPSILON);
+        assert!(mem.search.mmr.enabled);
         assert!((mem.search.mmr.lambda - 0.7).abs() < f64::EPSILON);
         assert!((mem.search.source_weights["workspace"] - 1.0).abs() < f32::EPSILON);
         assert!((mem.search.source_weights["session"] - 1.0).abs() < f32::EPSILON);
         assert!((mem.search.source_weights["global"] - 1.0).abs() < f32::EPSILON);
         assert!(mem.initial_injection.enabled);
-        assert_eq!(mem.initial_injection.min_score, None);
+        assert_eq!(mem.initial_injection.min_score, Some(0.9));
         assert!(mem.session.save_on_end);
         assert!(mem.flush.enabled);
         assert_eq!(mem.flush.soft_threshold_tokens, 4000);
         assert!(mem.flush.flush_model.is_none());
         assert_eq!(mem.flush.max_flush_write_chars, 8000);
-        assert!(mem.flush.idle_timeout_secs.is_none());
+        assert_eq!(mem.flush.idle_timeout_secs, Some(300));
         assert!(mem.pruning.enabled);
         assert_eq!(mem.pruning.keep_last_n_turns, 3);
         assert_eq!(mem.pruning.soft_trim_threshold, 4000);
@@ -347,10 +395,10 @@ fn memory_config_defaults_are_correct() {
         assert!(mem.watcher.enabled);
         assert_eq!(mem.watcher.stale_claim_secs, 60);
         assert!(mem.dream.enabled);
-        assert_eq!(mem.dream.min_hours, 4);
-        assert_eq!(mem.dream.min_sessions, 3);
+        assert_eq!(mem.dream.min_hours, 24);
+        assert_eq!(mem.dream.min_sessions, 5);
         assert_eq!(mem.dream.stale_lock_secs, 3600);
-        assert_eq!(mem.dream.check_interval_secs, None);
+        assert_eq!(mem.dream.check_interval_secs, Some(3600));
     });
 }
 /// `debounce_ms` was a dead field on `MemoryWatcherConfig` that was never
@@ -503,17 +551,27 @@ fn memory_config_remote_settings_pruning() {
     });
 }
 #[test]
-fn memory_config_remote_settings_initial_injection() {
+fn partial_embedding_injection_and_watcher_use_remote_for_missing_fields() {
     without_grok_memory(|| {
-        let config = toml::Value::Table(toml::map::Map::new());
+        let config: toml::Value = toml::from_str(
+                "[memory.embedding]\ndimensions = 384\n[memory.initial_injection]\nenabled = false\n[memory.watcher]\nstale_claim_secs = 75",
+            )
+            .unwrap();
         let remote = crate::util::config::RemoteSettings {
-            memory_initial_injection_enabled: Some(false),
+            memory_embedding_model: Some("remote-model".to_owned()),
+            memory_embedding_dimensions: Some(768),
+            memory_initial_injection_enabled: Some(true),
             memory_initial_injection_min_score: Some(0.77),
+            memory_watcher_enabled: Some(false),
             ..Default::default()
         };
         let mem = MemoryConfig::resolve(false, false, &config, Some(&remote));
+        assert_eq!(mem.embedding.model.as_deref(), Some("remote-model"));
+        assert_eq!(mem.embedding.dimensions, 384);
         assert!(!mem.initial_injection.enabled);
         assert_eq!(mem.initial_injection.min_score, Some(0.77));
+        assert!(!mem.watcher.enabled);
+        assert_eq!(mem.watcher.stale_claim_secs, 75);
     });
 }
 #[test]
@@ -551,22 +609,18 @@ fn memory_config_local_disabled_blocks_remote_enable() {
     });
 }
 #[test]
-fn memory_config_local_overrides_remote() {
+fn memory_config_partial_search_uses_remote_for_missing_field() {
     without_grok_memory(|| {
-        let toml_str = r#"
-[memory.search]
-max_results = 20
-"#;
-        let config: toml::Value = toml::from_str(toml_str).unwrap();
+        let config: toml::Value = toml::from_str("[memory.search]\nmax_results = 20")
+            .unwrap();
         let remote = crate::util::config::RemoteSettings {
             memory_search_max_results: Some(5),
+            memory_search_min_score: Some(0.82),
             ..Default::default()
         };
         let mem = MemoryConfig::resolve(false, false, &config, Some(&remote));
-        assert_eq!(
-                mem.search.max_results, 20,
-                "local config should override remote"
-            );
+        assert_eq!(mem.search.max_results, 20);
+        assert!((mem.search.min_score - 0.82).abs() < f32::EPSILON);
     });
 }
 #[test]
@@ -630,24 +684,24 @@ fn flush_semantic_dedup_threshold_clamped_from_remote() {
     });
 }
 #[test]
-fn flush_semantic_dedup_threshold_local_blocks_remote() {
+fn partial_flush_and_pruning_use_remote_for_missing_fields() {
     without_grok_memory(|| {
-        let toml_str = r#"
-[compaction.memory_flush]
-enabled = true
-semantic_dedup_threshold = 0.88
-"#;
-        let config: toml::Value = toml::from_str(toml_str).unwrap();
+        let config: toml::Value = toml::from_str(
+                "[compaction.memory_flush]\nsemantic_dedup_threshold = 0.88\n[compaction.pruning]\nkeep_last_n_turns = 7",
+            )
+            .unwrap();
         let remote = crate::util::config::RemoteSettings {
+            flush_enabled: Some(false),
             flush_semantic_dedup_threshold: Some(0.70),
+            pruning_enabled: Some(false),
+            pruning_keep_last_n_turns: Some(2),
             ..Default::default()
         };
         let mem = MemoryConfig::resolve(false, false, &config, Some(&remote));
-        assert_eq!(
-                mem.flush.semantic_dedup_threshold,
-                Some(0.88),
-                "local flush config should block remote override"
-            );
+        assert!(!mem.flush.enabled);
+        assert_eq!(mem.flush.semantic_dedup_threshold, Some(0.88));
+        assert!(!mem.pruning.enabled);
+        assert_eq!(mem.pruning.keep_last_n_turns, 7);
     });
 }
 #[test]
@@ -667,10 +721,10 @@ fn memory_dream_config_defaults() {
         let config = toml::Value::Table(toml::map::Map::new());
         let mem = MemoryConfig::resolve(false, false, &config, None);
         assert!(mem.dream.enabled);
-        assert_eq!(mem.dream.min_hours, 4);
-        assert_eq!(mem.dream.min_sessions, 3);
+        assert_eq!(mem.dream.min_hours, 24);
+        assert_eq!(mem.dream.min_sessions, 5);
         assert_eq!(mem.dream.stale_lock_secs, 3600);
-        assert_eq!(mem.dream.check_interval_secs, None);
+        assert_eq!(mem.dream.check_interval_secs, Some(3600));
     });
 }
 #[test]
@@ -713,7 +767,7 @@ fn memory_dream_config_remote_override_when_toml_absent() {
     });
 }
 #[test]
-fn memory_dream_config_remote_ignored_when_toml_present() {
+fn memory_dream_config_partial_toml_uses_remote_for_missing_fields() {
     without_grok_memory(|| {
         let toml_str = r#"
 [memory.dream]
@@ -731,8 +785,8 @@ min_hours = 6
         let mem = MemoryConfig::resolve(false, false, &config, Some(&remote));
         assert!(!mem.dream.enabled, "local TOML should win over remote");
         assert_eq!(mem.dream.min_hours, 6);
-        assert_eq!(mem.dream.min_sessions, 3);
-        assert_eq!(mem.dream.check_interval_secs, None);
+        assert_eq!(mem.dream.min_sessions, 10);
+        assert_eq!(mem.dream.check_interval_secs, Some(300));
     });
 }
 #[test]
@@ -965,7 +1019,7 @@ fn memory_config_remote_mmr_lambda_clamped() {
     });
 }
 #[test]
-fn memory_config_local_search_blocks_remote_temporal_decay_and_mmr() {
+fn memory_config_partial_search_uses_remote_temporal_decay_and_mmr() {
     without_grok_memory(|| {
         let toml_str = r#"
 [memory.search]
@@ -979,14 +1033,9 @@ max_results = 8
             ..Default::default()
         };
         let mem = MemoryConfig::resolve(false, false, &config, Some(&remote));
-        assert!(
-                mem.search.temporal_decay.enabled,
-                "local search section should block remote temporal_decay override"
-            );
-        assert!(
-                !mem.search.mmr.enabled,
-                "local search section should block remote mmr override"
-            );
+        assert!(!mem.search.temporal_decay.enabled);
+        assert!(mem.search.mmr.enabled);
+        assert!((mem.search.mmr.lambda - 0.3).abs() < f64::EPSILON);
     });
 }
 /// Mutex to serialize tests that touch the GROK_SUBAGENTS env var.
@@ -2208,6 +2257,30 @@ fn malformed_zdr_video_output_s3_preserves_zdr_flag() {
     });
 }
 #[test]
+fn media_gen_caps_resolve_env_over_toml_over_remote_over_default() {
+    use xai_grok_tools::media_gen_limits::{
+        DEFAULT_MAX_PARALLEL_IMAGE_GEN, DEFAULT_MAX_PARALLEL_VIDEO_GEN,
+    };
+    let config: toml::Value = toml::from_str(
+            "[tools.media_gen]\nmax_parallel_image_gen_calls = 2\nmax_parallel_video_gen_calls = 1\n",
+        )
+        .unwrap();
+    let tc = ToolsConfig::resolve(&config);
+    assert_eq!(tc.media_gen.max_parallel_image_gen_calls, Some(2));
+    assert_eq!(tc.media_gen.max_parallel_video_gen_calls, Some(1));
+    let image = ToolsConfig::resolve_max_parallel_image_gen_calls;
+    let video = ToolsConfig::resolve_max_parallel_video_gen_calls;
+    assert_eq!(image(Some("3"), Some(2), Some(4)), 3);
+    assert_eq!(image(None, Some(2), Some(4)), 2);
+    assert_eq!(image(None, None, Some(5)), 5);
+    assert_eq!(image(None, None, None), DEFAULT_MAX_PARALLEL_IMAGE_GEN);
+    assert_eq!(image(Some("not-a-number"), Some(2), None), 2);
+    assert_eq!(image(Some("0"), Some(2), None), 1);
+    assert_eq!(image(None, Some(0), Some(3)), 1);
+    assert_eq!(video(None, None, None), DEFAULT_MAX_PARALLEL_VIDEO_GEN);
+    assert_eq!(video(Some("9"), Some(1), Some(2)), 9);
+}
+#[test]
 fn roles_parse_from_toml() {
     let toml_str = r#"
             [roles.researcher]
@@ -3210,10 +3283,15 @@ fn apply_requirements_value_overrides_user_settings() {
             Some(crate::agent::config::TelemetryMode::Disabled),
             cfg.features.telemetry
         );
-    assert_eq!(Some(false), cfg.features.feedback);
-    assert_eq!(Some(false), cfg.features.lsp_tools);
-    assert_eq!(Some(false), cfg.features.web_fetch);
-    assert_eq!(Some(false), cfg.features.write_file);
+    assert!(!cfg.is_feature_enabled(crate::agent::config::Feature::Feedback));
+    assert!(!cfg.is_feature_enabled(crate::agent::config::Feature::LspTools));
+    assert!(!cfg.is_feature_enabled(crate::agent::config::Feature::WebFetch));
+    assert!(
+            enforced
+                .iter()
+                .any(|e| e.path == "features.lsp_tools" && e.value == "false")
+        );
+    assert!(!cfg.is_feature_enabled(crate::agent::config::Feature::WriteFile));
     assert_eq!(Some(false), cfg.requirements.remote_fetch.pinned());
     assert!(
             enforced
@@ -3321,9 +3399,83 @@ fn apply_requirements_pins_voice_mode_false() {
         path: std::path::PathBuf::from("/test/requirements.toml"),
     };
     apply_requirements_inner(&mut cfg, &req, &source);
-    assert_eq!(cfg.requirements.voice_mode.pinned(), Some(false));
-    assert_eq!(cfg.features.voice_mode, Some(false));
-    assert!(!cfg.resolve_voice_mode().value);
+    assert_eq!(
+            cfg.requirements
+                .pinned_feature(crate::agent::config::Feature::VoiceMode),
+            Some(false)
+        );
+    assert!(!cfg.is_feature_enabled(crate::agent::config::Feature::VoiceMode));
+}
+/// Two layers pinning one key alike must report the layer that decided, not
+/// the first that asked, or the operator log names a user's file for an
+/// administrator's pin. Layers apply user first, system last.
+#[test]
+fn a_repeated_pin_is_reported_against_the_layer_that_decided() {
+    let mut cfg = crate::agent::config::Config::default();
+    let req: toml::Value = toml::from_str("[features]\nsession_search = false\n")
+        .unwrap();
+    let user = RequirementSource::Requirements {
+        path: std::path::PathBuf::from("/home/dev/.grok/requirements.toml"),
+    };
+    let system = RequirementSource::Requirements {
+        path: std::path::PathBuf::from("/etc/grok/requirements.toml"),
+    };
+    let mut enforced = apply_requirements_inner(&mut cfg, &req, &user);
+    enforced.extend(apply_requirements_inner(&mut cfg, &req, &system));
+    let deduped = keep_the_deciding_layer(enforced);
+    let reported: Vec<_> = deduped
+        .iter()
+        .filter(|field| field.path == "features.session_search")
+        .collect();
+    assert_eq!(reported.len(), 1, "one row per pinned key");
+    assert_eq!(reported[0].source, system);
+}
+/// Not a registry row, so the loop that pins those does not reach it. An
+/// administrator pinning the title off must still outrank a user's
+/// GROK_TITLE_REFRESH, which a config-tier value would lose to.
+#[test]
+#[serial_test::serial]
+fn apply_requirements_pins_title_refresh_over_the_environment() {
+    use xai_grok_test_support::EnvGuard;
+    let _env = EnvGuard::set("GROK_TITLE_REFRESH", "1");
+    let mut cfg = crate::agent::config::Config::default();
+    let req: toml::Value = toml::from_str("[features]\ntitle_refresh = false\n")
+        .unwrap();
+    let source = RequirementSource::Requirements {
+        path: std::path::PathBuf::from("/test/requirements.toml"),
+    };
+    let enforced = apply_requirements_inner(&mut cfg, &req, &source);
+    let resolved = cfg.resolve_title_refresh();
+    assert!(!resolved.value, "the pin lost to GROK_TITLE_REFRESH");
+    assert_eq!(
+            resolved.source,
+            crate::agent::config::ConfigSource::Requirement
+        );
+    assert!(
+            enforced
+                .iter()
+                .any(|field| field.path == "features.title_refresh"),
+            "the pin is reported to the operator log"
+        );
+}
+/// A non-boolean pin reaches the applier only when a higher layer supplied a
+/// valid value, so ignoring it leaves that winning layer standing.
+#[test]
+fn malformed_requirements_pin_is_ignored() {
+    use crate::agent::config::Feature;
+    let mut cfg = crate::agent::config::Config::default();
+    let req: toml::Value = toml::from_str("[features]\nweb_fetch = 1\n").unwrap();
+    let source = RequirementSource::Requirements {
+        path: std::path::PathBuf::from("/home/dev/.grok/requirements.toml"),
+    };
+    let enforced = apply_requirements_inner(&mut cfg, &req, &source);
+    assert_eq!(cfg.requirements.pinned_feature(Feature::WebFetch), None);
+    assert!(
+            !enforced
+                .iter()
+                .any(|e| e.path == Feature::WebFetch.path()),
+            "an ignored pin enforces nothing"
+        );
 }
 /// Requirements enforcement beats a campaign-supplied default. The on-disk
 /// `Config` arrives campaign-overlaid (`models.default` = a campaign value);
@@ -3424,10 +3576,11 @@ fn validate_hooks_path_accepts_grok_hooks_subdir() {
 }
 #[test]
 fn managed_settings_disables_features_and_requirements_overrides() {
+    use crate::agent::config::Feature;
     use xai_grok_workspace::permission::resolution::ManagedSettingsFeatures;
     let mut cfg = crate::agent::config::Config::default();
     cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
-    cfg.features.feedback = Some(true);
+    cfg.feature_values.insert(Feature::Feedback, true);
     cfg.default_yolo_mode = true;
     let features = ManagedSettingsFeatures {
         disable_telemetry: Some(true),
@@ -3440,7 +3593,7 @@ fn managed_settings_disables_features_and_requirements_overrides() {
             cfg.features.telemetry,
             Some(crate::agent::config::TelemetryMode::Disabled)
         );
-    assert_eq!(cfg.features.feedback, Some(false));
+    assert_eq!(cfg.feature_values.get(&Feature::Feedback), Some(&false));
     assert!(cfg.default_yolo_mode);
     assert_eq!(enforced.len(), 2);
     assert!(!enforced.iter().any(|e| e.path == "ui.yolo"));
@@ -3456,17 +3609,18 @@ fn managed_settings_disables_features_and_requirements_overrides() {
             cfg.features.telemetry,
             Some(crate::agent::config::TelemetryMode::Enabled)
         );
-    assert_eq!(cfg.features.feedback, Some(true));
+    assert!(cfg.is_feature_enabled(Feature::Feedback));
     assert!(cfg.ui.yolo);
 }
 /// REGRESSION: external managed-settings.json is advisory, not authoritative.
 /// disableBypassPermissionsMode (-> features.disable_yolo) must NOT clamp the user's own grok yolo.
 #[test]
 fn managed_settings_does_not_override_user_yolo() {
+    use crate::agent::config::Feature;
     use xai_grok_workspace::permission::resolution::ManagedSettingsFeatures;
     let mut cfg = crate::agent::config::Config::default();
     cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
-    cfg.features.feedback = Some(true);
+    cfg.feature_values.insert(Feature::Feedback, true);
     cfg.ui.yolo = true;
     cfg.default_yolo_mode = true;
     let features = ManagedSettingsFeatures {
@@ -3482,7 +3636,7 @@ fn managed_settings_does_not_override_user_yolo() {
             cfg.features.telemetry,
             Some(crate::agent::config::TelemetryMode::Disabled)
         );
-    assert_eq!(cfg.features.feedback, Some(false));
+    assert_eq!(cfg.feature_values.get(&Feature::Feedback), Some(&false));
     assert!(cfg.ui.yolo);
     assert!(cfg.default_yolo_mode);
     assert_eq!(enforced.len(), 2);

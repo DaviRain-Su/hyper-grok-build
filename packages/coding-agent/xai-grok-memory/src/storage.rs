@@ -357,7 +357,7 @@ impl MemoryStorage {
     /// Ensure the global memory directory exists and create a template
     /// `MEMORY.md` if one doesn't already exist.
     ///
-    /// Called on first run with `--experimental-memory` to bootstrap the layout.
+    /// Called on first run with memory enabled to bootstrap the layout.
     pub fn ensure_initialized(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.global_dir)?;
 

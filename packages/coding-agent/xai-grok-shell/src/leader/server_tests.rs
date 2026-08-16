@@ -1316,6 +1316,29 @@ fn inject_capabilities_yolo_suppresses_auto_mode() {
 }
 
 #[test]
+fn inject_capabilities_preserves_explicit_auto_over_stale_yolo() {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp","_meta":{{"yoloMode":false,"autoMode":true}}}}}}"#,
+        AGENT_METHOD_NAMES.session_new
+    );
+    let caps = ClientCapabilities {
+        auto_mode: false,
+        yolo_mode: true,
+        ..Default::default()
+    };
+    let mut json = pv(&payload);
+
+    assert!(inject_session_request_context(
+        &mut json,
+        &caps,
+        "grok-tui",
+        ClientId(1)
+    ));
+    assert_eq!(json["params"]["_meta"]["yoloMode"], false);
+    assert_eq!(json["params"]["_meta"]["autoMode"], true);
+}
+
+#[test]
 fn inject_capabilities_skips_non_session_new() {
     let mut json = pv(r#"{"jsonrpc":"2.0","method":"other/method","id":1,"params":{}}"#);
     let caps = ClientCapabilities {

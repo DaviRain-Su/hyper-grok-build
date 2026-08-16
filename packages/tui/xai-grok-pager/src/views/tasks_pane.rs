@@ -2086,7 +2086,7 @@ mod tests {
             prompt: None,
             child_cwd: None,
             worktree_path: None,
-            child_updates_replayed: false,
+            transcript: Default::default(),
         }
     }
 

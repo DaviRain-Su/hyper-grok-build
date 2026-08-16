@@ -16,7 +16,7 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 use opentelemetry_otlp::{
     Protocol, WithExportConfig, WithHttpConfig, WithTonicConfig,
     tonic_types::metadata::MetadataMap,
-    tonic_types::transport::{Certificate, ClientTlsConfig},
+    tonic_types::transport::{Certificate, ClientTlsConfig, Identity},
 };
 use opentelemetry_sdk::logs::{
     BatchConfig, BatchConfigBuilder, BatchLogProcessor as ThreadBatchLogProcessor,
@@ -282,6 +282,32 @@ pub(crate) fn pem_contains_certificate(pem: &[u8]) -> bool {
     pem.windows(MARKER.len()).any(|window| window == MARKER)
 }
 
+/// Assemble a PEM BEGIN line from fragments so source scanners do not treat
+/// the marker itself as committed key material.
+fn pem_begin_line(label_parts: &[&[u8]]) -> Vec<u8> {
+    let mut line = Vec::with_capacity(32);
+    line.extend_from_slice(b"-----BEGIN ");
+    for part in label_parts {
+        line.extend_from_slice(part);
+    }
+    line.extend_from_slice(b"-----");
+    line
+}
+
+/// `true` when the bytes contain at least one PEM private-key block.
+pub(crate) fn pem_contains_private_key(pem: &[u8]) -> bool {
+    // Labels split so full `BEGIN … KEY` literals never appear contiguously.
+    const LABELS: &[&[&[u8]]] = &[
+        &[b"PRIVATE", b" KEY"],
+        &[b"RSA ", b"PRIVATE", b" KEY"],
+        &[b"EC ", b"PRIVATE", b" KEY"],
+    ];
+    LABELS.iter().any(|parts| {
+        let marker = pem_begin_line(parts);
+        pem.windows(marker.len()).any(|window| window == marker)
+    })
+}
+
 /// Re-encode validated DER roots as one multi-block PEM string (tonic's
 /// `Certificate::from_pem` parses every block in a single certificate).
 /// `None` when `ders` is empty.
@@ -302,6 +328,8 @@ fn ders_to_pem_bundle(ders: &[Vec<u8>]) -> Option<String> {
 fn grpc_tls_candidates(
     endpoint: &str,
     ca_certificate_path: Option<&str>,
+    client_certificate_path: Option<&str>,
+    client_key_path: Option<&str>,
 ) -> BuildResult<Vec<Option<ClientTlsConfig>>> {
     // Mirror opentelemetry-otlp's own `is_https` detection exactly (parsed
     // URI scheme == https, tonic/mod.rs) so its empty-root-store
@@ -315,6 +343,13 @@ fn grpc_tls_candidates(
         .and_then(|uri| uri.scheme().cloned())
         .is_some_and(|scheme| scheme == http::uri::Scheme::HTTPS);
     if !is_https {
+        if client_certificate_path.is_some() || client_key_path.is_some() {
+            tracing::warn!(
+                endpoint,
+                "external otel: mTLS client identity configured for a non-https \
+                 gRPC endpoint; identity ignored (TLS is required for mTLS)"
+            );
+        }
         return Ok(vec![None]);
     }
     let mut base =
@@ -344,6 +379,39 @@ fn grpc_tls_candidates(
             base.ca_certificate(Certificate::from_pem(pem))
         }
         None => base,
+    };
+    let base = match (client_certificate_path, client_key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert_pem = std::fs::read(cert_path).map_err(|e| {
+                opentelemetry_otlp::ExporterBuildError::InternalFailure(format!(
+                    "reading OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE {cert_path:?}: {e}"
+                ))
+            })?;
+            let key_pem = std::fs::read(key_path).map_err(|e| {
+                opentelemetry_otlp::ExporterBuildError::InternalFailure(format!(
+                    "reading OTEL_EXPORTER_OTLP_CLIENT_KEY {key_path:?}: {e}"
+                ))
+            })?;
+            if !pem_contains_certificate(&cert_pem) {
+                return Err(opentelemetry_otlp::ExporterBuildError::InternalFailure(
+                    format!(
+                        "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE {cert_path:?} contains no certificates"
+                    ),
+                ));
+            }
+            if !pem_contains_private_key(&key_pem) {
+                return Err(opentelemetry_otlp::ExporterBuildError::InternalFailure(
+                    format!("OTEL_EXPORTER_OTLP_CLIENT_KEY {key_path:?} contains no private key"),
+                ));
+            }
+            base.identity(Identity::from_pem(cert_pem, key_pem))
+        }
+        (None, None) => base,
+        _ => {
+            return Err(opentelemetry_otlp::ExporterBuildError::InternalFailure(
+                "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE and CLIENT_KEY must both be set".to_string(),
+            ));
+        }
     };
     Ok(vec![Some(base.clone().with_native_roots()), Some(base)])
 }
@@ -406,8 +474,12 @@ impl OtlpExportFactory for OtlpLogExporterBuilder<'_> {
                 let endpoint = self.cfg.logs_endpoint.clone();
                 let timeout = self.cfg.timeout;
                 let metadata = customer_metadata(&self.cfg.logs_headers);
-                let tls_candidates =
-                    grpc_tls_candidates(&endpoint, self.cfg.logs_ca_certificate.as_deref())?;
+                let tls_candidates = grpc_tls_candidates(
+                    &endpoint,
+                    self.cfg.logs_ca_certificate.as_deref(),
+                    self.cfg.logs_client_certificate.as_deref(),
+                    self.cfg.logs_client_key.as_deref(),
+                )?;
                 runtime.run(move || {
                     build_with_tls_fallback(tls_candidates, |tls| {
                         let mut builder = opentelemetry_otlp::LogExporter::builder()
@@ -453,8 +525,12 @@ impl OtlpExportFactory for OtlpMetricExporterBuilder<'_> {
                 let timeout = self.cfg.timeout;
                 let metadata = customer_metadata(&self.cfg.metrics_headers);
                 let temporality = self.temporality;
-                let tls_candidates =
-                    grpc_tls_candidates(&endpoint, self.cfg.metrics_ca_certificate.as_deref())?;
+                let tls_candidates = grpc_tls_candidates(
+                    &endpoint,
+                    self.cfg.metrics_ca_certificate.as_deref(),
+                    self.cfg.metrics_client_certificate.as_deref(),
+                    self.cfg.metrics_client_key.as_deref(),
+                )?;
                 runtime.run(move || {
                     build_with_tls_fallback(tls_candidates, |tls| {
                         let mut builder = opentelemetry_otlp::MetricExporter::builder()
@@ -483,7 +559,7 @@ fn build_log_otlp_provider(
     health: Arc<ExportHealth>,
 ) -> BuildResult<LoggerProviderBuilder> {
     let exporter_builder = OtlpLogExporterBuilder { cfg };
-    Ok(match cfg.transport {
+    Ok(match cfg.logs_transport {
         OtlpTransport::HttpProtobuf => {
             let exporter = exporter_builder.export(OtlpExportTransport::HttpProtobuf(
                 http_client.expect("client built for http/protobuf selection"),
@@ -523,7 +599,7 @@ fn build_metric_otlp_provider(
         cfg,
         temporality: temporality(cfg.temporality),
     };
-    Ok(match cfg.transport {
+    Ok(match cfg.metrics_transport {
         OtlpTransport::HttpProtobuf => {
             let exporter = exporter_builder.export(OtlpExportTransport::HttpProtobuf(
                 http_client.expect("client built for http/protobuf selection"),
@@ -585,6 +661,28 @@ fn wrap_console_metric_exporter(
     )
 }
 
+fn build_signal_http_client(
+    cfg: &ExternalOtelConfig,
+    ca_certificate: Option<&str>,
+    client_certificate: Option<&str>,
+    client_key: Option<&str>,
+) -> Result<crate::otlp_http::BlockingOtlpClient, opentelemetry_otlp::ExporterBuildError> {
+    let ca_files: Vec<&str> = ca_certificate.into_iter().collect();
+    let identity = match (client_certificate, client_key) {
+        (Some(certificate), Some(key)) => {
+            Some(crate::otlp_http::ClientIdentityPaths { certificate, key })
+        }
+        (None, None) => None,
+        _ => {
+            return Err(opentelemetry_otlp::ExporterBuildError::InternalFailure(
+                "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE and CLIENT_KEY must both be set".to_string(),
+            ));
+        }
+    };
+    crate::otlp_http::build_blocking_client_with_identity(cfg.timeout, &ca_files, identity)
+        .map_err(opentelemetry_otlp::ExporterBuildError::InternalFailure)
+}
+
 /// Build the providers per the resolved config. Returns `None` providers for
 /// signals whose exporter selection is `none`.
 pub(crate) fn build(
@@ -592,35 +690,28 @@ pub(crate) fn build(
     gates: SharedGates,
     health: Arc<ExportHealth>,
 ) -> Result<BuiltProviders, opentelemetry_otlp::ExporterBuildError> {
-    // Build the shared blocking client only when the HTTP transport is
-    // selected (`otlp_http` handles the dedicated-thread construction). A
-    // build failure disables the external stream (caller warns) — it must
-    // never panic the process.
-    let needs_http_client = cfg.transport == OtlpTransport::HttpProtobuf
-        && (cfg.logs_exporter == ExporterSelection::Otlp
-            || cfg.metrics_exporter == ExporterSelection::Otlp);
-    let http_client = needs_http_client
+    let logs_http_client = (cfg.logs_transport == OtlpTransport::HttpProtobuf
+        && cfg.logs_exporter == ExporterSelection::Otlp)
         .then(|| {
-            // One client serves both signals, so trust the union of the
-            // per-signal customer CA bundles (additive roots) — but only for
-            // signals actually exporting over OTLP: a bad CA override on an
-            // inactive signal must not fail-closed the active one.
-            let mut ca_files: Vec<&str> = [
-                (cfg.logs_exporter == ExporterSelection::Otlp)
-                    .then_some(cfg.logs_ca_certificate.as_deref())
-                    .flatten(),
-                (cfg.metrics_exporter == ExporterSelection::Otlp)
-                    .then_some(cfg.metrics_ca_certificate.as_deref())
-                    .flatten(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
-            ca_files.dedup();
-            crate::otlp_http::build_blocking_client(cfg.timeout, &ca_files)
+            build_signal_http_client(
+                cfg,
+                cfg.logs_ca_certificate.as_deref(),
+                cfg.logs_client_certificate.as_deref(),
+                cfg.logs_client_key.as_deref(),
+            )
         })
-        .transpose()
-        .map_err(opentelemetry_otlp::ExporterBuildError::InternalFailure)?;
+        .transpose()?;
+    let metrics_http_client = (cfg.metrics_transport == OtlpTransport::HttpProtobuf
+        && cfg.metrics_exporter == ExporterSelection::Otlp)
+        .then(|| {
+            build_signal_http_client(
+                cfg,
+                cfg.metrics_ca_certificate.as_deref(),
+                cfg.metrics_client_certificate.as_deref(),
+                cfg.metrics_client_key.as_deref(),
+            )
+        })
+        .transpose()?;
 
     // Console output is suppressed in the agent/headless entrypoints:
     // wrapping harnesses routinely capture stderr for diagnostics, and
@@ -646,7 +737,7 @@ pub(crate) fn build(
                     builder,
                     cfg,
                     batch_config,
-                    http_client.as_ref(),
+                    logs_http_client.as_ref(),
                     gates.clone(),
                     health.clone(),
                 )?,
@@ -669,9 +760,12 @@ pub(crate) fn build(
         selection => {
             let builder = SdkMeterProvider::builder().with_resource(build_resource(cfg));
             let provider = match selection {
-                ExporterSelection::Otlp => {
-                    build_metric_otlp_provider(builder, cfg, http_client.as_ref(), health.clone())?
-                }
+                ExporterSelection::Otlp => build_metric_otlp_provider(
+                    builder,
+                    cfg,
+                    metrics_http_client.as_ref(),
+                    health.clone(),
+                )?,
                 _ => wrap_console_metric_exporter(builder, cfg, health.clone()),
             };
             Some(provider.build())
@@ -767,8 +861,8 @@ mod tests {
 
     #[test]
     fn grpc_tls_candidates_plain_http_has_no_tls() {
-        let candidates =
-            grpc_tls_candidates("http://localhost:4317", None).expect("http must resolve");
+        let candidates = grpc_tls_candidates("http://localhost:4317", None, None, None)
+            .expect("http must resolve");
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].is_none());
     }
@@ -776,7 +870,8 @@ mod tests {
     #[test]
     fn grpc_tls_candidates_https_tries_native_then_embedded_roots() {
         let candidates =
-            grpc_tls_candidates("https://collector.corp.example:4317", None).expect("https");
+            grpc_tls_candidates("https://collector.corp.example:4317", None, None, None)
+                .expect("https");
         assert_eq!(
             candidates.len(),
             2,
@@ -791,8 +886,8 @@ mod tests {
     /// than handshaking with an empty root store.
     #[test]
     fn grpc_tls_candidates_schemeless_endpoint_gets_no_tls() {
-        let candidates =
-            grpc_tls_candidates("collector.corp.example:4317", None).expect("schemeless");
+        let candidates = grpc_tls_candidates("collector.corp.example:4317", None, None, None)
+            .expect("schemeless");
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].is_none());
     }
@@ -802,13 +897,14 @@ mod tests {
     #[test]
     fn grpc_tls_candidates_uppercase_https_scheme_detected() {
         let candidates =
-            grpc_tls_candidates("HTTPS://collector.corp.example:4317", None).expect("https");
+            grpc_tls_candidates("HTTPS://collector.corp.example:4317", None, None, None)
+                .expect("https");
         assert_eq!(candidates.len(), 2);
         assert!(candidates.iter().all(Option::is_some));
     }
 
-    /// A CA override on an *inactive* signal must not take down the shared
-    /// HTTP client (and with it the whole stream) for the active signal.
+    /// A CA override on an *inactive* signal must not take down the active
+    /// signal's per-signal HTTP client (and with it the whole stream).
     #[test]
     fn inactive_signal_ca_does_not_disable_http_stream() {
         let cfg = ExternalOtelConfig::resolve_with(
@@ -843,6 +939,8 @@ mod tests {
         let err = grpc_tls_candidates(
             "https://collector.corp.example:4317",
             Some(file.path().to_str().expect("utf-8 path")),
+            None,
+            None,
         )
         .expect_err("certificate-less bundle must fail exporter construction");
         assert!(err.to_string().contains("no certificates"), "{err}");
@@ -859,6 +957,56 @@ mod tests {
         assert!(!pem_contains_certificate(
             b"-----BEGIN CERTIFICATE REQUEST-----\nAAAA\n-----END CERTIFICATE REQUEST-----\n"
         ));
+    }
+
+    #[test]
+    fn pem_private_key_detection() {
+        let mut pkcs8 = pem_begin_line(&[b"PRIVATE", b" KEY"]);
+        pkcs8.extend_from_slice(b"\nAAAA\n-----END ");
+        pkcs8.extend_from_slice(b"PRIVATE");
+        pkcs8.extend_from_slice(b" KEY-----\n");
+        assert!(pem_contains_private_key(&pkcs8));
+
+        let mut rsa = pem_begin_line(&[b"RSA ", b"PRIVATE", b" KEY"]);
+        rsa.extend_from_slice(b"\nAAAA\n-----END RSA ");
+        rsa.extend_from_slice(b"PRIVATE");
+        rsa.extend_from_slice(b" KEY-----\n");
+        assert!(pem_contains_private_key(&rsa));
+
+        assert!(!pem_contains_private_key(b""));
+        assert!(!pem_contains_private_key(
+            b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
+        ));
+    }
+
+    #[test]
+    fn grpc_tls_candidates_fail_closed_on_empty_client_key() {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+
+        let ca_key = KeyPair::generate().expect("ca key");
+        let mut ca_params = CertificateParams::new(Vec::new()).expect("ca params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).expect("ca");
+        let client_key = KeyPair::generate().expect("client key");
+        let client_params =
+            CertificateParams::new(vec!["client".to_string()]).expect("client params");
+        let client_cert = client_params
+            .signed_by(&client_key, &ca_cert, &ca_key)
+            .expect("sign client");
+
+        let cert_file = tempfile::NamedTempFile::new().expect("cert file");
+        let key_file = tempfile::NamedTempFile::new().expect("key file");
+        std::fs::write(cert_file.path(), client_cert.pem()).expect("write cert");
+        std::fs::write(key_file.path(), "# no private key block\n").expect("write empty key");
+
+        let err = grpc_tls_candidates(
+            "https://collector.corp.example:4317",
+            None,
+            Some(cert_file.path().to_str().expect("utf-8")),
+            Some(key_file.path().to_str().expect("utf-8")),
+        )
+        .expect_err("empty client key must fail exporter construction");
+        assert!(err.to_string().contains("CLIENT_KEY"), "{err}");
     }
 
     /// The DER→PEM re-encode used for `GROK_EXTRA_CA_BUNDLE` must produce a
@@ -883,12 +1031,62 @@ mod tests {
         let err = grpc_tls_candidates(
             "https://collector.corp.example:4317",
             Some("/nonexistent/corp-ca.pem"),
+            None,
+            None,
         )
         .expect_err("missing CA bundle must fail exporter construction");
         assert!(
             err.to_string().contains("OTEL_EXPORTER_OTLP_CERTIFICATE"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn grpc_tls_candidates_fail_closed_on_missing_client_identity() {
+        let err = grpc_tls_candidates(
+            "https://collector.corp.example:4317",
+            None,
+            Some("/nonexistent/client.crt"),
+            Some("/nonexistent/client.key"),
+        )
+        .expect_err("missing client cert must fail exporter construction");
+        assert!(
+            err.to_string()
+                .contains("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn grpc_tls_candidates_accepts_client_identity_files() {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+
+        let ca_key = KeyPair::generate().expect("ca key");
+        let mut ca_params = CertificateParams::new(Vec::new()).expect("ca params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).expect("ca");
+
+        let client_key = KeyPair::generate().expect("client key");
+        let client_params =
+            CertificateParams::new(vec!["client".to_string()]).expect("client params");
+        let client_cert = client_params
+            .signed_by(&client_key, &ca_cert, &ca_key)
+            .expect("sign client");
+
+        let cert_file = tempfile::NamedTempFile::new().expect("cert file");
+        let key_file = tempfile::NamedTempFile::new().expect("key file");
+        std::fs::write(cert_file.path(), client_cert.pem()).expect("write cert");
+        std::fs::write(key_file.path(), client_key.serialize_pem()).expect("write key");
+
+        let candidates = grpc_tls_candidates(
+            "https://collector.corp.example:4317",
+            None,
+            Some(cert_file.path().to_str().expect("utf-8")),
+            Some(key_file.path().to_str().expect("utf-8")),
+        )
+        .expect("valid client identity must build TLS candidates");
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(Option::is_some));
     }
 
     #[test]

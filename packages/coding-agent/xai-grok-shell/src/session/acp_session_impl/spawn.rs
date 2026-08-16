@@ -44,17 +44,42 @@ pub(crate) fn build_session_runtime() -> std::io::Result<tokio::runtime::Runtime
     let mut builder = tokio::runtime::Builder::new_current_thread();
     xai_tty_utils::runtime::apply_blocking_pool(builder.enable_all()).build()
 }
+fn configured_memory_retrieval_mode(
+    config: Option<&crate::config::MemoryConfig>,
+) -> xai_grok_telemetry::events::MemoryRetrievalMode {
+    use xai_grok_telemetry::events::MemoryRetrievalMode::*;
+    match config.filter(|config| config.enabled) {
+        None => Disabled,
+        Some(config)
+            if config
+                .embedding
+                .model
+                .as_ref()
+                .is_some_and(|model| !model.is_empty()) =>
+        {
+            Hybrid
+        }
+        Some(_) => FtsOnly,
+    }
+}
 #[cfg(all(test, unix))]
 #[path = "spawn_runtime_containment_tests.rs"]
 mod runtime_containment_tests;
 #[cfg(test)]
 mod cli_catchall_drop_tests {
-    use super::drop_cli_catchall_allows;
+    use super::{configured_memory_retrieval_mode, drop_cli_catchall_allows};
     use xai_grok_workspace::permission::resolution::YOLO_PIN_REASON_REQUIREMENTS;
     use xai_grok_workspace::permission::rules::parse_permission_rule;
     use xai_grok_workspace::permission::types::{PermissionRule, RuleAction, ToolFilter};
     fn allow(rule: &str) -> PermissionRule {
         parse_permission_rule(rule, RuleAction::Allow).expect("rule parses")
+    }
+    #[test]
+    fn disabled_memory_config_has_disabled_retrieval_mode() {
+        assert_eq!(
+            configured_memory_retrieval_mode(Some(&Default::default())),
+            xai_grok_telemetry::events::MemoryRetrievalMode::Disabled
+        );
     }
     /// Under the pin, CLI catch-all `--allow` rules (`*`, `**`) are dropped while
     /// a scoped rule (`Bash(touch *)`) survives.
@@ -186,6 +211,7 @@ pub(crate) async fn spawn_session_actor(
     subagents_enabled: bool,
     subagents_max_depth: u32,
     workflow_max_concurrent_agents: usize,
+    media_gen_batch_limits: xai_grok_tools::media_gen_limits::MediaGenBatchLimits,
     ask_user_question_enabled: bool,
     client_hooks: crate::extensions::hooks::ClientHooks,
     prompt_display_cwd: Option<String>,
@@ -353,6 +379,11 @@ pub(crate) async fn spawn_session_actor(
         .filter(|item| matches!(item, ConversationItem::User(_)))
         .count();
     let initial_conversation_len = conversation.len();
+    let title_session_dir = crate::session::persistence::session_dir(&session_info);
+    let title_refresh_watermark =
+        crate::session::helpers::session_summary::load_title_refresh_watermark(&title_session_dir);
+    let title_refresh_turns_at_spawn =
+        crate::session::helpers::session_recap::main_turn_count(&conversation);
     let initial_last_recap_main_turn = crate::session::helpers::session_recap::load_recap_watermark(
         &crate::session::persistence::session_dir(&session_info),
     );
@@ -757,7 +788,12 @@ pub(crate) async fn spawn_session_actor(
                 .map_or_else(Default::default, |mc| mc.search.clone()),
             watcher,
             stale_claim_secs: watcher_config.stale_claim_secs,
-            search_source: "tool",
+            search_source: crate::session::memory::MemorySearchSource::Tool,
+            observation_sink: std::sync::Arc::new(
+                crate::session::memory_observation::TelemetryMemoryObservationSink {
+                    session_id: session_info.id.to_string(),
+                },
+            ),
             embedding_credentials: embed_credentials,
         };
         let backend = crate::session::memory::MemoryBackendImpl::from_session_params(
@@ -915,6 +951,7 @@ pub(crate) async fn spawn_session_actor(
         image_gen_config: image_gen_config.clone(),
         video_gen_config: video_gen_config.clone(),
         app_builder_deployer_config: app_builder_deployer_config.clone(),
+        media_gen_batch_limits,
         write_file_enabled,
         subagents_enabled,
         subagent_toggle: subagent_toggle.clone(),
@@ -982,7 +1019,10 @@ pub(crate) async fn spawn_session_actor(
         .tool_bridge()
         .update_resource(task_wake_suppressed)
         .await;
-    let harness_metrics = if telemetry_enabled || xai_grok_telemetry::external::is_active() {
+    let memory_retrieval_mode = configured_memory_retrieval_mode(memory_config.as_ref());
+    let harness_metrics = if !startup_hints.is_subagent
+        && (telemetry_enabled || xai_grok_telemetry::external::is_active())
+    {
         let plugin_names = plugin_registry
             .as_ref()
             .map(|reg| {
@@ -1011,7 +1051,8 @@ pub(crate) async fn spawn_session_actor(
                 .map(|s| mcp_server_name(s).to_owned())
                 .collect(),
             lsp_server_names: tool_context.lsp_server_names.clone(),
-            memory_enabled: memory_config.is_some(),
+            memory_enabled: memory_config.as_ref().is_some_and(|config| config.enabled),
+            memory_retrieval_mode,
             auto_update,
             cwd: tool_context.cwd.as_str().to_owned(),
             skill_names: agent.tool_bridge().skill_discovery_snapshot_names().await,
@@ -1509,6 +1550,19 @@ pub(crate) async fn spawn_session_actor(
     let resolved_tool_overrides: std::sync::Arc<
         arc_swap::ArcSwapOption<xai_grok_sampling_types::ToolOverrides>,
     > = std::sync::Arc::new(arc_swap::ArcSwapOption::empty());
+    let title_refresh_enabled = effective_config.is_title_refresh_enabled();
+    let initial_title_refresh_idx =
+        crate::session::helpers::session_summary::initial_title_refresh_idx(
+            title_refresh_watermark,
+            title_refresh_enabled,
+            title_refresh_turns_at_spawn,
+        );
+    if title_refresh_watermark.is_none() && initial_title_refresh_idx == 0 {
+        crate::session::helpers::session_summary::save_title_refresh_watermark(
+            &title_session_dir,
+            0,
+        );
+    }
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         session_info: session_info.clone(),
         auth_method_id,
@@ -1744,6 +1798,10 @@ pub(crate) async fn spawn_session_actor(
         turn_summary_task: std::cell::RefCell::new(None),
         turn_summary_generation: std::cell::Cell::new(0),
         turn_summary_enabled: effective_config.is_turn_summary_enabled(),
+        title_refresh_enabled,
+        title_refresh_task: std::cell::RefCell::new(None),
+        title_refresh_generation: std::cell::Cell::new(0),
+        next_title_refresh_idx: std::cell::Cell::new(initial_title_refresh_idx),
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
@@ -2235,6 +2293,7 @@ pub(crate) async fn spawn_session_on_thread(
     subagents_enabled: bool,
     subagents_max_depth: u32,
     workflow_max_concurrent_agents: usize,
+    media_gen_batch_limits: xai_grok_tools::media_gen_limits::MediaGenBatchLimits,
     ask_user_question_enabled: bool,
     client_hooks: crate::extensions::hooks::ClientHooks,
     prompt_display_cwd: Option<String>,
@@ -2409,6 +2468,7 @@ pub(crate) async fn spawn_session_on_thread(
                         subagents_enabled,
                         subagents_max_depth,
                         workflow_max_concurrent_agents,
+                        media_gen_batch_limits,
                         ask_user_question_enabled,
                         client_hooks,
                         prompt_display_cwd,

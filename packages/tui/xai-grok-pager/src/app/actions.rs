@@ -758,6 +758,9 @@ pub enum Action {
     /// workspace, mark trust resolved, and replay any deferred session startup.
     /// (Declining quits via [`Action::Quit`]; there is no decline action.)
     TrustFolder,
+    /// Replays any session startup deferred behind the notice.
+    /// (Declining quits via [`Action::Quit`]; there is no decline action.)
+    AcceptConsent,
     /// A spawned task completed.
     TaskComplete(TaskResult),
     /// Share the current session via URL.
@@ -1718,6 +1721,15 @@ pub enum Effect {
     },
     /// Persist `[privacy].privacy_banner_acked` (RFC 3339 dismiss time).
     PersistPrivacyBannerAcked { acked_at: String },
+    /// Persist the consent answer to `[consent]` in config.toml.
+    PersistConsentAnswer {
+        account: Option<String>,
+        notice_id: String,
+        version: i32,
+        acked: bool,
+    },
+    /// Until a handler exists this always fails, and the local marker is what stops the re-prompt.
+    RecordConsentUpstream { notice_id: String, version: i32 },
     /// Persist memory modal fullscreen preference to `[hints]` in config.toml.
     PersistMemoryFullscreen { fullscreen: bool },
     /// Persist the dashboard's `[dashboard]` configuration to `~/.grok/config.toml`.
@@ -2615,6 +2627,11 @@ pub enum TaskResult {
     /// Cancel notification was sent (fire-and-forget).
     /// The real turn end comes via PromptResponse.
     CancelComplete,
+    /// The marker can stop advertising itself as unsent.
+    ConsentRecorded {
+        notice_id: String,
+        version: i32,
+    },
     /// Response to `x.ai/subagent/cancel`; see [`SubagentKillOutcome`].
     KillSubagentComplete {
         session_id: acp::SessionId,

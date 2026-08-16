@@ -1,4 +1,5 @@
 use crate::sampling::{ConversationItem, ConversationRequest};
+use xai_grok_sampling_types::SyntheticReason;
 
 const TRANSCRIPT_MAX_BYTES: usize = 32 * 1024;
 const ITEM_MAX_BYTES: usize = 4 * 1024;
@@ -116,16 +117,29 @@ pub(crate) fn bounded_goal_transcript(items: &[ConversationItem]) -> String {
     let mut used = 0usize;
 
     for item in items.iter().rev() {
-        let role = match item {
+        let (role, warning) = match item {
             ConversationItem::System(_) => continue,
-            ConversationItem::User(_) => "user",
-            ConversationItem::Assistant(_) => "assistant",
-            ConversationItem::ToolResult(_) => "tool",
+            ConversationItem::User(user)
+                if user.synthetic_reason == Some(SyntheticReason::AgentMessage) =>
+            {
+                (
+                    "agent_message",
+                    Some(xai_chat_state::compaction_utils::AGENT_MESSAGE_MODEL_LABEL),
+                )
+            }
+            ConversationItem::User(_) => ("user", None),
+            ConversationItem::Assistant(_) => ("assistant", None),
+            ConversationItem::ToolResult(_) => ("tool", None),
             ConversationItem::BackendToolCall(_)
             | ConversationItem::Reasoning(_)
             | ConversationItem::Compaction(_) => continue,
         };
         let text = item.text_content();
+        let text = if let Some(warning) = warning {
+            format!("{warning} {text}")
+        } else {
+            text
+        };
         let trimmed = text.trim();
         if trimmed.is_empty() {
             continue;
@@ -233,6 +247,19 @@ mod tests {
         assert!(!transcript.contains("secret system"));
         assert!(transcript.contains("[assistant] worked"));
         assert!(transcript.ends_with("[user] latest"));
+    }
+
+    #[test]
+    fn transcript_marks_agent_message_as_untrusted_not_human() {
+        let transcript =
+            bounded_goal_transcript(&[ConversationItem::agent_message("review this change")]);
+        assert_eq!(
+            transcript,
+            format!(
+                "[agent_message] {} review this change",
+                xai_chat_state::compaction_utils::AGENT_MESSAGE_MODEL_LABEL
+            )
+        );
     }
 
     #[test]

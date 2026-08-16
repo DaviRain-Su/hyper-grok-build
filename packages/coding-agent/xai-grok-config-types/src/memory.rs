@@ -1,12 +1,127 @@
 //! Memory-system configuration value types, extracted from xai-grok-shell
 //! (config dependency inversion).
 //!
-//! These are the leaf `[memory.*]` and `[compaction.*]` sub-config structs.
-//! The `MemoryConfig` aggregate and its `resolve()` loader stay in
-//! `xai-grok-shell` — `resolve()` depends on `toml` and on shell-internal
-//! flag resolution, and is part of shell's public API (cross-crate caller).
+//! These are the raw optional settings and resolved leaf value types for
+//! `[memory.*]` and the memory-owned `[compaction.*]` tables.
 
 use serde::{Deserialize, Serialize};
+
+/// Raw `[memory]` settings. Absence is preserved for per-field fallback.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemorySettings {
+    pub enabled: Option<bool>,
+    pub index: Option<MemoryIndexSettings>,
+    pub embedding: Option<MemoryEmbeddingSettings>,
+    pub search: Option<MemorySearchSettings>,
+    pub initial_injection: Option<MemoryInitialInjectionSettings>,
+    pub session: Option<MemorySessionSettings>,
+    pub watcher: Option<MemoryWatcherSettings>,
+    pub gc: Option<MemoryGcSettings>,
+    pub dream: Option<MemoryDreamSettings>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryIndexSettings {
+    pub max_chunk_chars: Option<usize>,
+    pub chunk_overlap_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryEmbeddingSettings {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub dimensions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemorySearchSettings {
+    pub max_results: Option<usize>,
+    pub min_score: Option<f32>,
+    pub vector_weight: Option<f32>,
+    pub text_weight: Option<f32>,
+    pub recency_decay: Option<f32>,
+    pub temporal_decay: Option<TemporalDecaySettings>,
+    pub mmr: Option<MmrSettings>,
+    pub source_weights: Option<std::collections::HashMap<String, f32>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TemporalDecaySettings {
+    pub enabled: Option<bool>,
+    pub half_life_days: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MmrSettings {
+    pub enabled: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_clamped_unit_option")]
+    pub lambda: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryInitialInjectionSettings {
+    pub enabled: Option<bool>,
+    pub min_score: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemorySessionSettings {
+    pub save_on_end: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryWatcherSettings {
+    pub enabled: Option<bool>,
+    pub stale_claim_secs: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryGcSettings {
+    pub max_age_days: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryDreamSettings {
+    pub enabled: Option<bool>,
+    pub min_hours: Option<u64>,
+    pub min_sessions: Option<u64>,
+    pub stale_lock_secs: Option<u64>,
+    pub check_interval_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryFlushSettings {
+    pub enabled: Option<bool>,
+    pub soft_threshold_tokens: Option<u64>,
+    pub flush_model: Option<String>,
+    pub max_flush_write_chars: Option<usize>,
+    pub idle_timeout_secs: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_clamped_unit_option")]
+    pub semantic_dedup_threshold: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PruningSettings {
+    pub enabled: Option<bool>,
+    pub keep_last_n_turns: Option<usize>,
+    pub soft_trim_threshold: Option<usize>,
+    pub soft_trim_head: Option<usize>,
+    pub soft_trim_tail: Option<usize>,
+    pub hard_clear_age_turns: Option<usize>,
+}
 
 /// Index and chunking configuration (`[memory.index]`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -71,7 +186,7 @@ pub struct MemorySearchConfig {
     pub recency_decay: f32,
     /// Temporal decay configuration for time-aware scoring.
     pub temporal_decay: TemporalDecayConfig,
-    /// MMR diversity re-ranking configuration (opt-in).
+    /// MMR diversity re-ranking configuration (enabled by default).
     pub mmr: MmrConfig,
     /// Source-type weight multipliers: all default to 1.0.
     pub source_weights: std::collections::HashMap<String, f32>,
@@ -86,7 +201,7 @@ impl Default for MemorySearchConfig {
 
         Self {
             max_results: 6,
-            min_score: 0.35,
+            min_score: 0.7,
             vector_weight: 0.7,
             text_weight: 0.3,
             recency_decay: DEFAULT_RECENCY_DECAY,
@@ -121,7 +236,7 @@ impl Default for TemporalDecayConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            half_life_days: 7.0,
+            half_life_days: 30.0,
         }
     }
 }
@@ -139,7 +254,7 @@ impl Default for TemporalDecayConfig {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct MmrConfig {
-    /// Whether MMR re-ranking is enabled. Default: false (opt-in).
+    /// Whether MMR re-ranking is enabled. Default: true.
     pub enabled: bool,
     /// Trade-off between relevance and diversity.
     /// 0.0 = maximum diversity, 1.0 = pure relevance (no re-ranking).
@@ -151,7 +266,7 @@ pub struct MmrConfig {
 impl Default for MmrConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             lambda: 0.7,
         }
     }
@@ -239,7 +354,7 @@ impl Default for MemoryInitialInjectionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            min_score: None,
+            min_score: Some(0.9),
         }
     }
 }
@@ -280,10 +395,10 @@ impl Default for MemoryDreamConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            min_hours: 4,
-            min_sessions: 3,
+            min_hours: 24,
+            min_sessions: 5,
             stale_lock_secs: 3600,
-            check_interval_secs: None,
+            check_interval_secs: Some(3600),
         }
     }
 }
@@ -366,7 +481,7 @@ impl Default for MemoryFlushConfig {
             soft_threshold_tokens: 4000,
             flush_model: None,
             max_flush_write_chars: 8000,
-            idle_timeout_secs: None,
+            idle_timeout_secs: Some(300),
             semantic_dedup_threshold: None,
         }
     }
@@ -403,23 +518,310 @@ impl Default for PruningConfig {
     }
 }
 
+/// Concrete memory configuration used by a running session.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    pub enabled: bool,
+    pub index: MemoryIndexConfig,
+    pub embedding: MemoryEmbeddingConfig,
+    pub search: MemorySearchConfig,
+    pub initial_injection: MemoryInitialInjectionConfig,
+    pub session: MemorySessionConfig,
+    pub watcher: MemoryWatcherConfig,
+    pub gc: MemoryGcConfig,
+    pub dream: MemoryDreamConfig,
+    #[serde(skip)]
+    pub flush: MemoryFlushConfig,
+    #[serde(skip)]
+    pub pruning: PruningConfig,
+    #[serde(skip)]
+    pub root_dir_override: Option<std::path::PathBuf>,
+    #[serde(skip)]
+    pub flat_memory_root: bool,
+}
+
+impl MemoryConfig {
+    /// Legacy compatibility wrapper for callers that pass both memory flags.
+    #[doc(hidden)]
+    pub fn resolve(
+        experimental_memory: bool,
+        no_memory: bool,
+        config: &toml::Value,
+        remote: Option<&crate::RemoteSettings>,
+    ) -> Self {
+        let memory_enabled_override = if no_memory {
+            Some(false)
+        } else if experimental_memory {
+            Some(true)
+        } else {
+            None
+        };
+        Self::resolve_with_override(memory_enabled_override, config, remote)
+    }
+
+    /// Compatibility resolver for callers that still hold the effective TOML value.
+    #[doc(hidden)]
+    pub fn resolve_with_override(
+        memory_enabled_override: Option<bool>,
+        config: &toml::Value,
+        remote: Option<&crate::RemoteSettings>,
+    ) -> Self {
+        let memory = config
+            .get("memory")
+            .and_then(|value| value.clone().try_into().ok())
+            .unwrap_or_default();
+        let compaction = config.get("compaction");
+        let flush = compaction
+            .and_then(|value| value.get("memory_flush"))
+            .and_then(|value| value.clone().try_into().ok())
+            .unwrap_or_default();
+        let pruning = compaction
+            .and_then(|value| value.get("pruning"))
+            .and_then(|value| value.clone().try_into().ok())
+            .unwrap_or_default();
+        Self::resolve_settings(memory_enabled_override, &memory, &flush, &pruning, remote)
+    }
+
+    /// Resolve typed effective-TOML settings against remote values and code defaults.
+    pub fn resolve_settings(
+        memory_enabled_override: Option<bool>,
+        memory: &MemorySettings,
+        flush: &MemoryFlushSettings,
+        pruning: &PruningSettings,
+        remote: Option<&crate::RemoteSettings>,
+    ) -> Self {
+        let defaults = Self::default();
+        let index = memory.index.as_ref();
+        let embedding = memory.embedding.as_ref();
+        let search = memory.search.as_ref();
+        let temporal_decay = search.and_then(|settings| settings.temporal_decay.as_ref());
+        let mmr = search.and_then(|settings| settings.mmr.as_ref());
+        let initial_injection = memory.initial_injection.as_ref();
+        let session = memory.session.as_ref();
+        let watcher = memory.watcher.as_ref();
+        let gc = memory.gc.as_ref();
+        let dream = memory.dream.as_ref();
+
+        Self {
+            enabled: crate::BoolFlag::env("GROK_MEMORY")
+                .cli(memory_enabled_override)
+                .config(memory.enabled)
+                .feature_flag(remote.and_then(|settings| settings.memory_enabled))
+                .default(false)
+                .resolve()
+                .value,
+            index: MemoryIndexConfig {
+                max_chunk_chars: index
+                    .and_then(|settings| settings.max_chunk_chars)
+                    .unwrap_or(defaults.index.max_chunk_chars),
+                chunk_overlap_chars: index
+                    .and_then(|settings| settings.chunk_overlap_chars)
+                    .unwrap_or(defaults.index.chunk_overlap_chars),
+            },
+            embedding: MemoryEmbeddingConfig {
+                provider: embedding
+                    .and_then(|settings| settings.provider.clone())
+                    .unwrap_or(defaults.embedding.provider),
+                model: match embedding.and_then(|settings| settings.model.as_deref()) {
+                    Some("") => None,
+                    Some(model) => Some(model.to_owned()),
+                    None => remote.and_then(|settings| settings.memory_embedding_model.clone()),
+                },
+                dimensions: embedding
+                    .and_then(|settings| settings.dimensions)
+                    .or_else(|| {
+                        remote
+                            .and_then(|settings| settings.memory_embedding_dimensions)
+                            .map(|value| value as usize)
+                    })
+                    .unwrap_or(defaults.embedding.dimensions),
+            },
+            search: MemorySearchConfig {
+                max_results: search
+                    .and_then(|settings| settings.max_results)
+                    .or_else(|| {
+                        remote
+                            .and_then(|settings| settings.memory_search_max_results)
+                            .map(|value| value as usize)
+                    })
+                    .unwrap_or(defaults.search.max_results),
+                min_score: search
+                    .and_then(|settings| settings.min_score)
+                    .or_else(|| remote.and_then(|settings| settings.memory_search_min_score))
+                    .unwrap_or(defaults.search.min_score),
+                vector_weight: search
+                    .and_then(|settings| settings.vector_weight)
+                    .unwrap_or(defaults.search.vector_weight),
+                text_weight: search
+                    .and_then(|settings| settings.text_weight)
+                    .unwrap_or(defaults.search.text_weight),
+                recency_decay: search
+                    .and_then(|settings| settings.recency_decay)
+                    .unwrap_or(defaults.search.recency_decay),
+                temporal_decay: TemporalDecayConfig {
+                    enabled: temporal_decay
+                        .and_then(|settings| settings.enabled)
+                        .or_else(|| {
+                            remote.and_then(|settings| settings.memory_temporal_decay_enabled)
+                        })
+                        .unwrap_or(defaults.search.temporal_decay.enabled),
+                    half_life_days: temporal_decay
+                        .and_then(|settings| settings.half_life_days)
+                        .or_else(|| {
+                            remote
+                                .and_then(|settings| settings.memory_temporal_decay_half_life_days)
+                        })
+                        .unwrap_or(defaults.search.temporal_decay.half_life_days),
+                },
+                mmr: MmrConfig {
+                    enabled: mmr
+                        .and_then(|settings| settings.enabled)
+                        .or_else(|| remote.and_then(|settings| settings.memory_mmr_enabled))
+                        .unwrap_or(defaults.search.mmr.enabled),
+                    lambda: mmr
+                        .and_then(|settings| settings.lambda)
+                        .or_else(|| remote.and_then(|settings| settings.memory_mmr_lambda))
+                        .unwrap_or(defaults.search.mmr.lambda)
+                        .clamp(0.0, 1.0),
+                },
+                source_weights: search
+                    .and_then(|settings| settings.source_weights.clone())
+                    .unwrap_or(defaults.search.source_weights),
+            },
+            initial_injection: MemoryInitialInjectionConfig {
+                enabled: initial_injection
+                    .and_then(|settings| settings.enabled)
+                    .or_else(|| {
+                        remote.and_then(|settings| settings.memory_initial_injection_enabled)
+                    })
+                    .unwrap_or(defaults.initial_injection.enabled),
+                min_score: initial_injection
+                    .and_then(|settings| settings.min_score)
+                    .or_else(|| {
+                        remote.and_then(|settings| settings.memory_initial_injection_min_score)
+                    })
+                    .or(defaults.initial_injection.min_score),
+            },
+            session: MemorySessionConfig {
+                save_on_end: session
+                    .and_then(|settings| settings.save_on_end)
+                    .unwrap_or(defaults.session.save_on_end),
+            },
+            watcher: MemoryWatcherConfig {
+                enabled: watcher
+                    .and_then(|settings| settings.enabled)
+                    .or_else(|| remote.and_then(|settings| settings.memory_watcher_enabled))
+                    .unwrap_or(defaults.watcher.enabled),
+                stale_claim_secs: watcher
+                    .and_then(|settings| settings.stale_claim_secs)
+                    .unwrap_or(defaults.watcher.stale_claim_secs),
+            },
+            gc: MemoryGcConfig {
+                max_age_days: gc
+                    .and_then(|settings| settings.max_age_days)
+                    .unwrap_or(defaults.gc.max_age_days),
+            },
+            dream: MemoryDreamConfig {
+                enabled: dream
+                    .and_then(|settings| settings.enabled)
+                    .or_else(|| remote.and_then(|settings| settings.dream_enabled))
+                    .unwrap_or(defaults.dream.enabled),
+                min_hours: dream
+                    .and_then(|settings| settings.min_hours)
+                    .or_else(|| remote.and_then(|settings| settings.dream_min_hours))
+                    .unwrap_or(defaults.dream.min_hours),
+                min_sessions: dream
+                    .and_then(|settings| settings.min_sessions)
+                    .or_else(|| remote.and_then(|settings| settings.dream_min_sessions))
+                    .unwrap_or(defaults.dream.min_sessions),
+                stale_lock_secs: dream
+                    .and_then(|settings| settings.stale_lock_secs)
+                    .unwrap_or(defaults.dream.stale_lock_secs),
+                check_interval_secs: match dream.and_then(|settings| settings.check_interval_secs) {
+                    Some(0) => None,
+                    Some(seconds) => Some(seconds),
+                    None => match remote.and_then(|settings| settings.dream_check_interval_secs) {
+                        Some(0) => None,
+                        Some(seconds) => Some(seconds),
+                        None => defaults.dream.check_interval_secs,
+                    },
+                },
+            },
+            flush: MemoryFlushConfig {
+                enabled: flush
+                    .enabled
+                    .or_else(|| remote.and_then(|settings| settings.flush_enabled))
+                    .unwrap_or(defaults.flush.enabled),
+                soft_threshold_tokens: flush
+                    .soft_threshold_tokens
+                    .or_else(|| remote.and_then(|settings| settings.flush_soft_threshold_tokens))
+                    .unwrap_or(defaults.flush.soft_threshold_tokens),
+                flush_model: match flush.flush_model.as_deref() {
+                    Some("") | None => None,
+                    Some(model) => Some(model.to_owned()),
+                },
+                max_flush_write_chars: flush
+                    .max_flush_write_chars
+                    .unwrap_or(defaults.flush.max_flush_write_chars),
+                idle_timeout_secs: match flush.idle_timeout_secs {
+                    Some(0) => None,
+                    Some(seconds) => Some(seconds),
+                    None => match remote.and_then(|settings| settings.flush_idle_timeout_secs) {
+                        Some(0) => None,
+                        Some(seconds) => Some(seconds),
+                        None => defaults.flush.idle_timeout_secs,
+                    },
+                },
+                semantic_dedup_threshold: flush
+                    .semantic_dedup_threshold
+                    .or_else(|| {
+                        remote
+                            .and_then(|settings| settings.flush_semantic_dedup_threshold)
+                            .map(|value| value.clamp(0.0, 1.0))
+                    })
+                    .or(defaults.flush.semantic_dedup_threshold),
+            },
+            pruning: PruningConfig {
+                enabled: pruning
+                    .enabled
+                    .or_else(|| remote.and_then(|settings| settings.pruning_enabled))
+                    .unwrap_or(defaults.pruning.enabled),
+                keep_last_n_turns: pruning
+                    .keep_last_n_turns
+                    .or_else(|| {
+                        remote
+                            .and_then(|settings| settings.pruning_keep_last_n_turns)
+                            .map(|value| value as usize)
+                    })
+                    .unwrap_or(defaults.pruning.keep_last_n_turns),
+                soft_trim_threshold: pruning
+                    .soft_trim_threshold
+                    .or_else(|| {
+                        remote
+                            .and_then(|settings| settings.pruning_soft_trim_threshold)
+                            .map(|value| value as usize)
+                    })
+                    .unwrap_or(defaults.pruning.soft_trim_threshold),
+                soft_trim_head: pruning
+                    .soft_trim_head
+                    .unwrap_or(defaults.pruning.soft_trim_head),
+                soft_trim_tail: pruning
+                    .soft_trim_tail
+                    .unwrap_or(defaults.pruning.soft_trim_tail),
+                hard_clear_age_turns: pruning
+                    .hard_clear_age_turns
+                    .unwrap_or(defaults.pruning.hard_clear_age_turns),
+            },
+            root_dir_override: None,
+            flat_memory_root: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sub_config_defaults_match() {
-        assert_eq!(MemoryIndexConfig::default().max_chunk_chars, 1600);
-        assert_eq!(MemoryEmbeddingConfig::default().dimensions, 1024);
-        let s = MemorySearchConfig::default();
-        assert_eq!(s.max_results, 6);
-        assert_eq!(s.recency_decay, DEFAULT_RECENCY_DECAY);
-        assert!(s.temporal_decay.enabled);
-        assert!(!s.mmr.enabled);
-        assert!(MemorySessionConfig::default().save_on_end);
-        assert_eq!(MemoryGcConfig::default().max_age_days, 30);
-        assert_eq!(PruningConfig::default().keep_last_n_turns, 3);
-    }
 
     #[test]
     fn mmr_lambda_is_clamped_on_deserialize() {

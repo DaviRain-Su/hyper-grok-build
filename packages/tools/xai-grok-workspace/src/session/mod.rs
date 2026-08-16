@@ -521,6 +521,8 @@ pub struct WorkspaceShared {
     pub(crate) client_ext_sink: arc_swap::ArcSwap<Option<ClientExtSink>>,
     pub(crate) local_registry: xai_computer_hub_sdk::LocalRegistry,
     pub(crate) activity_tracker: std::sync::Arc<crate::activity::ActivityTracker>,
+    /// True after the scheduler-liveness poll task started; reconnects must not start a second one.
+    pub(crate) scheduler_poll_started: std::sync::atomic::AtomicBool,
     /// Runtime-tunable timing/threshold config for the tool server.
     /// Read by the status publisher task and at shutdown.
     pub(crate) status_config: crate::status_config::StatusConfig,

@@ -137,26 +137,21 @@ pub fn resolve_contextual_hints(
     }
 }
 
-/// Merge config layers in effective-config order (system managed → managed →
-/// user → requirements). Used when [`load_effective_config`] fails but some
-/// layers still loaded (same pattern as tips/announcements).
 fn merge_hints_config_layers(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
     managed: Option<&TomlValue>,
 ) -> TomlValue {
-    let mut merged = crate::config::load_system_managed_config()
-        .unwrap_or_else(|_| TomlValue::Table(TomlMap::new()));
-    if let Some(m) = managed {
-        xai_grok_config::deep_merge_toml(&mut merged, m);
-    }
-    if let Some(u) = user {
-        xai_grok_config::deep_merge_toml(&mut merged, u);
-    }
-    if let Some(r) = requirements {
-        xai_grok_config::deep_merge_toml(&mut merged, r);
-    }
-    merged
+    let empty = || TomlValue::Table(TomlMap::new());
+    let layers = crate::config::ConfigLayers {
+        system_managed: crate::config::load_system_managed_config().unwrap_or_else(|_| empty()),
+        managed: managed.cloned().unwrap_or_else(empty),
+        user: user.cloned().unwrap_or_else(empty),
+        env_overlay: crate::config::resolved_env_overlay().map(|o| o.value),
+        user_requirements: requirements.cloned(),
+        ..Default::default()
+    };
+    layers.effective_config_base()
 }
 
 /// Resolve `[hints]` from effective config or partial layer merge.

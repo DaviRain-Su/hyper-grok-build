@@ -317,6 +317,7 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
             | ToolInput::WaitTasks(_)
             | ToolInput::KillTask(_)
             | ToolInput::Skill(_) => AccessKind::Read(None),
+            ToolInput::Task(t) => AccessKind::Edit(format!("task:{}", t.subagent_type)),
             ToolInput::WebSearch(ws) => AccessKind::WebSearch(ws.query.clone()),
             ToolInput::SearchReplace(search_replace) => {
                 AccessKind::Edit(search_replace.file_path.to_string())
@@ -335,11 +336,48 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
                 input: u.tool_input.clone(),
             },
             ToolInput::WebFetch(wf) => AccessKind::WebFetch(wf.url.clone()),
-            ToolInput::Dynamic(_) => AccessKind::Read(None),
+            ToolInput::Dynamic(value) => access_kind_from_dynamic(value),
             #[allow(unreachable_patterns)]
             _ => AccessKind::Read(None),
         }
     }
+}
+fn dynamic_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    let object = value.as_object()?;
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+}
+fn dynamic_has_field(value: &serde_json::Value, keys: &[&str]) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| keys.iter().any(|key| object.contains_key(*key)))
+}
+fn access_kind_from_dynamic(value: &serde_json::Value) -> AccessKind {
+    if let Some(path) = dynamic_string_field(value, &["filePath", "file_path", "path"]) {
+        let is_mutation = dynamic_has_field(
+            value,
+            &[
+                "oldString",
+                "old_string",
+                "newString",
+                "new_string",
+                "content",
+                "edits",
+                "replaceAll",
+                "replace_all",
+            ],
+        );
+        return if is_mutation {
+            AccessKind::Edit(path)
+        } else {
+            AccessKind::Read(Some(path))
+        };
+    }
+    if let Some(command) = dynamic_string_field(value, &["command"]) {
+        return AccessKind::Bash(command);
+    }
+    AccessKind::Read(None)
 }
 /// Permission policy configuration (duplicated from util/config.rs for Phase 1 move independence; identical).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -739,6 +777,61 @@ mod tests {
             matches!(access, AccessKind::Edit(ref p) if p == "/tmp/secret.txt"),
             "Write should produce AccessKind::Edit with the file path, got {access:?}"
         );
+    }
+    #[test]
+    fn write_scoped_and_dynamic_inputs_map_to_edit_not_read() {
+        use xai_grok_tools::implementations::opencode::edit::EditInput;
+        use xai_grok_tools::types::ToolInput;
+        use xai_tool_types::TaskToolInput;
+        let edit = ToolInput::from(EditInput {
+            file_path: "/tmp/denied.txt".into(),
+            old_string: "ORIGINAL".into(),
+            new_string: "BYPASS".into(),
+            replace_all: false,
+        });
+        assert!(matches!(
+            &edit,
+            ToolInput::SearchReplace(sr) if sr.file_path == "/tmp/denied.txt"
+        ));
+        assert!(matches!(
+            AccessKind::from(&edit),
+            AccessKind::Edit(p) if p == "/tmp/denied.txt"
+        ));
+        assert!(matches!(
+            AccessKind::from(&ToolInput::Task(TaskToolInput {
+                prompt: "edit config.toml".into(),
+                description: "spawn".into(),
+                subagent_type: "general-purpose".into(),
+                run_in_background: false,
+                capability_mode: None,
+                isolation: None,
+                resume_from: None,
+                cwd: None,
+                model: None,
+                task_id: None,
+            })),
+            AccessKind::Edit(p) if p == "task:general-purpose"
+        ));
+        assert!(matches!(
+            AccessKind::from(&ToolInput::Dynamic(serde_json::json!({
+                "filePath": "/tmp/denied.txt",
+                "oldString": "a",
+                "newString": "b",
+            }))),
+            AccessKind::Edit(p) if p == "/tmp/denied.txt"
+        ));
+        assert!(matches!(
+            AccessKind::from(&ToolInput::Dynamic(serde_json::json!({
+                "filePath": "src/main.rs"
+            }))),
+            AccessKind::Read(Some(p)) if p == "src/main.rs"
+        ));
+        assert!(matches!(
+            AccessKind::from(&ToolInput::Dynamic(serde_json::json!({
+                "command": "rm -rf /"
+            }))),
+            AccessKind::Bash(c) if c == "rm -rf /"
+        ));
     }
     #[test]
     fn client_type_deserializes_grok_shell_as_generic() {

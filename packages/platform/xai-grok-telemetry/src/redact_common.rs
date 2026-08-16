@@ -43,6 +43,41 @@ pub(crate) fn url_origin(value: &str) -> Cow<'_, str> {
     Cow::Borrowed(value)
 }
 
+/// Reduce any embedded `http(s)://…` URLs in free-form text (e.g. transport
+/// error strings) to their origins, then secret-scrub. Path/query can carry
+/// tokens or user content and must not reach logs.
+pub(crate) fn redact_urls_in_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while !rest.is_empty() {
+        let https = rest.find("https://");
+        let http = rest.find("http://");
+        let start = match (https, http) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        let Some(start) = start else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let url_rest = &rest[start..];
+        let end = url_rest
+            .char_indices()
+            .find(|&(_, c)| {
+                c.is_whitespace() || matches!(c, ')' | ']' | '"' | '\'' | ',' | ';' | '>')
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(url_rest.len());
+        let url = &url_rest[..end];
+        out.push_str(url_origin(url).as_ref());
+        rest = &url_rest[end..];
+    }
+    redact_to_owned(&out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +103,17 @@ mod tests {
     #[test]
     fn url_origin_passes_unparseable_through() {
         assert_eq!(url_origin("not a url"), "not a url");
+    }
+
+    #[test]
+    fn redact_urls_in_text_reduces_embedded_urls() {
+        let err = "error sending request for url (https://collector.corp.example:4318/v1/logs?token=CANARY): connection reset";
+        let out = redact_urls_in_text(err);
+        assert!(
+            out.contains("https://collector.corp.example:4318"),
+            "origin lost: {out}"
+        );
+        assert!(!out.contains("/v1/logs"), "path survived: {out}");
+        assert!(!out.contains("CANARY"), "query token survived: {out}");
     }
 }

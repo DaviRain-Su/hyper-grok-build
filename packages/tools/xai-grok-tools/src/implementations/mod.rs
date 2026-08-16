@@ -25,6 +25,6 @@ pub use opencode::{
     OpenCodeBashTool, OpenCodeEditTool, OpenCodeGlobTool, OpenCodeGrepTool, OpenCodeReadTool,
     OpenCodeSkillTool, OpenCodeTodoWriteTool, OpenCodeWriteTool,
 };
-pub use search_tool::SearchTool;
-pub use use_tool::{UseTool, UseToolInput};
+pub use search_tool::{SEARCH_TOOL_NAME, SearchTool};
+pub use use_tool::{USE_TOOL_NAME, UseTool, UseToolInput};
 pub use web_search::WebSearchConfig;

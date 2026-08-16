@@ -131,6 +131,9 @@ pub struct ExternalOtelFileConfig {
     pub endpoint: Option<String>,
     /// `http/protobuf` | `grpc`.
     pub protocol: Option<String>,
+    pub certificate: Option<String>,
+    pub client_certificate: Option<String>,
+    pub client_key: Option<String>,
     /// Content gate (admins can pin this to `false` via requirements).
     pub log_user_prompts: Option<bool>,
     /// Content gate (admins can pin this to `false` via requirements).
@@ -145,7 +148,8 @@ pub struct ExternalOtelFileConfig {
 pub struct ExternalOtelConfig {
     pub metrics_exporter: ExporterSelection,
     pub logs_exporter: ExporterSelection,
-    pub transport: OtlpTransport,
+    pub logs_transport: OtlpTransport,
+    pub metrics_transport: OtlpTransport,
     /// Resolved logs endpoint (full `…/v1/logs` for HTTP; collector origin for gRPC).
     pub logs_endpoint: String,
     /// Resolved metrics endpoint (full `…/v1/metrics` for HTTP; collector origin for gRPC).
@@ -165,6 +169,10 @@ pub struct ExternalOtelConfig {
     /// Same for the metrics collector (`OTEL_EXPORTER_OTLP_CERTIFICATE`,
     /// overridden by `OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE`).
     pub metrics_ca_certificate: Option<String>,
+    pub logs_client_certificate: Option<String>,
+    pub logs_client_key: Option<String>,
+    pub metrics_client_certificate: Option<String>,
+    pub metrics_client_key: Option<String>,
     /// `OTEL_EXPORTER_OTLP_TIMEOUT` (ms). Default 10 s.
     pub timeout: Duration,
     /// `OTEL_METRIC_EXPORT_INTERVAL` (ms). Default 60 s.
@@ -223,6 +231,90 @@ pub fn parse_header_list(raw: &str) -> Vec<(String, String)> {
 const DEFAULT_OTLP_HTTP_BASE: &str = "http://localhost:4318";
 /// OTLP gRPC default endpoint per spec.
 const DEFAULT_OTLP_GRPC_ENDPOINT: &str = "http://localhost:4317";
+
+fn resolve_client_identity(
+    signal: &str,
+    certificate: Option<String>,
+    key: Option<String>,
+    cert_source: &str,
+    key_source: &str,
+) -> (Option<String>, Option<String>) {
+    match (certificate, key) {
+        (Some(cert), Some(key)) => (Some(cert), Some(key)),
+        (None, None) => (None, None),
+        (Some(_), None) => {
+            tracing::warn!(
+                signal,
+                source = cert_source,
+                "external otel: client certificate set without matching client key; \
+                 mTLS identity ignored for this signal"
+            );
+            (None, None)
+        }
+        (None, Some(_)) => {
+            tracing::warn!(
+                signal,
+                source = key_source,
+                "external otel: client key set without matching client certificate; \
+                 mTLS identity ignored for this signal"
+            );
+            (None, None)
+        }
+    }
+}
+
+/// Resolve a cert/key pair where the upper layer (env) is atomic over the lower
+/// layer (file or base): a half-set upper layer never crosses with the lower
+/// layer's complementary path.
+fn resolve_identity_layer(
+    signal: &str,
+    upper_certificate: Option<String>,
+    upper_key: Option<String>,
+    upper_cert_source: &str,
+    upper_key_source: &str,
+    lower_certificate: Option<String>,
+    lower_key: Option<String>,
+    lower_cert_source: &str,
+    lower_key_source: &str,
+) -> (Option<String>, Option<String>) {
+    let upper_any = upper_certificate.is_some() || upper_key.is_some();
+    if upper_any {
+        let upper_partial = upper_certificate.is_some() ^ upper_key.is_some();
+        let lower_complete = lower_certificate.is_some() && lower_key.is_some();
+        // A single leftover upper-layer variable must not silently discard a
+        // complete managed/base pair: the only symptom is an empty collector.
+        if upper_partial && lower_complete {
+            let set_source = if upper_certificate.is_some() {
+                upper_cert_source
+            } else {
+                upper_key_source
+            };
+            tracing::warn!(
+                signal,
+                set = set_source,
+                discarded_cert = lower_cert_source,
+                discarded_key = lower_key_source,
+                "external otel: half-set upper identity discards complete lower-layer \
+                 mTLS pair; mTLS identity ignored for this signal"
+            );
+            return (None, None);
+        }
+        return resolve_client_identity(
+            signal,
+            upper_certificate,
+            upper_key,
+            upper_cert_source,
+            upper_key_source,
+        );
+    }
+    resolve_client_identity(
+        signal,
+        lower_certificate,
+        lower_key,
+        lower_cert_source,
+        lower_key_source,
+    )
+}
 
 fn resolve_signal_endpoint(
     signal_specific: Option<String>,
@@ -303,18 +395,98 @@ impl ExternalOtelConfig {
             return None;
         }
 
-        let raw_protocol =
-            getenv("OTEL_EXPORTER_OTLP_PROTOCOL").or_else(|| file.and_then(|f| f.protocol.clone()));
-        let transport = match raw_protocol.as_deref().map(OtlpTransport::parse) {
-            Some(Some(transport)) => transport,
-            Some(None) => {
-                tracing::warn!(
-                    protocol = raw_protocol.as_deref().unwrap_or_default(),
-                    "external otel: unrecognized OTLP protocol; stream disabled"
-                );
-                return None;
+        // Unrecognized protocol on an *active* signal disables the stream; on an
+        // *inactive* signal it is ignored so a stray fleet env var for a disabled
+        // signal cannot take down the other.
+        let resolve_protocol = |raw: Option<String>,
+                                label: &str,
+                                signal_active: bool|
+         -> Option<Option<OtlpTransport>> {
+            match raw {
+                // Blank is treated as unset so signal vars inherit the base protocol
+                // instead of `parse("")` forcing HttpProtobuf.
+                None => Some(None),
+                Some(s) if s.trim().is_empty() => Some(None),
+                Some(s) => match OtlpTransport::parse(&s) {
+                    Some(t) => Some(Some(t)),
+                    None if signal_active => {
+                        tracing::warn!(
+                            protocol = %s,
+                            signal = label,
+                            "external otel: unrecognized OTLP protocol; stream disabled"
+                        );
+                        None
+                    }
+                    None => {
+                        tracing::warn!(
+                            protocol = %s,
+                            signal = label,
+                            "external otel: unrecognized OTLP protocol on inactive signal; ignoring"
+                        );
+                        Some(None)
+                    }
+                },
             }
-            None => OtlpTransport::HttpProtobuf,
+        };
+        // Base is soft: an invalid generic protocol must not block valid
+        // per-signal overrides (OTLP signal-over-generic precedence). Only
+        // active signals that actually inherit a missing/invalid base fail.
+        #[derive(Clone, Copy)]
+        enum BaseProtocol {
+            Explicit(OtlpTransport),
+            Default,
+            Invalid,
+        }
+        let base_protocol = {
+            let raw = getenv("OTEL_EXPORTER_OTLP_PROTOCOL")
+                .or_else(|| file.and_then(|f| f.protocol.clone()));
+            match raw {
+                None => BaseProtocol::Default,
+                Some(s) if s.trim().is_empty() => BaseProtocol::Default,
+                Some(s) => match OtlpTransport::parse(&s) {
+                    Some(t) => BaseProtocol::Explicit(t),
+                    None => {
+                        tracing::warn!(
+                            protocol = %s,
+                            "external otel: unrecognized base OTLP protocol; \
+                             active signals without a signal-specific protocol will fail"
+                        );
+                        BaseProtocol::Invalid
+                    }
+                },
+            }
+        };
+        let inherit_base = |signal_active: bool| -> Option<OtlpTransport> {
+            match base_protocol {
+                BaseProtocol::Explicit(t) => Some(t),
+                BaseProtocol::Default => Some(OtlpTransport::HttpProtobuf),
+                BaseProtocol::Invalid if signal_active => {
+                    tracing::warn!(
+                        "external otel: active signal inherits invalid base OTLP protocol; \
+                         stream disabled"
+                    );
+                    None
+                }
+                BaseProtocol::Invalid => Some(OtlpTransport::HttpProtobuf),
+            }
+        };
+        let logs_otlp = logs_exporter == ExporterSelection::Otlp;
+        let metrics_otlp = metrics_exporter == ExporterSelection::Otlp;
+        let logs_transport = match resolve_protocol(
+            getenv("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL"),
+            "logs",
+            logs_otlp,
+        )? {
+            Some(t) => t,
+            None => inherit_base(logs_otlp)?,
+        };
+        let metrics_transport = match resolve_protocol(
+            getenv("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"),
+            "metrics",
+            metrics_otlp,
+        )? {
+            Some(t) => t,
+            None => inherit_base(metrics_otlp)?,
         };
 
         let base_endpoint = getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -325,13 +497,13 @@ impl ExternalOtelConfig {
             getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"),
             base_endpoint.as_deref(),
             "v1/logs",
-            transport,
+            logs_transport,
         );
         let metrics_endpoint = resolve_signal_endpoint(
             getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"),
             base_endpoint.as_deref(),
             "v1/metrics",
-            transport,
+            metrics_transport,
         );
 
         // Headers: env only (RQ4) — never from the config file. Resolve them
@@ -357,11 +529,10 @@ impl ExternalOtelConfig {
         let logs_headers = resolve_signal_headers("OTEL_EXPORTER_OTLP_LOGS_HEADERS");
         let metrics_headers = resolve_signal_headers("OTEL_EXPORTER_OTLP_METRICS_HEADERS");
 
-        // Collector CA certificate (OTLP spec): base var with per-signal
-        // overrides. A path, not a secret — but env-only like headers, so
-        // resolution stays a pure function of the standard OTEL_* interface.
-        let base_certificate =
-            getenv("OTEL_EXPORTER_OTLP_CERTIFICATE").filter(|s| !s.trim().is_empty());
+        let base_certificate = getenv("OTEL_EXPORTER_OTLP_CERTIFICATE")
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| file.and_then(|f| f.certificate.clone()))
+            .filter(|s| !s.trim().is_empty());
         let resolve_signal_certificate = |signal_var: &str| {
             getenv(signal_var)
                 .filter(|s| !s.trim().is_empty())
@@ -371,6 +542,61 @@ impl ExternalOtelConfig {
         let logs_ca_certificate = resolve_signal_certificate("OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE");
         let metrics_ca_certificate =
             resolve_signal_certificate("OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE");
+
+        let env_client_certificate = getenv("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE")
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string());
+        let env_client_key = getenv("OTEL_EXPORTER_OTLP_CLIENT_KEY")
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string());
+        let file_client_certificate = file
+            .and_then(|f| f.client_certificate.clone())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string());
+        let file_client_key = file
+            .and_then(|f| f.client_key.clone())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string());
+        let (base_client_certificate, base_client_key) = resolve_identity_layer(
+            "base",
+            env_client_certificate,
+            env_client_key,
+            "env OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+            "env OTEL_EXPORTER_OTLP_CLIENT_KEY",
+            file_client_certificate,
+            file_client_key,
+            "config [telemetry].otel_client_certificate",
+            "config [telemetry].otel_client_key",
+        );
+        let signal_identity = |signal: &str, cert_var: &str, key_var: &str| {
+            let signal_cert = getenv(cert_var)
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string());
+            let signal_key = getenv(key_var)
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string());
+            resolve_identity_layer(
+                signal,
+                signal_cert,
+                signal_key,
+                &format!("env {cert_var}"),
+                &format!("env {key_var}"),
+                base_client_certificate.clone(),
+                base_client_key.clone(),
+                "resolved base client certificate",
+                "resolved base client key",
+            )
+        };
+        let (logs_client_certificate, logs_client_key) = signal_identity(
+            "logs",
+            "OTEL_EXPORTER_OTLP_LOGS_CLIENT_CERTIFICATE",
+            "OTEL_EXPORTER_OTLP_LOGS_CLIENT_KEY",
+        );
+        let (metrics_client_certificate, metrics_client_key) = signal_identity(
+            "metrics",
+            "OTEL_EXPORTER_OTLP_METRICS_CLIENT_CERTIFICATE",
+            "OTEL_EXPORTER_OTLP_METRICS_CLIENT_KEY",
+        );
 
         let gates = ContentGates {
             log_user_prompts: getenv("OTEL_LOG_USER_PROMPTS")
@@ -397,13 +623,18 @@ impl ExternalOtelConfig {
         Some(Self {
             metrics_exporter,
             logs_exporter,
-            transport,
+            logs_transport,
+            metrics_transport,
             logs_endpoint,
             metrics_endpoint,
             logs_headers,
             metrics_headers,
             logs_ca_certificate,
             metrics_ca_certificate,
+            logs_client_certificate,
+            logs_client_key,
+            metrics_client_certificate,
+            metrics_client_key,
             timeout: parse_ms(
                 getenv("OTEL_EXPORTER_OTLP_TIMEOUT"),
                 Duration::from_millis(10_000),
@@ -486,7 +717,8 @@ mod tests {
         assert!(cfg.include_session_id_on_metrics);
         assert!(!cfg.include_version_on_metrics);
         assert_eq!(cfg.temporality, TemporalityPreference::Delta);
-        assert_eq!(cfg.transport, OtlpTransport::HttpProtobuf);
+        assert_eq!(cfg.logs_transport, OtlpTransport::HttpProtobuf);
+        assert_eq!(cfg.metrics_transport, OtlpTransport::HttpProtobuf);
     }
 
     #[test]
@@ -500,7 +732,8 @@ mod tests {
             None,
         )
         .expect("grpc must activate");
-        assert_eq!(cfg.transport, OtlpTransport::Grpc);
+        assert_eq!(cfg.logs_transport, OtlpTransport::Grpc);
+        assert_eq!(cfg.metrics_transport, OtlpTransport::Grpc);
         assert_eq!(cfg.logs_endpoint, "http://localhost:4317");
     }
 
@@ -515,7 +748,8 @@ mod tests {
             None,
         );
         let cfg = cfg.unwrap();
-        assert_eq!(cfg.transport, OtlpTransport::HttpProtobuf);
+        assert_eq!(cfg.logs_transport, OtlpTransport::HttpProtobuf);
+        assert_eq!(cfg.metrics_transport, OtlpTransport::HttpProtobuf);
     }
 
     #[test]
@@ -588,16 +822,128 @@ mod tests {
             log_user_prompts: None,
             log_tool_details: None,
             protocol: Some("grpc".into()),
+            ..Default::default()
         };
         let cfg = ExternalOtelConfig::resolve_with(env(&[]), Some(&file)).unwrap();
-        assert_eq!(cfg.transport, OtlpTransport::Grpc);
+        assert_eq!(cfg.logs_transport, OtlpTransport::Grpc);
+        assert_eq!(cfg.metrics_transport, OtlpTransport::Grpc);
 
         let cfg = ExternalOtelConfig::resolve_with(
             env(&[("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")]),
             Some(&file),
         )
         .unwrap();
-        assert_eq!(cfg.transport, OtlpTransport::HttpProtobuf);
+        assert_eq!(cfg.logs_transport, OtlpTransport::HttpProtobuf);
+        assert_eq!(cfg.metrics_transport, OtlpTransport::HttpProtobuf);
+    }
+
+    #[test]
+    fn per_signal_protocol_overrides_base() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("GROK_EXTERNAL_OTEL", "1"),
+                ("OTEL_LOGS_EXPORTER", "otlp"),
+                ("OTEL_METRICS_EXPORTER", "otlp"),
+                ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
+                ("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "grpc"),
+                (
+                    "OTEL_EXPORTER_OTLP_ENDPOINT",
+                    "https://collector.corp.example:4318",
+                ),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.logs_transport, OtlpTransport::Grpc);
+        assert_eq!(cfg.metrics_transport, OtlpTransport::HttpProtobuf);
+        assert_eq!(cfg.logs_endpoint, "https://collector.corp.example:4318");
+        assert_eq!(
+            cfg.metrics_endpoint,
+            "https://collector.corp.example:4318/v1/metrics"
+        );
+    }
+
+    #[test]
+    fn unrecognized_signal_protocol_disables_active_signal() {
+        assert!(
+            ExternalOtelConfig::resolve_with(
+                env(&[
+                    ("GROK_EXTERNAL_OTEL", "1"),
+                    ("OTEL_LOGS_EXPORTER", "otlp"),
+                    ("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "http/json"),
+                ]),
+                None,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn unrecognized_protocol_on_inactive_signal_is_ignored() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("GROK_EXTERNAL_OTEL", "1"),
+                ("OTEL_METRICS_EXPORTER", "otlp"),
+                // logs exporter is off: a bad logs protocol must not kill metrics
+                ("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "http/json"),
+            ]),
+            None,
+        )
+        .expect("inactive signal protocol must not disable the stream");
+        assert_eq!(cfg.metrics_exporter, ExporterSelection::Otlp);
+        assert_eq!(cfg.metrics_transport, OtlpTransport::HttpProtobuf);
+    }
+
+    #[test]
+    fn empty_signal_protocol_inherits_base() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("GROK_EXTERNAL_OTEL", "1"),
+                ("OTEL_LOGS_EXPORTER", "otlp"),
+                ("OTEL_METRICS_EXPORTER", "otlp"),
+                ("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
+                ("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "  "),
+                ("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", ""),
+            ]),
+            None,
+        )
+        .expect("blank signal protocol must inherit base");
+        assert_eq!(cfg.logs_transport, OtlpTransport::Grpc);
+        assert_eq!(cfg.metrics_transport, OtlpTransport::Grpc);
+    }
+
+    #[test]
+    fn invalid_base_protocol_allows_valid_signal_overrides() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("GROK_EXTERNAL_OTEL", "1"),
+                ("OTEL_LOGS_EXPORTER", "otlp"),
+                ("OTEL_METRICS_EXPORTER", "otlp"),
+                ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+                ("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "grpc"),
+                ("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", "http/protobuf"),
+            ]),
+            None,
+        )
+        .expect("valid signal protocols must recover from invalid base");
+        assert_eq!(cfg.logs_transport, OtlpTransport::Grpc);
+        assert_eq!(cfg.metrics_transport, OtlpTransport::HttpProtobuf);
+    }
+
+    #[test]
+    fn invalid_base_protocol_disables_when_active_signal_inherits() {
+        assert!(
+            ExternalOtelConfig::resolve_with(
+                env(&[
+                    ("GROK_EXTERNAL_OTEL", "1"),
+                    ("OTEL_LOGS_EXPORTER", "otlp"),
+                    ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+                ]),
+                None,
+            )
+            .is_none(),
+            "active signal with no override must fail on invalid base"
+        );
     }
 
     #[test]
@@ -755,6 +1101,7 @@ mod tests {
             log_user_prompts: Some(true),
             log_tool_details: None,
             protocol: None,
+            ..Default::default()
         };
         // No env at all: file config alone activates.
         let cfg = ExternalOtelConfig::resolve_with(env(&[]), Some(&file)).unwrap();
@@ -800,5 +1147,260 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.temporality, TemporalityPreference::Cumulative);
+    }
+
+    #[test]
+    fn client_identity_defaults_to_none() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[("GROK_EXTERNAL_OTEL", "1"), ("OTEL_LOGS_EXPORTER", "otlp")]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.logs_client_certificate, None);
+        assert_eq!(cfg.logs_client_key, None);
+        assert_eq!(cfg.metrics_client_certificate, None);
+        assert_eq!(cfg.metrics_client_key, None);
+    }
+
+    #[test]
+    fn client_identity_base_vars_apply_to_both_signals() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("GROK_EXTERNAL_OTEL", "1"),
+                ("OTEL_LOGS_EXPORTER", "otlp"),
+                ("OTEL_METRICS_EXPORTER", "otlp"),
+                (
+                    "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+                    "/etc/ssl/client.crt",
+                ),
+                ("OTEL_EXPORTER_OTLP_CLIENT_KEY", "/etc/ssl/client.key"),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.logs_client_certificate.as_deref(),
+            Some("/etc/ssl/client.crt")
+        );
+        assert_eq!(cfg.logs_client_key.as_deref(), Some("/etc/ssl/client.key"));
+        assert_eq!(
+            cfg.metrics_client_certificate.as_deref(),
+            Some("/etc/ssl/client.crt")
+        );
+        assert_eq!(
+            cfg.metrics_client_key.as_deref(),
+            Some("/etc/ssl/client.key")
+        );
+    }
+
+    #[test]
+    fn client_identity_per_signal_overrides_isolate() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("GROK_EXTERNAL_OTEL", "1"),
+                ("OTEL_LOGS_EXPORTER", "otlp"),
+                ("OTEL_METRICS_EXPORTER", "otlp"),
+                ("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE", "/etc/ssl/base.crt"),
+                ("OTEL_EXPORTER_OTLP_CLIENT_KEY", "/etc/ssl/base.key"),
+                (
+                    "OTEL_EXPORTER_OTLP_METRICS_CLIENT_CERTIFICATE",
+                    "/etc/ssl/metrics.crt",
+                ),
+                (
+                    "OTEL_EXPORTER_OTLP_METRICS_CLIENT_KEY",
+                    "/etc/ssl/metrics.key",
+                ),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.logs_client_certificate.as_deref(),
+            Some("/etc/ssl/base.crt")
+        );
+        assert_eq!(cfg.logs_client_key.as_deref(), Some("/etc/ssl/base.key"));
+        assert_eq!(
+            cfg.metrics_client_certificate.as_deref(),
+            Some("/etc/ssl/metrics.crt")
+        );
+        assert_eq!(
+            cfg.metrics_client_key.as_deref(),
+            Some("/etc/ssl/metrics.key")
+        );
+    }
+
+    #[test]
+    fn client_identity_half_config_clears_both() {
+        let cert_only = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("GROK_EXTERNAL_OTEL", "1"),
+                ("OTEL_LOGS_EXPORTER", "otlp"),
+                (
+                    "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+                    "/etc/ssl/client.crt",
+                ),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cert_only.logs_client_certificate, None);
+        assert_eq!(cert_only.logs_client_key, None);
+
+        let key_only = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("GROK_EXTERNAL_OTEL", "1"),
+                ("OTEL_METRICS_EXPORTER", "otlp"),
+                ("OTEL_EXPORTER_OTLP_CLIENT_KEY", "/etc/ssl/client.key"),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(key_only.metrics_client_certificate, None);
+        assert_eq!(key_only.metrics_client_key, None);
+    }
+
+    #[test]
+    fn client_identity_signal_override_pair_without_base() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("GROK_EXTERNAL_OTEL", "1"),
+                ("OTEL_LOGS_EXPORTER", "otlp"),
+                ("OTEL_METRICS_EXPORTER", "otlp"),
+                (
+                    "OTEL_EXPORTER_OTLP_LOGS_CLIENT_CERTIFICATE",
+                    "/etc/ssl/logs.crt",
+                ),
+                ("OTEL_EXPORTER_OTLP_LOGS_CLIENT_KEY", "/etc/ssl/logs.key"),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.logs_client_certificate.as_deref(),
+            Some("/etc/ssl/logs.crt")
+        );
+        assert_eq!(cfg.logs_client_key.as_deref(), Some("/etc/ssl/logs.key"));
+        assert_eq!(cfg.metrics_client_certificate, None);
+        assert_eq!(cfg.metrics_client_key, None);
+    }
+
+    #[test]
+    fn file_layer_certificate_and_client_identity_paths() {
+        let file = ExternalOtelFileConfig {
+            enabled: Some(true),
+            logs_exporter: Some("otlp".into()),
+            metrics_exporter: Some("otlp".into()),
+            certificate: Some("/etc/ssl/corp-ca.pem".into()),
+            client_certificate: Some("/etc/ssl/client.crt".into()),
+            client_key: Some("/etc/ssl/client.key".into()),
+            ..Default::default()
+        };
+        let cfg = ExternalOtelConfig::resolve_with(env(&[]), Some(&file)).unwrap();
+        assert_eq!(
+            cfg.logs_ca_certificate.as_deref(),
+            Some("/etc/ssl/corp-ca.pem")
+        );
+        assert_eq!(
+            cfg.metrics_ca_certificate.as_deref(),
+            Some("/etc/ssl/corp-ca.pem")
+        );
+        assert_eq!(
+            cfg.logs_client_certificate.as_deref(),
+            Some("/etc/ssl/client.crt")
+        );
+        assert_eq!(cfg.logs_client_key.as_deref(), Some("/etc/ssl/client.key"));
+        assert_eq!(
+            cfg.metrics_client_certificate.as_deref(),
+            Some("/etc/ssl/client.crt")
+        );
+        assert_eq!(
+            cfg.metrics_client_key.as_deref(),
+            Some("/etc/ssl/client.key")
+        );
+    }
+
+    #[test]
+    fn env_client_identity_overrides_file_layer() {
+        let file = ExternalOtelFileConfig {
+            enabled: Some(true),
+            logs_exporter: Some("otlp".into()),
+            client_certificate: Some("/file/client.crt".into()),
+            client_key: Some("/file/client.key".into()),
+            certificate: Some("/file/ca.pem".into()),
+            ..Default::default()
+        };
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE", "/env/client.crt"),
+                ("OTEL_EXPORTER_OTLP_CLIENT_KEY", "/env/client.key"),
+                ("OTEL_EXPORTER_OTLP_CERTIFICATE", "/env/ca.pem"),
+            ]),
+            Some(&file),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.logs_client_certificate.as_deref(),
+            Some("/env/client.crt")
+        );
+        assert_eq!(cfg.logs_client_key.as_deref(), Some("/env/client.key"));
+        assert_eq!(cfg.logs_ca_certificate.as_deref(), Some("/env/ca.pem"));
+    }
+
+    #[test]
+    fn half_env_identity_does_not_cross_with_file_pair() {
+        let file = ExternalOtelFileConfig {
+            enabled: Some(true),
+            logs_exporter: Some("otlp".into()),
+            metrics_exporter: Some("otlp".into()),
+            client_certificate: Some("/file/client.crt".into()),
+            client_key: Some("/file/client.key".into()),
+            ..Default::default()
+        };
+
+        let cert_only = ExternalOtelConfig::resolve_with(
+            env(&[("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE", "/env/client.crt")]),
+            Some(&file),
+        )
+        .unwrap();
+        assert_eq!(cert_only.logs_client_certificate, None);
+        assert_eq!(cert_only.logs_client_key, None);
+        assert_eq!(cert_only.metrics_client_certificate, None);
+        assert_eq!(cert_only.metrics_client_key, None);
+
+        let key_only = ExternalOtelConfig::resolve_with(
+            env(&[("OTEL_EXPORTER_OTLP_CLIENT_KEY", "/env/client.key")]),
+            Some(&file),
+        )
+        .unwrap();
+        assert_eq!(key_only.logs_client_certificate, None);
+        assert_eq!(key_only.logs_client_key, None);
+        assert_eq!(key_only.metrics_client_certificate, None);
+        assert_eq!(key_only.metrics_client_key, None);
+    }
+
+    #[test]
+    fn half_signal_env_identity_does_not_cross_with_base_pair() {
+        let cfg = ExternalOtelConfig::resolve_with(
+            env(&[
+                ("GROK_EXTERNAL_OTEL", "1"),
+                ("OTEL_LOGS_EXPORTER", "otlp"),
+                ("OTEL_METRICS_EXPORTER", "otlp"),
+                ("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE", "/base/client.crt"),
+                ("OTEL_EXPORTER_OTLP_CLIENT_KEY", "/base/client.key"),
+                (
+                    "OTEL_EXPORTER_OTLP_LOGS_CLIENT_CERTIFICATE",
+                    "/logs/only.crt",
+                ),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.logs_client_certificate, None);
+        assert_eq!(cfg.logs_client_key, None);
+        assert_eq!(
+            cfg.metrics_client_certificate.as_deref(),
+            Some("/base/client.crt")
+        );
+        assert_eq!(cfg.metrics_client_key.as_deref(), Some("/base/client.key"));
     }
 }

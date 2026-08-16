@@ -11,31 +11,9 @@ use agent_client_protocol as acp;
 use xai_acp_lib::acp_send;
 use xai_grok_shell::agent::config::Config as AgentConfig;
 
-/// Local response types matching the ACP response shapes.
-#[derive(Debug, serde::Deserialize)]
-pub struct GcReport {
-    pub dead_removed: u64,
-    pub expired_removed: u64,
-    pub skipped_alive: u64,
-    // serde(default) so reports from agents predating this field still parse.
-    #[serde(default)]
-    pub remove_failed: u64,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct DbStats {
-    pub total_records: u64,
-    pub alive_count: u64,
-    pub dead_count: u64,
-    pub db_file_bytes: u64,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct RebuildReport {
-    pub discovered: u64,
-    pub registered: u64,
-    pub already_tracked: u64,
-}
+/// Read the agent's own report types rather than copies, so a field added
+/// there cannot go missing here.
+pub use xai_fast_worktree::{DbStats, GcReport, KeptWorktree, RebuildReport};
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct WorktreeArgs {
@@ -68,13 +46,18 @@ enum WorktreeCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Garbage-collect orphaned/stale worktrees
+    /// Remove expired worktrees, keeping any whose work would not survive.
     #[command(alias = "prune")]
     Gc {
+        /// Report what would be removed without removing it.
         #[arg(long)]
         dry_run: bool,
+        /// Expire worktrees idle longer than this, e.g. `7d`. Without it,
+        /// nothing expires.
         #[arg(long)]
         max_age: Option<String>,
+        /// Skip the live-process and protected-path guards. This does not
+        /// override the safety check; use `grok worktree rm` for that.
         #[arg(short, long)]
         force: bool,
     },
@@ -451,6 +434,36 @@ mod tests {
         assert_eq!(report.expired_removed, 1);
         // Older agents omit remove_failed; it must default to zero.
         assert_eq!(report.remove_failed, 0);
+    }
+
+    /// A worktree the gate kept is not one in use, and a path that was never a
+    /// repository is not a worktree that was removed.
+    #[test]
+    fn kept_worktree_prints_apart_from_a_busy_one_and_from_a_removal() {
+        let json = r#"{"result": {"dead_removed": 0, "expired_removed": 3, "skipped_alive": 0,
+            "kept_unsafe": 2, "no_repo_paths": 1, "kept_reasons": {"dirty": 2},
+            "kept": [{"path": "/wt", "reason": "dirty"}], "not_judged": 4, "unnamed": 5}}"#;
+        let envelope: ExtEnvelope<GcReport> = serde_json::from_str(json).unwrap();
+        let mut out = Vec::new();
+        display::print_gc(&envelope.result.unwrap(), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            [
+                "GC report:",
+                "  Dead records removed:      0",
+                "  Expired worktrees removed: 3",
+                "  Non-repository paths:      1",
+                "  Skipped (guarded):         0",
+                "  Kept (not reclaimable):    2",
+                "    dirty: 2",
+                "      /wt  (dirty)",
+                "      and 1 more, named in the log",
+                "  Not judged this pass:      4",
+                "  Naming failed (kept):      5",
+            ]
+        );
     }
 
     #[test]

@@ -523,7 +523,7 @@ async fn refresh_tokens_with_timeout(
         principal_id = ?principal_id,
         "OIDC: refreshing token"
     );
-    let probe = exchange_probe;
+    let probe = super::refresh::SuspendProbe::start(super::refresh::ProbeScope::WholeRefresh);
     (|| {
         refresh_tokens_once_with_timeout(
             token_endpoint,
@@ -1326,10 +1326,7 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let probe = crate::auth::oidc::refresh::SuspendProbe::start(
-            crate::auth::oidc::refresh::ProbeScope::Exchange,
-        );
-        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None, &probe)
+        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None)
             .await
             .expect("transient 5xx must be retried until success");
         assert_eq!(resp.access_token, "new-at");
@@ -1367,10 +1364,7 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let probe = crate::auth::oidc::refresh::SuspendProbe::start(
-            crate::auth::oidc::refresh::ProbeScope::Exchange,
-        );
-        let err = refresh_tokens(&token_endpoint, "rt", "client", None, None, &probe)
+        let err = refresh_tokens(&token_endpoint, "rt", "client", None, None)
             .await
             .expect_err("invalid_grant is terminal");
         assert!(
@@ -1417,10 +1411,7 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let probe = crate::auth::oidc::refresh::SuspendProbe::start(
-            crate::auth::oidc::refresh::ProbeScope::Exchange,
-        );
-        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None, &probe)
+        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None)
             .await
             .expect("a non-terminal coded 4xx must be retried until success");
         assert_eq!(resp.access_token, "new-at");

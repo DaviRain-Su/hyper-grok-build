@@ -458,3 +458,30 @@ fn auth_mode_classification() {
     assert_eq!(auth_mode(false, &Ok(false)), AuthMode::Personal);
     assert_eq!(auth_mode(false, &Err(err())), AuthMode::Unknown);
 }
+
+/// The `GROK_CONFIG` overlay must not arm or disarm the managed-config sync gate:
+/// the reader is overlay-free, so an overlay value never reaches it in either
+/// direction. Requirements/managed layers still resolve normally.
+#[test]
+fn managed_config_gate_ignores_the_overlay_in_both_directions() {
+    use crate::config::ConfigLayers;
+
+    fn features_managed_config(v: bool) -> toml::Value {
+        toml::from_str(&format!("[features]\nmanaged_config = {v}\n")).unwrap()
+    }
+
+    let mut layers = ConfigLayers {
+        user: features_managed_config(true),
+        env_overlay: Some(features_managed_config(false)),
+        ..Default::default()
+    };
+    assert_eq!(managed_config_enabled_from_layers(&layers), Some(true));
+
+    layers.user = features_managed_config(false);
+    layers.env_overlay = Some(features_managed_config(true));
+    assert_eq!(managed_config_enabled_from_layers(&layers), Some(false));
+
+    layers.user = toml::Value::Table(Default::default());
+    layers.env_overlay = Some(features_managed_config(false));
+    assert_eq!(managed_config_enabled_from_layers(&layers), None);
+}

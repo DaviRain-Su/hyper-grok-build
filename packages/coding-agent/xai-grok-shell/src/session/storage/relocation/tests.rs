@@ -566,23 +566,27 @@ fn hinted_replay_skips_non_authoritative_source_while_journal_exists() {
     .unwrap();
 
     let mut texts = Vec::new();
-    let emission = super::super::stream_replay_updates_at_hinted(
-        sid,
-        temp.path(),
-        super::super::ReplayPathHint {
-            parent_cwd: Some(Path::new("/source")),
-            child_cwd: None,
-            ..Default::default()
-        },
-        |update| {
-            if let acp::SessionUpdate::UserMessageChunk(chunk) = update
-                && let acp::ContentBlock::Text(text) = chunk.content
-            {
-                texts.push(text.text);
-            }
-        },
-    )
-    .unwrap();
+    let emission =
+        super::super::stream_replay_updates_at_hinted(
+            sid,
+            temp.path(),
+            super::super::ReplayPathHint {
+                parent_cwd: Some(Path::new("/source")),
+                child_cwd: None,
+                ..Default::default()
+            },
+            |update| {
+                if let super::super::ReplayedUpdate::Acp(
+                    acp::SessionUpdate::UserMessageChunk(chunk),
+                    _,
+                ) = update
+                    && let acp::ContentBlock::Text(text) = chunk.content
+                {
+                    texts.push(text.text);
+                }
+            },
+        )
+        .unwrap();
     assert_eq!(emission, super::super::ReplayEmission::Emitted);
     assert_eq!(
         texts,

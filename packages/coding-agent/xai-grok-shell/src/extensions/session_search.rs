@@ -14,6 +14,7 @@
 use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
 
+use crate::agent::MvpAgent;
 use crate::session::storage::search::{SessionSearchRequest, SessionSearchResponse};
 use crate::session::storage::search_fts::SessionSearchRow;
 
@@ -68,7 +69,7 @@ pub struct SearchSessionHit {
 }
 
 /// Route `x.ai/session/search` extension method calls.
-pub async fn handle(args: &acp::ExtRequest) -> ExtResult {
+pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "x.ai/session/search" => {
             let req: SearchSessionsRequest = super::parse_params(args)?;
@@ -81,10 +82,14 @@ pub async fn handle(args: &acp::ExtRequest) -> ExtResult {
             };
 
             let root_dir = crate::util::grok_home::grok_home();
-            let result = crate::session::storage::search::execute_search(&root_dir, &internal_req)
-                .await
-                .map(to_response)
-                .map_err(|e| anyhow::anyhow!(e));
+            let result = crate::session::storage::search::execute_search(
+                agent.search_index(),
+                &root_dir,
+                &internal_req,
+            )
+            .await
+            .map(to_response)
+            .map_err(|e| anyhow::anyhow!(e));
 
             super::to_ext_response(result)
         }

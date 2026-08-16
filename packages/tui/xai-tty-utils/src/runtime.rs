@@ -22,6 +22,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Maximum runtime worker threads for any grok process.
+#[allow(
+    clippy::unwrap_used,
+    reason = "const unwrap is evaluated at compile time and cannot panic at runtime"
+)]
 pub const MAX_WORKER_THREADS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 
 /// Maximum Tokio blocking threads per runtime. Tokio's default is 512.

@@ -91,6 +91,10 @@ pub(crate) struct SummaryPatch {
     /// automatic LLM title generation so it never clobbers a title the user
     /// set via `/rename`. Ignored when `generated_title` is also set.
     pub generated_title_if_absent: Option<String>,
+    /// Overwrite an existing *auto* title with a freshly regenerated one, but
+    /// never a manual `/rename`. Used by the early-session title refresh
+    /// (turns 3 and 6). Ignored when `generated_title` (manual) is also set.
+    pub generated_title_regenerate: Option<String>,
     /// `/rename --auto`: clear the manual pin. Takes precedence over the
     /// generated-title fields. A successful clear blanks `generated_title`
     /// *and* `session_summary` so `display_title()` is empty and if-absent
@@ -101,6 +105,10 @@ pub(crate) struct SummaryPatch {
     /// applies (last-writer-wins); `Some(None)` clears it (conversation
     /// rewind removed the described work).
     pub last_turn_summary: Option<Option<(String, String)>>,
+    /// Latest session recap preview. Outer `Some` applies (last-writer-wins);
+    /// `Some(None)` clears it (rewind removed the described turns). Persisted so
+    /// listing surfaces can show a recap when available.
+    pub last_recap: Option<Option<String>>,
 }
 
 impl Summary {
@@ -108,10 +116,11 @@ impl Summary {
     /// single timestamp used for both `last_active_at` (when activity is
     /// recorded) and `updated_at`.
     ///
-    /// Returns `true` iff a `generated_title_if_absent` was applied, **or**
-    /// a `reset_title_to_auto` actually cleared a manual pin. Callers use
-    /// the former to propagate an adopted auto title and the latter to
-    /// reset the generator / remote pin only when unpin changed disk.
+    /// Returns `true` iff an auto title was adopted (`generated_title_if_absent`
+    /// or `generated_title_regenerate`), **or** a `reset_title_to_auto` actually
+    /// cleared a manual pin. Callers use the former to propagate the adopted
+    /// title and the latter to reset the generator / remote pin only when unpin
+    /// changed disk.
     pub(crate) fn apply_patch(&mut self, patch: &SummaryPatch, now: DateTime<Utc>) -> bool {
         if patch.record_activity {
             // Monotonic: a stale concurrent writer can never move it backwards.
@@ -171,6 +180,9 @@ impl Summary {
             self.last_turn_summary = text;
             self.last_turn_summary_prompt_id = prompt_id;
         }
+        if let Some(recap) = &patch.last_recap {
+            self.last_recap = recap.clone();
+        }
         let mut absent_title_applied = false;
         if patch.reset_title_to_auto {
             // Gate on a real pin (`manual_title_opt`), not a stale flag
@@ -193,6 +205,13 @@ impl Summary {
             // Manual `/rename`: recorded so clients can restore the
             // prompt-border title on resume.
             self.title_is_manual = true;
+        } else if let Some(title) = &patch.generated_title_regenerate {
+            // Early-session refresh: replace an existing auto title, but never
+            // a manual `/rename` (checked atomically under the summary lock).
+            if !self.title_is_manual {
+                self.set_title_overwrite(title);
+                absent_title_applied = true;
+            }
         } else if let Some(title) = &patch.generated_title_if_absent {
             // Auto-generated titles defer to any title already present, so a
             // manual `/rename` is never overwritten by a racing LLM title.
@@ -215,6 +234,16 @@ impl Summary {
         if self.session_summary.is_empty() {
             self.session_summary = title.to_owned();
         }
+    }
+
+    /// Replace an auto title with a refreshed one. Unlike [`Self::set_title`],
+    /// this also updates the mirrored `session_summary` (which for an auto title
+    /// holds the previous auto title) so `display_title()` — read by older
+    /// clients that only see `session_summary` — reflects the new title. Only
+    /// called for non-manual titles, so no manual `/rename` is overwritten.
+    fn set_title_overwrite(&mut self, title: &str) {
+        self.generated_title = Some(title.to_owned());
+        self.session_summary = title.to_owned();
     }
 }
 
@@ -577,6 +606,77 @@ mod tests {
         let summary = read_summary(&summary_path).unwrap();
         assert_eq!(summary.display_title(), "Fresh Auto");
         assert!(!summary.title_is_manual);
+    }
+
+    /// Early-session title refresh overwrites an existing auto title, updating
+    /// the mirrored `session_summary` so old clients see the new title too.
+    #[tokio::test]
+    async fn regenerate_overwrites_auto_title() {
+        let dir = TempDir::new().unwrap();
+        let (adapter, info, summary_path) = new_session(&dir).await;
+
+        adapter
+            .set_generated_title_if_absent(&info, "First Prompt Title".into())
+            .await
+            .unwrap();
+        let applied = adapter
+            .regenerate_generated_title(&info, "Refined Real Topic".into())
+            .await
+            .unwrap();
+
+        assert!(applied);
+        let summary = read_summary(&summary_path).unwrap();
+        assert_eq!(summary.display_title(), "Refined Real Topic");
+        // Mirror updated so `display_title()` (old clients) reflects the refresh.
+        assert_eq!(summary.session_summary, "Refined Real Topic");
+        assert!(!summary.title_is_manual);
+    }
+
+    /// A title refresh never overwrites a manual `/rename`, and reports `false`.
+    #[tokio::test]
+    async fn regenerate_never_clobbers_manual_title() {
+        let dir = TempDir::new().unwrap();
+        let (adapter, info, summary_path) = new_session(&dir).await;
+
+        adapter
+            .update_session_title(&info, "Manual Title".into())
+            .await
+            .unwrap();
+        let applied = adapter
+            .regenerate_generated_title(&info, "Auto Refresh".into())
+            .await
+            .unwrap();
+
+        assert!(!applied);
+        let summary = read_summary(&summary_path).unwrap();
+        assert_eq!(summary.display_title(), "Manual Title");
+        assert!(summary.title_is_manual);
+    }
+
+    /// A recap persists into `summary.json` (last-writer-wins) and clears on
+    /// rewind, separate from the last-turn summary.
+    #[tokio::test]
+    async fn set_last_recap_persists_and_clears() {
+        let dir = TempDir::new().unwrap();
+        let (adapter, info, summary_path) = new_session(&dir).await;
+
+        adapter
+            .set_last_recap(&info, Some("Where we left off: fixing the parser".into()))
+            .await
+            .unwrap();
+
+        let summary = read_summary(&summary_path).unwrap();
+        assert_eq!(
+            summary.last_recap.as_deref(),
+            Some("Where we left off: fixing the parser")
+        );
+        // Distinct from the last-turn summary.
+        assert!(summary.last_turn_summary.is_none());
+
+        // A rewind clears it.
+        adapter.set_last_recap(&info, None).await.unwrap();
+        let summary = read_summary(&summary_path).unwrap();
+        assert!(summary.last_recap.is_none());
     }
 
     /// Unpin on a never-renamed / auto-titled session is a no-op: the auto

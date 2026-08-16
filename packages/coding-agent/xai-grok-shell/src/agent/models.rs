@@ -574,34 +574,29 @@ impl ModelsManager {
         *self.inner.current_reasoning_effort.write() = effort;
     }
 
+    /// Run `f` on the [`ModelEntry`] for `model_id` (catalog key or wire name); `None` if absent.
+    fn with_catalog_entry<T>(&self, model_id: &str, f: impl FnOnce(&ModelEntry) -> T) -> Option<T> {
+        let cat = self.inner.catalog.read();
+        let models = &cat.models;
+        let key = resolve_catalog_key(models, &acp::ModelId::new(model_id))?;
+        models.get(key.0.as_ref()).map(f)
+    }
+
     /// Whether the given model supports reasoning effort according to the catalog.
     pub(crate) fn model_supports_reasoning_effort(&self, model_id: &str) -> bool {
-        self.inner
-            .catalog
-            .read()
-            .models
-            .get(model_id)
-            .map(|e| e.info().supports_reasoning_effort)
+        self.with_catalog_entry(model_id, |e| e.info().supports_reasoning_effort)
             .unwrap_or(false)
     }
 
+    /// The model's catalog default reasoning effort.
     pub(crate) fn model_default_reasoning_effort(&self, model_id: &str) -> Option<ReasoningEffort> {
-        self.inner
-            .catalog
-            .read()
-            .models
-            .get(model_id)
-            .and_then(|e| e.info().reasoning_effort)
+        self.with_catalog_entry(model_id, |e| e.info().reasoning_effort)
+            .flatten()
     }
 
     /// The raw catalog `reasoning_efforts` list for `model_id` with no fallback,
     pub(crate) fn model_reasoning_efforts(&self, model_id: &str) -> Vec<ReasoningEffortOption> {
-        self.inner
-            .catalog
-            .read()
-            .models
-            .get(model_id)
-            .map(|e| e.info().reasoning_efforts.clone())
+        self.with_catalog_entry(model_id, |e| e.info().reasoning_efforts.clone())
             .unwrap_or_default()
     }
 
@@ -641,11 +636,7 @@ impl ModelsManager {
 
     /// Catalog opt-in to display the served-checkpoint fingerprint for this model.
     pub(crate) fn model_show_model_fingerprint(&self, model_id: &str) -> bool {
-        let cat = self.inner.catalog.read();
-        let models = &cat.models;
-        resolve_catalog_key(models, &acp::ModelId::new(model_id))
-            .and_then(|key| models.get(key.0.as_ref()))
-            .map(|e| e.info().show_model_fingerprint)
+        self.with_catalog_entry(model_id, |e| e.info().show_model_fingerprint)
             .unwrap_or(false)
     }
 
@@ -1127,9 +1118,7 @@ impl ModelsManager {
     /// bundled/cache catalog stays and the next refresh retries) instead of
     /// stalling boot, mirroring the readiness path's no-mint auth bound.
     async fn bounded_startup_auth(auth_manager: &Arc<AuthManager>) -> Option<GrokAuth> {
-        // A dark-wake deferral degrades to a session-less fetch here and the
-        // next full wake retries.
-        Self::bounded_auth_refresh(async { auth_manager.auth_background().await.ok() }).await
+        Self::bounded_auth_refresh(async { auth_manager.auth().await.ok() }).await
     }
 
     /// Bounds an auth-refresh future to `STARTUP_AUTH_REFRESH_TIMEOUT`, yielding

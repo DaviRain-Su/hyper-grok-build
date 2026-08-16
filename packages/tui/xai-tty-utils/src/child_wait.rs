@@ -67,6 +67,10 @@ pub fn spawn_child_reaper(
             let owners = owners.lock().unwrap_or_else(PoisonError::into_inner).take();
             match owners {
                 Some((child, group)) => Err((error, child, group)),
+                #[allow(
+                    clippy::unreachable,
+                    reason = "a failed reaper spawn cannot also hold ownership taken by the thread"
+                )]
                 None => unreachable!("failed thread cannot take reaper ownership"),
             }
         }

@@ -49,6 +49,27 @@ pub enum VersionOverrideError {
     },
 }
 
+impl VersionOverrideError {
+    /// A log safe summary: entry index, field, and error category only. Never
+    /// the raw user supplied value or the offending source line, either of
+    /// which can carry a secret. Prefer this over the `Display` impl (which
+    /// echoes the value for local `Result` inspection) anywhere the message
+    /// reaches logs. Mirrors the redaction rule in [`crate::loader::toml_error_detail`].
+    pub fn redacted(&self) -> String {
+        match self {
+            Self::Deserialize(_) => {
+                "version_overrides: failed to deserialize (details omitted)".to_owned()
+            }
+            Self::InvalidMinimumVersion { index, .. } => {
+                format!("version_overrides[{index}].minimum_version is not valid semver")
+            }
+            Self::InvalidMaximumVersion { index, .. } => {
+                format!("version_overrides[{index}].maximum_version is not valid semver")
+            }
+        }
+    }
+}
+
 /// Strips `version_overrides` (always) and deep-merges each matching
 /// patch in ascending `minimum_version` order.
 pub fn apply_version_overrides(
@@ -208,5 +229,21 @@ mod tests {
             err,
             VersionOverrideError::InvalidMaximumVersion { .. }
         ));
+    }
+
+    #[test]
+    fn redacted_summary_omits_the_raw_bound_value() {
+        let mut cfg = parse(
+            r#"
+            [[version_overrides]]
+            minimum_version = "sk-secret-token"
+            x = 1
+            "#,
+        );
+        let err = apply_version_overrides(&mut cfg, &v("1.0.0")).unwrap_err();
+        assert_eq!(
+            err.redacted(),
+            "version_overrides[0].minimum_version is not valid semver"
+        );
     }
 }

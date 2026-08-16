@@ -160,8 +160,8 @@ impl<B: BlockContent> Renderable for BlockRenderer<'_, B> {
                 }
             }
 
-            // Render the line content
-            buf.set_line_safe(area.x, row, &line.content, area.width);
+            // Content paint (bidi-aware when rtl_bidi is on).
+            buf.set_line_safe_bidi(area.x, row, &line.content, area.width);
             row += 1;
         }
 

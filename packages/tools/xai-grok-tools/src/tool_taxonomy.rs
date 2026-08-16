@@ -115,6 +115,46 @@ impl ToolKind {
         }
     }
 }
+/// First-party tool wire names whose argument streams are long enough for a
+/// writing-phase spinner label to be visible (file bodies, edit strings,
+/// shell scripts, prompts), paired with their [`ToolKind`].
+///
+/// Public so clients can pin that every entry gets non-fallback display copy
+/// — a spelling added here without client copy would otherwise silently keep
+/// the raw-name fallback.
+pub const WRITING_TOOL_WIRE_NAMES: &[(&str, ToolKind)] = &[
+    ("write", ToolKind::Write),
+    ("search_replace", ToolKind::Edit),
+    ("edit", ToolKind::Edit),
+    ("hashline_edit", ToolKind::Edit),
+    ("apply_patch", ToolKind::Edit),
+    ("run_terminal_command", ToolKind::Execute),
+    ("run_terminal_cmd", ToolKind::Execute),
+    ("bash", ToolKind::Execute),
+    ("todo_write", ToolKind::Plan),
+    ("todowrite", ToolKind::Plan),
+    ("workflow", ToolKind::Workflow),
+    ("image_gen", ToolKind::ImageGen),
+    ("image_edit", ToolKind::ImageGen),
+    ("image_to_video", ToolKind::ImageToVideo),
+    ("reference_to_video", ToolKind::ReferenceToVideo),
+    ("ask_user_question", ToolKind::AskUser),
+];
+/// [`ToolKind`] of a wire name in [`WRITING_TOOL_WIRE_NAMES`].
+///
+/// Keyed by wire name because that is all a client has while
+/// `tool_call_delta_chunk`s stream. Best-effort by design: wire names are
+/// client-renameable, so unknown names return `None` and callers fall back to
+/// showing the raw name. Not a general name→kind resolver — read-style tools
+/// with tiny argument payloads are deliberately absent, as are the MCP
+/// dispatch tools (`use_tool`/`search_tool`), which clients special-case by
+/// name constant.
+pub fn writing_tool_kind(wire_name: &str) -> Option<ToolKind> {
+    WRITING_TOOL_WIRE_NAMES
+        .iter()
+        .find(|(name, _)| *name == wire_name)
+        .map(|&(_, kind)| kind)
+}
 impl schemars::JsonSchema for ToolKind {
     fn schema_name() -> Cow<'static, str> {
         "ToolKind".into()
@@ -252,6 +292,50 @@ mod tests {
             presentation_name: kind.presentation_name(),
             read_only: kind.is_read_only(),
         }
+    }
+    /// Every writing-visible spelling stays glued to its definition site:
+    /// the map must agree with the live tool's `id()` and metadata `kind()`.
+    #[test]
+    fn writing_tool_kind_matches_definition_sites() {
+        use crate::types::tool_metadata::ToolMetadata;
+        use xai_tool_runtime::Tool;
+        fn covered<T: Tool + ToolMetadata>(tool: T) {
+            assert_eq!(
+                writing_tool_kind(tool.id().as_str()),
+                Some(ToolMetadata::kind(&tool)),
+                "writing_tool_kind drifted for `{}`",
+                tool.id()
+            );
+        }
+        covered(crate::implementations::grok_build::SearchReplaceTool);
+        covered(crate::implementations::grok_build::BashTool);
+        covered(crate::implementations::grok_build::TodoWriteTool);
+        covered(crate::implementations::grok_build::WorkflowTool);
+        covered(crate::implementations::grok_build::ImageGenTool);
+        covered(crate::implementations::grok_build::ImageEditTool);
+        covered(crate::implementations::grok_build::ImageToVideoTool);
+        covered(crate::implementations::grok_build::ReferenceToVideoTool);
+        covered(crate::implementations::grok_build::AskUserQuestionTool);
+        covered(crate::implementations::opencode::OpenCodeWriteTool);
+        covered(crate::implementations::opencode::OpenCodeEditTool);
+        covered(crate::implementations::opencode::OpenCodeBashTool);
+        covered(crate::implementations::opencode::OpenCodeTodoWriteTool);
+        covered(crate::implementations::codex::ApplyPatchTool);
+        covered(crate::implementations::grok_build_hashline::HashlineEditTool);
+    }
+    /// Spellings with no instantiable definition site in this crate
+    /// (client-facing renames) and the deliberate absences.
+    #[test]
+    fn writing_tool_kind_renames_and_absences() {
+        assert_eq!(
+            writing_tool_kind("run_terminal_command"),
+            Some(ToolKind::Execute)
+        );
+        assert_eq!(writing_tool_kind("read_file"), None);
+        assert_eq!(writing_tool_kind("grep"), None);
+        assert_eq!(writing_tool_kind("list_dir"), None);
+        assert_eq!(writing_tool_kind(crate::USE_TOOL_NAME), None);
+        assert_eq!(writing_tool_kind(crate::SEARCH_TOOL_NAME), None);
     }
     #[test]
     fn is_read_only_classifies_kinds() {

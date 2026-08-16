@@ -21,7 +21,7 @@ pub(crate) fn search_db_path(root_dir: &Path) -> PathBuf {
     db_path_in(root_dir)
 }
 
-/// Whether an index was built earlier. Creates nothing, so a switched-off process can ask.
+/// Whether an index was built earlier. Creates nothing.
 pub(crate) fn search_index_exists(root_dir: &Path) -> bool {
     db_path_in(root_dir).exists()
 }

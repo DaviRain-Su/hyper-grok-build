@@ -1,3 +1,16 @@
+// A panic on a teardown path leaks whatever it was about to free; tests panic freely.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::watcher::{WatchStrategy, watch_strategy};
+use crate::handle::{WatchStrategy, watch_strategy};
 
 pub(crate) fn is_another_workspace(dir: &Path) -> bool {
     let holds_a_checkout = dir.join(".git").symlink_metadata().is_ok() || dir.join(".sl").is_dir();

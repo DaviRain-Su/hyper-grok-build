@@ -50,6 +50,12 @@ const MIN_PREVIEW_ACTIVITY_SCRAPE_INTERVAL_MS: u64 = 1;
 const MAX_RPC_ACTIVITY_WINDOW_MS: u64 = 600_000;
 /// Ceiling on the client-presence withhold window; `0` is exempt.
 const MAX_PRESENCE_ACTIVITY_WINDOW_MS: u64 = 600_000;
+/// Default keep-awake window for scheduled tasks; `0` turns it off.
+const DEFAULT_SCHEDULED_TASK_KEEP_AWAKE_MS: u64 =
+    crate::activity::SCHEDULED_TASK_KEEP_AWAKE_WINDOW_MS;
+/// Ceiling on the keep-awake window; `0` is exempt. Matches the 7-day cap
+/// on session TTL overrides.
+const MAX_SCHEDULED_TASK_KEEP_AWAKE_MS: u64 = 7 * 24 * 3_600_000; // 7 days
 const DEFAULT_PREVIEW_STATE_POLL_INTERVAL_MS: u64 = 5_000;
 /// Poll-interval floor; `0` would busy-loop the watcher against loopback.
 const MIN_PREVIEW_STATE_POLL_INTERVAL_MS: u64 = 100;
@@ -101,6 +107,9 @@ pub struct StatusConfig {
     /// A visible client-presence note withholds idle for this window
     /// (`GROK_WORKSPACE_PRESENCE_ACTIVITY_WINDOW_MS`); zero disables.
     pub presence_activity_window: Duration,
+    /// A live scheduled task keeps the sandbox awake while its next run is at most this far away (`GROK_WORKSPACE_SCHEDULED_TASK_KEEP_AWAKE_MS`).
+    /// Zero turns it off. Clamped to `MAX_SCHEDULED_TASK_KEEP_AWAKE_MS` by [`validate`](Self::validate).
+    pub scheduled_task_keep_awake: Duration,
     /// Preview-state reporter kill-switch
     /// (`GROK_WORKSPACE_PREVIEW_STATE_REPORTER_ENABLED`, default OFF).
     pub preview_state_reporter_enabled: bool,
@@ -147,6 +156,7 @@ impl Default for StatusConfig {
             rpc_activity_window: Duration::from_millis(DEFAULT_RPC_ACTIVITY_WINDOW_MS),
             presence_keepalive_enabled: false,
             presence_activity_window: Duration::from_millis(DEFAULT_PRESENCE_ACTIVITY_WINDOW_MS),
+            scheduled_task_keep_awake: Duration::from_millis(DEFAULT_SCHEDULED_TASK_KEEP_AWAKE_MS),
             preview_state_reporter_enabled: false,
             preview_state_poll_interval: Duration::from_millis(
                 DEFAULT_PREVIEW_STATE_POLL_INTERVAL_MS,
@@ -211,6 +221,10 @@ impl StatusConfig {
             presence_activity_window: ms_or(
                 "GROK_WORKSPACE_PRESENCE_ACTIVITY_WINDOW_MS",
                 defaults.presence_activity_window,
+            ),
+            scheduled_task_keep_awake: ms_or(
+                "GROK_WORKSPACE_SCHEDULED_TASK_KEEP_AWAKE_MS",
+                defaults.scheduled_task_keep_awake,
             ),
             preview_state_reporter_enabled: parse_or(
                 "GROK_WORKSPACE_PREVIEW_STATE_REPORTER_ENABLED",
@@ -322,6 +336,15 @@ impl StatusConfig {
             );
             self.presence_activity_window = presence_cap;
         }
+        let scheduled_cap = Duration::from_millis(MAX_SCHEDULED_TASK_KEEP_AWAKE_MS);
+        if self.scheduled_task_keep_awake > scheduled_cap {
+            tracing::warn!(
+                window = ?self.scheduled_task_keep_awake,
+                clamped_window = ?scheduled_cap,
+                "GROK_WORKSPACE scheduled-task keep-awake window above cap; clamped"
+            );
+            self.scheduled_task_keep_awake = scheduled_cap;
+        }
         let min_poll = Duration::from_millis(MIN_PREVIEW_STATE_POLL_INTERVAL_MS);
         if self.preview_state_poll_interval < min_poll {
             tracing::warn!(
@@ -429,6 +452,10 @@ mod tests {
         assert_eq!(cfg.rpc_activity_window, Duration::from_secs(60));
         assert!(!cfg.presence_keepalive_enabled);
         assert_eq!(cfg.presence_activity_window, Duration::from_secs(90));
+        assert_eq!(
+            cfg.scheduled_task_keep_awake,
+            Duration::from_secs(13 * 3600)
+        );
         assert!(!cfg.preview_state_reporter_enabled);
         assert_eq!(cfg.preview_state_poll_interval, Duration::from_secs(5));
         assert!(!cfg.session_restored);
@@ -810,6 +837,28 @@ mod tests {
 
         unsafe { std::env::remove_var(enabled_var) };
         unsafe { std::env::remove_var(window_var) };
+    }
+
+    #[test]
+    fn validate_clamps_scheduled_task_keep_awake_but_spares_the_kill_switch() {
+        for (window_ms, expected_ms) in [
+            (0u64, 0u64),
+            (46_800_000, 46_800_000),
+            (30 * 24 * 3_600_000, 7 * 24 * 3_600_000),
+        ] {
+            let mut cfg = StatusConfig {
+                scheduled_task_keep_awake: Duration::from_millis(window_ms),
+                ..StatusConfig::default()
+            };
+
+            cfg.validate();
+
+            assert_eq!(
+                cfg.scheduled_task_keep_awake,
+                Duration::from_millis(expected_ms),
+                "window {window_ms}ms"
+            );
+        }
     }
 
     #[test]

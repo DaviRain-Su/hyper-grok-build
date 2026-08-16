@@ -302,6 +302,14 @@ pub enum PersistenceMsg {
     /// Routed back through the persistence channel so the storage write
     /// stays sequential with other summary.json mutations.
     GeneratedTitle(String),
+    /// Early-session title refresh (turns 3 and 6): overwrite an existing auto
+    /// title with one regenerated from the whole conversation. Never overwrites
+    /// a manual `/rename` (enforced atomically under the summary lock).
+    RegenerateTitle(String),
+    /// Persist a bounded preview of the latest session recap so listing
+    /// surfaces can show it whenever available; `None` clears it (rewind
+    /// removed the described turns).
+    LastRecap(Option<String>),
     /// Manual `/rename` title. Rides this FIFO channel so the resulting
     /// `SetTitle` cannot race a `GeneratedTitle` `SetTitle` out-of-band.
     ManualTitleRenamed(String),
@@ -598,6 +606,16 @@ pub(crate) fn find_any_session_dir_by_id_result(session_id: &str) -> io::Result<
 fn session_exists_in_root(session_id: &str, sessions_root: &Path) -> bool {
     find_persisted_session_dir_by_id_in_root_result(session_id, sessions_root)
         .is_ok_and(|path| path.is_some())
+}
+
+/// Whether a session dir's `summary.json` records a manual `/rename`
+/// (`false` if missing/unreadable). Cheap read for paths that only need the
+/// manual flag without loading the full session.
+pub(crate) fn title_is_manual_in_dir(session_dir: &Path) -> bool {
+    std::fs::read(session_dir.join("summary.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Summary>(&bytes).ok())
+        .is_some_and(|summary| summary.title_is_manual)
 }
 
 /// Find and read a session summary given only its ID (scans all CWD directories).
@@ -923,6 +941,13 @@ pub struct Summary {
     /// Prompt id of the turn `last_turn_summary` describes (provenance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn_summary_prompt_id: Option<String>,
+    /// Bounded preview of the most recent session recap ("where was I"),
+    /// persisted so listing surfaces (`/resume`, `/session-info`) can show it
+    /// whenever available. Distinct from `last_turn_summary` (a summary of the
+    /// final turn only). Regenerated on demand by `/recap`; this holds the last
+    /// committed value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_recap: Option<String>,
 }
 
 /// Current `grok_home` as a UTF-8 string, or `None` if the path isn't valid UTF-8.
@@ -981,6 +1006,7 @@ impl Summary {
             reasoning_effort: None,
             last_turn_summary: None,
             last_turn_summary_prompt_id: None,
+            last_recap: None,
         })
     }
 
@@ -1200,6 +1226,9 @@ struct SessionPersistence {
     /// manual `/rename` never reaches the client. `None` for the subagent
     /// variant, whose lifecycle notifications are handled by the coordinator.
     gateway: Option<GatewaySender>,
+    /// Read every turn, not at construction, so a session opened before the
+    /// decision landed still indexes.
+    search_index: crate::session::storage::search::SharedSearchIndex,
     disk_full_tx: watch::Sender<bool>,
     disk_full_notified: bool,
 }
@@ -1530,6 +1559,39 @@ impl SessionPersistence {
         }
     }
 
+    /// Announce a newly adopted auto title (first generation or refresh) to the
+    /// client, remote store, and session registry. Called only after the title
+    /// actually landed on disk, so a title rejected for racing a manual
+    /// `/rename` is never announced.
+    fn announce_adopted_title(&self, title: String) {
+        crate::session::summary::notify_client(&self.gateway, &self.info, &title);
+        if let Some(sync) = &self.remote_sync {
+            sync.set_title(title.clone());
+        }
+        if let Some(reg) = self.registry_title_sync.as_ref()
+            && !reg.suppress_for_zdr
+        {
+            let client = reg.client.clone();
+            let sid = self.info.id.to_string();
+            tokio::spawn(async move {
+                let req = crate::agent::session_registry_client::UpdateRequest {
+                    summary: Some(title),
+                    first_prompt: None,
+                    last_turn_number: None,
+                    repo_head_at_end: None,
+                    restorable_turn_number: None,
+                };
+                if let Err(e) = client.update(&sid, &req).await {
+                    tracing::warn!(
+                        error = %e,
+                        session_id = %sid,
+                        "session registry summary sync failed after title update"
+                    );
+                }
+            });
+        }
+    }
+
     async fn run(mut self) {
         // Persistence traffic counts as worktree activity; debounced so
         // long-resident sessions (leader/remote, active for days without a
@@ -1737,6 +1799,7 @@ impl SessionPersistence {
 
                     // Notify session search index so this turn becomes searchable
                     crate::session::storage::search::notify_session_updated(
+                        self.search_index.decision().writer(),
                         &self.info.id.to_string(),
                         &self.info.cwd,
                     );
@@ -1753,43 +1816,7 @@ impl SessionPersistence {
                         .set_generated_title_if_absent(&self.info, title.clone())
                         .await
                     {
-                        Ok(true) => {
-                            // Announce to clients only now that the title is
-                            // adopted, so a title rejected for racing a manual
-                            // `/rename` never overwrites the client's title.
-                            crate::session::summary::notify_client(
-                                &self.gateway,
-                                &self.info,
-                                &title,
-                            );
-                            if let Some(sync) = &self.remote_sync {
-                                sync.set_title(title.clone());
-                            }
-                            if let Some(reg) = self.registry_title_sync.as_ref()
-                                && !reg.suppress_for_zdr
-                            {
-                                let client = reg.client.clone();
-                                let sid = self.info.id.to_string();
-                                let t = title;
-                                tokio::spawn(async move {
-                                    let req =
-                                        crate::agent::session_registry_client::UpdateRequest {
-                                            summary: Some(t),
-                                            first_prompt: None,
-                                            last_turn_number: None,
-                                            repo_head_at_end: None,
-                                            restorable_turn_number: None,
-                                        };
-                                    if let Err(e) = client.update(&sid, &req).await {
-                                        tracing::warn!(
-                                            error = %e,
-                                            session_id = %sid,
-                                            "session registry summary sync failed after title generation"
-                                        );
-                                    }
-                                });
-                            }
-                        }
+                        Ok(true) => self.announce_adopted_title(title),
                         Ok(false) => {
                             tracing::debug!(
                                 "skipped auto-generated title; session already has a title"
@@ -1798,6 +1825,29 @@ impl SessionPersistence {
                         Err(e) => {
                             tracing::warn!(?e, "failed to persist generated session title");
                         }
+                    }
+                }
+                PersistenceMsg::RegenerateTitle(title) => {
+                    // Overwrites an existing auto title but never a manual
+                    // `/rename` (enforced atomically under the summary lock);
+                    // `Ok(true)` means the refresh landed.
+                    match self
+                        .storage
+                        .regenerate_generated_title(&self.info, title.clone())
+                        .await
+                    {
+                        Ok(true) => self.announce_adopted_title(title),
+                        Ok(false) => {
+                            tracing::debug!("skipped title refresh; session has a manual title");
+                        }
+                        Err(e) => {
+                            tracing::warn!(?e, "failed to persist refreshed session title");
+                        }
+                    }
+                }
+                PersistenceMsg::LastRecap(recap) => {
+                    if let Err(e) = self.storage.set_last_recap(&self.info, recap).await {
+                        tracing::warn!(?e, "failed to persist session recap");
                     }
                 }
                 PersistenceMsg::ManualTitleRenamed(title) => {
@@ -2202,17 +2252,33 @@ async fn touch_worktree_for_session(info: &Info) {
 /// Floor between activity-driven worktree touches from the persistence actor.
 const WORKTREE_TOUCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
 
+/// What the actor is handed once and holds for the life of the session.
+pub(crate) struct SessionDeps {
+    pub(crate) sampling_client: OaiCompatClient,
+    pub(crate) storage_mode: StorageMode,
+    pub(crate) auth_manager: Option<Arc<crate::auth::AuthManager>>,
+    pub(crate) relay_sync: Option<crate::relay::RelaySync>,
+    pub(crate) gateway: Option<GatewaySender>,
+    pub(crate) session_summary_model: String,
+    pub(crate) registry_title_sync: Option<RegistryGeneratedTitleSync>,
+    pub(crate) search_index: crate::session::storage::search::SharedSearchIndex,
+}
+
 pub(crate) async fn new(
     info: &Info,
     model_id: acp::ModelId,
-    sampling_client: OaiCompatClient,
-    storage_mode: StorageMode,
-    auth_manager: Option<Arc<crate::auth::AuthManager>>,
-    relay_sync: Option<crate::relay::RelaySync>,
-    gateway: Option<GatewaySender>,
-    session_summary_model: String,
-    registry_title_sync: Option<RegistryGeneratedTitleSync>,
+    deps: SessionDeps,
 ) -> io::Result<PersistenceHandle> {
+    let SessionDeps {
+        sampling_client,
+        storage_mode,
+        auth_manager,
+        relay_sync,
+        gateway,
+        session_summary_model,
+        registry_title_sync,
+        search_index,
+    } = deps;
     let root_dir = grok_home();
     let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
 
@@ -2249,6 +2315,7 @@ pub(crate) async fn new(
             ),
             registry_title_sync,
             gateway,
+            search_index,
             disk_full_tx,
             disk_full_notified: false,
         };
@@ -2316,6 +2383,9 @@ pub(crate) async fn new_with_explicit_dir(
             ),
             registry_title_sync: None,
             gateway: None,
+            // A bootstrap never sees a subagent session: `list_sessions_sync`
+            // drops hidden summaries, and a subagent kind is hidden. Skip it here too.
+            search_index: crate::session::storage::search::SharedSearchIndex::never_indexed(),
             disk_full_tx,
             disk_full_notified: false,
         };
@@ -2373,15 +2443,19 @@ async fn pull_on_miss(
 #[expect(dead_code, reason = "wired when session restore flow calls load")]
 pub(crate) async fn load(
     info: &Info,
-    sampling_client: OaiCompatClient,
-    storage_mode: StorageMode,
-    auth_manager: Option<Arc<crate::auth::AuthManager>>,
     backend: Option<&crate::remote::BackendClient>,
-    relay_sync: Option<crate::relay::RelaySync>,
-    gateway: Option<GatewaySender>,
-    session_summary_model: String,
-    registry_title_sync: Option<RegistryGeneratedTitleSync>,
+    deps: SessionDeps,
 ) -> io::Result<(PersistedInfo, PersistenceHandle)> {
+    let SessionDeps {
+        sampling_client,
+        storage_mode,
+        auth_manager,
+        relay_sync,
+        gateway,
+        session_summary_model,
+        registry_title_sync,
+        search_index,
+    } = deps;
     let root_dir = grok_home();
     let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
 
@@ -2437,6 +2511,7 @@ pub(crate) async fn load(
             summary: summary_gen,
             registry_title_sync,
             gateway,
+            search_index,
             disk_full_tx,
             disk_full_notified: false,
         };
@@ -2451,15 +2526,19 @@ pub(crate) async fn load(
 /// Use this for memory-efficient session loading when replaying updates.
 pub(crate) async fn load_light(
     info: &Info,
-    sampling_client: OaiCompatClient,
-    storage_mode: StorageMode,
-    auth_manager: Option<Arc<crate::auth::AuthManager>>,
     backend: Option<&crate::remote::BackendClient>,
-    relay_sync: Option<crate::relay::RelaySync>,
-    gateway: Option<GatewaySender>,
-    session_summary_model: String,
-    registry_title_sync: Option<RegistryGeneratedTitleSync>,
+    deps: SessionDeps,
 ) -> io::Result<(PersistedInfoLight, PersistenceHandle)> {
+    let SessionDeps {
+        sampling_client,
+        storage_mode,
+        auth_manager,
+        relay_sync,
+        gateway,
+        session_summary_model,
+        registry_title_sync,
+        search_index,
+    } = deps;
     let root_dir = grok_home();
     let storage: Box<dyn StorageAdapter> =
         Box::new(JsonlStorageAdapter::with_root(root_dir.clone()));
@@ -2522,6 +2601,7 @@ pub(crate) async fn load_light(
             summary: summary_gen,
             registry_title_sync,
             gateway,
+            search_index,
             disk_full_tx,
             disk_full_notified: false,
         };
@@ -2611,6 +2691,7 @@ pub async fn delete_session_history(
     cwd: Option<&str>,
     needs_remote: bool,
     auth_manager: Arc<crate::auth::AuthManager>,
+    search_index: Option<&xai_grok_session_search::SearchIndexManager>,
 ) -> Result<SessionDeletion, DeleteSessionError> {
     let sid = acp::SessionId::new(Arc::from(session_id));
 
@@ -2651,10 +2732,8 @@ pub async fn delete_session_history(
     };
     let local_removed = removed.is_some();
 
-    // Evict whenever this delete removed the session, and also when no workspace was named, since
-    // that row outlives the directory and nothing else prunes it while search is off. A delete
-    // scoped to a workspace that held nothing leaves the row alone, because the session lives in
-    // another workspace.
+    // Also evict when no workspace was named: that row outlives the directory
+    // and nothing else prunes it.
     if local_removed || cwd.is_none() {
         crate::session::storage::search::evict_session(
             &crate::util::grok_home::grok_home(),
@@ -2665,7 +2744,11 @@ pub async fn delete_session_history(
     // The eviction above is a point in time. Queue the indexer as well so an upsert already under
     // way, which would otherwise write the row back, is followed by a re-read that finds nothing.
     if let Some(info) = removed {
-        crate::session::storage::search::notify_session_updated(&info.id.to_string(), &info.cwd);
+        crate::session::storage::search::notify_session_updated(
+            search_index,
+            &info.id.to_string(),
+            &info.cwd,
+        );
     }
 
     Ok(SessionDeletion {

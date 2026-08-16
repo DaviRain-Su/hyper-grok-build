@@ -841,6 +841,10 @@ pub(crate) fn parse_remote_model_value(
         .or_else(|| id.clone())
         .or_else(|| meta.and_then(|m| get_string(m, "model")))
         .or_else(|| meta.and_then(|m| get_string(m, "modelId")))?;
+    let model_family = get_string(obj, "modelFamily")
+        .or_else(|| get_string(obj, "model_family"))
+        .or_else(|| meta.and_then(|m| get_string(m, "modelFamily")))
+        .or_else(|| meta.and_then(|m| get_string(m, "model_family")));
     let base_url = get_string(obj, "baseUrl")
         .or_else(|| get_string(obj, "base_url"))
         .unwrap_or_else(|| default_base_url.to_owned());
@@ -879,6 +883,7 @@ pub(crate) fn parse_remote_model_value(
     Some(crate::agent::config::ModelEntryConfig {
         id,
         model,
+        model_family,
         base_url,
         name,
         description: get_string(obj, "description"),

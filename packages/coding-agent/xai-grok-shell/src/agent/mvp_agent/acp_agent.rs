@@ -51,35 +51,27 @@ impl acp::Agent for MvpAgent {
         if self.cfg.borrow().remote_settings.is_none() {
             self.spawn_settings_reapply();
         }
-        let (auto_gc_policy, run_auto_gc) = {
-            let cfg = self.cfg.borrow();
-            let has_remote = cfg.remote_settings.is_some();
-            let run = has_remote || !crate::util::config::resolve_remote_fetch_enabled();
-            (cfg.resolve_worktree_auto_gc(), run)
-        };
-        if !run_auto_gc {
+        let remote_settled = self.remote_settings_settled();
+        let auto_gc_policy = self.cfg.borrow().resolve_worktree_auto_gc();
+        if !remote_settled {
             tracing::debug!(
-                "auto worktree gc deferred until remote_settings are available"
+                "auto worktree gc and session search deferred until remote_settings arrive"
             );
         }
+        let grok_home = xai_fast_worktree::resolve_grok_home();
         tokio::task::spawn_blocking(move || {
             crate::session::worktree_pool::cleanup_stale_pool_worktrees(None);
-            if !run_auto_gc {
+            if !remote_settled {
                 return;
             }
-            let opts = xai_fast_worktree::AutoGcOptions::from_resolved(auto_gc_policy);
-            if let Err(e) = xai_fast_worktree::WorktreeDb::open_default()
-                .and_then(|db| xai_fast_worktree::maybe_auto_gc(&db, &opts))
-            {
-                tracing::warn!(error = %e, "auto worktree gc failed");
-            }
+            Self::reclaim_worktrees(grok_home, auto_gc_policy);
         });
         tokio::task::spawn_blocking(|| {
             crate::session::persistence::cleanup_stale_sessions(None);
         });
-        self.apply_session_search_gate();
-        crate::session::storage::search::SEARCH_INDEX_MANAGER
-            .bootstrap_once(crate::util::grok_home::grok_home());
+        if remote_settled {
+            self.start_search_index_once();
+        }
         const PERMISSION_CLEANUP_TTL_DAYS: u64 = 30;
         static CLEANUP_PERMISSIONS_ONCE: std::sync::Once = std::sync::Once::new();
         CLEANUP_PERMISSIONS_ONCE
@@ -507,7 +499,10 @@ impl acp::Agent for MvpAgent {
                     "mcpApps": client_supports_mcp_apps,
                     "metadata": metadata,
                     "availableCommands": crate::session::slash_commands::builtin_commands(self.command_availability()),
-                    "cancelRewind": self.cfg.borrow().resolve_cancel_rewind().value,
+                    "cancelRewind": self
+                        .cfg
+                        .borrow()
+                        .is_feature_enabled(crate::agent::config::Feature::CancelRewind),
                     // Resolved session-recap state (remote settings / config / env;
                     // default ON). The client gates BOTH its automatic
                     // away-recap poll and the manual `/recap` on this so a
@@ -1365,6 +1360,7 @@ impl acp::Agent for MvpAgent {
                             arguments.session_id.clone(),
                             restore_model_id.clone(),
                         ),
+                        None,
                     )
                     .await
                 {
@@ -1703,6 +1699,10 @@ impl acp::Agent for MvpAgent {
                 } => ctx.trigger.clone(),
                 _ => None,
             });
+        let cancellation_category: Option<String> = stop_result
+            .as_ref()
+            .ok()
+            .and_then(|ok| ok.completion_kind.cancellation_category_meta());
         {
             let mapped = stop_result
                 .as_ref()
@@ -1727,6 +1727,9 @@ impl acp::Agent for MvpAgent {
             }
             if let Some(ref t) = cancel_trigger {
                 payload["cancelTrigger"] = serde_json::json!(t);
+            }
+            if let Some(ref c) = cancellation_category {
+                payload["cancellationCategory"] = serde_json::json!(c);
             }
             let params = serde_json::value::to_raw_value(&payload)
                 .expect("prompt_complete params serialization");
@@ -2211,19 +2214,6 @@ impl acp::Agent for MvpAgent {
                     }
                 }
                 let last_turn_usage = last_turn_usage_for_meta;
-                let cancellation_category = match &completion_kind {
-                    crate::session::commands::PromptCompletionKind::Cancelled {
-                        category: Some(cat),
-                        ..
-                    } => Some(format!("{cat:?}")),
-                    crate::session::commands::PromptCompletionKind::MaxTurnsReached {
-                        ..
-                    } => Some("max_turns_reached".to_string()),
-                    crate::session::commands::PromptCompletionKind::StationarityEnded => {
-                        Some("action_stationarity".to_string())
-                    }
-                    _ => None,
-                };
                 Ok(
                     acp::PromptResponse::new(stop_reason)
                         .meta(
@@ -2517,7 +2507,13 @@ impl acp::Agent for MvpAgent {
             )));
         }
         let session_id = args.session_id.clone();
-        let res = crate::agent::handlers::model_switch::apply(self, args).await;
+        let effort_override = parse_reasoning_effort_meta(args.meta.as_ref());
+        let res = crate::agent::handlers::model_switch::apply(
+                self,
+                args,
+                effort_override,
+            )
+            .await;
         if res.is_ok()
             && let Some(unavailable) = self
                 .session_registry
@@ -2577,7 +2573,7 @@ impl acp::Agent for MvpAgent {
                 crate::extensions::chat_conversation_history::handle(self, &args).await
             }
             "x.ai/session/search" => {
-                crate::extensions::session_search::handle(&args).await
+                crate::extensions::session_search::handle(self, &args).await
             }
             "x.ai/session/resolve_local_for_worktree_resume"
             | "x.ai/session/rehydrate" => {

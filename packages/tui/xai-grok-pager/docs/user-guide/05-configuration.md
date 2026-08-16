@@ -10,9 +10,28 @@ Settings resolve highest-priority first:
 
 1. **CLI flags** (e.g. `--yolo`, `--model`, `--sandbox`)
 2. **Environment variables** (e.g. `XAI_API_KEY`, `GROK_MEMORY`)
-3. **config.toml** (`~/.grok/config.toml`)
-4. **Managed / requirements config** (files your org may deploy, e.g. `managed_config.toml` / `requirements.toml`)
-5. **Built-in defaults**
+3. **`requirements.toml` / MDM** (org-enforced; clamps every config layer below, including the overlay)
+4. **`GROK_CONFIG` / `GROK_CONFIG_PATH` overlay** (above `config.toml` and managed, below `requirements.toml` / MDM)
+5. **config.toml** (`~/.grok/config.toml`)
+6. **`managed_config.toml`** (org-deployed defaults; below `config.toml`)
+7. **Built-in defaults**
+
+Within the config-file tier, the layers merge lowest-to-highest: `managed_config.toml` → `config.toml` → `GROK_CONFIG` overlay → `requirements.toml` / MDM. So `requirements.toml` and MDM clamp **both** your `config.toml` and the overlay.
+
+`GROK_CONFIG` / `GROK_CONFIG_PATH` (tier 4) are config **overlays**: a merged config layer, not direct-setting environment variables like `XAI_API_KEY` (tier 2). They set config keys (subject to the allowlist below), so read them as part of the config-file tier rather than the env-var tier.
+
+### Injecting config with `GROK_CONFIG`
+
+A harness or ACP client that launches `grok agent stdio` can inject settings without writing a `config.toml` or relocating `$GROK_HOME`:
+
+- **`GROK_CONFIG`**: an inline JSON object overlay.
+- **`GROK_CONFIG_PATH`**: an *additional* file overlay (not a replacement for `config.toml`), a JSON or TOML file read by its extension (`.json` → JSON, else TOML). `GROK_CONFIG` wins if both are set. An empty `GROK_CONFIG` is treated as unset, and a malformed one logs a warning and falls through to `GROK_CONFIG_PATH`.
+
+The overlay is **deep-merged** on top of your `config.toml` (it overrides only the keys it sets), placed above the user/managed layers but **below** `requirements.toml` / MDM so an enterprise pin still wins. A malformed blob is ignored with a warning. This mirrors `CODEX_CONFIG` from the `codex-acp` adapter (a JSON object merged into the session config); Grok is ACP-native, so the overlay lives in the agent itself. It only affects settings read from the merged config, and it is **not** a permission-escalation path. The overlay is confined, fail-closed, to an **allowlist** of soft settings (`models`, `features`, a narrowed `toolset`, and a `shell_environment_policy` limited to its filter fields, which select among env names the launcher already controls and cannot inject an env value into tool subprocesses); every other table is dropped at the choke point, so the overlay cannot spawn commands, set auth policy, redirect network traffic, elevate trust, or add a discovery source. Even on the allowlisted settings, a specific set of security gates read the raw disk layers rather than the overlay. The `ConfigLayers::env_overlay` rustdoc is the canonical list of what the overlay can and cannot reach and which gates read it overlay-free; see also the [internal environment-variables reference](../internal/22-environment-variables.md). Use `GROK_DEFAULT_SELECTED_PERMISSION` for headless permission control. For example, to set the default reasoning effort:
+
+```bash
+GROK_CONFIG='{"models": {"default_reasoning_effort": "high"}}' grok agent stdio
+```
 
 ---
 
@@ -79,6 +98,16 @@ load_envrc = true                      # load .envrc environment variables
 
 [tools]
 respect_gitignore = false              # default: false; set true to make every tool skip gitignored files
+
+# Optional caps on parallel media generation in a single model step.
+# Per tool name. First 2×-or-more burst: discard that step and retry once.
+# Any other over-cap (including a second 2× burst) keeps the first K.
+# Defaults: image 8, video 4.
+# Env vars GROK_MAX_PARALLEL_IMAGE_GEN_CALLS / GROK_MAX_PARALLEL_VIDEO_GEN_CALLS
+# override these values (see environment-variables doc).
+# [tools.media_gen]
+# max_parallel_image_gen_calls = 8
+# max_parallel_video_gen_calls = 4
 ```
 
 #### Input mode
@@ -274,7 +303,7 @@ Priority for `[mcp_servers]` and `[plugins]`: `.grok/config.toml` (current dir) 
 
 ### Memory
 
-Persist knowledge across sessions (requires `--experimental-memory` or `GROK_MEMORY=1`).
+Persist knowledge across sessions. Enable memory with `GROK_MEMORY=1`, `[memory] enabled = true`, or managed remote settings.
 
 ```toml
 [memory]
@@ -288,14 +317,14 @@ enabled = true                        # watch memory files for external edits
 
 [memory.search]
 max_results = 6                       # default number of results
-min_score = 0.35                      # minimum relevance score
+min_score = 0.7                       # minimum relevance score
 
 [memory.initial_injection]
 enabled = true                        # auto-inject memory on first turn
-min_score = 0.0                       # score threshold for first-turn injection
+min_score = 0.9                       # score threshold for first-turn injection
 
 [memory.embedding]
-model = "embedding-model"             # embedding model name
+# model is unset by default, so retrieval uses full-text search only
 dimensions = 1024                     # vector dimensions
 ```
 
@@ -523,6 +552,9 @@ otel_metrics_exporter = "otlp"                            # otlp | console | non
 otel_logs_exporter = "otlp"                               # otlp | console | none
 otel_endpoint = "https://collector.corp.example:4318"     # OTLP base endpoint
 otel_protocol = "http/protobuf"                           # http/protobuf | grpc
+otel_certificate = "/etc/ssl/corp-ca.pem"                 # optional: trust private CA (path only)
+otel_client_certificate = "/etc/ssl/client.crt"           # optional: mTLS client cert (path only)
+otel_client_key = "/etc/ssl/client.key"                   # optional: mTLS client key (path only)
 otel_log_user_prompts = false                             # content gate (admins can pin via requirements)
 otel_log_tool_details = false                             # content gate (admins can pin via requirements)
 ```
@@ -684,19 +716,6 @@ min_lines = 2                         # minimum content lines in sticky mode
 animate = true                        # animated accent while thinking
 truncated_lines = 3                   # lines in truncated mode
 ```
-
-### Todo
-
-```toml
-[todo]
-badge_format = "default"              # "default", "colon", or "comma"
-```
-
-Badge format examples:
-
-- `default`: `2/5` — a `done/total` progress fraction (done = completed, total = all tasks except cancelled).
-- `colon`: `[>:1 [ ]:4 ok:3 x:2]` — icon:count.
-- `comma`: `[1 >, 4 [ ], 3 ok, 2 x]` — count icon, comma-separated.
 
 ### Plugins
 

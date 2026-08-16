@@ -149,13 +149,16 @@ enum UserEchoMode {
     /// monitor gutter, task pane) that no pane should render live.
     PersistOnly,
 }
-fn user_echo_mode(prompt_id: &str) -> UserEchoMode {
-    if super::interjection::is_interject_fallback(prompt_id) {
-        return UserEchoMode::PersistOnly;
-    }
-    match super::super::PromptOrigin::from_prompt_id(prompt_id) {
-        super::super::PromptOrigin::NotificationDrain => UserEchoMode::PersistOnly,
-        _ => UserEchoMode::Broadcast,
+fn user_echo_mode(prompt_id: &str, input_origin: &InputOrigin) -> UserEchoMode {
+    if super::interjection::is_interject_fallback(prompt_id)
+        || matches!(
+            input_origin.as_prompt_origin(),
+            PromptOrigin::NotificationDrain
+        )
+    {
+        UserEchoMode::PersistOnly
+    } else {
+        UserEchoMode::Broadcast
     }
 }
 impl SessionActor {
@@ -287,11 +290,13 @@ impl SessionActor {
         persist_ack: Option<oneshot::Sender<()>>,
         parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
     ) -> PromptTurnResult {
+        let input_origin = super::InputOrigin::from_prompt_id(prompt_id);
         // Thin entry: pin the large body future from a never-inlined frame so
         // construction does not sit under the caller's stack load (docs §8.3).
         box_turn_future(|| {
             self.handle_prompt_body(
                 prompt_id,
+                &input_origin,
                 prompt_blocks,
                 prompt_mode,
                 trace_gcs_config,
@@ -314,6 +319,7 @@ impl SessionActor {
     async fn handle_prompt_body(
         self: &Arc<Self>,
         prompt_id: &str,
+        input_origin: &super::InputOrigin,
         prompt_blocks: Vec<acp::ContentBlock>,
         prompt_mode: PromptMode,
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
@@ -344,29 +350,31 @@ impl SessionActor {
                 "block_count": prompt_blocks.len(),
             })),
         );
-        let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
-        if let Some(completion_id) = origin.completion_id() {
+        let policy = input_origin.policy();
+        if let Some(completion_id) = input_origin.completion_id() {
             self.mark_completions_reported(&[completion_id]).await;
             if let Some(reservations) = &self.tool_context.task_completion_reservations {
                 reservations.release(completion_id);
             }
         }
-        if !origin.is_synthetic() {
+        if policy.authority.is_human_intent() {
             self.invalidate_side_calls_for_new_prompt();
         }
         self.ensure_session_disk_writable().await?;
         self.signals_handle().increment_turn();
-        let prompt_mode = self.resolve_turn_prompt_mode(&origin, prompt_mode);
+        let prompt_mode =
+            self.resolve_turn_prompt_mode(input_origin.as_prompt_origin(), prompt_mode);
         *self.turn_start_prompt_mode.lock() = prompt_mode;
         *self.turn_prompt_mode.lock() = prompt_mode;
         let _turn_active_guard =
             TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
         let _session_turn_active_guard = TurnActiveGuard::activate(Some(&self.session_turn_active));
-        let turn_start_input = xai_agent_lifecycle::TurnStartInput::new(
-            super::super::PromptOrigin::from_prompt_id(prompt_id).is_synthetic(),
-        );
+        let turn_start_input =
+            xai_agent_lifecycle::TurnStartInput::new(input_origin.is_synthetic());
         for contributor in self.extension_registry.turn_lifecycle_contributors() {
-            contributor.on_turn_start(&turn_start_input).await;
+            contributor
+                .on_turn_start_with_policy(&turn_start_input, policy)
+                .await;
         }
         if let Ok(mut pending) = self.rewind_pending_prompt.lock()
             && let Some(prev_text) = pending.take()
@@ -553,10 +561,7 @@ impl SessionActor {
         self.current_turn_number.set(turn_number);
         let yolo_mode = self.permissions.is_yolo_mode();
         let msg_count = self.chat_state_handle.get_conversation_len().await;
-        let redirect_kind = if matches!(
-            super::super::PromptOrigin::from_prompt_id(prompt_id),
-            super::super::PromptOrigin::User
-        ) {
+        let redirect_kind = if policy.authority.is_human_intent() {
             self.events.take_prior_redirect_kind()
         } else {
             None
@@ -597,14 +602,16 @@ impl SessionActor {
         });
         let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
         xai_grok_telemetry::session_ctx::begin_prompt_id();
-        let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
         let mut chunk_meta = serde_json::Map::new();
         chunk_meta.insert("modelId".into(), serde_json::json!(model_id));
         chunk_meta.insert(
             "promptIndex".into(),
             serde_json::json!(current_prompt_index),
         );
-        if origin.hide_user_echo_from_scrollback() {
+        if input_origin
+            .as_prompt_origin()
+            .hide_user_echo_from_scrollback()
+        {
             chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
         }
         let user_chunk_meta = Some(chunk_meta);
@@ -623,7 +630,7 @@ impl SessionActor {
         self.file_state_tracker
             .begin_prompt(current_prompt_index)
             .await;
-        let echo_mode = user_echo_mode(prompt_id);
+        let echo_mode = user_echo_mode(prompt_id, &input_origin);
         for block in prompt_blocks.iter() {
             let update = acp::SessionUpdate::UserMessageChunk(
                 acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
@@ -775,7 +782,7 @@ impl SessionActor {
         self.maybe_inject_date_rollover_reminder().await;
         self.inject_plan_mode_reminders().await;
         self.inject_resumed_tasks_reminder();
-        if matches!(&origin, super::super::PromptOrigin::User) {
+        if policy.authority.is_human_intent() {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(false);
             }
@@ -828,8 +835,7 @@ impl SessionActor {
             if trace_gcs_config.is_some() {
                 self.chat_state_handle.begin_turn_capture();
             }
-            let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
-            let mut user_chat = match &origin {
+            let mut user_chat = match input_origin.as_prompt_origin() {
                 super::super::PromptOrigin::TaskCompleted { .. } => {
                     ConversationItem::task_completed(user_message)
                 }
@@ -1117,7 +1123,9 @@ impl SessionActor {
                     tool_call_count: turn_tool_count,
                     model_id: turn_model_id.clone(),
                     written_repo_paths: Vec::new(),
-                    cancellation_category: Some("action_stationarity".to_string()),
+                    cancellation_category: Some(
+                        crate::session::commands::ACTION_STATIONARITY_CATEGORY.to_string(),
+                    ),
                     cancellation_context: None,
                 })
                 .await;
@@ -1127,7 +1135,9 @@ impl SessionActor {
                         duration_ms: turn_duration_ms,
                         tool_call_count: turn_tool_count,
                         model_id: turn_model_id,
-                        cancellation_category: Some("action_stationarity".to_string()),
+                        cancellation_category: Some(
+                            crate::session::commands::ACTION_STATIONARITY_CATEGORY.to_string(),
+                        ),
                         error_category: None,
                     },
                 );
@@ -1158,7 +1168,8 @@ impl SessionActor {
                         duration_ms: turn_duration_ms,
                         tool_call_count: turn_tool_count,
                         model_id: turn_model_id,
-                        cancellation_category: category.map(|c| format!("{c:?}")),
+                        cancellation_category: category
+                            .map(|c| crate::session::commands::meta_category_str(c).to_string()),
                         error_category: None,
                     },
                 );
@@ -1193,7 +1204,9 @@ impl SessionActor {
                         duration_ms: turn_duration_ms,
                         tool_call_count: turn_tool_count,
                         model_id: turn_model_id,
-                        cancellation_category: Some("max_turns_reached".to_string()),
+                        cancellation_category: Some(
+                            crate::session::commands::MAX_TURNS_REACHED_CATEGORY.to_string(),
+                        ),
                         error_category: None,
                     },
                 );
@@ -1996,11 +2009,21 @@ impl SessionActor {
                 target: xai_grok_telemetry::memory_log::TARGET,
                 "MEMORY_INJECT: first-turn injection disabled by config"
             );
+            crate::session::memory_observation::log_memory_injection(
+                self.session_info.id.to_string(),
+                xai_grok_telemetry::memory_telemetry::MemoryInjectionOutcome::Skipped,
+                Default::default(),
+            );
             return None;
         }
         let (Some(storage), Some(params)) =
             (self.memory.storage(), self.memory.backend_params.as_ref())
         else {
+            crate::session::memory_observation::log_memory_injection(
+                self.session_info.id.to_string(),
+                xai_grok_telemetry::memory_telemetry::MemoryInjectionOutcome::Skipped,
+                Default::default(),
+            );
             return None;
         };
         let conversation = self.chat_state_handle.get_conversation().await;
@@ -2008,6 +2031,11 @@ impl SessionActor {
             tracing::info!(
                 target: xai_grok_telemetry::memory_log::TARGET,
                 "MEMORY_INJECT: existing memory-context block present in system message -- skipping re-injection to preserve prompt cache"
+            );
+            crate::session::memory_observation::log_memory_injection(
+                self.session_info.id.to_string(),
+                xai_grok_telemetry::memory_telemetry::MemoryInjectionOutcome::Skipped,
+                Default::default(),
             );
             return None;
         }
@@ -2030,28 +2058,59 @@ impl SessionActor {
             raw_query
         };
         let inject_start = std::time::Instant::now();
-        let mut inject_results = backend
-            .search(&query, 6, configured_min_score)
-            .await
-            .unwrap_or_default();
+        let search_result = backend.search(&query, 6, configured_min_score).await;
+        let (outcome, mut inject_results) = match search_result {
+            Ok(results) if results.is_empty() => (
+                xai_grok_telemetry::memory_telemetry::MemoryInjectionOutcome::Empty,
+                results,
+            ),
+            Ok(results) => (
+                xai_grok_telemetry::memory_telemetry::MemoryInjectionOutcome::Results,
+                results,
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    target: xai_grok_telemetry::memory_log::TARGET,
+                    %error,
+                    "MEMORY_INJECT_SEARCH: search failed"
+                );
+                (
+                    xai_grok_telemetry::memory_telemetry::MemoryInjectionOutcome::Error,
+                    Vec::new(),
+                )
+            }
+        };
         inject_results.retain(|result| Self::is_first_turn_memory_score_visible(result.score));
+        let outcome = if outcome
+            == xai_grok_telemetry::memory_telemetry::MemoryInjectionOutcome::Results
+            && inject_results.is_empty()
+        {
+            xai_grok_telemetry::memory_telemetry::MemoryInjectionOutcome::Empty
+        } else {
+            outcome
+        };
         let result_count = inject_results.len();
-        let top_score = inject_results.first().map_or(0.0, |r| r.score);
-        let total_snippet_chars: usize = inject_results.iter().map(|s| s.snippet.len()).sum();
+        let top_score = inject_results.first().map_or(0.0, |result| result.score);
+        let total_snippet_chars = inject_results
+            .iter()
+            .map(|result| result.snippet.len())
+            .sum();
         tracing::info!(
             target: xai_grok_telemetry::memory_log::TARGET,
             configured_min_score,
-            "MEMORY_INJECT_SEARCH: results={result_count}"
+            result_count,
+            "MEMORY_INJECT_SEARCH: completed"
         );
-        xai_grok_telemetry::session_ctx::log_event(
-            xai_grok_telemetry::memory_telemetry::MemoryInjection {
-                session_id: self.session_info.id.to_string(),
-                was_greeting_fallback: was_greeting,
+        crate::session::memory_observation::log_memory_injection(
+            self.session_info.id.to_string(),
+            outcome,
+            crate::session::memory_observation::MemoryInjectionMetrics {
+                is_greeting_fallback: was_greeting,
                 result_count,
                 total_snippet_chars,
                 top_score,
                 configured_min_score,
-                injection_duration_ms: inject_start.elapsed().as_millis() as u64,
+                duration_ms: inject_start.elapsed().as_millis() as u64,
             },
         );
         crate::session::helpers::memory_context::format_memory_reminder(&inject_results)
@@ -2318,6 +2377,7 @@ impl SessionActor {
         let mut turn_span_totals = TurnSpanTotals::default();
         let mut model_fingerprint: Option<String> = None;
         let mut structured_output_retries: u32 = 0;
+        let mut media_gen_resamples: u32 = 0;
         // Validator is large; keep it on the heap for the whole turn.
         let structured_output_validator = std::sync::Arc::new(json_schema.as_ref().map(|schema| {
             jsonschema::validator_for(schema).map_err(|e| format!("invalid output schema: {e}"))
@@ -2784,6 +2844,44 @@ impl SessionActor {
                 );
             }
             let mut tool_calls = response.tool_calls().to_vec();
+            let over_cap = self.media_gen_over_cap(&tool_calls);
+            if xai_grok_tools::media_gen_limits::should_resample_egregious(
+                &over_cap,
+                media_gen_resamples,
+                MAX_MEDIA_GEN_OVER_CAP_RESAMPLES,
+            ) {
+                media_gen_resamples += 1;
+                let egregious: Vec<_> = over_cap.into_iter().filter(|o| o.is_egregious()).collect();
+                let reminder = xai_grok_tools::media_gen_limits::resample_reminder(&egregious);
+                tracing::warn!(
+                    session_id = %self.session_info.id,
+                    resample = media_gen_resamples,
+                    "media_gen 2x over-cap — discarding generation and resampling"
+                );
+                xai_grok_telemetry::unified_log::info(
+                    "shell.media_gen.batch_resampled",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "over": egregious.iter().map(|o| serde_json::json!({
+                            "tool_name": o.name,
+                            "total": o.total,
+                            "max": o.max,
+                        })).collect::<Vec<_>>(),
+                        "attempt": media_gen_resamples,
+                        "max_retries": MAX_MEDIA_GEN_OVER_CAP_RESAMPLES,
+                    })),
+                );
+                self.send_xai_notification(XaiSessionUpdate::RetryState(
+                    crate::extensions::notification::RetryState::Retrying {
+                        attempt: media_gen_resamples,
+                        max_retries: MAX_MEDIA_GEN_OVER_CAP_RESAMPLES,
+                        reason: "Too many parallel media-gen calls; retrying".to_string(),
+                    },
+                ))
+                .await;
+                self.push_system_reminder(&reminder);
+                continue;
+            }
             metrics_drop_guard.record_model_response(tool_calls.len());
             if let Some(fp) = response
                 .assistant()
@@ -3068,6 +3166,9 @@ impl SessionActor {
         }
     }
 }
+/// Discard an egregious (2× cap) media-gen generation and re-sample this
+/// many times; later over-caps in the same turn use first-K.
+const MAX_MEDIA_GEN_OVER_CAP_RESAMPLES: u32 = 1;
 const MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS: u32 = 16;
 const NUDGE_AFTER_IDENTICAL_TOOL_CALLS: u32 = 8;
 const MAX_CONSECUTIVE_TRUE_NOOPS: u32 = 4;
@@ -3198,14 +3299,20 @@ mod identical_tool_call_run_tests {
 }
 #[cfg(test)]
 mod user_echo_broadcast_tests {
-    use super::{UserEchoMode, user_echo_mode};
+    use super::{InputOrigin, PromptOrigin, UserEchoMode, user_echo_mode};
+    fn origin(prompt_id: &str) -> InputOrigin {
+        InputOrigin::new(PromptOrigin::from_prompt_id(prompt_id))
+    }
     /// Notification-drain: persisted (rewind/fork count user-chunk runs as
     /// turn boundaries) but never broadcast live; the pager hides it via the
     /// `hideFromScrollback` chunk meta.
     #[test]
     fn notification_drain_turn_is_persist_only() {
         assert_eq!(
-            user_echo_mode("notifications-019e0000-0000-7000-8000-0000000000aa"),
+            user_echo_mode(
+                "notifications-019e0000-0000-7000-8000-0000000000aa",
+                &origin("notifications-uuid"),
+            ),
             UserEchoMode::PersistOnly
         );
     }
@@ -3213,17 +3320,20 @@ mod user_echo_broadcast_tests {
     /// live so multi-client / dashboard viewers stay in sync.
     #[test]
     fn user_and_cron_turns_broadcast_live() {
-        assert_eq!(user_echo_mode("my-prompt"), UserEchoMode::Broadcast);
         assert_eq!(
-            user_echo_mode("scheduler-fired-abc"),
+            user_echo_mode("my-prompt", &origin("my-prompt")),
             UserEchoMode::Broadcast
         );
         assert_eq!(
-            user_echo_mode("task-completed-bg-1"),
+            user_echo_mode("scheduler-fired-abc", &origin("scheduler-fired-abc")),
             UserEchoMode::Broadcast
         );
         assert_eq!(
-            user_echo_mode("subagent-completed-xyz"),
+            user_echo_mode("task-completed-bg-1", &origin("task-completed-bg-1")),
+            UserEchoMode::Broadcast
+        );
+        assert_eq!(
+            user_echo_mode("subagent-completed-xyz", &origin("subagent-completed-xyz")),
             UserEchoMode::Broadcast
         );
     }
@@ -3233,7 +3343,10 @@ mod user_echo_broadcast_tests {
     #[test]
     fn interject_fallback_turn_is_persist_only() {
         assert_eq!(
-            user_echo_mode("interject-fallback-019e24b7"),
+            user_echo_mode(
+                "interject-fallback-019e24b7",
+                &origin("interject-fallback-019e24b7")
+            ),
             UserEchoMode::PersistOnly
         );
     }

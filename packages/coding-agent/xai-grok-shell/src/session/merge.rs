@@ -59,6 +59,10 @@ pub struct MergedSession {
     /// Per-turn dashboard summary from `summary.json` (local sessions only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_turn_summary: Option<String>,
+    /// Latest session recap from `summary.json` (local sessions only). Distinct
+    /// from `last_turn_summary`; shown on `/resume` / `/session-info`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_recap: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_kind: Option<String>,
 }
@@ -306,6 +310,7 @@ pub fn merge(
                 git_remotes: s.git_remotes,
                 source_workspace_dir: s.source_workspace_dir,
                 last_turn_summary: s.last_turn_summary,
+                last_recap: s.last_recap,
                 session_kind: s.session_kind,
             },
         );
@@ -365,6 +370,7 @@ pub fn merge(
                 git_remotes: local.git_remotes,
                 source_workspace_dir: local.source_workspace_dir,
                 last_turn_summary: local.last_turn_summary,
+                last_recap: local.last_recap,
                 session_kind: local.session_kind,
             },
         );
@@ -497,6 +503,7 @@ mod tests {
             reasoning_effort: None,
             last_turn_summary: None,
             last_turn_summary_prompt_id: None,
+            last_recap: None,
         }
     }
 
@@ -654,6 +661,29 @@ mod tests {
         assert_eq!(
             merged[0].last_turn_summary.as_deref(),
             Some("Fixed the parser")
+        );
+    }
+
+    /// `last_recap` rides the session-list wire from local `summary.json`,
+    /// both for local-only rows and inherited onto a merged "both" row.
+    #[test]
+    fn last_recap_carried_from_local_summary() {
+        let mut s = make_summary("s1", "title", "2026-03-01T00:00:00Z");
+        s.last_recap = Some("Where we left off: auth refactor".into());
+        let merged = merge(Vec::new(), vec![s], None, &[], 20);
+        assert_eq!(
+            merged[0].last_recap.as_deref(),
+            Some("Where we left off: auth refactor")
+        );
+
+        let mut s = make_summary("s1", "title", "2026-03-01T00:00:00Z");
+        s.last_recap = Some("Where we left off: auth refactor".into());
+        let remote = vec![make_remote("s1", "remote title", "2026-03-01T00:00:00Z")];
+        let merged = merge(remote, vec![s], None, &[], 20);
+        assert_eq!(merged[0].source, "both");
+        assert_eq!(
+            merged[0].last_recap.as_deref(),
+            Some("Where we left off: auth refactor")
         );
     }
 
@@ -1276,6 +1306,7 @@ mod tests {
             git_remotes: Vec::new(),
             source_workspace_dir: None,
             last_turn_summary: None,
+            last_recap: None,
             session_kind: None,
         }
     }

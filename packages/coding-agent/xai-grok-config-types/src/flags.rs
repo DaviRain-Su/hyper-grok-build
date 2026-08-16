@@ -13,6 +13,8 @@ pub enum ConfigSource {
     SystemManagedConfig,
     ManagedConfig,
     UserConfig,
+    /// A value injected via the `GROK_CONFIG` / `GROK_CONFIG_PATH` overlay.
+    EnvOverlay,
     Config,
     Remote,
     Default,
@@ -37,22 +39,28 @@ impl<T: std::fmt::Display> std::fmt::Display for Resolved<T> {
     }
 }
 /// Resolve a boolean feature flag: requirement > cli > env > config > managed > feature flag > default.
-pub struct BoolFlag<'a> {
+pub struct BoolFlag {
     requirement: Option<bool>,
     cli: Option<bool>,
-    env_var: &'a str,
+    env: Option<bool>,
     config: Option<bool>,
     managed: Option<bool>,
     feature_flag: Option<bool>,
     default: bool,
 }
 
-impl<'a> BoolFlag<'a> {
-    pub fn env(env_var: &'a str) -> Self {
+impl BoolFlag {
+    pub fn env(env_var: &str) -> Self {
+        Self::env_value(env_bool(env_var))
+    }
+
+    /// The environment tier already read, for a resolver handed every tier
+    /// rather than reading the process itself.
+    pub fn env_value(env: Option<bool>) -> Self {
         Self {
             requirement: None,
             cli: None,
-            env_var,
+            env,
             config: None,
             managed: None,
             feature_flag: None,
@@ -89,7 +97,7 @@ impl<'a> BoolFlag<'a> {
         resolve_bool_flag(
             self.requirement,
             self.cli,
-            self.env_var,
+            self.env,
             self.config,
             self.managed,
             self.feature_flag,
@@ -101,7 +109,7 @@ impl<'a> BoolFlag<'a> {
 fn resolve_bool_flag(
     requirement: Option<bool>,
     cli_arg: Option<bool>,
-    env_var: &str,
+    env_val: Option<bool>,
     config_val: Option<bool>,
     managed_val: Option<bool>,
     feature_flag_val: Option<bool>,
@@ -113,7 +121,7 @@ fn resolve_bool_flag(
     if let Some(val) = cli_arg {
         return Resolved::new(val, ConfigSource::Cli);
     }
-    if let Some(val) = env_bool(env_var) {
+    if let Some(val) = env_val {
         return Resolved::new(val, ConfigSource::Env);
     }
     if let Some(val) = config_val {

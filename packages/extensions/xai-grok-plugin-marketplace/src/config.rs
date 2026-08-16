@@ -268,6 +268,10 @@ pub fn load_extra_sources_from_settings_in(
 mod tests {
     use super::*;
 
+    /// Serializes every test that touches the process-global
+    /// `GROK_MARKETPLACE_REQUIRE_SHA`, so they cannot race each other.
+    static REQUIRE_SHA_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn parse_local_source() {
         let config: toml::Value = toml::from_str(
@@ -334,8 +338,9 @@ mod tests {
     #[test]
     fn require_sha_policy_composition() {
         // Process-global env: serialize against any other env-touching test.
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = REQUIRE_SHA_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
 
         let empty: toml::Value = toml::from_str("").unwrap();
         let enabled: toml::Value = toml::from_str("[marketplace]\nrequire_sha = true\n").unwrap();
@@ -355,6 +360,24 @@ mod tests {
         );
 
         unsafe { std::env::remove_var("GROK_MARKETPLACE_REQUIRE_SHA") };
+    }
+
+    #[test]
+    fn overlay_cannot_loosen_require_sha() {
+        let _guard = REQUIRE_SHA_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("GROK_MARKETPLACE_REQUIRE_SHA") };
+
+        let layers = xai_grok_config::ConfigLayers {
+            user: toml::from_str("[marketplace]\nrequire_sha = true\n").unwrap(),
+            env_overlay: Some(toml::from_str("[marketplace]\nrequire_sha = false\n").unwrap()),
+            ..Default::default()
+        };
+        assert!(load_require_sha(
+            &layers.effective_config_base_without_overlay()
+        ));
+        assert!(!load_require_sha(&layers.effective_config_base()));
     }
 
     #[test]

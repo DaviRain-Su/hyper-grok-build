@@ -21,7 +21,51 @@ use std::collections::HashMap;
 
 use super::embedding::EmbeddingProvider;
 use super::index::MemoryIndex;
+use super::observation::MemoryRetrievalMode;
 use xai_grok_config_types::MemorySearchConfig;
+
+pub(super) enum QueryEmbedding {
+    FtsOnly,
+    Hybrid(Vec<f32>),
+    EmbeddingFallback,
+}
+impl QueryEmbedding {
+    pub fn embedding(&self) -> Option<&[f32]> {
+        if let Self::Hybrid(value) = self {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    pub fn mode(&self) -> MemoryRetrievalMode {
+        match self {
+            Self::FtsOnly => MemoryRetrievalMode::FtsOnly,
+            Self::Hybrid(_) => MemoryRetrievalMode::Hybrid,
+            Self::EmbeddingFallback => MemoryRetrievalMode::EmbeddingFallback,
+        }
+    }
+}
+
+pub(super) async fn resolve_query_embedding(
+    provider: Option<&dyn EmbeddingProvider>,
+    is_vector_index_available: bool,
+    query: &str,
+) -> QueryEmbedding {
+    let Some(provider) = provider.filter(|_| is_vector_index_available) else {
+        return QueryEmbedding::FtsOnly;
+    };
+    match provider.embed_batch(&[query]).await {
+        Ok(embeddings) => embeddings
+            .into_iter()
+            .next()
+            .map_or(QueryEmbedding::EmbeddingFallback, QueryEmbedding::Hybrid),
+        Err(error) => {
+            tracing::warn!(target: crate::MEMORY_LOG_TARGET, %error, "embedding query failed");
+            QueryEmbedding::EmbeddingFallback
+        }
+    }
+}
 
 /// A search result with merged scoring from FTS and vector search.
 #[derive(Debug, Clone)]
@@ -34,6 +78,11 @@ pub struct SearchResult {
     pub snippet: String,
     pub source: String,
     pub created_at: i64,
+}
+
+pub(super) struct SearchMerge {
+    pub results: Vec<SearchResult>,
+    pub is_vector_degraded: bool,
 }
 
 /// Returns `true` for sources that contain curated long-term knowledge
@@ -164,30 +213,12 @@ pub async fn hybrid_search(
             fts_results.push(r);
         }
     }
-    let vec_available = index.vec_available();
-
     // Phase 2 (async): embed query — no &index borrow here
-    let query_embedding = if vec_available {
-        if let Some(provider) = embedding_provider {
-            match provider.embed_batch(&[query]).await {
-                Ok(embeddings) if !embeddings.is_empty() => {
-                    Some(embeddings.into_iter().next().unwrap())
-                }
-                Ok(_) => None,
-                Err(e) => {
-                    tracing::warn!(error = %e, "embedding query failed, falling back to FTS-only");
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let query_embedding =
+        resolve_query_embedding(embedding_provider, index.vec_available(), query).await;
 
     // Phase 3 (sync): vector search + scoring + merge
-    hybrid_search_merge(index, fts_results, query_embedding.as_deref(), config)
+    Ok(hybrid_search_merge(index, fts_results, query_embedding.embedding(), config)?.results)
 }
 
 /// Synchronous merge phase: vector search (if embedding provided), score
@@ -197,15 +228,19 @@ pub(super) fn hybrid_search_merge(
     fts_results: Vec<super::index::FtsResult>,
     query_embedding: Option<&[f32]>,
     config: &MemorySearchConfig,
-) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+) -> Result<SearchMerge, Box<dyn std::error::Error>> {
     let candidate_limit = config.max_results * 3;
 
-    let vec_results = if let Some(embedding) = query_embedding {
-        index
-            .vector_search(embedding, candidate_limit)
-            .unwrap_or_default()
+    let (vec_results, is_vector_degraded) = if let Some(embedding) = query_embedding {
+        match index.vector_search(embedding, candidate_limit) {
+            Ok(results) => (results, false),
+            Err(error) => {
+                tracing::warn!(target: crate::MEMORY_LOG_TARGET, %error, "vector search failed");
+                (vec![], true)
+            }
+        }
     } else {
-        vec![]
+        (vec![], false)
     };
 
     // Normalize and merge scores.
@@ -385,7 +420,10 @@ pub(super) fn hybrid_search_merge(
 
     results.truncate(config.max_results);
 
-    Ok(results)
+    Ok(SearchMerge {
+        results,
+        is_vector_degraded,
+    })
 }
 
 #[cfg(test)]
@@ -397,6 +435,26 @@ mod tests {
     use tempfile::TempDir;
     use xai_grok_config_types::{MemoryIndexConfig, MemorySearchConfig};
 
+    struct FailingEmbeddingProvider;
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for FailingEmbeddingProvider {
+        async fn embed_batch(
+            &self,
+            _texts: &[&str],
+        ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+            Err("query embedding failed".into())
+        }
+
+        fn model_name(&self) -> &str {
+            "failing"
+        }
+
+        fn dimensions(&self) -> usize {
+            4
+        }
+    }
+
     fn test_index(tmp: &TempDir) -> MemoryIndex {
         init_sqlite_vec();
         let global = tmp.path().join("memory");
@@ -404,6 +462,28 @@ mod tests {
         let storage = MemoryStorage::with_paths(global, workspace);
         let db_path = tmp.path().join("test.sqlite");
         MemoryIndex::open_or_create(&db_path, storage, MemoryIndexConfig::default(), 4).unwrap()
+    }
+
+    #[test]
+    fn vector_failure_falls_back_to_fts() {
+        let tmp = TempDir::new().unwrap();
+        let mut index = test_index(&tmp);
+        let file = tmp.path().join("test.md");
+        std::fs::write(&file, "# Guide\n\nRust programming.").unwrap();
+        index.reindex_file(&file, "workspace").unwrap();
+        index.db().execute("DROP TABLE chunks_vec", []).unwrap();
+        let config = MemorySearchConfig {
+            min_score: 0.0,
+            ..Default::default()
+        };
+        let merged = hybrid_search_merge(
+            &index,
+            index.search_fts("rust", 3).unwrap(),
+            Some(&[0.0; 4]),
+            &config,
+        )
+        .unwrap();
+        assert!(merged.is_vector_degraded && !merged.results.is_empty());
     }
 
     #[tokio::test]
@@ -521,6 +601,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn query_embedding_failure_uses_embedding_fallback_mode() {
+        let resolved = resolve_query_embedding(
+            Some(&FailingEmbeddingProvider),
+            true,
+            "private query content",
+        )
+        .await;
+
+        assert_eq!(MemoryRetrievalMode::EmbeddingFallback, resolved.mode());
+        assert!(resolved.embedding().is_none());
     }
 
     #[tokio::test]
@@ -762,7 +855,8 @@ mod tests {
             None,
             &config,
         )
-        .unwrap();
+        .unwrap()
+        .results;
 
         // Both chunks must be returned (no vacuous "inconclusive → pass" path).
         let pos_a = results
@@ -837,7 +931,8 @@ mod tests {
             None,
             &config,
         )
-        .unwrap();
+        .unwrap()
+        .results;
 
         assert!(
             !results.is_empty(),
@@ -1053,8 +1148,9 @@ mod tests {
             ..Default::default()
         };
 
-        let results =
-            hybrid_search_merge(&idx, fts_results, Some(&query_embedding[0]), &config).unwrap();
+        let results = hybrid_search_merge(&idx, fts_results, Some(&query_embedding[0]), &config)
+            .unwrap()
+            .results;
 
         assert!(!results.is_empty(), "should find at least one result");
         // With absolute normalization, the combined score should be
@@ -1325,7 +1421,8 @@ mod tests {
             None,
             &config,
         )
-        .unwrap();
+        .unwrap()
+        .results;
 
         assert!(
             !results.is_empty(),

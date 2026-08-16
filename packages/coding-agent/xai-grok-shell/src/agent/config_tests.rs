@@ -178,6 +178,12 @@ fn inject_url_derived_headers_adds_proxy_headers_for_cli_chat_proxy_url() {
         headers.get("x-authenticateresponse").map(String::as_str),
         Some("authenticate-response")
     );
+    assert_eq!(
+        headers
+            .get(crate::http::CLIENT_MODE_HEADER)
+            .map(String::as_str),
+        Some(crate::http::process_client_mode())
+    );
 }
 #[test]
 fn inject_url_derived_headers_skips_proxy_headers_for_external_url() {
@@ -185,6 +191,12 @@ fn inject_url_derived_headers_skips_proxy_headers_for_external_url() {
     inject_url_derived_headers(&mut headers, None, "https://api.x.ai/v1");
     assert!(headers.get("X-XAI-Token-Auth").is_none());
     assert!(headers.get("x-authenticateresponse").is_none());
+    assert_eq!(
+        headers
+            .get(crate::http::CLIENT_MODE_HEADER)
+            .map(String::as_str),
+        Some(crate::http::process_client_mode())
+    );
 }
 #[test]
 fn inject_url_derived_headers_preserves_caller_extra_headers() {
@@ -250,8 +262,7 @@ fn resolve_runtime_fields_propagates_disable_zdr_incompatible_tools() {
             cli_subagents: None,
             cli_web_search_model: None,
             cli_session_summary_model: None,
-            cli_experimental_memory: false,
-            cli_no_memory: false,
+            memory_enabled_override: None,
             disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
@@ -269,6 +280,17 @@ fn resolve_runtime_fields_propagates_disable_zdr_incompatible_tools() {
     assert!(cfg.disable_zdr_incompatible_tools);
 }
 #[test]
+fn re_resolve_runtime_fields_refreshes_typed_memory_from_raw_config() {
+    let initial: toml::Value =
+        toml::from_str("[memory]\nenabled = true\n[memory.search]\nmax_results = 6").unwrap();
+    let updated: toml::Value =
+        toml::from_str("[memory]\nenabled = true\n[memory.search]\nmax_results = 12").unwrap();
+    let mut cfg = Config::new_from_toml_cfg(&initial).unwrap();
+    cfg.memory_enabled_override = Some(true);
+    cfg.re_resolve_runtime_fields(&updated);
+    assert_eq!(cfg.memory_config.unwrap().search.max_results, 12);
+}
+#[test]
 fn resolve_runtime_fields_propagates_disable_web_search() {
     fn ctx(raw: &toml::Value, disable_web_search: bool) -> RuntimeResolutionContext<'_> {
         RuntimeResolutionContext {
@@ -278,8 +300,7 @@ fn resolve_runtime_fields_propagates_disable_web_search() {
             cli_subagents: None,
             cli_web_search_model: None,
             cli_session_summary_model: None,
-            cli_experimental_memory: false,
-            cli_no_memory: false,
+            memory_enabled_override: None,
             disable_web_search,
             todo_gate: false,
             laziness_debug_log: None,
@@ -1016,6 +1037,7 @@ fn test_model_entry(
         info: ModelInfo {
             user_selectable: true,
             id: None,
+            model_family: None,
             model: model.to_string(),
             base_url: base_url.to_string(),
             name: None,
@@ -2088,6 +2110,7 @@ fn model_use_concise_defaults_to_false() {
 fn model_info_from_config_propagates_use_concise() {
     let entry = ModelEntryConfig {
         id: None,
+        model_family: None,
         model: "test".to_string(),
         base_url: "https://test.api/v1".to_string(),
         name: None,
@@ -2247,6 +2270,7 @@ fn model_agent_type_defaults_to_grok_build() {
 fn model_info_from_config_propagates_agent_type() {
     let entry = ModelEntryConfig {
         id: None,
+        model_family: None,
         model: "test".to_string(),
         base_url: "https://test.api/v1".to_string(),
         name: None,
@@ -2698,6 +2722,7 @@ fn inference_idle_timeout_secs_absent_defaults_to_none() {
 fn inference_idle_timeout_propagates_to_model_info() {
     let entry = ModelEntryConfig {
         id: None,
+        model_family: None,
         model: "test".to_string(),
         base_url: "https://test.api/v1".to_string(),
         name: None,
@@ -2843,6 +2868,11 @@ fn disable_api_key_auth_parses_from_auth_alias() {
 #[test]
 fn force_login_team_uuid_parses_string_and_array() {
     use crate::auth::ForceLoginTeam;
+    let _g = crate::env::EnvVarGuard::remove("GROK_FORCE_LOGIN_TEAM_ID");
+    assert!(
+        crate::auth::force_login_team_from_requirements().is_none(),
+        "clear the force_login_team_uuid pin in requirements.toml to run this test",
+    );
     let absent = Config::new_from_toml_cfg(&toml::from_str("").unwrap()).unwrap();
     assert_eq!(absent.grok_com_config.force_login_team_uuid, None);
     let raw: toml::Value = toml::from_str(
@@ -2883,6 +2913,57 @@ fn force_login_team_uuid_parses_string_and_array() {
     assert_eq!(
         cfg.grok_com_config.force_login_team_uuid,
         Some(ForceLoginTeam::AnyOf(vec![])),
+    );
+}
+/// The env override applies when config is empty and wins over a user/managed
+/// `config.toml` value (requirements clamping is covered in `auth::config`).
+#[test]
+fn force_login_team_id_env_overrides_user_config() {
+    use crate::auth::ForceLoginTeam;
+    let _guard = crate::env::EnvVarGuard::set("GROK_FORCE_LOGIN_TEAM_ID", "env-team");
+    assert!(
+        crate::auth::force_login_team_from_requirements().is_none(),
+        "clear the force_login_team_uuid pin in requirements.toml to run this test",
+    );
+    let from_env = Config::new_from_toml_cfg(&toml::from_str("").unwrap()).unwrap();
+    assert_eq!(
+        from_env.grok_com_config.force_login_team_uuid,
+        Some(ForceLoginTeam::Single("env-team".into())),
+    );
+    let raw: toml::Value = toml::from_str(
+        r#"
+            [grok_com_config]
+            force_login_team_uuid = "admin-team"
+            "#,
+    )
+    .unwrap();
+    let overridden = Config::new_from_toml_cfg(&raw).expect("config should parse");
+    assert_eq!(
+        overridden.grok_com_config.force_login_team_uuid,
+        Some(ForceLoginTeam::Single("env-team".into())),
+    );
+}
+/// Env unset: `force_login_team_uuid` is taken from `config.toml` unchanged (the
+/// env override tier never clobbers the merged config value).
+#[test]
+fn force_login_team_id_env_unset_keeps_config_value() {
+    use crate::auth::ForceLoginTeam;
+    let _guard = crate::env::EnvVarGuard::remove("GROK_FORCE_LOGIN_TEAM_ID");
+    assert!(
+        crate::auth::force_login_team_from_requirements().is_none(),
+        "clear the force_login_team_uuid pin in requirements.toml to run this test",
+    );
+    let raw: toml::Value = toml::from_str(
+        r#"
+            [grok_com_config]
+            force_login_team_uuid = "admin-team"
+            "#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+    assert_eq!(
+        cfg.grok_com_config.force_login_team_uuid,
+        Some(ForceLoginTeam::Single("admin-team".into())),
     );
 }
 /// Pinning a team via `force_login_team_uuid` implies API-key auth is
@@ -3517,204 +3598,248 @@ fn e2e_config_models_parsed_directly_not_via_deep_merge() {
         "base_url should be None when user didn't set it"
     );
 }
+/// A field holding a registered key is read as of whenever it was written, and
+/// these three are built before the value's last writer runs. `auto_wake` shipped
+/// that way and lost every pin. Catches the spelling, not the class: a mirror
+/// under another name still gets through.
 #[test]
-#[serial]
-fn resolve_feedback_defaults_to_true_when_unset() {
-    unsafe { std::env::remove_var("GROK_FEEDBACK_ENABLED") };
-    unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
-    let cfg = Config::default();
-    let r = cfg.resolve_feedback();
-    assert!(r.value, "feedback should be true by default");
-    assert_eq!(r.source, ConfigSource::Default);
+fn no_registered_feature_is_mirrored_by_a_config_field() {
+    const SRC: &str = include_str!("config.rs");
+    const AGENT: &str = include_str!("mvp_agent/mod.rs");
+    for (src, decl) in [
+        (SRC, "pub struct Config {"),
+        (SRC, "pub struct Features {"),
+        (AGENT, "pub struct MvpAgent {"),
+    ] {
+        let body = src
+            .split_once(decl)
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .unwrap_or_else(|| panic!("{decl} moved; this test needs its new shape"));
+        for spec in FEATURES {
+            for field in [
+                format!("{}: bool", spec.key),
+                format!("{}_enabled: bool", spec.key),
+                format!("{}: Option<bool>", spec.key),
+                format!("{}_enabled: Option<bool>", spec.key),
+            ] {
+                assert!(
+                    !body.contains(&field),
+                    "`{field}` mirrors the {} row; read the registry at use time \
+                     instead, so a pin applied after this field was written still counts",
+                    spec.key,
+                );
+            }
+        }
+    }
 }
+/// The tamper-resistance `25-enterprise.md` sells to administrators, for
+/// every key an administrator can pin.
 #[test]
 #[serial]
-fn resolve_session_search_precedence() {
-    use xai_grok_test_support::EnvGuard;
-    fn resolved(apply: fn(&mut Config)) -> (bool, ConfigSource) {
+fn requirement_pin_outranks_a_hostile_environment() {
+    for spec in FEATURES {
+        let pinned = !spec.default_enabled;
+        let _env = EnvGuard::set(spec.env, if pinned { "0" } else { "1" });
         let mut cfg = Config::default();
-        apply(&mut cfg);
-        let gate = cfg.resolve_session_search();
-        (gate.value, gate.source)
+        cfg.requirements
+            .pin_feature(spec.id, pinned, crate::config::RequirementSource::Unknown);
+        let r = cfg.feature(spec.id);
+        assert_eq!(r.value, pinned, "{} lost to {}", spec.key, spec.env);
+        assert_eq!(r.source, ConfigSource::Requirement, "{}", spec.key);
     }
-    fn remote_off(cfg: &mut Config) {
-        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-            session_search: Some(false),
-            ..Default::default()
-        });
+}
+/// A registered key is a `&'static str` matched against the `[features]`
+/// table, not a serde field name, so every one of them is read back here.
+#[test]
+#[serial]
+fn every_registered_key_parses_out_of_the_features_table() {
+    for spec in FEATURES {
+        let configured = !spec.default_enabled;
+        let raw: toml::Value =
+            toml::from_str(&format!("[features]\n{} = {configured}\n", spec.key)).unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        {
+            let _env = EnvGuard::unset(spec.env);
+            let r = cfg.feature(spec.id);
+            assert_eq!(
+                r.value, configured,
+                "{} never reached the registry",
+                spec.key
+            );
+            assert_eq!(r.source, ConfigSource::Config, "{}", spec.key);
+        }
+        let _env = EnvGuard::set(spec.env, if configured { "0" } else { "1" });
+        let r = cfg.feature(spec.id);
+        assert_eq!(r.value, !configured, "config.toml outranked {}", spec.env);
+        assert_eq!(r.source, ConfigSource::Env, "{}", spec.key);
     }
-    {
-        let _env = EnvGuard::unset("GROK_SESSION_SEARCH");
-        assert_eq!(resolved(|_| {}), (true, ConfigSource::Default));
-        assert_eq!(resolved(remote_off), (false, ConfigSource::Remote));
-        assert_eq!(
-            resolved(|cfg| {
-                remote_off(cfg);
-                cfg.features.session_search = Some(true);
-            }),
-            (true, ConfigSource::Config),
-            "config.toml beats remote settings",
+}
+/// The keys the list names are read from the raw layers, so each must be one no
+/// field claims. A quoted `remote_fetch` used to read as absent and leave the
+/// egress gate open.
+#[test]
+fn non_boolean_value_fails_the_load_for_a_key_with_no_field() {
+    let features = include_str!("config.rs")
+        .split_once("pub struct Features {")
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .map(|(body, _)| body)
+        .expect("`Features` moved; this test needs its new shape");
+    for key in UNMIRRORED_BOOLEAN_FEATURES {
+        assert!(
+            !FEATURES.iter().any(|spec| spec.key == *key),
+            "{key} is a registry row, which is already known"
         );
-    }
-    {
-        let _env = EnvGuard::set("GROK_SESSION_SEARCH", "0");
-        assert_eq!(
-            resolved(|cfg| cfg.features.session_search = Some(true)),
-            (false, ConfigSource::Env),
-            "env beats config.toml",
+        assert!(
+            !features.contains(&format!("pub {key}:")),
+            "{key} has a `Features` field, so it is read through that instead"
         );
-    }
-    {
-        let _env = EnvGuard::set("GROK_SESSION_SEARCH", "1");
-        assert_eq!(
-            resolved(|cfg| cfg.features.session_search = Some(false)),
-            (true, ConfigSource::Env),
-            "env beats config.toml in both directions",
-        );
-        assert_eq!(
-            resolved(|cfg| {
-                cfg.features.session_search = Some(false);
-                cfg.requirements
-                    .session_search
-                    .pin(false, crate::config::RequirementSource::Unknown);
-            }),
-            (false, ConfigSource::Requirement),
-            "a requirements pin beats env, so a tenant cannot switch it back on",
+        let raw: toml::Value = toml::from_str(&format!("[features]\n{key} = \"false\"\n")).unwrap();
+        let err = Config::new_from_toml_cfg(&raw)
+            .expect_err(&format!("{key}: a quoted value must not read as absent"));
+        assert!(
+            err.contains(key) && err.contains("true or false"),
+            "{key}: the error names the key and the spelling that works: {err}"
         );
     }
 }
+/// What no list could cover: a key this build has never heard of is typed all
+/// the same, so the next boolean added to `[features]` is checked before anyone
+/// writes it down. `image_edit` rides the same path, which is why it is kept out
+/// of the list that only suppresses the unrecognized-key warning.
 #[test]
-#[serial]
-fn resolve_session_recap_defaults_to_true_when_unset() {
-    unsafe { std::env::remove_var("GROK_SESSION_RECAP") };
-    let cfg = Config::default();
-    let r = cfg.resolve_session_recap();
-    assert!(r.value, "session_recap should be true by default");
-    assert_eq!(r.source, ConfigSource::Default);
+fn non_boolean_value_fails_the_load_for_an_unregistered_key() {
+    for key in ["image_edit", "a_key_no_build_has_ever_had"] {
+        let raw: toml::Value = toml::from_str(&format!("[features]\n{key} = \"false\"\n")).unwrap();
+        let err = Config::new_from_toml_cfg(&raw)
+            .expect_err(&format!("{key}: a quoted value must not read as absent"));
+        assert!(
+            err.contains(key) && err.contains("true or false"),
+            "{key}: the error names the key and the spelling that works: {err}"
+        );
+    }
+}
+/// The other half of the rule. A later release can add a `[features]` key that
+/// holds something other than a boolean, and the build that predates its field
+/// has to start on that config rather than strand a fleet mid-rollout.
+#[test]
+fn a_value_that_reads_as_nothing_like_a_boolean_still_loads() {
+    for value in ["\"aggressive\"", "42", "[\"a\", \"b\"]", "1.5"] {
+        let entry = format!("[features]\na_later_release_key = {value}\n");
+        let raw: toml::Value = toml::from_str(&entry).unwrap();
+        Config::new_from_toml_cfg(&raw)
+            .unwrap_or_else(|e| panic!("{value} must not stop an older build: {e}"));
+        let unused = unused_keys_from_toml(&entry);
+        assert!(
+            unused
+                .iter()
+                .any(|key| key == "features.a_later_release_key"),
+            "{value}: ignored, and the operator still hears about it: {unused:?}"
+        );
+    }
+}
+/// The non-row keys that do have a field are turned away by serde, whatever it
+/// words the failure as.
+#[test]
+fn non_boolean_value_fails_the_load_for_a_key_with_a_field() {
+    for key in ["title_refresh", "image_gen", "video_gen"] {
+        let raw: toml::Value = toml::from_str(&format!("[features]\n{key} = \"false\"\n")).unwrap();
+        Config::new_from_toml_cfg(&raw)
+            .expect_err(&format!("{key}: a quoted value must not read as absent"));
+    }
 }
 #[test]
-#[serial]
-fn resolve_session_recap_config_off_overrides_default() {
-    unsafe { std::env::remove_var("GROK_SESSION_RECAP") };
-    let cfg = Config {
-        features: Features {
-            session_recap: Some(false),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let r = cfg.resolve_session_recap();
-    assert!(!r.value);
-    assert_eq!(r.source, ConfigSource::Config);
-}
-#[test]
-#[serial]
-fn resolve_session_recap_env_off_overrides_default() {
-    unsafe { std::env::set_var("GROK_SESSION_RECAP", "0") };
-    let cfg = Config::default();
-    let r = cfg.resolve_session_recap();
-    assert!(!r.value);
-    assert_eq!(r.source, ConfigSource::Env);
-    unsafe { std::env::remove_var("GROK_SESSION_RECAP") };
-}
-#[test]
-#[serial]
-fn resolve_session_recap_remote_off_overrides_default() {
-    unsafe { std::env::remove_var("GROK_SESSION_RECAP") };
-    let cfg = Config {
-        remote_settings: Some(crate::util::config::RemoteSettings {
-            session_recap: Some(false),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let r = cfg.resolve_session_recap();
+fn non_boolean_feature_value_fails_the_load() {
+    let raw: toml::Value = toml::from_str("[features]\nsession_search = \"no\"\n").unwrap();
+    let err = Config::new_from_toml_cfg(&raw)
+        .expect_err("a quoted value must not read as off and leave the index on");
     assert!(
-        !r.value,
-        "remote settings/remote false must kill-switch default on"
+        err.contains("features.session_search") && err.contains("true or false"),
+        "the error names the key and the spelling that works: {err}"
     );
-    assert_eq!(r.source, ConfigSource::Remote);
 }
-/// Precedence: env > config.toml > remote settings > default(true). One
-/// test covers the full ladder (the `resolve_two_pass_compaction` pattern).
+/// Title refresh defaults to the resolved `turn_summary` value, but each knob
+/// (env / config / remote) can flip it independently of turn summary.
 #[test]
 #[serial]
-fn resolve_turn_summary_precedence() {
+fn resolve_title_refresh_defaults_to_turn_summary_but_decouples() {
+    unsafe { std::env::remove_var("GROK_TITLE_REFRESH") };
     unsafe { std::env::remove_var("GROK_TURN_SUMMARY") };
-    let r = Config::default().resolve_turn_summary();
-    assert!(r.value, "turn_summary defaults on");
-    assert_eq!(r.source, ConfigSource::Default);
-    let remote_off = Config {
+    let r = Config::default().resolve_title_refresh();
+    assert!(r.value, "title_refresh defaults to turn_summary (on)");
+    let ts_off = Config {
         remote_settings: Some(crate::util::config::RemoteSettings {
             turn_summary: Some(false),
             ..Default::default()
         }),
         ..Default::default()
     };
-    let r = remote_off.resolve_turn_summary();
-    assert!(!r.value, "remote false must kill-switch default on");
-    assert_eq!(r.source, ConfigSource::Remote);
-    let config_over_remote = Config {
+    assert!(
+        !ts_off.resolve_title_refresh().value,
+        "default follows turn_summary"
+    );
+    let decoupled = Config {
         features: Features {
-            turn_summary: Some(true),
+            title_refresh: Some(true),
             ..Default::default()
         },
-        ..remote_off
+        ..ts_off
     };
-    let r = config_over_remote.resolve_turn_summary();
-    assert!(r.value, "config.toml beats remote kill-switch");
+    let r = decoupled.resolve_title_refresh();
+    assert!(
+        r.value,
+        "title_refresh config overrides the turn_summary default"
+    );
     assert_eq!(r.source, ConfigSource::Config);
-    unsafe { std::env::set_var("GROK_TURN_SUMMARY", "0") };
-    let r = config_over_remote.resolve_turn_summary();
-    assert!(!r.value, "env wins over config + remote");
+    unsafe { std::env::set_var("GROK_TITLE_REFRESH", "0") };
+    let r = decoupled.resolve_title_refresh();
+    assert!(!r.value, "GROK_TITLE_REFRESH env wins");
     assert_eq!(r.source, ConfigSource::Env);
-    unsafe { std::env::remove_var("GROK_TURN_SUMMARY") };
+    unsafe { std::env::remove_var("GROK_TITLE_REFRESH") };
 }
-/// Precedence: env > config.toml > remote settings > default(false). One test
-/// covers the full ladder so we do not maintain a matrix of flag cases.
+/// A `turn_summary` pin lands in the title's default slot, so it moves the title
+/// with it. Only the default slot, so `GROK_TITLE_REFRESH` still outranks it and a
+/// user can turn the title back on. Pinning `title_refresh` is what closes that.
 #[test]
 #[serial]
-fn resolve_two_pass_compaction_precedence() {
-    unsafe { std::env::remove_var("GROK_TWO_PASS_COMPACTION") };
-    let default_cfg = Config::default();
-    let r = default_cfg.resolve_two_pass_compaction();
-    assert!(!r.value, "default is opt-in off");
-    assert_eq!(r.source, ConfigSource::Default);
-    let remote_on = Config {
-        remote_settings: Some(crate::util::config::RemoteSettings {
-            two_pass_compaction_enabled: Some(true),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let r = remote_on.resolve_two_pass_compaction();
-    assert!(r.value);
-    assert_eq!(r.source, ConfigSource::Remote);
-    let config_over_remote = Config {
-        features: Features {
-            two_pass_compaction: Some(true),
-            ..Default::default()
-        },
-        remote_settings: Some(crate::util::config::RemoteSettings {
-            two_pass_compaction_enabled: Some(false),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let r = config_over_remote.resolve_two_pass_compaction();
-    assert!(r.value);
-    assert_eq!(r.source, ConfigSource::Config);
-    unsafe { std::env::set_var("GROK_TWO_PASS_COMPACTION", "0") };
-    let r = config_over_remote.resolve_two_pass_compaction();
-    assert!(!r.value, "env wins over config + remote");
+fn a_turn_summary_pin_moves_the_title_default_and_the_environment_lifts_it() {
+    let _env = EnvGuard::set("GROK_TURN_SUMMARY", "1");
+    let mut cfg = Config::default();
+    cfg.requirements.pin_feature(
+        Feature::TurnSummary,
+        false,
+        crate::config::RequirementSource::Unknown,
+    );
+    {
+        let _title = EnvGuard::unset("GROK_TITLE_REFRESH");
+        assert!(
+            !cfg.resolve_title_refresh().value,
+            "the pin outranks GROK_TURN_SUMMARY, and the title default follows the pin"
+        );
+    }
+    let _title = EnvGuard::set("GROK_TITLE_REFRESH", "1");
+    let r = cfg.resolve_title_refresh();
+    assert!(r.value, "the environment outranks a derived default");
     assert_eq!(r.source, ConfigSource::Env);
-    unsafe { std::env::remove_var("GROK_TWO_PASS_COMPACTION") };
+}
+/// The tier that closes it. Not a registry row, so the sweep in
+/// `requirement_pin_outranks_a_hostile_environment` never reaches this key.
+#[test]
+#[serial]
+fn a_title_refresh_pin_outranks_the_environment() {
+    let _env = EnvGuard::set("GROK_TITLE_REFRESH", "1");
+    let mut cfg = Config::default();
+    cfg.requirements
+        .title_refresh
+        .pin(false, crate::config::RequirementSource::Unknown);
+    let r = cfg.resolve_title_refresh();
+    assert!(!r.value, "the pin lost to GROK_TITLE_REFRESH");
+    assert_eq!(r.source, ConfigSource::Requirement);
 }
 /// Gate precedence: env > `[doom_loop_recovery]` > remote settings >
 /// default(ON), with the remote layer merged PER-FIELD from the nested
 /// `doom_loop_recovery` object and each layer's `false` an independent
-/// kill switch. One test covers the full ladder (the
-/// `resolve_two_pass_compaction_precedence` pattern).
+/// kill switch. One test covers the full ladder.
 #[test]
 #[serial]
 fn resolve_doom_loop_recovery_precedence() {
@@ -3724,7 +3849,7 @@ fn resolve_doom_loop_recovery_precedence() {
     let p = default_cfg
         .resolve_doom_loop_recovery()
         .expect("default is ON");
-    assert_eq!(p.max_threshold, 32, "default tunables unchanged");
+    assert_eq!(p.max_threshold, 64, "default tunables unchanged");
     assert_eq!(p.max_retries, 2, "default tunables unchanged");
     assert_eq!(p.window_tokens, 1024, "default tunables unchanged");
     let toml_off = Config {
@@ -3845,11 +3970,7 @@ fn doom_loop_recovery_section_parses_from_toml() {
 #[test]
 #[serial]
 fn worktree_auto_gc_section_parses_from_toml() {
-    unsafe {
-        std::env::remove_var(xai_fast_worktree::ENV_AUTO_GC);
-        std::env::remove_var(xai_fast_worktree::ENV_AUTO_GC_DRY_RUN);
-        std::env::remove_var(xai_fast_worktree::ENV_AUTO_GC_MAX_AGE);
-    }
+    unsafe { xai_fast_worktree::clear_auto_gc_env_for_test() };
     let raw: toml::Value = toml::from_str(
         r#"
             [worktree.auto_gc]
@@ -3932,50 +4053,6 @@ fn resolve_doom_loop_recovery_clamps_tunables() {
         let p = cfg.resolve_doom_loop_recovery().expect("enabled");
         assert_eq!(p.window_tokens, expected, "window_tokens={raw}");
     }
-}
-#[test]
-#[serial]
-fn resolve_feedback_env_overrides_all() {
-    unsafe { std::env::set_var("GROK_FEEDBACK_ENABLED", "true") };
-    let mut cfg = Config::default();
-    cfg.features.feedback = Some(false);
-    cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-        feedback_enabled: Some(false),
-        ..Default::default()
-    });
-    let r = cfg.resolve_feedback();
-    assert_eq!(r.source, ConfigSource::Env);
-    assert!(r.value);
-    unsafe { std::env::remove_var("GROK_FEEDBACK_ENABLED") };
-}
-#[test]
-#[serial]
-fn resolve_feedback_config_overrides_remote_settings() {
-    unsafe { std::env::remove_var("GROK_FEEDBACK_ENABLED") };
-    let mut cfg = Config::default();
-    cfg.features.feedback = Some(true);
-    cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-        feedback_enabled: Some(false),
-        ..Default::default()
-    });
-    let r = cfg.resolve_feedback();
-    assert_eq!(r.source, ConfigSource::Config);
-    assert!(r.value);
-}
-#[test]
-#[serial]
-fn resolve_feedback_remote_settings_used_when_no_local() {
-    unsafe { std::env::remove_var("GROK_FEEDBACK_ENABLED") };
-    let cfg = Config {
-        remote_settings: Some(crate::util::config::RemoteSettings {
-            feedback_enabled: Some(true),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let r = cfg.resolve_feedback();
-    assert_eq!(r.source, ConfigSource::Remote);
-    assert!(r.value);
 }
 #[test]
 #[serial]
@@ -4169,77 +4246,6 @@ fn resolve_workflows_env_wins() {
         "env must be able to kill the default-on workflows"
     );
     unsafe { std::env::remove_var("GROK_WORKFLOWS") };
-}
-#[test]
-#[serial]
-fn resolve_ask_user_question_defaults_to_true_when_unset() {
-    unsafe { std::env::remove_var("GROK_ASK_USER_QUESTION") };
-    let cfg = Config::default();
-    let r = cfg.resolve_ask_user_question();
-    assert!(r.value, "ask_user_question should be on by default");
-    assert_eq!(r.source, ConfigSource::Default);
-}
-#[test]
-#[serial]
-fn resolve_ask_user_question_remote_settings_enables() {
-    unsafe { std::env::remove_var("GROK_ASK_USER_QUESTION") };
-    let cfg = Config {
-        remote_settings: Some(crate::util::config::RemoteSettings {
-            ask_user_question_enabled: Some(true),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let r = cfg.resolve_ask_user_question();
-    assert_eq!(r.source, ConfigSource::Remote);
-    assert!(r.value);
-}
-#[test]
-#[serial]
-fn resolve_ask_user_question_env_overrides_remote_settings() {
-    unsafe { std::env::set_var("GROK_ASK_USER_QUESTION", "1") };
-    let cfg = Config {
-        remote_settings: Some(crate::util::config::RemoteSettings {
-            ask_user_question_enabled: Some(false),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let r = cfg.resolve_ask_user_question();
-    assert_eq!(r.source, ConfigSource::Env);
-    assert!(r.value);
-    unsafe { std::env::remove_var("GROK_ASK_USER_QUESTION") };
-}
-#[test]
-#[serial]
-fn resolve_ask_user_question_config_overrides_remote_settings() {
-    unsafe { std::env::remove_var("GROK_ASK_USER_QUESTION") };
-    let mut cfg = Config::default();
-    cfg.features.ask_user_question = Some(true);
-    cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-        ask_user_question_enabled: Some(false),
-        ..Default::default()
-    });
-    let r = cfg.resolve_ask_user_question();
-    assert_eq!(r.source, ConfigSource::Config);
-    assert!(r.value);
-}
-/// remote settings `ask_user_question_enabled: false` is a kill-switch: it must
-/// win over the default-on fallback.
-#[test]
-#[serial]
-fn resolve_ask_user_question_remote_settings_kill_switch_overrides_default_on() {
-    unsafe { std::env::remove_var("GROK_ASK_USER_QUESTION") };
-    let cfg = Config {
-        remote_settings: Some(crate::util::config::RemoteSettings {
-            ask_user_question_enabled: Some(false),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let r = cfg.resolve_ask_user_question();
-    assert_eq!(r.source, ConfigSource::Remote);
-    assert!(!r.value);
 }
 #[test]
 #[serial]
@@ -5181,6 +5187,8 @@ fn known_non_serde_config_paths_are_not_reported_unused() {
         r#"
             [features]
             remote_fetch = false
+            session_search = false
+            image_edit = true
             not_a_real_feature = true
             [slash_command_tags]
             workflows = "new"
@@ -5191,8 +5199,16 @@ fn known_non_serde_config_paths_are_not_reported_unused() {
         "features.remote_fetch must not be treated as a typo: {unused:?}"
     );
     assert!(
+        !unused.iter().any(|k| k == "features.session_search"),
+        "a registered feature has no typed field and must not look like a typo: {unused:?}"
+    );
+    assert!(
         !unused.iter().any(|k| k == "slash_command_tags"),
         "slash_command_tags is a real table: {unused:?}"
+    );
+    assert!(
+        unused.iter().any(|k| k == "features.image_edit"),
+        "only a pin sets image_edit, so a config entry stays unrecognized: {unused:?}"
     );
     assert!(
         unused.iter().any(|k| k == "features.not_a_real_feature"),
@@ -5772,7 +5788,8 @@ fn external_otel_file_table_layered_under_env() {
         false,
     )
     .expect("file table must activate");
-    assert_eq!(cfg.transport.as_protocol_str(), "grpc");
+    assert_eq!(cfg.logs_transport.as_protocol_str(), "grpc");
+    assert_eq!(cfg.metrics_transport.as_protocol_str(), "grpc");
     assert_eq!(cfg.logs_endpoint, "https://collector.corp.example:4318");
     let cfg = resolve_external_otel_config_with(
         Some(&effective),
@@ -5782,7 +5799,8 @@ fn external_otel_file_table_layered_under_env() {
         false,
     )
     .expect("env protocol must override file protocol");
-    assert_eq!(cfg.transport.as_protocol_str(), "http/protobuf");
+    assert_eq!(cfg.logs_transport.as_protocol_str(), "http/protobuf");
+    assert_eq!(cfg.metrics_transport.as_protocol_str(), "http/protobuf");
     assert_eq!(
         cfg.logs_endpoint,
         "https://collector.corp.example:4318/v1/logs"
@@ -5797,6 +5815,60 @@ fn external_otel_file_table_layered_under_env() {
         )
         .is_none()
     );
+}
+#[test]
+fn external_otel_file_table_carries_mtls_paths() {
+    let effective: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_metrics_exporter = "otlp"
+            otel_endpoint = "https://collector.corp.example:4318"
+            otel_protocol = "grpc"
+            otel_certificate = "/etc/ssl/corp-ca.pem"
+            otel_client_certificate = "/etc/ssl/client.crt"
+            otel_client_key = "/etc/ssl/client.key"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        Some(&effective),
+        None,
+        ext_env(&[]),
+        ext_client(),
+        false,
+    )
+    .expect("managed paths alone must activate");
+    assert_eq!(
+        cfg.logs_ca_certificate.as_deref(),
+        Some("/etc/ssl/corp-ca.pem")
+    );
+    assert_eq!(
+        cfg.logs_client_certificate.as_deref(),
+        Some("/etc/ssl/client.crt")
+    );
+    assert_eq!(cfg.logs_client_key.as_deref(), Some("/etc/ssl/client.key"));
+    assert_eq!(
+        cfg.metrics_client_certificate.as_deref(),
+        Some("/etc/ssl/client.crt")
+    );
+    let cfg = resolve_external_otel_config_with(
+        Some(&effective),
+        None,
+        ext_env(&[
+            ("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE", "/env/client.crt"),
+            ("OTEL_EXPORTER_OTLP_CLIENT_KEY", "/env/client.key"),
+        ]),
+        ext_client(),
+        false,
+    )
+    .expect("env override must resolve");
+    assert_eq!(
+        cfg.logs_client_certificate.as_deref(),
+        Some("/env/client.crt")
+    );
+    assert_eq!(cfg.logs_client_key.as_deref(), Some("/env/client.key"));
 }
 #[test]
 fn external_otel_requirements_pin_wins_over_env() {
@@ -6187,8 +6259,7 @@ fn resolve_runtime_fields_compat_asymmetric_sources() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6212,8 +6283,7 @@ fn resolve_runtime_fields_interactive_defaults() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6247,8 +6317,7 @@ fn resolve_runtime_fields_headless_defaults() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6278,8 +6347,7 @@ fn resolve_runtime_fields_managed_gateway_tools_from_remote() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6300,8 +6368,7 @@ fn resolve_runtime_fields_subagents_from_config() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6322,8 +6389,7 @@ fn resolve_runtime_fields_cli_subagents_override() {
         cli_subagents: Some(true),
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6345,8 +6411,7 @@ fn resolve_runtime_fields_gitignore_from_env() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6368,8 +6433,7 @@ fn resolve_runtime_fields_model_overrides_from_cli() {
         cli_subagents: None,
         cli_web_search_model: Some("custom-ws"),
         cli_session_summary_model: Some("custom-ss"),
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6395,8 +6459,7 @@ fn resolve_runtime_fields_path_hints_from_remote() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6417,8 +6480,7 @@ fn resolve_runtime_fields_idempotent() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6637,6 +6699,7 @@ fn prefetch_model_entry(slug: &str, context_window: u64, api_backend: ApiBackend
         info: ModelInfo {
             user_selectable: true,
             id: None,
+            model_family: None,
             model: slug.to_owned(),
             base_url: "https://test.example.com/v1".to_owned(),
             name: Some(slug.to_owned()),

@@ -657,6 +657,42 @@ fn model_show_model_fingerprint_reads_catalog_flag() {
 }
 
 #[test]
+fn reasoning_effort_helpers_resolve_wire_name_to_catalog_key() {
+    let mgr = test_manager();
+
+    let mut custom = ModelEntry {
+        info: config::ModelInfo::fallback("enterprise-slug"),
+        api_key: None,
+        env_key: None,
+        auth_provider: None,
+        api_base_url: None,
+    };
+    custom.info.supports_reasoning_effort = true;
+    custom.info.reasoning_effort = Some(ReasoningEffort::High);
+    custom.info.reasoning_efforts = vec![ReasoningEffortOption {
+        id: "high".into(),
+        value: ReasoningEffort::High,
+        label: "High".into(),
+        description: None,
+        default: true,
+    }];
+    mgr.insert_test_entry("enterprise-key", custom);
+
+    for id in ["enterprise-key", "enterprise-slug"] {
+        assert!(mgr.model_supports_reasoning_effort(id));
+        assert_eq!(
+            mgr.model_default_reasoning_effort(id),
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(mgr.model_reasoning_efforts(id).len(), 1);
+    }
+
+    assert!(!mgr.model_supports_reasoning_effort("missing-model"));
+    assert_eq!(mgr.model_default_reasoning_effort("missing-model"), None);
+    assert!(mgr.model_reasoning_efforts("missing-model").is_empty());
+}
+
+#[test]
 fn default_model_honors_allowlist_when_no_default_set() {
     let cfg = config_from_toml(
         r#"
@@ -2234,6 +2270,7 @@ fn make_entry_config_with_id(
 ) -> config::ModelEntryConfig {
     config::ModelEntryConfig {
         id: id.map(|s| s.to_owned()),
+        model_family: None,
         model: model.to_owned(),
         base_url: "https://test.api/v1".to_owned(),
         name: name.map(|n| n.to_owned()),

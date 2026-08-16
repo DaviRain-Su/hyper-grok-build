@@ -3,216 +3,14 @@ pub mod watcher;
 use crate::bundle;
 use serde::Deserialize;
 pub use xai_grok_config_types::{
-    DEFAULT_RECENCY_DECAY, MemoryDreamConfig, MemoryEmbeddingConfig, MemoryFlushConfig,
-    MemoryGcConfig, MemoryIndexConfig, MemoryInitialInjectionConfig, MemorySearchConfig,
-    MemorySessionConfig, MemoryWatcherConfig, MmrConfig, PruningConfig, TemporalDecayConfig,
+    DEFAULT_RECENCY_DECAY, MemoryConfig, MemoryDreamConfig, MemoryDreamSettings,
+    MemoryEmbeddingConfig, MemoryEmbeddingSettings, MemoryFlushConfig, MemoryFlushSettings,
+    MemoryGcConfig, MemoryGcSettings, MemoryIndexConfig, MemoryIndexSettings,
+    MemoryInitialInjectionConfig, MemoryInitialInjectionSettings, MemorySearchConfig,
+    MemorySearchSettings, MemorySessionConfig, MemorySessionSettings, MemorySettings,
+    MemoryWatcherConfig, MemoryWatcherSettings, MmrConfig, MmrSettings, PruningConfig,
+    PruningSettings, TemporalDecayConfig, TemporalDecaySettings,
 };
-/// Full configuration for the memory system.
-///
-/// Parsed from the `[memory]` section of `~/.grok/config.toml` or
-/// `.grok/config.toml`. Disabled by default; enabled via
-/// `--experimental-memory` CLI flag or `GROK_MEMORY=1` env var.
-/// Force-disabled via `GROK_MEMORY=0` (overrides TOML and remote settings).
-///
-/// All sub-configs are pre-populated with production-ready defaults so that
-/// later PRs (indexing, search, flush, pruning) can read them without any
-/// config migration.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct MemoryConfig {
-    /// Whether memory is enabled for this session.
-    pub enabled: bool,
-    /// Index / chunking settings.
-    pub index: MemoryIndexConfig,
-    /// Embedding provider settings.
-    pub embedding: MemoryEmbeddingConfig,
-    /// Hybrid search scoring settings.
-    pub search: MemorySearchConfig,
-    /// First-turn memory injection behavior.
-    pub initial_injection: MemoryInitialInjectionConfig,
-    /// Session lifecycle settings.
-    pub session: MemorySessionConfig,
-    /// File watcher settings for detecting external memory edits.
-    pub watcher: MemoryWatcherConfig,
-    /// Garbage collection settings for orphaned workspace directories.
-    pub gc: MemoryGcConfig,
-    /// autoDream consolidation settings.
-    pub dream: MemoryDreamConfig,
-    /// Pre-compaction memory flush settings.
-    ///
-    /// **Note:** Configured under `[compaction.memory_flush]` in config.toml,
-    /// not under `[memory]`. Flush is a compaction behavior.
-    #[serde(skip)]
-    pub flush: MemoryFlushConfig,
-    /// Tool-result pruning settings.
-    ///
-    /// **Note:** Configured under `[compaction.pruning]` in config.toml,
-    /// not under `[memory]`. Pruning is a compaction behavior.
-    #[serde(skip)]
-    pub pruning: PruningConfig,
-    /// Per-agent memory root override (e.g. `~/.grok/agent-memory/<name>/`).
-    #[serde(skip)]
-    pub root_dir_override: Option<std::path::PathBuf>,
-    /// When true, the root is already project-scoped so MemoryStorage should
-    /// skip the workspace hash subdirectory (use `new_flat` instead of `new`).
-    #[serde(skip)]
-    pub flat_memory_root: bool,
-}
-impl MemoryConfig {
-    /// Resolve the final memory config from all sources (in priority order):
-    /// 1. CLI flag `--no-memory` (absolute highest — always disables, overrides all)
-    /// 2. CLI flag `--experimental-memory` (enables, but overridden by --no-memory)
-    /// 3. `GROK_MEMORY` env var: `1`/`true` enables, `0`/`false` force-disables
-    /// 4. Config file `[memory]` / `[compaction]` sections
-    /// 5. Remote settings from `/v1/settings`
-    ///
-    /// Remote settings only override fields when the corresponding local
-    /// config section is absent. Section-level granularity: if `[memory.search]`
-    /// exists in TOML, all search fields come from TOML; if absent, remote
-    /// search settings apply.
-    pub fn resolve(
-        experimental_memory: bool,
-        no_memory: bool,
-        config: &toml::Value,
-        remote: Option<&crate::util::config::RemoteSettings>,
-    ) -> Self {
-        let mut result: Self = config
-            .get("memory")
-            .and_then(|v| v.clone().try_into().ok())
-            .unwrap_or_default();
-        if let Some(compaction) = config.get("compaction") {
-            if let Some(flush) = compaction.get("memory_flush")
-                && let Ok(f) = flush.clone().try_into()
-            {
-                result.flush = f;
-            }
-            if let Some(pruning) = compaction.get("pruning")
-                && let Ok(p) = pruning.clone().try_into()
-            {
-                result.pruning = p;
-            }
-        }
-        if let Some(remote) = remote {
-            let has_local_search = config.get("memory").and_then(|m| m.get("search")).is_some();
-            if !has_local_search {
-                if let Some(v) = remote.memory_search_max_results {
-                    result.search.max_results = v as usize;
-                }
-                if let Some(v) = remote.memory_search_min_score {
-                    result.search.min_score = v;
-                }
-                if let Some(v) = remote.memory_temporal_decay_enabled {
-                    result.search.temporal_decay.enabled = v;
-                }
-                if let Some(v) = remote.memory_temporal_decay_half_life_days {
-                    result.search.temporal_decay.half_life_days = v;
-                }
-                if let Some(v) = remote.memory_mmr_enabled {
-                    result.search.mmr.enabled = v;
-                }
-                if let Some(v) = remote.memory_mmr_lambda {
-                    result.search.mmr.lambda = v.clamp(0.0, 1.0);
-                }
-            }
-            let has_local_initial_injection = config
-                .get("memory")
-                .and_then(|m| m.get("initial_injection"))
-                .is_some();
-            if !has_local_initial_injection {
-                if let Some(v) = remote.memory_initial_injection_enabled {
-                    result.initial_injection.enabled = v;
-                }
-                if let Some(v) = remote.memory_initial_injection_min_score {
-                    result.initial_injection.min_score = Some(v);
-                }
-            }
-            let has_local_embedding = config
-                .get("memory")
-                .and_then(|m| m.get("embedding"))
-                .is_some();
-            if !has_local_embedding {
-                if let Some(ref v) = remote.memory_embedding_model {
-                    result.embedding.model = Some(v.clone());
-                }
-                if let Some(v) = remote.memory_embedding_dimensions {
-                    result.embedding.dimensions = v as usize;
-                }
-            }
-            let has_local_pruning = config
-                .get("compaction")
-                .and_then(|c| c.get("pruning"))
-                .is_some();
-            if !has_local_pruning {
-                if let Some(v) = remote.pruning_enabled {
-                    result.pruning.enabled = v;
-                }
-                if let Some(v) = remote.pruning_keep_last_n_turns {
-                    result.pruning.keep_last_n_turns = v as usize;
-                }
-                if let Some(v) = remote.pruning_soft_trim_threshold {
-                    result.pruning.soft_trim_threshold = v as usize;
-                }
-            }
-            let has_local_flush = config
-                .get("compaction")
-                .and_then(|c| c.get("memory_flush"))
-                .is_some();
-            if !has_local_flush {
-                if let Some(v) = remote.flush_enabled {
-                    result.flush.enabled = v;
-                }
-                if let Some(v) = remote.flush_soft_threshold_tokens {
-                    result.flush.soft_threshold_tokens = v;
-                }
-                if let Some(v) = remote.flush_idle_timeout_secs {
-                    result.flush.idle_timeout_secs = Some(v);
-                }
-                if let Some(v) = remote.flush_semantic_dedup_threshold {
-                    result.flush.semantic_dedup_threshold = Some(v.clamp(0.0, 1.0));
-                }
-            }
-            let has_local_watcher = config
-                .get("memory")
-                .and_then(|m| m.get("watcher"))
-                .is_some();
-            if !has_local_watcher && let Some(v) = remote.memory_watcher_enabled {
-                result.watcher.enabled = v;
-            }
-            let has_local_dream = config.get("memory").and_then(|m| m.get("dream")).is_some();
-            if !has_local_dream {
-                if let Some(v) = remote.dream_enabled {
-                    result.dream.enabled = v;
-                }
-                if let Some(v) = remote.dream_min_hours {
-                    result.dream.min_hours = v;
-                }
-                if let Some(v) = remote.dream_min_sessions {
-                    result.dream.min_sessions = v;
-                }
-                if let Some(v) = remote.dream_check_interval_secs {
-                    result.dream.check_interval_secs = Some(v);
-                }
-            }
-        }
-        let resolved = crate::agent::config::resolve_enabled(
-            if experimental_memory {
-                Some(true)
-            } else {
-                None
-            },
-            "GROK_MEMORY",
-            result.enabled,
-            config.get("memory").is_some(),
-            remote.and_then(|r| r.memory_enabled),
-            false,
-        );
-        result.enabled = resolved.value;
-        if no_memory {
-            result.enabled = false;
-        }
-        result
-    }
-}
 /// Configuration for subagent (task tool) support.
 ///
 /// Parsed from the `[subagents]` section of `~/.grok/config.toml` or
@@ -509,49 +307,12 @@ impl SubagentsConfig {
     pub const ENV_MAX_CONCURRENT: &'static str = "GROK_MAX_CONCURRENT_SUBAGENTS";
     pub const ENV_LIMIT_BEHAVIOR: &'static str = "GROK_SUBAGENT_LIMIT_BEHAVIOR";
     pub const ENV_WORKFLOW_MAX_CONCURRENT: &'static str = "GROK_WORKFLOW_MAX_CONCURRENT_AGENTS";
-    /// Clamp to `1..`; a limit can be adjusted but never disabled.
-    fn clamp_count(value: i64, source: &str, name: &str) -> usize {
-        if value < 1 {
-            tracing::warn!(source, name, value, "subagent limit < 1; clamping to 1");
-            1
-        } else {
-            usize::try_from(value).unwrap_or(usize::MAX)
-        }
-    }
-    /// Precedence: env > TOML > remote > default; invalid layers warn and fall through.
-    fn resolve_count(
-        env_name: &str,
-        env: Option<&str>,
-        config: Option<i64>,
-        remote: Option<u32>,
-        default: usize,
-    ) -> usize {
-        if let Some(value) = env {
-            match xai_grok_tools::util::env::parse_positive(value.trim()) {
-                Some(parsed) => return usize::try_from(parsed).unwrap_or(usize::MAX),
-                None => {
-                    tracing::warn!(
-                        name = env_name,
-                        %value,
-                        "invalid env value (expected a positive whole number); ignoring"
-                    );
-                }
-            }
-        }
-        if let Some(v) = config {
-            return Self::clamp_count(v, "config", env_name);
-        }
-        if let Some(v) = remote {
-            return Self::clamp_count(i64::from(v), "remote", env_name);
-        }
-        default
-    }
     pub(crate) fn resolve_max_concurrent(
         env: Option<&str>,
         config: Option<i64>,
         remote: Option<u32>,
     ) -> usize {
-        Self::resolve_count(
+        resolve_positive_count(
             Self::ENV_MAX_CONCURRENT,
             env,
             config,
@@ -564,7 +325,7 @@ impl SubagentsConfig {
         config: Option<i64>,
         remote: Option<u32>,
     ) -> usize {
-        Self::resolve_count(
+        resolve_positive_count(
             Self::ENV_WORKFLOW_MAX_CONCURRENT,
             env,
             config,
@@ -874,6 +635,16 @@ impl ModelOverrideConfig {
         result
     }
 }
+/// Raw `[tools.media_gen]` counts; resolve via
+/// [`ToolsConfig::resolve_max_parallel_image_gen_calls`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct MediaGenToolsConfig {
+    #[serde(default)]
+    pub max_parallel_image_gen_calls: Option<i64>,
+    #[serde(default)]
+    pub max_parallel_video_gen_calls: Option<i64>,
+}
 /// Tool behavior configuration (`[tools]` in config.toml).
 ///
 /// Controls cross-cutting tool behavior such as `.gitignore` filtering.
@@ -881,6 +652,7 @@ impl ModelOverrideConfig {
 /// ```toml
 /// [tools]
 /// disable_zdr_incompatible_tools = true
+/// # [tools.media_gen] — see MediaGenToolsConfig
 /// # [tools.zdr_video_output_s3] — see ZdrVideoOutputS3Config
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -902,8 +674,11 @@ pub struct ToolsConfig {
     /// is `true`. Populated from `[tools.zdr_video_output_s3]` in config.
     pub zdr_video_output_s3:
         Option<xai_grok_tools::implementations::grok_build::video_gen::ZdrVideoOutputS3Config>,
+    pub media_gen: MediaGenToolsConfig,
 }
 impl ToolsConfig {
+    pub const ENV_MAX_PARALLEL_IMAGE_GEN_CALLS: &'static str = "GROK_MAX_PARALLEL_IMAGE_GEN_CALLS";
+    pub const ENV_MAX_PARALLEL_VIDEO_GEN_CALLS: &'static str = "GROK_MAX_PARALLEL_VIDEO_GEN_CALLS";
     /// Resolve the final tools config, in priority order:
     /// 1. Env vars `GROK_RESPECT_GITIGNORE` and
     ///    `GROK_DISABLE_ZDR_INCOMPATIBLE_TOOLS` (`0`/`false` off,
@@ -948,6 +723,16 @@ impl ToolsConfig {
                         None
                     }
                 }),
+            media_gen: MediaGenToolsConfig {
+                max_parallel_image_gen_calls: tools
+                    .and_then(|t| t.get("media_gen"))
+                    .and_then(|m| m.get("max_parallel_image_gen_calls"))
+                    .and_then(|v| v.as_integer()),
+                max_parallel_video_gen_calls: tools
+                    .and_then(|t| t.get("media_gen"))
+                    .and_then(|m| m.get("max_parallel_video_gen_calls"))
+                    .and_then(|v| v.as_integer()),
+            },
         };
         match std::env::var("GROK_RESPECT_GITIGNORE").as_deref() {
             Ok("0") | Ok("false") => {
@@ -968,6 +753,98 @@ impl ToolsConfig {
             _ => {}
         }
         result
+    }
+    pub(crate) fn resolve_max_parallel_image_gen_calls(
+        env: Option<&str>,
+        config: Option<i64>,
+        remote: Option<u32>,
+    ) -> usize {
+        resolve_clamped_count(
+            Self::ENV_MAX_PARALLEL_IMAGE_GEN_CALLS,
+            env,
+            config,
+            remote,
+            xai_grok_tools::media_gen_limits::DEFAULT_MAX_PARALLEL_IMAGE_GEN,
+        )
+    }
+    pub(crate) fn resolve_max_parallel_video_gen_calls(
+        env: Option<&str>,
+        config: Option<i64>,
+        remote: Option<u32>,
+    ) -> usize {
+        resolve_clamped_count(
+            Self::ENV_MAX_PARALLEL_VIDEO_GEN_CALLS,
+            env,
+            config,
+            remote,
+            xai_grok_tools::media_gen_limits::DEFAULT_MAX_PARALLEL_VIDEO_GEN,
+        )
+    }
+}
+/// Media-gen ladder: env > TOML > remote > default, with every numeric layer
+/// clamping `< 1` to `1`. Non-numeric env warns and falls through.
+fn resolve_clamped_count(
+    env_name: &str,
+    env: Option<&str>,
+    config: Option<i64>,
+    remote: Option<u32>,
+    default: usize,
+) -> usize {
+    if let Some(raw) = env {
+        match raw.trim().parse::<i64>() {
+            Ok(v) => return clamp_positive_count(v, "env", env_name),
+            Err(_) => {
+                tracing::warn!(
+                    name = env_name,
+                    %raw,
+                    "invalid env value (expected a whole number); ignoring"
+                );
+            }
+        }
+    }
+    if let Some(v) = config {
+        return clamp_positive_count(v, "config", env_name);
+    }
+    if let Some(v) = remote {
+        return clamp_positive_count(i64::from(v), "remote", env_name);
+    }
+    default
+}
+/// Positive whole-number ladder: env > TOML > remote > default.
+/// Invalid/non-positive env warns and falls through; TOML/remote `< 1` clamp to 1.
+pub(crate) fn resolve_positive_count(
+    env_name: &str,
+    env: Option<&str>,
+    config: Option<i64>,
+    remote: Option<u32>,
+    default: usize,
+) -> usize {
+    if let Some(value) = env {
+        match xai_grok_tools::util::env::parse_positive(value.trim()) {
+            Some(parsed) => return usize::try_from(parsed).unwrap_or(usize::MAX),
+            None => {
+                tracing::warn!(
+                    name = env_name,
+                    %value,
+                    "invalid env value (expected a positive whole number); ignoring"
+                );
+            }
+        }
+    }
+    if let Some(v) = config {
+        return clamp_positive_count(v, "config", env_name);
+    }
+    if let Some(v) = remote {
+        return clamp_positive_count(i64::from(v), "remote", env_name);
+    }
+    default
+}
+fn clamp_positive_count(value: i64, source: &str, name: &str) -> usize {
+    if value < 1 {
+        tracing::warn!(source, name, value, "positive count < 1; clamping to 1");
+        1
+    } else {
+        usize::try_from(value).unwrap_or(usize::MAX)
     }
 }
 /// Storage mode for session persistence.
@@ -1022,13 +899,15 @@ impl StorageMode {
 }
 pub use xai_grok_config::ConfigLayers;
 pub use xai_grok_config::{
-    MDM_REQUIREMENTS_SOURCE, RequirementsLayer, RequirementsSource, ServingIdentity, SyncMarker,
+    GROK_CONFIG_ENV, GROK_CONFIG_PATH_ENV, MDM_REQUIREMENTS_SOURCE, OverlaySource,
+    RequirementsLayer, RequirementsSource, ResolvedOverlay, ServingIdentity, SyncMarker,
     claude_managed_settings_probe_path, confirmed_team_switch, confirmed_team_switch_at,
     is_managed_config_hard_stale_for, is_managed_config_stale_for, load_config_file,
     load_from_disk, load_managed_config, load_merged_requirements, load_system_managed_config,
     load_toml_file, managed_config_identity_changed_at, managed_deployment_id,
     managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
-    normalize_identity, requirements_layers, system_config_dir, user_grok_home,
+    normalize_identity, requirements_layers, resolved_env_overlay, system_config_dir,
+    user_grok_home,
 };
 /// Map of "dotted.path" to which config file the value came from.
 pub(crate) fn config_origins(
@@ -1058,6 +937,9 @@ pub(crate) fn config_origins(
         ConfigSource::UserConfig,
         &mut origins,
     );
+    if let Some(overlay) = &layers.env_overlay {
+        walk_toml(overlay, &mut vec![], ConfigSource::EnvOverlay, &mut origins);
+    }
     origins
 }
 fn walk_toml(
@@ -1164,26 +1046,15 @@ fn apply_managed_settings_features_inner(
         });
     }
     if features.disable_feedback == Some(true) {
-        config.features.feedback = Some(false);
+        use crate::agent::config::Feature;
+        config.feature_values.insert(Feature::Feedback, false);
         enforced.push(EnforcedField {
-            path: "features.feedback",
+            path: Feature::Feedback.path(),
             value: "false (DISABLE_FEEDBACK_COMMAND)".to_string(),
             source: source.clone(),
         });
     }
     enforced
-}
-/// Display text naming the setting that turned session search off, or `None` while it is on.
-/// One source of truth: the latch records the setting that closed it, which a later resolve of a
-/// lower tier cannot change.
-pub fn session_search_turned_off_by() -> Option<&'static str> {
-    let source = crate::session::storage::search_gate::closed_by()?;
-    Some(crate::session::storage::search_gate::session_search_off_reason(source))
-}
-/// Resolve the session search setting and latch it for the process. Call after every rewrite of
-/// `remote_settings`, and before anything can reach the index.
-pub fn apply_session_search_gate(config: &crate::agent::config::Config) {
-    crate::session::storage::search_gate::apply_gate(&config.resolve_session_search());
 }
 /// Load the on-disk config for a one-shot command and clamp it with policy. Without the clamp a
 /// pinned value reads as an ordinary config value, which the environment outranks.
@@ -1208,7 +1079,7 @@ pub(crate) fn apply_policy(config: &mut crate::agent::config::Config) {
 /// Clamp `AgentConfig` fields per `requirements.toml`. No-op if absent.
 /// System pins win over user pins on conflict.
 pub(crate) fn apply_requirements(config: &mut crate::agent::config::Config) -> Vec<EnforcedField> {
-    requirements_layers()
+    let enforced: Vec<EnforcedField> = requirements_layers()
         .into_iter()
         .flat_map(|layer| {
             apply_requirements_inner(
@@ -1219,7 +1090,19 @@ pub(crate) fn apply_requirements(config: &mut crate::agent::config::Config) -> V
                 },
             )
         })
-        .collect()
+        .collect();
+    keep_the_deciding_layer(enforced)
+}
+/// Layers arrive user first, system last, and the last write is the pin that
+/// holds. Report that one, so an operator reading the log sees the file that
+/// decided rather than the first that asked. Keyed by value as well as path,
+/// because one layer can enforce the same path twice for different reasons.
+fn keep_the_deciding_layer(mut enforced: Vec<EnforcedField>) -> Vec<EnforcedField> {
+    let mut seen = std::collections::HashSet::new();
+    enforced.reverse();
+    enforced.retain(|field| seen.insert((field.path, field.value.clone())));
+    enforced.reverse();
+    enforced
 }
 fn apply_requirements_inner(
     config: &mut crate::agent::config::Config,
@@ -1227,7 +1110,17 @@ fn apply_requirements_inner(
     source: &RequirementSource,
 ) -> Vec<EnforcedField> {
     fn req_bool(req: &toml::Value, section: &str, key: &str) -> Option<bool> {
-        req.get(section)?.get(key)?.as_bool()
+        let value = req.get(section)?.get(key)?;
+        let parsed = value.as_bool();
+        if parsed.is_none() {
+            tracing::error!(
+                section,
+                key,
+                kind = value.type_str(),
+                "requirements value is not a boolean; the constraint is not applied"
+            );
+        }
+        parsed
     }
     fn req_str<'a>(req: &'a toml::Value, section: &str, key: &str) -> Option<&'a str> {
         req.get(section)?.get(key)?.as_str()
@@ -1244,10 +1137,11 @@ fn apply_requirements_inner(
         ($name:ident) => {
             if let Some(val) = req_bool(req, "features", stringify!($name)) {
                 config.requirements.$name.pin(val, source.clone());
-                if config.features.$name != Some(val) {
-                    config.features.$name = Some(val);
-                    push(concat!("features.", stringify!($name)), format!("{val}"));
-                }
+                config.features.$name = Some(val);
+                // Unconditional, like the registry loop: a later layer repeating
+                // the pin must report, or the dedupe keeps the first layer that
+                // asked instead of the one that decided.
+                push(concat!("features.", stringify!($name)), format!("{val}"));
             }
         };
     }
@@ -1290,17 +1184,33 @@ fn apply_requirements_inner(
             }
         };
     }
-    pin_feature!(feedback);
-    pin_feature!(lsp_tools);
-    pin_feature!(web_fetch);
-    pin_feature!(ask_user_question);
     pin_feature!(image_gen);
     pin_requirement_only!(image_edit);
     pin_feature!(video_gen);
-    pin_feature!(write_file);
-    pin_feature!(voice_mode);
-    pin_feature!(session_search);
+    for spec in crate::agent::config::FEATURES {
+        let Some(value) = req
+            .get("features")
+            .and_then(|features| features.get(spec.key))
+        else {
+            continue;
+        };
+        let Some(val) = value.as_bool() else {
+            tracing::error!(
+                path = spec.path,
+                kind = value.type_str(),
+                source = %source,
+                "requirements pin is not a boolean; the pin is ignored until the next launch, \
+                 which will refuse to start"
+            );
+            continue;
+        };
+        config
+            .requirements
+            .pin_feature(spec.id, val, source.clone());
+        push(spec.path, format!("{val}"));
+    }
     pin_requirement_only!(remote_fetch);
+    pin_requirement_only!(title_refresh);
     if let Some(val) = req_bool(req, "telemetry", "trace_upload") {
         config.requirements.trace_upload.pin(val, source.clone());
         if config.telemetry.trace_upload != Some(val) {
@@ -1311,7 +1221,7 @@ fn apply_requirements_inner(
     enforce_opt!("cli", "auto_update", config.cli.auto_update);
     enforce_opt!("cli", "use_leader", config.cli.use_leader);
     enforce_opt!("cli", "show_tips", config.cli.show_tips);
-    enforce_val!("memory", "enabled", config.memory.enabled);
+    enforce_opt!("memory", "enabled", config.memory.enabled);
     enforce_val!("subagents", "enabled", config.subagents.enabled);
     enforce_val!("managed_mcps", "enabled", config.managed_mcps.enabled);
     if let Some(val) = req_bool(req, "tools", "respect_gitignore") {

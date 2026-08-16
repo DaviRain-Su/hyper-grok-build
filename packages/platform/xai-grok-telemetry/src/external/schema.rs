@@ -625,6 +625,8 @@ pub(crate) const BUILTIN_TOOL_NAMES: &[&str] = &[
     "scheduler_list",
     "search_tool",
     "use_tool",
+    "memory_search",
+    "memory_get",
     "update_goal",
 ];
 

@@ -19,12 +19,6 @@ Memory is experimental and disabled by default.
 
 ## Enabling Memory
 
-### Per-Session Flag
-
-```bash
-grok --experimental-memory
-```
-
 ### Environment Variable
 
 ```bash
@@ -42,19 +36,11 @@ enabled = true
 
 ### Force-Disable
 
-To disable memory even when other settings enable it:
-
-```bash
-grok --no-memory
-```
-
-Or:
+To disable memory for the process even when TOML or remote settings enable it:
 
 ```bash
 export GROK_MEMORY=0
 ```
-
-The `--no-memory` flag has absolute highest priority and always disables memory.
 
 ### Mid-Session Toggle
 
@@ -71,10 +57,10 @@ You can also toggle from inside the `/memory` modal by pressing `t`.
 
 ### Priority Order
 
-1. `--no-memory` CLI flag (always disables)
-2. `--experimental-memory` CLI flag (enables)
-3. `GROK_MEMORY` env var: `1`/`true` enables, `0`/`false` disables
-4. `[memory]` section in config.toml
+1. Hidden deprecated compatibility flag, when supplied
+2. `GROK_MEMORY` env var: `1`/`true` enables, `0`/`false` disables
+3. `[memory]` section in effective TOML
+4. Managed remote settings
 5. Default: disabled
 
 ---
@@ -91,9 +77,9 @@ Memory is stored as Markdown files under `~/.grok/memory/`:
 
 Grok suffixes each workspace directory with a short hash of the repository's identity. The identity is the `origin` remote in `org/repo` form when the directory is a Git repository with an `origin` remote, or the directory path otherwise. Because clones and worktrees of the same repository share an `origin` remote, they also share one memory directory.
 
-An SQLite index supports hybrid search across all memory files:
-- **FTS5** provides full-text search for keyword matching.
-- **vec0** provides vector search for semantic similarity. Vector search is optional and requires an embedding.
+An SQLite index supports search across all memory files:
+- **FTS5** provides the default full-text search for keyword matching.
+- **vec0** adds vector search for semantic similarity when an embedding model is configured.
 
 ---
 
@@ -239,10 +225,9 @@ Dream also runs automatically. By default, Grok checks the consolidation gates w
 ```toml
 [memory.dream]
 enabled = true     # Run automatic consolidation (default: true)
-min_hours = 4      # Minimum hours between consolidations
-min_sessions = 3   # Minimum sessions since the last consolidation
-# check_interval_secs is unset by default, so Dream runs only at session end.
-# Set it to a positive number of seconds to also check on a periodic interval.
+min_hours = 24     # Minimum hours between consolidations
+min_sessions = 5   # Minimum sessions since the last consolidation
+check_interval_secs = 3600 # Also check the gates hourly
 ```
 
 ---
@@ -258,7 +243,7 @@ First-turn injection can be configured:
 ```toml
 [memory.initial_injection]
 enabled = true     # Enable or disable first-turn injection
-min_score = 0.0    # Optional score threshold; unset by default, which applies no filtering
+min_score = 0.9    # Score threshold for first-turn injection
 ```
 
 ### After Compaction
@@ -277,16 +262,12 @@ Read my workspace MEMORY.md
 ```
 
 The model has access to two memory tools:
-- `memory_search` -- Hybrid search across all memory (vector + full-text)
+- `memory_search` -- Search across all memory
 - `memory_get` -- Read a specific memory file by path
 
-### Hybrid Scoring
+### Search Scoring
 
-Memory search uses a weighted combination of:
-- **Vector similarity** (semantic) -- weight: 0.7
-- **BM25 text similarity** (keyword) -- weight: 0.3
-
-Results are filtered by a minimum score threshold (default: 0.35).
+The default embedding model is unset, so memory starts in full-text-only mode. If you configure an embedding model, search combines vector similarity (weight `0.7`) with BM25 text similarity (weight `0.3`). Results are filtered by a minimum score threshold (default: `0.7`).
 
 ### Source Weights
 
@@ -305,7 +286,7 @@ Session memories decay over time so recent sessions are prioritized:
 ```toml
 [memory.search.temporal_decay]
 enabled = true           # Enable time-based decay
-half_life_days = 7.0     # Score halves after this many days
+half_life_days = 30.0    # Score halves after this many days
 ```
 
 Only session chunks decay. Global and workspace memories are exempt since they contain curated long-term knowledge.
@@ -316,7 +297,7 @@ MMR re-ranking penalizes redundant results to improve diversity:
 
 ```toml
 [memory.search.mmr]
-enabled = false          # Opt-in diversity re-ranking
+enabled = true           # Enable diversity re-ranking
 lambda = 0.7             # 0.0 = max diversity, 1.0 = pure relevance
 ```
 
@@ -369,7 +350,7 @@ To edit memory from the shell, open the files in your editor directly -- for exa
 | Key | Default | Description |
 |-----|---------|-------------|
 | `provider` | `"api"` | Embedding provider (currently `"api"`) |
-| `model` | *(provider default)* | Embedding model name |
+| `model` | unset | Embedding model name. Unset or `""` uses full-text-only retrieval. |
 | `dimensions` | `1024` | Embedding vector dimensions |
 
 ### Search Settings (`[memory.search]`)
@@ -377,7 +358,7 @@ To edit memory from the shell, open the files in your editor directly -- for exa
 | Key | Default | Description |
 |-----|---------|-------------|
 | `max_results` | `6` | Maximum search results |
-| `min_score` | `0.35` | Minimum relevance score |
+| `min_score` | `0.7` | Minimum relevance score |
 | `vector_weight` | `0.7` | Weight for vector similarity |
 | `text_weight` | `0.3` | Weight for BM25 text similarity |
 
@@ -386,17 +367,17 @@ To edit memory from the shell, open the files in your editor directly -- for exa
 | Key | Default | Description |
 |-----|---------|-------------|
 | `enabled` | `true` | Enable first-turn memory injection |
-| `min_score` | unset | Score threshold for first-turn results. When unset, Grok applies no threshold, which is equivalent to `0.0`. |
+| `min_score` | `0.9` | Score threshold for first-turn results |
 
 ### Dream Settings (`[memory.dream]`)
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `enabled` | `true` | Enable automatic Dream consolidation |
-| `min_hours` | `4` | Minimum hours between consolidations |
-| `min_sessions` | `3` | Minimum sessions since the last consolidation |
+| `min_hours` | `24` | Minimum hours between consolidations |
+| `min_sessions` | `5` | Minimum sessions since the last consolidation |
 | `stale_lock_secs` | `3600` | Seconds before a stale consolidation lock is reclaimed |
-| `check_interval_secs` | unset | Periodic check interval in seconds. When unset, Dream runs only at session end. |
+| `check_interval_secs` | `3600` | Periodic Dream-gate check interval in seconds. Set `0` to disable periodic checks. |
 
 ### Flush Settings (`[compaction.memory_flush]`)
 
@@ -407,8 +388,8 @@ You configure flush under `[compaction]`, not `[memory]`, because it is a compac
 | `enabled` | `true` | Enable the pre-compaction memory flush |
 | `soft_threshold_tokens` | `4000` | Token headroom before the compact threshold that triggers a flush |
 | `max_flush_write_chars` | `8000` | Maximum characters the flush may write to memory |
-| `flush_model` | unset | Model for the flush turn. When unset, Grok uses the session's primary model. |
-| `idle_timeout_secs` | unset | Idle seconds before a background flush. When unset, flush runs only before compaction. |
+| `flush_model` | unset | Model for the flush turn. When unset or `""`, Grok uses the session's primary model. |
+| `idle_timeout_secs` | `300` | Idle seconds before a background flush. Set `0` to disable idle flushes. |
 | `semantic_dedup_threshold` | unset | Cosine-similarity threshold for de-duplicating flushed content. When unset, defaults to `0.92`. |
 
 ### Pruning Settings (`[compaction.pruning]`)
@@ -451,8 +432,8 @@ enabled = true    # default
 ### Memory Not Working
 
 1. Verify memory is enabled: check `grok inspect` output.
-2. Check the flag: `grok --experimental-memory` or `GROK_MEMORY=1`.
-3. Check for `--no-memory` or `GROK_MEMORY=0` overriding your config.
+2. Check `GROK_MEMORY` or `[memory] enabled` in effective TOML.
+3. Check for `GROK_MEMORY=0` or a deprecated compatibility flag overriding config.
 
 ### Memory Not Appearing in Sessions
 

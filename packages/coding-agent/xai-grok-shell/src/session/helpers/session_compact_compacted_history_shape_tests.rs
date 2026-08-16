@@ -248,6 +248,10 @@ async fn grok_build_compaction_drops_working_tail_regression_206460() {
         dropped.recent_messages.is_empty(),
         "grok-build must drop recent_messages post-compaction",
     );
+    assert!(
+        dropped.agent_message_anchor.is_none(),
+        "a human-only conversation has no agent-message anchor",
+    );
     let compacted = build_compacted_history(
         "You are a helpful assistant.",
         "<user_info>\nOS: macos\n</user_info>",
@@ -316,6 +320,7 @@ fn fallback_minimal_history_has_no_tool_results() {
     let state_context = CompactionStateContext {
         cwd_generation: 0,
         destination_project_instructions: None,
+        agent_message_anchor: None,
         recent_messages: vec![],
         last_user_query: Some("fix the bug".to_string()),
         agent_edited_paths: vec!["src/main.rs".to_string()],
@@ -527,6 +532,7 @@ fn fallback_preserves_subagents() {
     let original = CompactionStateContext {
         cwd_generation: 0,
         destination_project_instructions: None,
+        agent_message_anchor: None,
         recent_messages: vec![ConversationItem::assistant("working")],
         last_user_query: Some("fix the bug".to_string()),
         agent_edited_paths: vec!["src/main.rs".to_string()],
@@ -556,6 +562,7 @@ fn fallback_preserves_subagents() {
     let fallback = CompactionStateContext {
         cwd_generation: original.cwd_generation,
         destination_project_instructions: original.destination_project_instructions.clone(),
+        agent_message_anchor: original.agent_message_anchor.clone(),
         recent_messages: vec![],
         last_user_query: original.last_user_query.clone(),
         agent_edited_paths: original.agent_edited_paths.clone(),

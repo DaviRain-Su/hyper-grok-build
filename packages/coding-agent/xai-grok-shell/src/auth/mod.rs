@@ -39,6 +39,9 @@ pub use config::{
     ForceLoginTeam, GrokComConfig, OAuth2ProviderConfig, OidcAuthConfig, PreferredAuthMethod,
     XAI_OAUTH2_ISSUER, is_xai_oauth2_issuer, xai_oauth2_issuer,
 };
+pub(crate) use config::{
+    force_login_team_from_env, force_login_team_from_requirements, resolve_force_login_team,
+};
 pub(crate) use external_auth::{parse_output, refresh_with_command};
 pub(crate) use flow::{
     AuthChannels, mint_session_noninteractive, run_auth_flow, run_auth_flow_with_stderr_bridge,

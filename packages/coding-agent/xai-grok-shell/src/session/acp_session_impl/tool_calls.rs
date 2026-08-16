@@ -361,20 +361,27 @@ impl SessionActor {
         }
         let mut final_result: Option<ToolLoop> = None;
         let mut deferred_followups: Vec<ConversationItem> = Vec::new();
-        if tool_calls.len() > 1 {
-            let kind_of = |name: &str| self.agent.borrow().tool_bridge().tool_kind(name);
-            let (body, tail) = split_exit_plan_tail(tool_calls, kind_of);
-            if !body.is_empty() {
-                self.execute_tool_calls_batch(body, &mut deferred_followups, &mut final_result)
-                    .await?;
-            }
-            if !tail.is_empty() {
-                self.execute_tool_calls_batch(tail, &mut deferred_followups, &mut final_result)
-                    .await?;
-            }
-        } else {
-            self.execute_tool_calls_batch(tool_calls, &mut deferred_followups, &mut final_result)
+        let tool_calls = self.reject_excess_media_gen_calls(tool_calls).await?;
+        if !tool_calls.is_empty() {
+            if tool_calls.len() > 1 {
+                let kind_of = |name: &str| self.agent.borrow().tool_bridge().tool_kind(name);
+                let (body, tail) = split_exit_plan_tail(tool_calls, kind_of);
+                if !body.is_empty() {
+                    self.execute_tool_calls_batch(body, &mut deferred_followups, &mut final_result)
+                        .await?;
+                }
+                if !tail.is_empty() {
+                    self.execute_tool_calls_batch(tail, &mut deferred_followups, &mut final_result)
+                        .await?;
+                }
+            } else {
+                self.execute_tool_calls_batch(
+                    tool_calls,
+                    &mut deferred_followups,
+                    &mut final_result,
+                )
                 .await?;
+            }
         }
         {
             let _span = if !deferred_followups.is_empty() {
@@ -398,6 +405,88 @@ impl SessionActor {
             return Ok(final_result);
         }
         Ok(ToolLoop::Continue)
+    }
+    /// Per-name media-gen counts that exceed this session's cap.
+    pub(super) fn media_gen_over_cap(
+        &self,
+        calls: &[xai_grok_sampling_types::ToolCall],
+    ) -> Vec<xai_grok_tools::media_gen_limits::MediaGenOverCap> {
+        let kind_of = |name: &str| self.agent.borrow().tool_bridge().tool_kind(name);
+        xai_grok_tools::media_gen_limits::over_cap_by_name(
+            calls.iter().map(|c| (c.name.as_str(), kind_of(&c.name))),
+            &self.rebuild_spec.media_gen_batch_limits,
+        )
+    }
+    /// Every rejected tool_use id still gets a tool_result so the provider batch stays paired.
+    /// Registers Pending `ToolCall` then Failed `ToolCallUpdate` (via
+    /// `handle_tool_not_executed`) so clients do not orphan the update.
+    async fn reject_excess_media_gen_calls(
+        &self,
+        tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
+    ) -> Result<Vec<crate::sampling::types::ToolCallResponse>, acp::Error> {
+        let kind_of = |name: &str| self.agent.borrow().tool_bridge().tool_kind(name);
+        let (allowed, rejected) = xai_grok_tools::media_gen_limits::partition_media_gen_batch(
+            tool_calls,
+            |c| c.function.name.as_str(),
+            |c| kind_of(&c.function.name),
+            &self.rebuild_spec.media_gen_batch_limits,
+        );
+        if rejected.is_empty() {
+            return Ok(allowed);
+        }
+        let rejected_count = rejected.len();
+        let mut rejected_by_name: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (call, reason) in rejected {
+            let tool_name = call.function.name.clone();
+            *rejected_by_name.entry(tool_name.clone()).or_default() += 1;
+            let tool_call_id = acp::ToolCallId::new(std::sync::Arc::from(call.id.clone()));
+            let early_raw_input =
+                serde_json::from_str::<serde_json::Value>(&call.function.arguments).ok();
+            let meta = self.stamp_tool_meta(None, &tool_name, None);
+            self.send_update(
+                acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new(tool_call_id.clone(), tool_name.clone())
+                        .kind(acp::ToolKind::Other)
+                        .status(acp::ToolCallStatus::Pending)
+                        .raw_input(early_raw_input)
+                        .meta(meta),
+                ),
+                None,
+            )
+            .await;
+            self.handle_tool_not_executed(&call.id, &tool_call_id, reason)
+                .await?;
+        }
+        let limits = &self.rebuild_spec.media_gen_batch_limits;
+        for (name, rejected_n) in &rejected_by_name {
+            let max = self
+                .agent
+                .borrow()
+                .tool_bridge()
+                .tool_kind(name)
+                .and_then(|k| xai_grok_tools::media_gen_limits::max_calls_per_batch(k, limits))
+                .unwrap_or(0);
+            let admitted = allowed.iter().filter(|c| c.function.name == *name).count();
+            xai_grok_telemetry::unified_log::info(
+                "shell.media_gen.batch_rejected",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({
+                    "tool_name": name,
+                    "total": admitted + rejected_n,
+                    "rejected": rejected_n,
+                    "max": max,
+                    "disposition": "first_k_tail",
+                })),
+            );
+        }
+        tracing::warn!(
+            session_id = %self.session_info.id.0,
+            rejected = rejected_count,
+            allowed = allowed.len(),
+            "media_gen batch limit rejected tool calls"
+        );
+        Ok(allowed)
     }
     /// Prepare → dispatch → post-flight. Caller owns the outer tail flush.
     async fn execute_tool_calls_batch(
@@ -1746,7 +1835,7 @@ impl SessionActor {
         let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
         let (respond_to, _rx) = oneshot::channel();
         let _ = self
-            .queue_input(QueueInputRequest::new(
+            .queue_input(QueueInputRequest::from_legacy_prompt_id(
                 prompt_blocks,
                 prompt_id,
                 mode,
@@ -2246,7 +2335,7 @@ impl SessionActor {
         }
         let mut state = self.state.lock().await;
         let dropped = state.sweep_pending_inputs(|i| {
-            i.origin
+            i.input_origin
                 .completion_id()
                 .is_some_and(|id| consumed_ids.contains(&id))
         });
@@ -2260,7 +2349,7 @@ impl SessionActor {
         if let Some(reservations) = &self.tool_context.task_completion_reservations {
             for task_id in dropped
                 .iter()
-                .filter_map(|input| input.origin.completion_id())
+                .filter_map(|input| input.input_origin.completion_id())
             {
                 reservations.release(task_id);
             }
@@ -2274,23 +2363,21 @@ impl SessionActor {
             );
         }
     }
-    /// Drain all queued synthetic prompts (auto-wake task/subagent
-    /// completions, notification-drain batches, and goal-summary turns —
-    /// every `PromptOrigin` variant where `is_synthetic()` returns
-    /// `true`) from `pending_inputs`, and clear ALL
-    /// `pending_notifications` unconditionally (every current
-    /// `NotificationSource` variant is sourced from a synthetic event).
+    /// Drain queued runtime producer wakes (non-`ShutdownPolicy::Drain`
+    /// origins: auto-wake task/subagent completions, notification-drain
+    /// batches, goal-summary turns, etc.) from `pending_inputs`, and clear
+    /// ALL `pending_notifications` unconditionally.
     ///
-    /// Called from `SessionCommand::Shutdown` as a defensive backstop
-    /// so a synthetic prompt that slipped past the per-tool-result
-    /// sweep cannot be flushed to `chat_history.jsonl` after the actor
-    /// returns. Real user inputs are preserved.
+    /// Called from `SessionCommand::Shutdown` as a defensive backstop so a
+    /// runtime wake that slipped past the per-tool-result sweep cannot be
+    /// flushed to `chat_history.jsonl` after the actor returns. Drain-policy
+    /// rows are preserved.
     pub(super) async fn drop_pending_synthetic_items(&self) {
         let mut state = self.state.lock().await;
         let mut kept = VecDeque::with_capacity(state.pending_inputs.len());
         let mut dropped = Vec::new();
         for input in std::mem::take(&mut state.pending_inputs) {
-            if input.origin.is_synthetic() {
+            if input.input_origin.is_preemptible_runtime_wake() {
                 dropped.push(input);
             } else {
                 kept.push_back(input);
@@ -2302,7 +2389,7 @@ impl SessionActor {
         if let Some(reservations) = &self.tool_context.task_completion_reservations {
             for task_id in dropped
                 .iter()
-                .filter_map(|input| input.origin.completion_id())
+                .filter_map(|input| input.input_origin.completion_id())
             {
                 reservations.release(task_id);
             }

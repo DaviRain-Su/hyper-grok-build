@@ -491,7 +491,7 @@ impl AgentView {
                     .hit_subagent_frame_close
                     .contains(mouse.column, mouse.row)
             {
-                self.active_subagent = None;
+                self.close_subagent_fullscreen();
                 return InputOutcome::Changed;
             }
             if let Event::Mouse(mouse) = ev
@@ -511,7 +511,7 @@ impl AgentView {
                 && key.kind != KeyEventKind::Release
                 && (key!('q').matches(key) || key.code == KeyCode::Esc)
             {
-                self.active_subagent = None;
+                self.close_subagent_fullscreen();
                 return InputOutcome::Changed;
             }
             if let Some(child_view) = self.subagent_views.get_mut(child_sid) {

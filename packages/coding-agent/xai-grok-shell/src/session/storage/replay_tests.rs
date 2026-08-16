@@ -4,9 +4,10 @@
 use agent_client_protocol as acp;
 
 use super::replay::{
-    ReplayLookupFallback, ReplayPathHint, ReplayToolCollapser, collect_unfinished_subagents,
-    filter_delta_replay_lines, for_each_replay_update_in_file, line_is_available_commands_update,
-    line_is_dropped_on_replay, line_is_in_progress_tool_call_update, prepare_replay_lines,
+    ReplayLookupFallback, ReplayPathHint, ReplayToolCollapser, ReplayedUpdate,
+    collect_unfinished_subagents, filter_delta_replay_lines, for_each_replay_update_in_file,
+    line_is_available_commands_update, line_is_dropped_on_replay,
+    line_is_in_progress_tool_call_update, prepare_replay_lines, replay_would_emit,
     resolve_replay_updates_path, stream_replay_updates_at, stream_replay_updates_at_hinted,
 };
 use super::{
@@ -714,6 +715,17 @@ fn persist_acp_update(update: acp::SessionUpdate) -> String {
     persist_acp_update_with_meta(update, None)
 }
 
+fn persist_xai_update(update: crate::extensions::notification::SessionUpdate) -> String {
+    let notif = crate::extensions::notification::SessionNotification {
+        session_id: acp::SessionId::new("s"),
+        update,
+        meta: None,
+    };
+    let envelope =
+        SessionUpdateEnvelope::from_update(&SessionUpdate::Xai(Box::new(notif))).unwrap();
+    serde_json::to_string(&envelope).unwrap()
+}
+
 fn persist_acp_update_with_meta(
     update: acp::SessionUpdate,
     meta: Option<serde_json::Value>,
@@ -963,11 +975,186 @@ fn stream_replay_forwards_completed_tool_call_update_without_base() {
             child_cwd: None,
             ..Default::default()
         },
-        |u| updates.push(u),
+        |u| {
+            if let ReplayedUpdate::Acp(u, _) = u {
+                updates.push(u)
+            }
+        },
     )
     .unwrap();
     assert_eq!(updates.len(), 1);
     assert!(matches!(&updates[0], acp::SessionUpdate::ToolCallUpdate(_)));
+}
+
+/// Persisted xAI child events (compaction, retry) are forwarded in file
+/// order alongside the ACP stream, so a rebuilt child view keeps its
+/// non-ACP markers, but they never count toward `Emitted`.
+#[test]
+fn stream_replay_forwards_xai_updates_in_file_order() {
+    let home = tempfile::tempdir().unwrap();
+    let sid = "child-xai";
+    let dir = home.path().join("sessions").join("cwd").join(sid);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(SUMMARY_FILE), "{}").unwrap();
+    let compact = persist_xai_update(
+        crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
+            tokens_before: Some(1_000),
+            tokens_after: 100,
+            elapsed_ms: Some(5),
+            summary_preview: None,
+        },
+    );
+    let msg = acp_envelope(
+        r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}"#,
+    );
+    std::fs::write(dir.join(UPDATES_FILE), format!("{compact}\n{msg}\n")).unwrap();
+
+    let mut kinds = Vec::new();
+    let emission =
+        stream_replay_updates_at_hinted(sid, home.path(), ReplayPathHint::default(), |u| {
+            kinds.push(matches!(u, ReplayedUpdate::Xai(_)));
+        })
+        .unwrap();
+    assert_eq!(emission, ReplayEmission::Emitted);
+    assert_eq!(kinds, vec![true, false], "xai then acp, in file order");
+}
+
+/// The stream forwards each persisted line's `_meta` alongside the ACP
+/// update, so a child rebuild can restore original timestamps
+/// (`agentTimestampMs`) instead of stamping entries at rebuild time.
+#[test]
+fn stream_replay_forwards_persisted_line_meta() {
+    let home = tempfile::tempdir().unwrap();
+    let sid = "child-meta";
+    let dir = home.path().join("sessions").join("cwd").join(sid);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(SUMMARY_FILE), "{}").unwrap();
+    let msg = acp_envelope_with_meta(
+        r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}"#,
+        r#"{"agentTimestampMs":1700000000000}"#,
+    );
+    std::fs::write(dir.join(UPDATES_FILE), format!("{msg}\n")).unwrap();
+
+    let mut metas = Vec::new();
+    let emission =
+        stream_replay_updates_at_hinted(sid, home.path(), ReplayPathHint::default(), |u| {
+            if let ReplayedUpdate::Acp(_, meta) = u {
+                metas.push(meta);
+            }
+        })
+        .unwrap();
+    assert_eq!(emission, ReplayEmission::Emitted);
+    assert_eq!(metas.len(), 1);
+    let meta = metas[0]
+        .as_ref()
+        .expect("persisted _meta must be forwarded");
+    assert_eq!(
+        meta.get("agentTimestampMs").and_then(|v| v.as_i64()),
+        Some(1_700_000_000_000)
+    );
+}
+
+/// A transcript holding only xAI events replays them but stays `Empty`:
+/// eviction decisions must not settle on a file the client cannot rebuild
+/// transcript content from.
+#[test]
+fn xai_only_transcript_forwards_but_stays_empty() {
+    let home = tempfile::tempdir().unwrap();
+    let sid = "child-xai-only";
+    let dir = home.path().join("sessions").join("cwd").join(sid);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(SUMMARY_FILE), "{}").unwrap();
+    let retry = persist_xai_update(crate::extensions::notification::SessionUpdate::RetryState(
+        crate::extensions::notification::RetryState::Retrying {
+            attempt: 1,
+            max_retries: 3,
+            reason: "overloaded".into(),
+        },
+    ));
+    std::fs::write(dir.join(UPDATES_FILE), format!("{retry}\n")).unwrap();
+
+    let mut xai = 0usize;
+    let emission =
+        stream_replay_updates_at_hinted(sid, home.path(), ReplayPathHint::default(), |u| {
+            if matches!(u, ReplayedUpdate::Xai(_)) {
+                xai += 1;
+            }
+        })
+        .unwrap();
+    assert_eq!(xai, 1);
+    assert_eq!(emission, ReplayEmission::Empty);
+}
+
+/// The eviction probe verifies EMISSION, not file size: it must agree with
+/// what [`stream_replay_updates_at_hinted`] would actually emit, because a
+/// `true` licenses dropping the only in-memory transcript copy. Non-empty
+/// content that replays `Empty` — xAI-only lines, a torn/unparseable line,
+/// a start-only ToolCallUpdate — must report false.
+#[test]
+fn replay_would_emit_requires_an_emitting_acp_line() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("sessions")).unwrap();
+    assert!(!replay_would_emit("nope", home.path(), ReplayPathHint::default()).unwrap());
+
+    let sid = "child-probe";
+    let dir = home.path().join("sessions").join("cwd").join(sid);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(SUMMARY_FILE), "{}").unwrap();
+    let probe = |contents: &str| {
+        std::fs::write(dir.join(UPDATES_FILE), contents).unwrap();
+        replay_would_emit(sid, home.path(), ReplayPathHint::default()).unwrap()
+    };
+
+    assert!(!probe(""), "empty file");
+    assert!(!probe("{}\n"), "non-empty but unparseable envelope");
+    assert!(
+        !probe(r#"{"method":"session/update","params":{"sessionId":"s","update":{"session"#),
+        "torn line (crash mid-write)"
+    );
+    let xai_only = persist_xai_update(
+        crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
+            tokens_before: Some(1_000),
+            tokens_after: 100,
+            elapsed_ms: Some(5),
+            summary_preview: None,
+        },
+    );
+    assert!(
+        !probe(&format!("{xai_only}\n")),
+        "xAI events alone never count as Emitted"
+    );
+    let acu =
+        acp_envelope(r#"{"sessionUpdate":"available_commands_update","availableCommands":[]}"#);
+    assert!(!probe(&format!("{acu}\n")), "catalog lines are dropped");
+    let orphan_start =
+        acp_envelope(r#"{"sessionUpdate":"tool_call_update","toolCallId":"t1","title":"bash"}"#);
+    assert!(
+        !probe(&format!("{orphan_start}\n")),
+        "a baseless non-completed ToolCallUpdate never emits"
+    );
+
+    let msg = acp_envelope(
+        r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}"#,
+    );
+    assert!(probe(&format!("{msg}\n")), "a content line emits");
+    let tool = acp_envelope(
+        r#"{"sessionUpdate":"tool_call","toolCallId":"t1","title":"bash","status":"pending"}"#,
+    );
+    assert!(
+        probe(&format!("{tool}\n")),
+        "a start-only ToolCall emits via the EOF pending flush"
+    );
+    let done = acp_envelope(
+        r#"{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed"}"#,
+    );
+    assert!(
+        probe(&format!("{done}\n")),
+        "a completed ToolCallUpdate emits even without its base"
+    );
+    assert!(
+        probe(&format!("{xai_only}\n{msg}\n")),
+        "an emitting line after non-emitting ones is found"
+    );
 }
 
 #[test]

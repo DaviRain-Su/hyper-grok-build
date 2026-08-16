@@ -340,13 +340,6 @@ mouse_hover = true           # Show hover highlight on mouse over
 show_prefix = true           # Show the prompt prefix character
 ```
 
-### Todo Badges
-
-```toml
-[todo]
-badge_format = "default"   # "default" = 2/5 (done/total), "colon" = [▶:1 □:4 ✓:3 ✗:2], "comma" = [1 ▶, 4 □, 3 ✓, 2 ✗]
-```
-
 ### Terminal Behavior
 
 ```toml

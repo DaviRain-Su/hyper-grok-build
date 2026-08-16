@@ -478,14 +478,32 @@ fn deployment_key_fingerprint(key: &str) -> String {
 
 /// Whether managed config fetching is enabled (env > config.toml > default true).
 /// Callers doing auto-fetch should check this; explicit user actions (grok setup) skip it.
+///
+/// Overlay-free: reads the raw config layers via
+/// [`crate::config::ConfigLayers::effective_config_base_without_overlay`] rather
+/// than the overlay-inclusive effective config, so a `GROK_CONFIG` overlay cannot
+/// suppress the requirements/managed-config sync (a policy-enforcement gate, like
+/// `remote_fetch`; see the overlay-free contract in `ConfigLayers::env_overlay`).
+/// Requirements/MDM still clamp through the base merge.
 pub fn is_fetch_enabled() -> bool {
     if let Some(v) = crate::agent::config::env_bool("GROK_MANAGED_CONFIG") {
         return v;
     }
-    crate::config::load_effective_config()
+    crate::config::ConfigLayers::load()
         .ok()
-        .and_then(|cfg| cfg.get("features")?.get("managed_config")?.as_bool())
+        .and_then(|layers| managed_config_enabled_from_layers(&layers))
         .unwrap_or(true)
+}
+
+/// `[features] managed_config` from the raw (overlay-free) config layers, or
+/// `None` when unset. Split out so the overlay-free contract is unit-testable
+/// without touching disk.
+fn managed_config_enabled_from_layers(layers: &crate::config::ConfigLayers) -> Option<bool> {
+    layers
+        .effective_config_base_without_overlay()
+        .get("features")?
+        .get("managed_config")?
+        .as_bool()
 }
 
 /// Fetch managed config + requirements and write to `~/.grok/`, trying the

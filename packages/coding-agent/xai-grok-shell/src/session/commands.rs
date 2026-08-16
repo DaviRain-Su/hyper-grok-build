@@ -59,6 +59,44 @@ pub enum PromptCompletionKind {
     /// `MvpAgent::prompt`'s short-circuit and `respond_removed_prompt`.
     RemovedFromQueue,
 }
+/// `_meta.cancellationCategory` of a hook-denied cancel; the pager matches it
+/// to render the blocked-by-a-hook marker.
+pub const HOOK_DENIED_CATEGORY: &str = "HookDenied";
+/// `_meta.cancellationCategory` of a max-turns end; headless matches it to
+/// drive the max-turns exit code.
+pub const MAX_TURNS_REACHED_CATEGORY: &str = "max_turns_reached";
+/// `_meta.cancellationCategory` of a stationarity end.
+pub const ACTION_STATIONARITY_CATEGORY: &str = "action_stationarity";
+/// `_meta.cancellationCategory` wire name of a cancel category — an explicit
+/// match so a variant rename cannot silently change the wire. Deliberately a
+/// second vocabulary next to the serde snake_case of the events.jsonl /
+/// after-turn rails: `_meta` shipped PascalCase and clients match it.
+pub fn meta_category_str(
+    category: xai_grok_session_events::types::CancellationCategory,
+) -> &'static str {
+    use xai_grok_session_events::types::CancellationCategory;
+    match category {
+        CancellationCategory::HookDenied => HOOK_DENIED_CATEGORY,
+        CancellationCategory::PermissionRejected => "PermissionRejected",
+        CancellationCategory::PermissionCancelled => "PermissionCancelled",
+        CancellationCategory::MidTurnAbort => "MidTurnAbort",
+    }
+}
+impl PromptCompletionKind {
+    /// The completion's `_meta.cancellationCategory`, shared by every terminal
+    /// rail (`PromptResponse` `_meta`, legacy `prompt_complete`, durable
+    /// `TurnCompleted`) so the wires never disagree.
+    pub fn cancellation_category_meta(&self) -> Option<String> {
+        match self {
+            Self::Cancelled { category, .. } => {
+                category.map(|cat| meta_category_str(cat).to_string())
+            }
+            Self::MaxTurnsReached { .. } => Some(MAX_TURNS_REACHED_CATEGORY.to_string()),
+            Self::StationarityEnded => Some(ACTION_STATIONARITY_CATEGORY.to_string()),
+            Self::Completed | Self::Rewound | Self::RemovedFromQueue => None,
+        }
+    }
+}
 /// Successful prompt/turn payload returned to the ACP layer and trace uploaders.
 #[derive(Debug, Clone)]
 pub struct PromptTurnOk {
@@ -215,6 +253,13 @@ pub enum SessionCommand {
     /// reverse-request so the client re-shows approval chrome over a real live
     /// waiter. Fire-and-forget; the actor spawns the round-trip + decision.
     RestorePlanApproval,
+    /// A `/rename` landed for this resident session. `manual: true` (a user
+    /// title) freezes the auto title refresh and aborts any in-flight one;
+    /// `manual: false` (`/rename --auto`) reopens it so the whole-conversation
+    /// refresh can re-title.
+    TitleRenamed {
+        manual: bool,
+    },
     GetToolOverrides {
         respond_to: oneshot::Sender<Option<xai_grok_sampling_types::ToolOverrides>>,
     },
@@ -851,6 +896,56 @@ pub enum SessionCommand {
         commit: Option<String>,
         branch: Option<String>,
     },
+}
+#[cfg(test)]
+mod cancellation_category_meta_tests {
+    use super::PromptCompletionKind;
+    use xai_grok_session_events::types::CancellationCategory;
+    /// Pins every `_meta.cancellationCategory` wire name: shipped clients
+    /// string-match these, so a rename is a wire break the compiler can't see.
+    #[test]
+    fn pins_every_wire_name() {
+        let cancelled = |category| PromptCompletionKind::Cancelled {
+            category,
+            context: None,
+        };
+        for (kind, expected) in [
+            (
+                cancelled(Some(CancellationCategory::HookDenied)),
+                Some("HookDenied"),
+            ),
+            (
+                cancelled(Some(CancellationCategory::MidTurnAbort)),
+                Some("MidTurnAbort"),
+            ),
+            (
+                cancelled(Some(CancellationCategory::PermissionRejected)),
+                Some("PermissionRejected"),
+            ),
+            (
+                cancelled(Some(CancellationCategory::PermissionCancelled)),
+                Some("PermissionCancelled"),
+            ),
+            (cancelled(None), None),
+            (
+                PromptCompletionKind::MaxTurnsReached { limit: 1 },
+                Some("max_turns_reached"),
+            ),
+            (
+                PromptCompletionKind::StationarityEnded,
+                Some("action_stationarity"),
+            ),
+            (PromptCompletionKind::Completed, None),
+            (PromptCompletionKind::Rewound, None),
+            (PromptCompletionKind::RemovedFromQueue, None),
+        ] {
+            assert_eq!(
+                kind.cancellation_category_meta().as_deref(),
+                expected,
+                "{kind:?}"
+            );
+        }
+    }
 }
 #[cfg(test)]
 mod cancel_trigger_tests {

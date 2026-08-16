@@ -61,7 +61,8 @@ impl SessionActor {
             session_id.clone()
         };
         ConversationRequest {
-            items: call.items,
+            items: xai_chat_state::compaction_utils::ModelRequestHistory::from_raw(call.items)
+                .into_items(),
             tools: call.tools,
             hosted_tools: call.hosted_tools,
             model: Some(call.model),
@@ -149,5 +150,10 @@ impl SessionActor {
     pub(crate) fn invalidate_side_calls_for_new_prompt(&self) {
         self.recap_epoch.set(self.recap_epoch.get().wrapping_add(1));
         self.abort_turn_summary();
+        // The title refresh is deliberately NOT aborted here: it describes the
+        // whole conversation, so completing against the pre-prompt snapshot is
+        // still valid, and it runs at most once per checkpoint (one at a time).
+        // Aborting on every prompt would leave the checkpoint unconsumed and
+        // re-spawn a call each turn.
     }
 }

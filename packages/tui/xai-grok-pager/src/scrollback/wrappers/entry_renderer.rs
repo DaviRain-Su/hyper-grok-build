@@ -326,7 +326,9 @@ impl<'a> EntryRenderer<'a> {
                 spans.extend(vg.line.spans.iter().cloned());
             }
             let line = ratatui::text::Line::from(spans);
-            buf.set_line_safe(content_area.x, content_area.y, &line, content_area.width);
+            // Group-header content is registered selectable (GROUP_HEADER_RANGE_ID)
+            // and its selection maps visual columns, so it must paint visual too.
+            buf.set_line_safe_bidi(content_area.x, content_area.y, &line, content_area.width);
             return;
         }
 
@@ -368,7 +370,9 @@ impl<'a> EntryRenderer<'a> {
             spans.push(ratatui::text::Span::styled(label, text_style));
         }
         let line = ratatui::text::Line::from(spans);
-        buf.set_line_safe(content_area.x, content_area.y, &line, content_area.width);
+        // Group-header content is registered selectable (GROUP_HEADER_RANGE_ID)
+        // and its selection maps visual columns, so it must paint visual too.
+        buf.set_line_safe_bidi(content_area.x, content_area.y, &line, content_area.width);
     }
 
     /// Get the chrome width (accent + padding) for this renderer's appearance.
@@ -939,7 +943,7 @@ impl Renderable for EntryRenderer<'_> {
                 }
             }
 
-            buf.set_line_safe(content_area.x, row, &line.content, content_area.width);
+            buf.set_line_safe_bidi(content_area.x, row, &line.content, content_area.width);
 
             if own_gutter {
                 let gutter = Rect::new(content_area.x + text_width, row, ts_reserved, 1);

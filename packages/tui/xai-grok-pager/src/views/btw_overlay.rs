@@ -6,6 +6,7 @@
 //! panel stays on screen until the user presses Esc, at which point
 //! the content is persisted to scrollback as a collapsed `BtwBlock`.
 
+use crate::render::SafeBuf;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -123,8 +124,9 @@ impl BtwOverlayState {
                     block_line_idx: idx,
                     screen_y: 0,
                     screen_x: 0,
-                    selectable_cols: 0..text.width() as u16,
+                    selectable_cols: 0..crate::scrollback::types::str_display_cells(&text) as u16,
                     text,
+                    painted_region: None,
                     joiner_to_previous,
                 });
             }
@@ -395,7 +397,10 @@ pub fn render_btw_panel(
             let visible_count = end.saturating_sub(content_skip);
             for (row, idx) in (content_skip..end).enumerate() {
                 let bl = &block_output.lines[idx];
-                buf.set_line(
+                // Content paints bidi-aware (when rtl_bidi is on) so the shared
+                // selection machinery, which maps visual columns, agrees with
+                // the drawn cells — matching scrollback/list content.
+                buf.set_line_safe_bidi(
                     content_x,
                     body_y + row as u16,
                     &bl.content,
@@ -409,8 +414,9 @@ pub fn render_btw_panel(
                     block_line_idx: idx,
                     screen_y: body_y + row as u16,
                     screen_x: content_x,
-                    selectable_cols: 0..text.width() as u16,
+                    selectable_cols: 0..crate::scrollback::types::str_display_cells(&text) as u16,
                     text,
+                    painted_region: None,
                     joiner_to_previous,
                 });
             }

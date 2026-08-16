@@ -899,8 +899,9 @@ impl ScrollbackPane {
             if y >= content_area.y + content_area.height {
                 break;
             }
-            // Render line in the content area (not overlapping with accent)
-            buf.set_line_safe(content_area.x, y, &line.content, content_area.width);
+            // Render line in the content area (not overlapping with accent).
+            // Bidi: content paint only — selection maps visual columns back.
+            buf.set_line_safe_bidi(content_area.x, y, &line.content, content_area.width);
             if let (Some(range_id), Some(cols)) = (
                 line.selection_range,
                 selectable_cols(&line.content, &line.selectable),
@@ -911,8 +912,12 @@ impl ScrollbackPane {
                     block_line_idx,
                     screen_y: y,
                     screen_x: content_area.x,
-                    selectable_cols: cols,
+                    // Visual span so the hit box matches the reordered cells
+                    // even when a non-selectable suffix shifts the region.
+                    selectable_cols: crate::scrollback::types::visual_selectable_cols(line)
+                        .unwrap_or(cols),
                     text: derive_selection_text(line),
+                    painted_region: Some(crate::scrollback::types::painted_selectable_region(line)),
                     joiner_to_previous: line.joiner.clone(),
                 });
             }

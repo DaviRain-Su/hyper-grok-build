@@ -884,14 +884,14 @@ fn reclaim_hint_names_a_sequence_that_frees_space() {
     let text = render_report(&worktrees_report(vec![tracked], 100), 0);
     assert!(text.contains(AGE), "{text}");
     assert!(!text.contains(RM), "{text}");
+    assert!(
+        text.contains("keeps a worktree whose work it cannot find elsewhere"),
+        "the hint must say what gc will refuse to reclaim: {text}"
+    );
 
     let text = render_report(&worktrees_report(vec![untracked_row(60)], 100), 0);
     assert!(text.contains(RM), "{text}");
     assert!(!text.contains(AGE), "{text}");
-    assert!(
-        !text.contains("uncommitted"),
-        "gc makes no work-preserving promise on main: {text}"
-    );
 }
 
 #[cfg(unix)]

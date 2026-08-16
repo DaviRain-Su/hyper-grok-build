@@ -49,6 +49,16 @@ Version:    0.0.3
 crates.io:  https://crates.io/crates/ordered_hashmap/0.0.3
 
 --------------------------------------------------------------------------------
+nfsserve
+--------------------------------------------------------------------------------
+Path:       third_party/nfsserve/
+License:    BSD 3-Clause
+License file: third_party/nfsserve/LICENSE
+Upstream:   https://github.com/huggingface/nfsserve (v0.11.0)
+            via Turso agentfs vendored fork (cli/src/nfsserve/)
+Copyright:  Copyright (c) 2023, XetData; Copyright (c) 2025, Hugging Face
+
+--------------------------------------------------------------------------------
 End of notices for vendored third_party/ crates.
 
 Full product notices (all crates.io / git dependencies shipped with the Grok

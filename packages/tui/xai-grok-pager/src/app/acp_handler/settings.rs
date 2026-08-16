@@ -218,6 +218,17 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
     //   allow_access=Some(false) without a gate_message must NOT clear the
     //   gate (gate_from_settings returns None when gate_message is absent,
     //   which would incorrectly lift an existing gate).
+
+    // A fresh machine has no auth at startup, so the prefetch never runs and the startup seed sees
+    // no settings. Welcome only: arming behind a session blocks new sessions on an unseen screen.
+    if let Some(gate) = update.consent_gate.as_ref()
+        && matches!(app.consent_state, crate::app::consent::ConsentState::Done)
+        && matches!(app.active_view, crate::app::app_view::ActiveView::Welcome)
+        && app.agents.is_empty()
+    {
+        crate::app::event_loop::seed_consent_state_from_gate(app, Some(gate));
+    }
+
     if update.allow_access == Some(true) {
         let effs = app.lift_gate();
         app.pending_effects.extend(effs);
@@ -583,6 +594,13 @@ pub(super) struct PagerSettingsUpdate {
     collapsed_edit_blocks: Option<bool>,
     #[serde(default)]
     subscription_watch_interval_secs: Option<u64>,
+    /// Tolerant for the same reason as the settings response it mirrors: a malformed gate must not
+    /// discard the tier, permission mode and campaigns that arrive with it.
+    #[serde(
+        default,
+        deserialize_with = "xai_grok_shell::util::config::deserialize_tolerant"
+    )]
+    consent_gate: Option<xai_grok_shell::util::config::ConsentGate>,
 }
 
 /// Presence-aware string: omit → `None` (`#[serde(default)]`), null →
@@ -659,6 +677,21 @@ mod presence_aware_dto_tests {
             some_v.permission_mode,
             Some(Some("always-approve".into())),
             "string must be Some(Some(_))"
+        );
+    }
+
+    #[test]
+    fn malformed_consent_gate_does_not_discard_the_rest_of_the_update() {
+        let update: PagerSettingsUpdate = serde_json::from_value(serde_json::json!({
+            "consent_gate": {"version": "not-a-number"},
+            "tips": ["still applied"],
+        }))
+        .expect("a malformed gate must not fail the whole update");
+
+        assert!(update.consent_gate.is_none());
+        assert_eq!(
+            update.tips.as_deref(),
+            Some(&["still applied".to_string()][..]),
         );
     }
 

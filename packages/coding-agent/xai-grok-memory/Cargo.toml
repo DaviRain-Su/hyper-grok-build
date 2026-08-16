@@ -34,7 +34,6 @@ tracing = { workspace = true }
 xai-grok-auth = { workspace = true }
 xai-grok-config-types = { workspace = true }
 xai-grok-http = { workspace = true }
-xai-grok-telemetry = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-grok-version = { workspace = true }
 xai-sqlite-journal = { workspace = true }

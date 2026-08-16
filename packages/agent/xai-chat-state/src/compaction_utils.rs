@@ -4,7 +4,40 @@
 //! no I/O, no actor state. They live in `xai-chat-state` so that both
 //! this crate and `xai-grok-shell` can share them without duplication.
 use std::collections::BTreeSet;
-use xai_grok_sampling_types::{ContentPart, ConversationItem, ToolResultItem};
+use xai_grok_sampling_types::{ContentPart, ConversationItem, SyntheticReason, ToolResultItem};
+pub const AGENT_MESSAGE_MODEL_LABEL: &str =
+    "[Message authored by another agent; not a human request or approval.]";
+/// Canonical history prepared exactly once for a model-facing request.
+///
+/// The private inner value distinguishes prepared history without inspecting
+/// or rewriting payload text.
+pub struct ModelRequestHistory(Vec<ConversationItem>);
+impl ModelRequestHistory {
+    pub fn from_raw(conversation: Vec<ConversationItem>) -> Self {
+        Self(
+            conversation
+                .into_iter()
+                .map(|item| match item {
+                    ConversationItem::User(mut user)
+                        if user.synthetic_reason == Some(SyntheticReason::AgentMessage) =>
+                    {
+                        user.content.insert(
+                            0,
+                            ContentPart::Text {
+                                text: std::sync::Arc::<str>::from(AGENT_MESSAGE_MODEL_LABEL),
+                            },
+                        );
+                        ConversationItem::User(user)
+                    }
+                    other => other,
+                })
+                .collect(),
+        )
+    }
+    pub fn into_items(self) -> Vec<ConversationItem> {
+        self.0
+    }
+}
 /// Drops tool results and flattens assistant `tool_calls` into
 /// `[Called tools: ...]` text annotations.
 ///
@@ -468,6 +501,81 @@ pub fn extract_messages_since_last_real_user(
         })
         .collect()
 }
+#[derive(Clone, Copy)]
+enum AgentMessagePosition {
+    Only,
+    BeforeHuman,
+    AfterHuman,
+}
+/// Latest raw agent-authored anchor and its structural order relative to human input.
+#[derive(Clone)]
+pub struct AgentMessageAnchor {
+    item: ConversationItem,
+    position: AgentMessagePosition,
+}
+fn extract_latest_agent_message(conversation: &[ConversationItem]) -> Option<AgentMessageAnchor> {
+    let agent_message_index = conversation.iter().rposition(|item| {
+        matches!(
+            item,
+            ConversationItem::User(user)
+                if user.synthetic_reason == Some(SyntheticReason::AgentMessage)
+        )
+    })?;
+    let position = match conversation.iter().rposition(is_real_user_turn) {
+        Some(human_index) if agent_message_index < human_index => AgentMessagePosition::BeforeHuman,
+        Some(_) => AgentMessagePosition::AfterHuman,
+        None => AgentMessagePosition::Only,
+    };
+    Some(AgentMessageAnchor {
+        item: conversation[agent_message_index].clone(),
+        position,
+    })
+}
+fn extract_messages_since_last_compaction_anchor(
+    conversation: &[ConversationItem],
+) -> Vec<ConversationItem> {
+    let boundary = conversation.iter().rposition(|item| {
+        is_real_user_turn(item)
+            || matches!(
+                item,
+                ConversationItem::User(user)
+                    if user.synthetic_reason == Some(SyntheticReason::AgentMessage)
+            )
+    });
+    let start = boundary.map_or(0, |idx| {
+        if matches!(
+            &conversation[idx],
+            ConversationItem::User(user)
+                if user.synthetic_reason == Some(SyntheticReason::AgentMessage)
+        ) {
+            idx
+        } else {
+            idx + 1
+        }
+    });
+    conversation[start..]
+        .iter()
+        .filter_map(|item| match item {
+            ConversationItem::User(user)
+                if user.synthetic_reason == Some(SyntheticReason::AgentMessage) =>
+            {
+                Some(ConversationItem::User(user.clone()))
+            }
+            ConversationItem::Assistant(assistant) => {
+                Some(ConversationItem::Assistant(assistant.clone()))
+            }
+            ConversationItem::ToolResult(result) => {
+                Some(ConversationItem::ToolResult(ToolResultItem {
+                    tool_call_id: result.tool_call_id.clone(),
+                    content: std::sync::Arc::<str>::from("Tool call omitted..."),
+                    is_error: result.is_error,
+                    images: Vec::new(),
+                }))
+            }
+            _ => None,
+        })
+        .collect()
+}
 /// Summary of a running subagent for compaction context.
 ///
 /// This is the compaction-layer type. The protocol-layer equivalent is
@@ -542,9 +650,10 @@ pub struct CompactionStateContext {
     pub cwd_generation: u64,
     /// Project instructions resolved for the latest destination cwd.
     pub destination_project_instructions: Option<String>,
-    /// Messages since the last **real** user turn (assistant + omitted tool
-    /// results).  Synthetic user injections (system reminders) do not reset
-    /// the boundary, preventing orphaned ToolResults in the compacted output.
+    /// Latest agent-authored input and its order relative to the latest human turn.
+    pub agent_message_anchor: Option<AgentMessageAnchor>,
+    /// Messages since the latest human or agent-message compaction anchor.
+    /// Runtime synthetic injections do not reset the boundary.
     pub recent_messages: Vec<ConversationItem>,
     /// The last real user query text (skips synthetic injections and
     /// auto-continue prompts).
@@ -576,14 +685,14 @@ pub struct CompactionInputs {
 impl CompactionStateContext {
     /// Build the state context from current session state.
     ///
-    /// Uses real-user-aware helpers so that synthetic user injections
-    /// (system reminders, auto-continue prompts) do not corrupt the
-    /// compaction boundary.
+    /// Uses a typed compaction boundary for the retained tail while keeping
+    /// the last-query field human-only.
     pub async fn build(conversation: &[ConversationItem], inputs: CompactionInputs) -> Self {
         Self {
             cwd_generation: inputs.cwd_generation,
             destination_project_instructions: inputs.destination_project_instructions,
-            recent_messages: extract_messages_since_last_real_user(conversation),
+            agent_message_anchor: extract_latest_agent_message(conversation),
+            recent_messages: extract_messages_since_last_compaction_anchor(conversation),
             last_user_query: extract_last_real_user_query(conversation),
             agent_edited_paths: inputs.agent_edited_paths.into_iter().collect(),
             running_tasks: inputs.running_tasks,
@@ -606,18 +715,21 @@ impl CompactionStateContext {
             tool_name,
         }
     }
-    /// Return the **compaction view** of this context: a copy with
-    /// `recent_messages` dropped, all other live state preserved verbatim.
+    /// Return the **compaction view** of this context: a copy with the
+    /// assistant/tool working tail dropped and the latest agent-message anchor
+    /// kept.
     ///
-    /// For a sub-agent with
-    /// a single real user turn, `recent_messages` is the ENTIRE working
-    /// transcript, and keeping it frees almost nothing while re-cueing the
-    /// model to re-read the same files. grok-build retains
-    /// `recent_messages` so the model keeps verbatim tool context.
+    /// For a sub-agent with a single real user turn, `recent_messages` is the
+    /// entire working transcript, and keeping it frees almost nothing while
+    /// re-cueing the model to re-read the same files.
     pub fn for_compaction(&self) -> Self {
         Self {
             cwd_generation: self.cwd_generation,
             destination_project_instructions: self.destination_project_instructions.clone(),
+            agent_message_anchor: self
+                .agent_message_anchor
+                .clone()
+                .or_else(|| extract_latest_agent_message(&self.recent_messages)),
             recent_messages: Vec::new(),
             last_user_query: self.last_user_query.clone(),
             agent_edited_paths: self.agent_edited_paths.clone(),
@@ -866,8 +978,32 @@ pub fn build_compacted_history(input: CompactedHistoryInput<'_>) -> Vec<Conversa
     if let Some(reminder) = project_instructions {
         compacted.push(ConversationItem::project_instructions(reminder.clone()));
     }
+    let anchor = input
+        .state_context
+        .agent_message_anchor
+        .clone()
+        .filter(|_| {
+            !input.state_context.recent_messages.iter().any(|item| {
+                matches!(
+                    item,
+                    ConversationItem::User(user)
+                        if user.synthetic_reason == Some(SyntheticReason::AgentMessage)
+                )
+            })
+        });
+    if let Some(anchor) = anchor
+        .as_ref()
+        .filter(|anchor| matches!(anchor.position, AgentMessagePosition::BeforeHuman))
+    {
+        compacted.push(anchor.item.clone());
+    }
     if let Some(ref last_query) = input.state_context.last_user_query {
         compacted.push(ConversationItem::user(wrap_user_query(last_query)));
+    }
+    if let Some(anchor) =
+        anchor.filter(|anchor| !matches!(anchor.position, AgentMessagePosition::BeforeHuman))
+    {
+        compacted.push(anchor.item);
     }
     if summary_first {
         compacted.push(summary_item);

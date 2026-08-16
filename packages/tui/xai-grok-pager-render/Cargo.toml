@@ -19,6 +19,8 @@ ratatui-core = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream", "bracketed-paste"] }
 textwrap = { workspace = true }
 regex = { workspace = true }
+unicode-bidi = { workspace = true }
+unicode-bidi-mirroring = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 linkify = { workspace = true }

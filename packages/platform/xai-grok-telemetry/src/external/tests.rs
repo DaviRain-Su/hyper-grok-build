@@ -273,6 +273,8 @@ fn screen_mode_allowlist_is_pinned() {
 #[test]
 fn tool_name_sanitization() {
     assert_eq!(schema::sanitize_tool_name("read_file"), "read_file");
+    assert_eq!(schema::sanitize_tool_name("memory_search"), "memory_search");
+    assert_eq!(schema::sanitize_tool_name("memory_get"), "memory_get");
     assert_eq!(
         schema::sanitize_tool_name("nebula__post_message"),
         "mcp_tool"
@@ -317,6 +319,7 @@ fn sentinel_session_harness() -> events::SessionHarness {
         hook_names: vec!["h1".into()],
         agents_md_dir_names: vec!["proj".into()],
         memory_enabled: true,
+        memory_retrieval_mode: events::MemoryRetrievalMode::Hybrid,
         is_git_repo: true,
         auto_update: None,
     }

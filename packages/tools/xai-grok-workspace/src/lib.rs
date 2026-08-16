@@ -31,6 +31,7 @@ pub mod project_config;
 pub mod publish;
 pub mod recovery;
 mod restore_fetch;
+pub mod scheduler_liveness;
 pub use restore_fetch::{EnsureCommitsOutcome, ensure_commits_reachable};
 pub use session::git::git_object_exists;
 pub mod rpc_envelope;

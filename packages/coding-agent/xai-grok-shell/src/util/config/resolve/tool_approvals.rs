@@ -61,19 +61,46 @@ fn cached_remote_remember_tool_approvals() -> Option<bool> {
     REMOTE_REMEMBER_TOOL_APPROVALS.read().ok().and_then(|g| *g)
 }
 
-/// Free-function form of [`resolve_remember_tool_approvals`] for the
-/// permission-manager spawn (no live `RemoteSettings`): env + requirements +
-/// effective `config.toml` + cached remote tier. Defaults `false`.
-pub(crate) fn remember_tool_approvals_from_disk() -> bool {
-    let requirements = crate::config::load_merged_requirements();
-    let effective = crate::config::load_effective_config().ok();
+fn remember_tool_approvals_from_layers(
+    layers: &crate::config::ConfigLayers,
+    requirements: Option<&TomlValue>,
+    remote: Option<bool>,
+) -> bool {
+    let crate::config::ConfigLayers {
+        system_managed,
+        managed,
+        user,
+        env_overlay: _,
+        user_requirements: _,
+        system_requirements: _,
+        mdm_requirements: _,
+        campaigns: _,
+    } = layers;
     resolve_remember_tool_approvals_layers(
-        remember_tool_approvals_from_toml(requirements.as_ref()),
-        remember_tool_approvals_from_toml(effective.as_ref()),
-        None,
-        cached_remote_remember_tool_approvals(),
+        remember_tool_approvals_from_toml(requirements),
+        remember_tool_approvals_from_toml(Some(user)),
+        remember_tool_approvals_from_toml(Some(managed))
+            .or_else(|| remember_tool_approvals_from_toml(Some(system_managed))),
+        remote,
     )
     .value
+}
+
+/// Disk form of the gate (overlay-free). Defaults `false`.
+pub(crate) fn remember_tool_approvals_from_disk() -> bool {
+    let requirements = crate::config::load_merged_requirements();
+    let layers = match crate::config::ConfigLayers::load() {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(error = %e, "remember_tool_approvals: failed to load config layers");
+            crate::config::ConfigLayers::default()
+        }
+    };
+    remember_tool_approvals_from_layers(
+        &layers,
+        requirements.as_ref(),
+        cached_remote_remember_tool_approvals(),
+    )
 }
 
 #[cfg(test)]

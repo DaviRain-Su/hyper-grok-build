@@ -109,6 +109,11 @@ pub(super) fn advance_reconnect_cursor(agent: &mut AgentView, meta: &mut Notific
         agent.advance_last_seen_event_id(id, meta.event_seq);
     }
 }
+/// A string field off a turn-terminal notification envelope's `_meta`
+/// (the cancel-qualifier keys; absent on older shells).
+fn terminal_meta_str<'a>(meta: Option<&'a serde_json::Value>, key: &str) -> Option<&'a str> {
+    meta.and_then(|v| v.get(key)).and_then(|v| v.as_str())
+}
 /// Handle `x.ai/session_notification` and replay-path `x.ai/session/update`.
 ///
 /// Routes by `session_id` so events for an inactive agent still mutate that
@@ -352,17 +357,19 @@ pub(super) fn handle_session_notification_with_origin(
                         false
                     }
                 } else {
-                    let cancel_trigger = session_notif
-                        .meta
-                        .as_ref()
-                        .and_then(|v| v.get("cancelTrigger"))
-                        .and_then(|v| v.as_str());
                     finish_wake_turn(
                         agent,
                         &prompt_id,
                         &stop_reason,
                         agent_result.as_deref(),
-                        cancel_trigger,
+                        terminal_meta_str(
+                            session_notif.meta.as_ref(),
+                            super::super::turn_completion::CANCEL_TRIGGER_KEY,
+                        ),
+                        terminal_meta_str(
+                            session_notif.meta.as_ref(),
+                            super::super::turn_completion::CANCELLATION_CATEGORY_KEY,
+                        ),
                     );
                     true
                 }
@@ -379,19 +386,23 @@ pub(super) fn handle_session_notification_with_origin(
                     true
                 }
             } else {
-                let cancel_trigger = session_notif
-                    .meta
-                    .as_ref()
-                    .and_then(|v| v.get("cancelTrigger"))
-                    .and_then(|v| v.as_str());
                 terminal_outcome =
                     Some(super::super::turn_completion::finalize_turn_from_terminal(
                         agent,
                         root_session_id,
-                        Some(&prompt_id),
-                        Some(&stop_reason),
-                        agent_result.as_deref(),
-                        cancel_trigger,
+                        super::super::turn_completion::TerminalSignal {
+                            prompt_id: Some(&prompt_id),
+                            stop_reason: Some(&stop_reason),
+                            agent_result: agent_result.as_deref(),
+                            cancel_trigger: terminal_meta_str(
+                                session_notif.meta.as_ref(),
+                                super::super::turn_completion::CANCEL_TRIGGER_KEY,
+                            ),
+                            cancellation_category: terminal_meta_str(
+                                session_notif.meta.as_ref(),
+                                super::super::turn_completion::CANCELLATION_CATEGORY_KEY,
+                            ),
+                        },
                     ));
                 false
             }
@@ -504,7 +515,7 @@ pub(super) fn handle_session_notification_with_origin(
                     prompt: None,
                     child_cwd: None,
                     worktree_path: None,
-                    child_updates_replayed: false,
+                    transcript: Default::default(),
                 },
             );
             if let Some(ref sid) = agent.session.session_id
@@ -601,23 +612,8 @@ pub(super) fn handle_session_notification_with_origin(
                 } else {
                     ReplayLookupFallback::HintedOnly
                 };
-                let parent_cwd = agent.session.cwd.clone();
-                let child_cwd = agent
-                    .subagent_sessions
-                    .get(&child_session_id)
-                    .and_then(|info| info.child_cwd.clone());
-                if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
-                    crate::app::subagent::replay_inherited_updates_with_fallback(
-                        child_view,
-                        &child_session_id,
-                        &parent_cwd,
-                        child_cwd.as_deref().map(std::path::Path::new),
-                        fallback,
-                    );
-                }
-                if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
-                    info.child_updates_replayed = true;
-                }
+                let _ =
+                    crate::app::subagent::replay_child_and_mark(agent, &child_session_id, fallback);
             }
             let prompt_to_inject = agent
                 .subagent_sessions
@@ -855,7 +851,13 @@ pub(super) fn handle_session_notification_with_origin(
             let resuming = agent.session.loading_replay;
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
                 child_view.session.state = AgentState::Idle;
-                if !resuming {
+            }
+            if !resuming {
+                let evicted =
+                    crate::app::subagent::evict_finished_child_view(agent, &child_session_id);
+                if !evicted
+                    && let Some(child_view) = agent.subagent_views.get_mut(&child_session_id)
+                {
                     crate::app::subagent::finalize_finished_child_view(child_view, elapsed_dur);
                 }
             }
@@ -1399,24 +1401,15 @@ pub(super) fn handle_child_session_notification(
         | XaiSessionUpdate::AutoCompactCompleted { .. }
         | XaiSessionUpdate::AutoCompactFailed { .. }
         | XaiSessionUpdate::AutoCompactCancelled { .. }
-        | XaiSessionUpdate::RetryState(_) => {
-            let compact_tokens = match &update {
-                XaiSessionUpdate::AutoCompactCompleted { tokens_after, .. } => Some(*tokens_after),
-                _ => None,
-            };
+        | XaiSessionUpdate::RetryState(_)
+        | XaiSessionUpdate::MemoryFlushCompleted { .. }
+        | XaiSessionUpdate::MemoryDreamCompleted { .. }
+        | XaiSessionUpdate::MemorySessionSaved { .. } => {
             let mut changed = false;
             if let Some(child_view) = agent.subagent_views.get_mut(child_sid) {
-                changed = apply_session_event(
-                    &update,
-                    &mut child_view.session,
-                    &mut child_view.scrollback,
-                    is_api_key_auth,
-                );
-                if let Some(tokens_after) = compact_tokens {
-                    refresh_context_used(child_view, tokens_after);
-                }
+                changed = apply_child_view_session_event(child_view, &update, is_api_key_auth);
             }
-            if let Some(tokens_after) = compact_tokens
+            if let XaiSessionUpdate::AutoCompactCompleted { tokens_after, .. } = update
                 && let Some(info) = agent.subagent_sessions.get_mut(child_sid)
             {
                 info.tokens_used = Some(tokens_after);
@@ -1426,20 +1419,6 @@ pub(super) fn handle_child_session_notification(
                 }
             }
             changed
-        }
-        ref update @ (XaiSessionUpdate::MemoryFlushCompleted { .. }
-        | XaiSessionUpdate::MemoryDreamCompleted { .. }
-        | XaiSessionUpdate::MemorySessionSaved { .. }) => {
-            if let Some(child_view) = agent.subagent_views.get_mut(child_sid) {
-                apply_session_event(
-                    update,
-                    &mut child_view.session,
-                    &mut child_view.scrollback,
-                    is_api_key_auth,
-                )
-            } else {
-                false
-            }
         }
         XaiSessionUpdate::ToolCallDeltaChunk {
             ref name,
@@ -1472,6 +1451,26 @@ pub(super) fn handle_child_session_notification(
         }
         _ => false,
     }
+}
+/// Apply one xAI session event to a child view: the scrollback/session
+/// rendering shared by the live child routing above and the from-disk child
+/// replay ([`crate::app::subagent::replay_inherited_updates`]), so a rebuilt
+/// transcript keeps the same compaction/retry markers the live one had.
+pub(crate) fn apply_child_view_session_event(
+    child_view: &mut AgentView,
+    update: &XaiSessionUpdate,
+    is_api_key_auth: bool,
+) -> bool {
+    let changed = apply_session_event(
+        update,
+        &mut child_view.session,
+        &mut child_view.scrollback,
+        is_api_key_auth,
+    );
+    if let XaiSessionUpdate::AutoCompactCompleted { tokens_after, .. } = update {
+        refresh_context_used(child_view, *tokens_after);
+    }
+    changed
 }
 /// Apply a compaction or retry event to a session's activity state and scrollback.
 ///

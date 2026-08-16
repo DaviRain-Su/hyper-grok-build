@@ -10,8 +10,9 @@ pub use local::{
     LocalSessionLifecycleContributor, LocalTurnInputContributor, LocalTurnLifecycleContributor,
 };
 pub use send::{
-    CommandAction, CommandContributor, CommandInvocation, CommandSpec, ExtensionRegistry,
-    ExtensionRegistryBuilder, SessionIdleInput, SessionLifecycleContributor, TurnAbortInput,
-    TurnAbortReason, TurnDoneInput, TurnErrorInput, TurnInputContext, TurnInputContributor,
-    TurnInputFragment, TurnLifecycleContributor, TurnStartInput,
+    AnalyticsClass, CommandAction, CommandContributor, CommandInvocation, CommandSpec,
+    CompactionClass, ExtensionRegistry, ExtensionRegistryBuilder, InputAuthority, InputPolicy,
+    QueuePolicy, SessionIdleInput, SessionLifecycleContributor, ShutdownPolicy, TurnAbortInput,
+    TurnAbortReason, TurnBoundary, TurnDoneInput, TurnErrorInput, TurnInputContext,
+    TurnInputContributor, TurnInputFragment, TurnLifecycleContributor, TurnStartInput,
 };

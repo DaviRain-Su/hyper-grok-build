@@ -1,6 +1,19 @@
 //! Per-session and connection-level activity tracking for tool server
 //! lifecycle status reporting.
 
+// A panic on a teardown path leaks whatever it was about to free; tests panic freely.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
+
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -37,6 +50,19 @@ pub(crate) const RPC_ACTIVITY_WINDOW_MS: u64 = PREVIEW_ACTIVITY_WINDOW_MS;
 /// `idle_since_ms`; `0` disables the withhold entirely (kill switch).
 pub(crate) const PRESENCE_ACTIVITY_WINDOW_MS: u64 =
     xai_grok_workspace_types::rpc::presence::PRESENCE_ACTIVITY_WINDOW_MS;
+
+/// Keep the sandbox awake while a live loop's next run is at most this far away. Set above the 12-hour sandbox
+/// lifetime, so a live loop keeps the sandbox awake until the sandbox dies. `0` turns this off.
+pub(crate) const SCHEDULED_TASK_KEEP_AWAKE_WINDOW_MS: u64 = 13 * 60 * 60 * 1000; // 13 hours
+
+/// Ignore poll results older than this, so a dead poller cannot keep the sandbox awake.
+const SCHEDULER_POLL_MAX_AGE_MS: u64 = 5 * 60 * 1000; // 5 minutes
+
+/// One saved scheduler poll: the next run it reported and when the poll happened.
+struct ScheduledPoll {
+    next_fire_ms: u64,
+    seen_at_ms: u64,
+}
 
 struct SessionActivity {
     active_tool_calls: AtomicU32,
@@ -118,6 +144,11 @@ pub struct ActivityTracker {
     last_client_rpc_ms: AtomicU64,
     /// Window (ms) a client-presence note withholds idle for; `0` disables.
     presence_activity_window_ms: u64,
+    /// See [`SCHEDULED_TASK_KEEP_AWAKE_WINDOW_MS`]; overridable via the builder. `0` turns it off.
+    scheduled_task_keep_awake_window_ms: u64,
+    /// The last scheduler poll that saw a live loop with a run coming; `None` = no hold.
+    /// One lock for the pair, so a reader can never see a new run time with an old poll time.
+    scheduled_poll: Mutex<Option<ScheduledPoll>>,
     /// Epoch ms a visible client-presence note was last received (`0` = none).
     last_presence_ms: AtomicU64,
     /// Highest presence-note `seq` applied (`0` = none). Guards against a
@@ -216,6 +247,8 @@ impl ActivityTracker {
             rpc_activity_window_ms: RPC_ACTIVITY_WINDOW_MS,
             last_client_rpc_ms: AtomicU64::new(0),
             presence_activity_window_ms: PRESENCE_ACTIVITY_WINDOW_MS,
+            scheduled_task_keep_awake_window_ms: SCHEDULED_TASK_KEEP_AWAKE_WINDOW_MS,
+            scheduled_poll: Mutex::new(None),
             last_presence_ms: AtomicU64::new(0),
             last_presence_seq: Mutex::new(0),
             preview_ws_tunnels_open: AtomicU64::new(0),
@@ -255,6 +288,58 @@ impl ActivityTracker {
     pub fn with_presence_activity_window_ms(mut self, window_ms: u64) -> Self {
         self.presence_activity_window_ms = window_ms;
         self
+    }
+
+    /// Override the keep-awake window (`0` turns it off); the WorkspaceServer sources it from `StatusConfig`.
+    pub fn with_scheduled_task_keep_awake_window_ms(mut self, window_ms: u64) -> Self {
+        self.scheduled_task_keep_awake_window_ms = window_ms;
+        self
+    }
+
+    /// Save the scheduler poll result. `Some(ms)` = a live scheduler with its next run at `ms`; `None` = no live scheduler, or nothing left to run.
+    pub fn record_scheduler_poll(&self, next_fire_ms: Option<u64>) {
+        self.record_scheduler_poll_at(next_fire_ms, now_ms());
+    }
+
+    /// `record_scheduler_poll` with the poll time passed in, so tests can fake an old poll.
+    fn record_scheduler_poll_at(&self, next_fire_ms: Option<u64>, seen_at_ms: u64) {
+        let next = next_fire_ms.map(|next_fire_ms| ScheduledPoll {
+            next_fire_ms,
+            seen_at_ms,
+        });
+
+        let mut poll = self
+            .scheduled_poll
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changed =
+            poll.as_ref().map(|p| p.next_fire_ms) != next.as_ref().map(|p| p.next_fire_ms);
+        *poll = next;
+        drop(poll);
+
+        if changed {
+            self.notify.notify_waiters();
+        }
+    }
+
+    /// True when a recent poll saw a live loop with a run coming inside the window.
+    fn scheduled_fire_withholds_idle(&self, now: u64) -> bool {
+        if self.scheduled_task_keep_awake_window_ms == 0 {
+            return false;
+        }
+
+        let poll = self
+            .scheduled_poll
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(poll) = poll.as_ref() else {
+            return false;
+        };
+        if now.saturating_sub(poll.seen_at_ms) > SCHEDULER_POLL_MAX_AGE_MS {
+            return false;
+        }
+
+        now.saturating_add(self.scheduled_task_keep_awake_window_ms) >= poll.next_fire_ms
     }
 
     /// Wire the shared per-session `events.jsonl` writer map into the tracker so
@@ -321,7 +406,10 @@ impl ActivityTracker {
         // Gate and stamp under one lock: split across two atomics, a slow
         // older visible note racing a newer hidden one could pass the seq
         // check and stamp after the hidden note, re-arming the withhold.
-        let mut last_seq = self.last_presence_seq.lock().unwrap();
+        let mut last_seq = self
+            .last_presence_seq
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(seq) = seq {
             if *last_seq >= seq {
                 return;
@@ -527,6 +615,10 @@ impl ActivityTracker {
             // Same anchor rule as the status poll: presence is not use, so
             // the hub's ceiling genuinely bounds an attached-but-idle client.
             return (true, Some(IdleWithholdReason::ClientPresence), anchor);
+        }
+        if self.scheduled_fire_withholds_idle(now) {
+            // A waiting loop is not user activity, so the anchor stays put. The poll max age limits this hold.
+            return (true, Some(IdleWithholdReason::ScheduledTask), anchor);
         }
         (false, None, anchor)
     }
@@ -1626,6 +1718,91 @@ mod tests {
         assert!(
             s.idle_since_ms.is_some(),
             "window 0 is the kill switch: the stamp must never withhold"
+        );
+        assert_eq!(s.withhold_reason, None);
+    }
+
+    #[test]
+    fn live_scheduler_with_pending_fire_withholds_idle() {
+        let t = ActivityTracker::new();
+        let started = t.started_at_ms;
+        t.record_scheduler_poll(Some(now_ms() + 60 * 60 * 1000));
+
+        let s = t.snapshot();
+        assert!(
+            s.idle_since_ms.is_none(),
+            "a live loop with a coming run withholds idle at any cadence inside the window"
+        );
+        assert_eq!(s.withhold_reason, Some(IdleWithholdReason::ScheduledTask));
+        assert_eq!(
+            s.withhold_since_ms,
+            Some(started),
+            "a waiting loop is not user activity, so the anchor stays on process start"
+        );
+
+        let per_session = t.snapshot_session("some-session");
+        assert!(
+            per_session.idle_since_ms.is_none(),
+            "the hold is aggregate: per-session payloads withhold too"
+        );
+    }
+
+    #[test]
+    fn dead_scheduler_releases_the_hold() {
+        let t = ActivityTracker::new();
+        t.record_scheduler_poll(Some(now_ms() + 60_000));
+
+        assert_eq!(
+            t.snapshot().withhold_reason,
+            Some(IdleWithholdReason::ScheduledTask)
+        );
+
+        // The poller reports None when the actor's channel is closed or no task is pending.
+        t.record_scheduler_poll(None);
+        let s = t.snapshot();
+        assert!(s.idle_since_ms.is_some());
+        assert_eq!(s.withhold_reason, None);
+    }
+
+    #[test]
+    fn stale_poll_stamp_releases_the_hold() {
+        let t = ActivityTracker::new();
+        t.record_scheduler_poll_at(
+            Some(now_ms() + 60_000),
+            now_ms() - SCHEDULER_POLL_MAX_AGE_MS - 1,
+        );
+
+        assert_eq!(
+            t.snapshot().withhold_reason,
+            None,
+            "a dead poller cannot keep the sandbox awake"
+        );
+    }
+
+    #[test]
+    fn a_run_beyond_the_window_does_not_keep_awake() {
+        let t = ActivityTracker::new();
+        t.record_scheduler_poll(Some(
+            now_ms() + SCHEDULED_TASK_KEEP_AWAKE_WINDOW_MS + 60_000,
+        ));
+
+        let s = t.snapshot();
+        assert!(
+            s.idle_since_ms.is_some(),
+            "no sandbox lives to see a run past the window, so it must not keep awake"
+        );
+        assert_eq!(s.withhold_reason, None);
+    }
+
+    #[test]
+    fn zero_window_turns_the_keep_awake_off() {
+        let t = ActivityTracker::new().with_scheduled_task_keep_awake_window_ms(0);
+        t.record_scheduler_poll(Some(now_ms() + 60_000));
+
+        let s = t.snapshot();
+        assert!(
+            s.idle_since_ms.is_some(),
+            "window 0 is the off switch: a live loop must never keep the sandbox awake"
         );
         assert_eq!(s.withhold_reason, None);
     }

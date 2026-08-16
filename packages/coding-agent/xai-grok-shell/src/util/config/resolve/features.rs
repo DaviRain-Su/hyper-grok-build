@@ -30,8 +30,11 @@ pub fn resolve_zdr_access_enabled(
 ///
 /// Precedence: requirements (MDM > system > user) > managed
 /// (`managed_config.toml` > system managed) > user `config.toml` > default
-/// (true). Callable before an `AgentConfig` exists (startup prefetch runs
-/// pre-agent), so it re-reads the config layers like
+/// (true). Overlay-free: the `GROK_CONFIG` / `GROK_CONFIG_PATH` overlay is
+/// deliberately excluded (an egress gate, matching the overlay-free contract in
+/// `ConfigLayers::env_overlay`), so an overlay cannot re-arm a user's or a
+/// deployment's "never fetch" decision. Callable before an `AgentConfig` exists
+/// (startup prefetch runs pre-agent), so it re-reads the config layers like
 /// `managed_config::is_fetch_enabled`.
 ///
 /// Deliberately no env var and no remote tier: remote settings are exactly
@@ -66,14 +69,17 @@ fn remote_fetch_value(v: &TomlValue) -> Option<bool> {
 fn remote_fetch_enabled_from_layers(layers: &crate::config::ConfigLayers) -> bool {
     // Exhaustive destructure (no `..`): a future layer must be slotted into the
     // walk deliberately instead of silently keeping stale precedence.
-    // `campaigns` is deliberately NOT in the walk: campaign patches are soft,
-    // dismissable overlays applied after the layer merge — they must never
-    // arm/disarm a policy knob like remote_fetch (requirements are re-merged
-    // over campaigns for the same reason).
+    // `env_overlay` is deliberately NOT in the walk: the `GROK_CONFIG` overlay
+    // is soft, user-tier input, and this is an egress gate, so it must never
+    // arm/disarm remote_fetch (the overlay-free contract in
+    // `ConfigLayers::env_overlay`). `campaigns` is excluded for the same reason:
+    // campaign patches are soft, dismissable overlays applied after the layer
+    // merge, and requirements are re-merged over campaigns for the same reason.
     let crate::config::ConfigLayers {
         system_managed,
         managed,
         user,
+        env_overlay: _,
         user_requirements,
         system_requirements,
         mdm_requirements,
@@ -182,6 +188,18 @@ mod tests {
             remote_fetch_enabled_from_layers(&layers),
             "requirements=true must beat managed and user"
         );
+    }
+
+    #[test]
+    fn remote_fetch_env_overlay_is_ignored_in_both_directions() {
+        let mut layers = empty_layers();
+        layers.user = features_remote_fetch(false);
+        layers.env_overlay = Some(features_remote_fetch(true));
+        assert!(!remote_fetch_enabled_from_layers(&layers));
+
+        let mut layers = empty_layers();
+        layers.env_overlay = Some(features_remote_fetch(false));
+        assert!(remote_fetch_enabled_from_layers(&layers));
     }
 
     #[test]

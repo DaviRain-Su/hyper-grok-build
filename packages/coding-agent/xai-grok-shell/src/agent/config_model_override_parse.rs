@@ -682,6 +682,7 @@ mod tests {
     fn fully_populated_override() -> ConfigModelOverride {
         ConfigModelOverride {
             model: Some("m".into()),
+            model_family: None,
             base_url: Some("https://example.com".into()),
             name: Some("Model M".into()),
             description: Some("desc".into()),

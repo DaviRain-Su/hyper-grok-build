@@ -1247,7 +1247,7 @@ pub(super) fn handle_prompt_response(
         let wire_cancel_trigger = result.as_ref().ok().and_then(|pr| {
             pr.meta
                 .as_ref()?
-                .get("cancelTrigger")?
+                .get(crate::app::turn_completion::CANCEL_TRIGGER_KEY)?
                 .as_str()
                 .map(str::to_string)
         });
@@ -1256,6 +1256,15 @@ pub(super) fn handle_prompt_response(
                 Some(trigger) => trigger == "send_now",
                 None => expected_send_now.is_some(),
             };
+        // A hook-denied end rides the cancelled stop reason but is a policy
+        // block, not a user cancel — `cancelled_turn_event` picks the marker.
+        let wire_cancellation_category = result.as_ref().ok().and_then(|pr| {
+            pr.meta
+                .as_ref()?
+                .get(crate::app::turn_completion::CANCELLATION_CATEGORY_KEY)?
+                .as_str()
+                .map(str::to_string)
+        });
         let rate_limited = agent.session.rate_limited;
         // Fallback mirroring the credit-limit race guard below: if the retry
         // notification lost the race with (or never reached) this
@@ -1383,9 +1392,10 @@ pub(super) fn handle_prompt_response(
             // Send-now cancel: no marker (the new prompt is the next turn); the
             // `None` still flushes any held stop hooks standalone.
             (Ok(_), true) if send_now_cancel => None,
-            (Ok(_), true) => Some(SessionEvent::TurnCancelled {
-                elapsed: elapsed.unwrap_or_default(),
-            }),
+            (Ok(_), true) => Some(crate::app::turn_completion::cancelled_turn_event(
+                wire_cancellation_category.as_deref(),
+                elapsed.unwrap_or_default(),
+            )),
             (Ok(_), false) if agent.bash_turn => None,
             (Ok(_), false) => Some(SessionEvent::TurnCompleted {
                 // Legacy copy on purpose: unknown elapsed keeps the "in 0.0s"

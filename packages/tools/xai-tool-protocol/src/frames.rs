@@ -1019,6 +1019,8 @@ pub enum IdleWithholdReason {
     /// [`PreviewStatusOnly`](Self::PreviewStatusOnly) it never advances the
     /// withhold anchor, so the hub's hold ceiling genuinely caps it.
     ClientPresence,
+    /// A live scheduled task (`/loop`) has a run coming soon; the workspace limits this hold itself.
+    ScheduledTask,
     /// A reason this build does not recognise — a newer sender. Never
     /// constructed locally; only produced by deserialization.
     #[serde(other)]
@@ -1509,6 +1511,7 @@ mod tests {
             super::IdleWithholdReason::PreviewStatusOnly,
             super::IdleWithholdReason::ClientRpc,
             super::IdleWithholdReason::ClientPresence,
+            super::IdleWithholdReason::ScheduledTask,
         ] {
             let expected = match reason {
                 super::IdleWithholdReason::Durability => "durability",
@@ -1517,6 +1520,7 @@ mod tests {
                 super::IdleWithholdReason::PreviewStatusOnly => "preview_status_only",
                 super::IdleWithholdReason::ClientRpc => "client_rpc",
                 super::IdleWithholdReason::ClientPresence => "client_presence",
+                super::IdleWithholdReason::ScheduledTask => "scheduled_task",
                 super::IdleWithholdReason::Unknown => unreachable!("never constructed locally"),
             };
             assert_eq!(

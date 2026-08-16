@@ -32,6 +32,10 @@
 //! - subagent transcript replay (`app/subagent.rs`,
 //!   `replay_inherited_updates`) — covers both producers (eager live-spawn
 //!   and resume-deferred first open), gated on a non-empty replay
+//! - subagent eviction (`app/subagent.rs`, `evict_finished_child_view`;
+//!   finish-time and fullscreen-close/switch): the finished child's retained
+//!   scrollback, tracker, todo/workflow state, and media-byte cache; deferred
+//!   to the post-flush gap from both producers
 //! - closing an agent tab (`dispatch/session/modal.rs`) — the whole
 //!   `AgentView` incl. scrollback, render caches, and child views
 //! - video teardown — the pre-extracted frame set (~50–300 MB per video):

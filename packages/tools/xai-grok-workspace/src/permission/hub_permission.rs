@@ -239,9 +239,10 @@ pub fn access_kind_for_hub_tool(tool_name: &str, args: &Value) -> Option<AccessK
                 .to_owned();
             Some(AccessKind::Bash(cmd))
         }
-        "search_replace" | "hashline_edit" => {
+        "search_replace" | "hashline_edit" | "edit" => {
             let path = args
                 .get("file_path")
+                .or_else(|| args.get("filePath"))
                 .or_else(|| args.get("path"))
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
@@ -251,6 +252,7 @@ pub fn access_kind_for_hub_tool(tool_name: &str, args: &Value) -> Option<AccessK
         "write" | "write_file" => {
             let path = args
                 .get("file_path")
+                .or_else(|| args.get("filePath"))
                 .or_else(|| args.get("path"))
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
@@ -258,6 +260,13 @@ pub fn access_kind_for_hub_tool(tool_name: &str, args: &Value) -> Option<AccessK
             Some(AccessKind::Edit(path))
         }
         "apply_patch" => Some(AccessKind::Edit("apply_patch".to_owned())),
+        "task" | "Task" | "spawn_subagent" => {
+            let kind = args
+                .get("subagent_type")
+                .and_then(Value::as_str)
+                .unwrap_or("task");
+            Some(AccessKind::Edit(format!("task:{kind}")))
+        }
         "web_fetch" => {
             let url = args
                 .get("url")
@@ -344,6 +353,35 @@ mod tests {
         );
         assert!(payload.get("bash_command").is_none());
         assert!(payload.get("edit_kind").is_none());
+    }
+    #[test]
+    fn hub_gates_edit_and_task() {
+        assert!(matches!(
+            access_kind_for_hub_tool(
+                "opencode:edit",
+                &serde_json::json!({
+                    "filePath": "/tmp/denied.txt",
+                    "oldString": "ORIGINAL",
+                    "newString": "BYPASS",
+                }),
+            ),
+            Some(AccessKind::Edit(p)) if p == "/tmp/denied.txt"
+        ));
+        for name in ["spawn_subagent", "Task", "task"] {
+            assert!(
+                matches!(
+                    access_kind_for_hub_tool(
+                        name,
+                        &serde_json::json!({
+                            "subagent_type": "general-purpose",
+                            "prompt": "edit config.toml",
+                        }),
+                    ),
+                    Some(AccessKind::Edit(p)) if p == "task:general-purpose"
+                ),
+                "hub must gate {name:?}"
+            );
+        }
     }
     #[test]
     fn payload_for_mcp_has_no_tool_context() {

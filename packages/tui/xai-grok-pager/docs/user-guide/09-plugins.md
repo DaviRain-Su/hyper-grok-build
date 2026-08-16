@@ -279,7 +279,7 @@ List the only sources people may add in `managed-settings.json`. Any other marke
 
 ### Restrict which MCP servers can run
 
-Also in `managed-settings.json`. Each entry allows an HTTP address (with `*` wildcards) or a local command; anything unlisted is denied:
+Also in `managed-settings.json`. Each entry allows an HTTP address (with `*` wildcards) or a local command; anything unlisted is denied. Wildcards match the host and the path separately — `https://*.example.com/*` cannot match a lookalike path on another host — and the scheme and port stay literal (an explicit `:443` on https and no port are the same target). Always include the scheme: a wildcard scheme (`*://…`) or a scheme-less pattern (`*.example.com/*`) never matches and logs a warning at startup. A pattern without a path matches only the root path; append `/*` to allow paths:
 
 ```json
 {

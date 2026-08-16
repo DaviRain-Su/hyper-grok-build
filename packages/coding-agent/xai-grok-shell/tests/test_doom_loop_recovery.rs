@@ -287,7 +287,7 @@ async fn disabled_policy_leaves_terminal_field_unparsed() {
 // ---------------------------------------------------------------------------
 
 /// A confident signal (`tail_repetition:8@thinking` is confident under
-/// default `max_threshold` 32) on a completed turn is resampled once: two requests,
+/// default `max_threshold` 64) on a completed turn is resampled once: two requests,
 /// the clean second script is the accepted response, and the resample
 /// request body is identical to the first — the poisoned turn's output never
 /// enters the conversation.
@@ -373,7 +373,7 @@ async fn budget_exhaustion_accepts_last_doomed_response() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn not_confident_signals_do_not_resample() {
     for trigger in [
-        "tail_repetition:64@thinking",
+        "tail_repetition:65@thinking",
         "tail_repetition:2@response",
         "low_logprob@thinking",
     ] {

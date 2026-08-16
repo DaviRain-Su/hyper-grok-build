@@ -94,32 +94,67 @@ fn login_shell_capture_from_toml(v: Option<&TomlValue>) -> Option<bool> {
 pub(crate) fn resolve_login_shell_capture(remote: Option<bool>) -> bool {
     let requirements = crate::config::load_merged_requirements();
     let layers = match crate::config::ConfigLayers::load() {
-        Ok(l) => Some(l),
+        Ok(l) => l,
         Err(e) => {
             tracing::warn!(error = %e, "login_shell_capture: failed to load config layers");
-            None
+            crate::config::ConfigLayers::default()
         }
     };
-    resolve_login_shell_capture_tiers(
-        requirements.as_ref(),
-        layers.as_ref().map(|l| &l.user),
-        layers.as_ref().map(|l| &l.managed),
-        layers.as_ref().map(|l| &l.system_managed),
+    let crate::config::ConfigLayers {
+        system_managed,
+        managed,
+        user,
+        env_overlay,
+        user_requirements: _,
+        system_requirements: _,
+        mdm_requirements: _,
+        campaigns: _,
+    } = &layers;
+    resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
+        requirements: requirements.as_ref(),
+        env_overlay: env_overlay.as_ref(),
+        user: Some(user),
+        managed: Some(managed),
+        system_managed: Some(system_managed),
         remote,
-    )
+    })
 }
 
-fn resolve_login_shell_capture_tiers(
-    requirements: Option<&TomlValue>,
-    user: Option<&TomlValue>,
-    managed: Option<&TomlValue>,
-    system_managed: Option<&TomlValue>,
+/// Config layers for [`resolve_login_shell_capture_tiers`], one `Option` per
+/// tier so a positional `None` can't be misread as the wrong layer.
+#[derive(Default)]
+struct LoginShellCaptureTiers<'a> {
+    requirements: Option<&'a TomlValue>,
+    env_overlay: Option<&'a TomlValue>,
+    user: Option<&'a TomlValue>,
+    managed: Option<&'a TomlValue>,
+    system_managed: Option<&'a TomlValue>,
     remote: Option<bool>,
-) -> bool {
+}
+
+/// Precedence (highest first): requirements/MDM (clamp, via
+/// [`crate::config::load_merged_requirements`]) > `GROK_LOGIN_ENV` env >
+/// `GROK_CONFIG` overlay > user `config.toml` > managed layers > remote >
+/// default `true`. `login_shell_capture` is a soft key, so the overlay is
+/// merged just above user config (mirroring its place in the disk merge: above
+/// user, below requirements), letting a `GROK_CONFIG` toggle reach it while
+/// requirements/MDM still clamp the value.
+fn resolve_login_shell_capture_tiers(tiers: LoginShellCaptureTiers<'_>) -> bool {
+    let LoginShellCaptureTiers {
+        requirements,
+        env_overlay,
+        user,
+        managed,
+        system_managed,
+        remote,
+    } = tiers;
     use crate::agent::config::BoolFlag;
     BoolFlag::env(ENV_LOGIN_SHELL_CAPTURE)
         .requirement(login_shell_capture_from_toml(requirements))
-        .config(login_shell_capture_from_toml(user))
+        .config(
+            login_shell_capture_from_toml(env_overlay)
+                .or_else(|| login_shell_capture_from_toml(user)),
+        )
         .managed(
             login_shell_capture_from_toml(managed)
                 .or_else(|| login_shell_capture_from_toml(system_managed)),
@@ -132,7 +167,9 @@ fn resolve_login_shell_capture_tiers(
 
 #[cfg(test)]
 mod login_shell_capture_tests {
-    use super::{ENV_LOGIN_SHELL_CAPTURE, resolve_login_shell_capture_tiers};
+    use super::{
+        ENV_LOGIN_SHELL_CAPTURE, LoginShellCaptureTiers, resolve_login_shell_capture_tiers,
+    };
     use toml::Value as TomlValue;
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -153,46 +190,43 @@ mod login_shell_capture_tests {
     fn defaults_on() {
         let _g = guard();
         assert!(resolve_login_shell_capture_tiers(
-            None, None, None, None, None
+            LoginShellCaptureTiers::default()
         ));
     }
 
     #[test]
     fn remote_flag_can_disable() {
         let _g = guard();
-        assert!(!resolve_login_shell_capture_tiers(
-            None,
-            None,
-            None,
-            None,
-            Some(false)
-        ));
+        assert!(!resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
+            remote: Some(false),
+            ..Default::default()
+        }));
     }
 
     #[test]
     fn user_config_beats_remote() {
         let _g = guard();
-        assert!(resolve_login_shell_capture_tiers(
-            None,
-            Some(&cfg(true)),
-            None,
-            None,
-            Some(false)
-        ));
-        assert!(!resolve_login_shell_capture_tiers(
-            None,
-            Some(&cfg(false)),
-            None,
-            None,
-            Some(true)
-        ));
+        assert!(resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
+            user: Some(&cfg(true)),
+            remote: Some(false),
+            ..Default::default()
+        }));
+        assert!(!resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
+            user: Some(&cfg(false)),
+            remote: Some(true),
+            ..Default::default()
+        }));
     }
 
     #[test]
     fn env_beats_config_and_remote() {
         let _g = guard();
         unsafe { std::env::set_var(ENV_LOGIN_SHELL_CAPTURE, "0") };
-        let off = resolve_login_shell_capture_tiers(None, Some(&cfg(true)), None, None, Some(true));
+        let off = resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
+            user: Some(&cfg(true)),
+            remote: Some(true),
+            ..Default::default()
+        });
         unsafe { std::env::remove_var(ENV_LOGIN_SHELL_CAPTURE) };
         assert!(!off);
     }
@@ -201,15 +235,76 @@ mod login_shell_capture_tests {
     fn requirements_win_outright() {
         let _g = guard();
         unsafe { std::env::set_var(ENV_LOGIN_SHELL_CAPTURE, "1") };
-        let off = resolve_login_shell_capture_tiers(
-            Some(&cfg(false)),
-            Some(&cfg(true)),
-            None,
-            None,
-            Some(true),
-        );
+        let off = resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
+            requirements: Some(&cfg(false)),
+            user: Some(&cfg(true)),
+            remote: Some(true),
+            ..Default::default()
+        });
         unsafe { std::env::remove_var(ENV_LOGIN_SHELL_CAPTURE) };
         assert!(!off);
+    }
+
+    #[test]
+    fn overlay_beats_user_and_default() {
+        let _g = guard();
+        // (a) Overlay `false` is honored over a user-on config...
+        assert!(!resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
+            env_overlay: Some(&cfg(false)),
+            user: Some(&cfg(true)),
+            ..Default::default()
+        }));
+        // ...and over the bare default-on (no disk layer at all).
+        assert!(!resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
+            env_overlay: Some(&cfg(false)),
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn overlay_honored_in_both_directions_over_disk() {
+        let _g = guard();
+        // (b) Overlay `true` beats a user-`false` disk config...
+        assert!(resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
+            env_overlay: Some(&cfg(true)),
+            user: Some(&cfg(false)),
+            ..Default::default()
+        }));
+        // ...and overlay `false` beats a user-`true` disk config.
+        assert!(!resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
+            env_overlay: Some(&cfg(false)),
+            user: Some(&cfg(true)),
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn requirements_clamp_the_overlay() {
+        let _g = guard();
+        // (c) A requirements value clamps the overlay in both directions.
+        assert!(!resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
+            requirements: Some(&cfg(false)),
+            env_overlay: Some(&cfg(true)),
+            ..Default::default()
+        }));
+        assert!(resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
+            requirements: Some(&cfg(true)),
+            env_overlay: Some(&cfg(false)),
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn env_beats_overlay() {
+        let _g = guard();
+        // `GROK_LOGIN_ENV` outranks the overlay (env > overlay).
+        unsafe { std::env::set_var(ENV_LOGIN_SHELL_CAPTURE, "1") };
+        let on = resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
+            env_overlay: Some(&cfg(false)),
+            ..Default::default()
+        });
+        unsafe { std::env::remove_var(ENV_LOGIN_SHELL_CAPTURE) };
+        assert!(on);
     }
 }
 

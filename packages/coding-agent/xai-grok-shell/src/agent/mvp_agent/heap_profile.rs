@@ -140,7 +140,7 @@ impl MvpAgent {
         if !self.heap_profile_monitor.borrow().config().enabled {
             return;
         }
-        let Ok(auth) = self.auth_manager.auth_background().await else {
+        let Ok(auth) = self.auth_manager.auth().await else {
             tracing::debug!("heap_profile scoped poll skipped: not authenticated");
             return;
         };

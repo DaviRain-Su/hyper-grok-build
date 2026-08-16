@@ -217,7 +217,8 @@ impl<T: ListItem> ListPane<'_, T> {
             let content_x = area.x + prefix_w;
             let content_w = area.width.saturating_sub(prefix_w);
             if content_w > 0 {
-                buf.set_line_safe(content_x, area.y, content, content_w);
+                // Content paint is bidi-aware; search highlights remap columns.
+                buf.set_line_safe_bidi(content_x, area.y, content, content_w);
             }
         } else {
             // Wrap: word-wrap content into (area.width - prefix_w) columns.
@@ -232,7 +233,7 @@ impl<T: ListItem> ListPane<'_, T> {
                 if y >= area.y + area.height {
                     break;
                 }
-                buf.set_line_safe(content_x, y, wl, content_w as u16);
+                buf.set_line_safe_bidi(content_x, y, wl, content_w as u16);
                 // On continuation lines (i > 0), the prefix area is left
                 // blank — indentation happens via the column offset.
             }
@@ -389,6 +390,16 @@ impl<T: ListItem> ListPane<'_, T> {
                 && let Some(matcher) = state.matcher()
             {
                 let single_row = wrap_mode == WrapMode::NoWrap || item_h == 1;
+                // Highlights must map the painted string. Framework items paint
+                // `content()` reordered, so highlight over it (not `search_text()`,
+                // which can differ in base direction / chrome). Custom `render()`
+                // items paint logically and keep logical columns.
+                let content_plain = (uses_framework && crate::render::bidi::is_enabled())
+                    .then(|| crate::scrollback::types::line_plain_text(item.content()));
+                let (hl_text, map_visual) = match &content_plain {
+                    Some(text) => (text.as_str(), true),
+                    None => (item.search_text(), false),
+                };
                 paint_match_highlights(
                     buf,
                     area,
@@ -396,9 +407,10 @@ impl<T: ListItem> ListPane<'_, T> {
                     viewport_bottom,
                     skip,
                     item.search_text_col_offset(),
-                    item.search_text(),
+                    hl_text,
                     matcher.compiled_regex(),
                     single_row,
+                    map_visual,
                 );
             }
 

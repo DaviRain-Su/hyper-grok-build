@@ -704,11 +704,18 @@ fn bullet_list(items: &[String]) -> String {
 }
 
 /// The require-sha pin policy for remote plugin code. Disk-only config + env,
-/// both tighten-only: a remote campaign overlay must not be able to relax a
-/// local security policy, and an unreadable config falls back to the env knob.
+/// both tighten-only: neither a remote campaign nor the `GROK_CONFIG` /
+/// `GROK_CONFIG_PATH` overlay must be able to relax a local security policy, and
+/// an unreadable config falls back to the env knob. Read from the overlay-free
+/// layer merge (the overlay-free contract in `ConfigLayers::env_overlay`) so an
+/// overlay `require_sha = false` cannot defeat a disk-set `true`.
 pub(crate) fn marketplace_require_sha() -> bool {
-    xai_grok_config::load_effective_config_disk_only()
-        .map(|c| xai_grok_plugin_marketplace::load_require_sha(&c))
+    xai_grok_config::ConfigLayers::load()
+        .map(|layers| {
+            xai_grok_plugin_marketplace::load_require_sha(
+                &layers.effective_config_base_without_overlay(),
+            )
+        })
         .unwrap_or_else(|_| xai_grok_plugin_marketplace::env_require_sha())
 }
 

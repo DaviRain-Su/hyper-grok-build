@@ -620,8 +620,21 @@ async fn promo_announcement_banner_slash_gate_and_critical_preemption() {
                 harness.screen_contents()
             )
         });
+    // Crossterm may hold a lone ESC briefly to disambiguate CSI sequences; a
+    // fixed 200ms pump races the dismiss paint under remote CI (same class as
+    // minimal_slash_dropdown_dismisses_with_esc). Wait for the sentinel to
+    // leave, clear the residual `/announ` draft, then re-sync the promo row so
+    // the preemption wait starts from a known banner state.
     harness.inject_keys(keys::ESC).expect("esc dropdown");
-    harness.update(Duration::from_millis(200));
+    harness
+        .wait_for_text_absent(SLASH_DESC, Duration::from_secs(10))
+        .expect("slash dropdown dismissed after Esc");
+    harness
+        .inject_keys(b"\x15")
+        .expect("Ctrl+U clear residual slash draft");
+    harness
+        .wait_for_text(PROMO_BUTTON, Duration::from_secs(10))
+        .expect("promo banner still up after slash dismiss");
 
     // Critical published mid-promo, with the promo STILL in the list: the
     // single slot flips to the critical banner (precedence, not replacement).

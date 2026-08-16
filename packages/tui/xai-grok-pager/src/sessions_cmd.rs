@@ -34,8 +34,6 @@ enum SessionsCommand {
 }
 
 pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
-    xai_grok_shell::config::apply_session_search_gate(agent_config);
-
     // Best-effort only. Do not force an interactive public login for enterprise
     // deployments that only configure a deployment_key + custom xai_api_base_url.
     // If the user has previously run the interactive `grok` TUI (which succeeds
@@ -74,7 +72,12 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
         SessionsCommand::Search { query, limit } => {
             use std::collections::HashSet;
             use xai_grok_shell::session::merge::REMOTE_TIMEOUT;
-            use xai_grok_shell::session::storage::search::{SessionSearchRequest, execute_search};
+            use xai_grok_shell::session::storage::search::{
+                IndexDecision, SessionSearchRequest, execute_search,
+            };
+
+            // The only subcommand that reads the index, so the only one to start one.
+            let search = xai_grok_shell::session::storage::search::start_if_enabled(agent_config);
 
             let req = SessionSearchRequest {
                 query,
@@ -86,26 +89,29 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
             let root = grok_home();
 
             let remote_limit = (limit * 3).max(100) as i64;
-            let (local_resp, remote_results) = tokio::join!(execute_search(&root, &req), async {
-                tokio::time::timeout(
-                    REMOTE_TIMEOUT,
-                    client.search(Some(&req.query), remote_limit),
-                )
-                .await
-                .unwrap_or_else(|_| {
-                    eprintln!("warning: remote session search timed out");
-                    Ok(Vec::new())
-                })
-                .unwrap_or_else(|e| {
-                    eprintln!("warning: remote session search failed: {e}");
-                    Vec::new()
-                })
-            });
+            let (local_resp, remote_results) = tokio::join!(
+                execute_search(IndexDecision::settled(&search), &root, &req),
+                async {
+                    tokio::time::timeout(
+                        REMOTE_TIMEOUT,
+                        client.search(Some(&req.query), remote_limit),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        eprintln!("warning: remote session search timed out");
+                        Ok(Vec::new())
+                    })
+                    .unwrap_or_else(|e| {
+                        eprintln!("warning: remote session search failed: {e}");
+                        Vec::new()
+                    })
+                }
+            );
 
             let resp = local_resp?;
-            if let Some(by) = xai_grok_shell::config::session_search_turned_off_by() {
+            if let Some(by) = search.off_reason() {
                 eprintln!(
-                    "warning: local session search is off ({by}); local sessions were not searched."
+                    "warning: local session search is off ({by}); searched remote sessions only."
                 );
             }
             let local_ids: HashSet<&str> =
@@ -184,11 +190,14 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
             // Pass `cwd = None` so the session is found by id regardless of
             // which workspace it was created in; the local delete still uses
             // the resolved per-session cwd.
+            // No handle: the eviction inside prunes the row from another
+            // process's index, so a delete never needs one of its own.
             let deletion = xai_grok_shell::session::persistence::delete_session_history(
                 &id,
                 None,
                 needs_remote,
                 auth_manager.clone(),
+                None,
             )
             .await?;
 

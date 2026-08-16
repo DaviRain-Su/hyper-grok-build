@@ -72,13 +72,29 @@ pub struct PreparedReplay<'a> {
     pub(crate) unfinished_subagents: Vec<(String, String)>,
 }
 
-/// Whether a replay stream forwarded any update. Gates the caller's
-/// post-replay memory purge: `Empty` means nothing was reclaimable.
+/// Whether a replay stream forwarded any ACP update. Gates the caller's
+/// post-replay memory purge (`Empty` means nothing was reclaimable) and, for
+/// child hydrate, whether disk proved it can rebuild the transcript. xAI
+/// events alone never count as `Emitted`, so an eviction decision can't
+/// settle on a file the client cannot rebuild content from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
 pub enum ReplayEmission {
     Emitted,
     Empty,
+}
+
+/// One update forwarded by the streaming child replay: the ACP transcript
+/// stream plus persisted xAI child events (compaction, retry, memory
+/// lifecycle) in file order, so a rebuilt view keeps its non-ACP markers.
+#[derive(Debug)]
+pub enum ReplayedUpdate {
+    /// The second field is the persisted line's `_meta` (original
+    /// `agentTimestampMs`/`turnStartMs`, so rebuilt entries keep their run-time
+    /// timestamps). For a collapsed ToolCall it is the completing line's meta;
+    /// `None` for start-only tools flushed at EOF.
+    Acp(acp::SessionUpdate, Option<acp::Meta>),
+    Xai(XaiUpdate),
 }
 
 /// Collapses ToolCall + ToolCallUpdates into one ToolCall during replay.
@@ -252,14 +268,65 @@ pub(crate) fn resolve_replay_updates_path(
 pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
     session_id: &str,
     grok_home: &std::path::Path,
-    f: F,
+    mut f: F,
 ) -> std::io::Result<ReplayEmission> {
-    stream_replay_updates_at_hinted(session_id, grok_home, ReplayPathHint::default(), f)
+    stream_replay_updates_at_hinted(session_id, grok_home, ReplayPathHint::default(), |update| {
+        if let ReplayedUpdate::Acp(update, _) = update {
+            f(update);
+        }
+    })
+}
+
+/// Whether replaying `session_id`'s persisted transcript would emit at least
+/// one ACP update ([`ReplayEmission::Emitted`]), without applying anything.
+/// For callers deciding whether an in-memory copy can be dropped and rebuilt
+/// later: a non-empty file is NOT proof (xAI-only, torn, or catalog-only
+/// content replays `Empty`), so this mirrors
+/// [`stream_replay_updates_at_hinted`]'s per-line emission exactly — same
+/// rewind and drop filters, same envelope parse — but stops at the first
+/// emitting line (typically the first line, the prompt echo). `false` and
+/// `Err` both mean "keep the in-memory copy".
+pub fn replay_would_emit(
+    session_id: &str,
+    grok_home: &std::path::Path,
+    hint: ReplayPathHint<'_>,
+) -> std::io::Result<bool> {
+    let Some(path) = resolve_replay_updates_path(session_id, grok_home, hint)? else {
+        return Ok(false);
+    };
+    let raw_contents = std::fs::read_to_string(&path)?;
+    for line in rewind_filtered_live(&raw_contents) {
+        if line_is_dropped_on_replay(line) {
+            continue;
+        }
+        let Ok(SessionUpdate::Acp(notif)) = SessionUpdateEnvelope::from_str(line) else {
+            continue;
+        };
+        // Mirrors [`ReplayToolCollapser`]: every parsed ACP line reaches the
+        // stream (directly, merged into its ToolCall, or via the EOF pending
+        // flush) except a command catalog and a ToolCallUpdate that never
+        // completes and has no base to merge into.
+        match notif.update {
+            acp::SessionUpdate::AvailableCommandsUpdate(_) => {}
+            acp::SessionUpdate::ToolCallUpdate(u) => {
+                if matches!(
+                    u.fields.status,
+                    Some(acp::ToolCallStatus::Completed) | Some(acp::ToolCallStatus::Failed)
+                ) {
+                    return Ok(true);
+                }
+            }
+            _ => return Ok(true),
+        }
+    }
+    Ok(false)
 }
 
 /// [`stream_replay_updates_at`] with parent/child cwd hints so child hydrate
-/// can skip a full sessions-root scan on the common encoded-cwd path.
-pub fn stream_replay_updates_at_hinted<F: FnMut(acp::SessionUpdate)>(
+/// can skip a full sessions-root scan on the common encoded-cwd path, and
+/// with persisted xAI child events forwarded in file order (see
+/// [`ReplayedUpdate`]).
+pub fn stream_replay_updates_at_hinted<F: FnMut(ReplayedUpdate)>(
     session_id: &str,
     grok_home: &std::path::Path,
     hint: ReplayPathHint<'_>,
@@ -278,19 +345,20 @@ pub fn stream_replay_updates_at_hinted<F: FnMut(acp::SessionUpdate)>(
         }
         match SessionUpdateEnvelope::from_str(line) {
             Ok(SessionUpdate::Acp(notif)) => {
+                let notif = *notif;
                 let update = strip_context_wrappers(notif.update);
                 if let Some(update) = collapser.push(update) {
                     forwarded = true;
-                    f(update);
+                    f(ReplayedUpdate::Acp(update, notif.meta));
                 }
             }
-            Ok(SessionUpdate::Xai(_)) => {}
+            Ok(SessionUpdate::Xai(notif)) => f(ReplayedUpdate::Xai(notif.update)),
             Err(e) => tracing::debug!(error = %e, "skipping unparseable replay line"),
         }
     }
     for update in collapser.take_pending() {
         forwarded = true;
-        f(update);
+        f(ReplayedUpdate::Acp(update, None));
     }
     Ok(if forwarded {
         ReplayEmission::Emitted

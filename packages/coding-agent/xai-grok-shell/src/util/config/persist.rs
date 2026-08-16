@@ -41,6 +41,14 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     } else {
         merge_section(table, "privacy", &config.privacy);
     }
+    if config.consent == super::consent::ConsentConfig::default() {
+        table.remove("consent");
+    } else {
+        if let Some(TomlValue::Table(section)) = table.get_mut("consent") {
+            section.remove("answers");
+        }
+        merge_section(table, "consent", &config.consent);
+    }
     if config.skills == SkillsConfig::default() {
         table.remove("skills");
     } else {

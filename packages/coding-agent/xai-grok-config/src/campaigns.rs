@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config_override::{
-    ConfigOverrideEntry, PATCH_STRIP_KEYS, PatchPath, apply_patches, patch_touches_any,
+    CAMPAIGN_STRIP_KEYS, ConfigOverrideEntry, PatchPath, apply_patches, patch_touches_any,
     take_patch_array,
 };
 
@@ -23,7 +23,7 @@ pub struct CampaignEntry {
 }
 
 /// Disk campaigns grouped by source layer. Merged with the remote layer (by
-/// priority, first id wins) in [`crate::loader::ConfigLayers::resolve_campaigns`].
+/// priority, first id wins) in [`crate::config_layers::ConfigLayers::resolve_campaigns`].
 #[derive(Debug, Clone, Default)]
 pub struct CampaignOverrides {
     pub requirements: Vec<CampaignEntry>,
@@ -35,8 +35,11 @@ pub struct CampaignOverrides {
 pub fn take_campaigns(config: &mut toml::Value) -> Vec<ConfigOverrideEntry<CampaignMeta>> {
     match take_patch_array::<CampaignMeta>(config, CAMPAIGNS_KEY) {
         Ok(entries) => entries,
-        Err(e) => {
-            tracing::warn!(error = %e, "campaigns: failed to deserialize; ignoring entries");
+        Err(_) => {
+            // Category-only, never the raw error: a `toml::de::Error` Display
+            // echoes the offending value, so `campaigns = "sk-secret"` would
+            // leak into logs. Mirrors `VersionOverrideError::redacted`.
+            tracing::warn!("campaigns: failed to deserialize (details omitted); ignoring entries");
             Vec::new()
         }
     }
@@ -113,7 +116,7 @@ pub fn apply_active_campaign_patches(effective: &mut toml::Value, active: &[Camp
     apply_patches(
         effective,
         active.iter().rev().map(|e| e.patch.clone()),
-        PATCH_STRIP_KEYS,
+        CAMPAIGN_STRIP_KEYS,
     );
 }
 
@@ -158,6 +161,74 @@ mod tests {
         apply_active_campaign_patches(&mut effective, &entries);
         assert_eq!(effective["models"]["default"].as_str(), Some("new-model"));
         assert_eq!(effective["features"]["web_fetch"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn campaign_parse_error_is_redacted() {
+        use std::sync::{Arc, Mutex};
+
+        struct CaptureSubscriber {
+            messages: Arc<Mutex<Vec<String>>>,
+        }
+        struct MessageVisitor<'a>(&'a mut Vec<String>);
+        impl tracing::field::Visit for MessageVisitor<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0.push(format!("{value:?}"));
+                }
+            }
+        }
+        impl tracing::Subscriber for CaptureSubscriber {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                if let Ok(mut msgs) = self.messages.lock() {
+                    event.record(&mut MessageVisitor(&mut msgs));
+                }
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        // A scalar where an array is expected: the raw toml error echoes the
+        // value, so `take_campaigns` must never log it verbatim.
+        let secret = "sk-secret-token";
+        let mut cfg = parse(&format!("campaigns = \"{secret}\"\n"));
+
+        // Guard: logging the raw error verbatim would leak the secret.
+        assert!(
+            take_patch_array::<CampaignMeta>(&mut cfg.clone(), CAMPAIGNS_KEY)
+                .unwrap_err()
+                .to_string()
+                .contains(secret),
+            "guard: the raw toml error is expected to carry the value"
+        );
+
+        // Drive the real `take_campaigns` failure path and capture what it logs.
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let entries = tracing::subscriber::with_default(
+            CaptureSubscriber {
+                messages: messages.clone(),
+            },
+            || take_campaign_entries(&mut cfg, "env_overlay"),
+        );
+        assert!(entries.is_empty());
+
+        let logged = messages.lock().unwrap().join("\n");
+        assert!(
+            logged.contains("campaigns"),
+            "the parse-failure branch must emit its category-only warning: {logged}"
+        );
+        assert!(
+            !logged.contains(secret),
+            "take_campaigns leaked the value into its warning: {logged}"
+        );
     }
 
     #[test]
@@ -249,7 +320,7 @@ mod tests {
 
     #[test]
     fn requirements_win_over_campaign() {
-        use crate::loader::ConfigLayers;
+        use crate::config_layers::ConfigLayers;
         // A campaign (even from a lower layer) can't override a field the admin
         // set in requirements: `apply_campaign_overrides` re-merges requirements on top.
         let mut layers = ConfigLayers {
@@ -272,7 +343,7 @@ mod tests {
 
     #[test]
     fn effective_config_honors_dismiss() {
-        use crate::loader::ConfigLayers;
+        use crate::config_layers::ConfigLayers;
         // A dismissed campaign id stops overriding; the user's stored value returns.
         let mut layers = ConfigLayers {
             user: parse("[models]\ndefault = \"user-old\"\n"),

@@ -452,6 +452,26 @@ fn parse_model_field_takes_priority_over_id() {
     assert_eq!(result.name.as_deref(), Some("Display Name"));
 }
 #[test]
+fn parse_reads_model_family() {
+    let value = serde_json::json!({
+        "model": "grok-4.5",
+        "context_window": 1_000_000,
+        "model_family": "xai"
+    });
+    let result = parse_remote_model_value(&value, "https://default.url").unwrap();
+    assert_eq!(result.model_family.as_deref(), Some("xai"));
+    let value = serde_json::json!({
+        "model": "acme-1",
+        "contextWindow": 400_000,
+        "modelFamily": "acme"
+    });
+    let result = parse_remote_model_value(&value, "https://default.url").unwrap();
+    assert_eq!(result.model_family.as_deref(), Some("acme"));
+    let value = serde_json::json!({"model": "x", "context_window": 256_000});
+    let result = parse_remote_model_value(&value, "https://default.url").unwrap();
+    assert!(result.model_family.is_none());
+}
+#[test]
 fn parse_reads_reasoning_effort_fields() {
     use xai_grok_sampling_types::ReasoningEffort;
     let value = serde_json::json!({

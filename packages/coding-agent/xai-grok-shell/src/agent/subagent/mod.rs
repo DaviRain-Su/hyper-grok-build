@@ -132,6 +132,7 @@ pub(crate) struct SubagentSpawnContext {
     pub parent_depth: u32,
     pub subagents_max_depth: u32,
     pub workflow_max_concurrent_agents: usize,
+    pub media_gen_batch_limits: xai_grok_tools::media_gen_limits::MediaGenBatchLimits,
     /// Inference idle timeout (secs), resolved from the parent's model config at spawn-context creation time.
     pub inference_idle_timeout_secs: u64,
     /// Tier inputs for resolving `auto_compact_threshold_percent` at
@@ -371,22 +372,19 @@ impl SubagentSpawnContext {
             cfg.cli_agent_overrides.apply_to_subagent_definition(def);
         }
     }
-    /// Subagent verbatim-input flag, mirroring `Config::resolve_compaction_verbatim_input` (env > config > remote settings > default `true`).
+    /// Not `Config::feature`: the parent's tiers resolve against the
+    /// subagent's own remote settings snapshot.
+    fn resolve_feature(&self, feature: crate::agent::config::Feature) -> bool {
+        use crate::agent::config::FeatureSources;
+        let mut sources = self.agent_config.as_ref().map_or_else(
+            || FeatureSources::from_process_env(feature),
+            |parent| parent.feature_sources(feature),
+        );
+        sources.remote = feature.remote_value(self.remote_settings.as_ref());
+        feature.resolve(sources).value
+    }
     pub(crate) fn resolve_compaction_verbatim_input(&self) -> bool {
-        crate::agent::config::BoolFlag::env("GROK_COMPACTION_VERBATIM_INPUT")
-            .config(
-                self.agent_config
-                    .as_ref()
-                    .and_then(|c| c.features.compaction_verbatim_input),
-            )
-            .feature_flag(
-                self.remote_settings
-                    .as_ref()
-                    .and_then(|r| r.compaction_verbatim_input),
-            )
-            .default(true)
-            .resolve()
-            .value
+        self.resolve_feature(crate::agent::config::Feature::CompactionVerbatimInput)
     }
     pub(crate) fn resolve_compaction_tool_choice(
         &self,
@@ -402,26 +400,10 @@ impl SubagentSpawnContext {
                 .and_then(|r| r.compaction_tool_choice.as_deref()),
         )
     }
-    /// Whether a completed subagent's worktree is snapshotted into a durable ref
-    /// and its directory deleted. Resolution mirrors the other subagent gates
-    /// (env > config > remote settings > default). Default `false` so it ships dark;
-    /// `managed_config.toml` `[features] subagent_worktree_snapshot` is the
-    /// per-deployment rollout lever.
+    /// Whether a completed subagent's working copy is saved into the repo as a
+    /// git ref and its directory deleted.
     pub(crate) fn resolve_subagent_worktree_snapshot_enabled(&self) -> bool {
-        crate::agent::config::BoolFlag::env("GROK_SUBAGENT_WORKTREE_SNAPSHOT")
-            .config(
-                self.agent_config
-                    .as_ref()
-                    .and_then(|c| c.features.subagent_worktree_snapshot),
-            )
-            .feature_flag(
-                self.remote_settings
-                    .as_ref()
-                    .and_then(|r| r.subagent_worktree_snapshot_enabled),
-            )
-            .default(false)
-            .resolve()
-            .value
+        self.resolve_feature(crate::agent::config::Feature::SubagentWorktreeSnapshot)
     }
     /// Per-tool params for the child's spawn. The ask_user_question timeout is
     /// session-level config, so it is resolved from the same tiers as the

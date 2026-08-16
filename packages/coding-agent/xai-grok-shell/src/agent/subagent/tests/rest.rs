@@ -326,27 +326,10 @@ fn compaction_no_prefix_passes_through() {
 fn resumed_from_field_in_meta_roundtrips() {
     let meta = SubagentMeta {
         subagent_id: "sa-resumed".into(),
-        parent_session_id: "parent".into(),
-        child_session_id: "child".into(),
-        subagent_type: "general-purpose".into(),
         description: "resumed task".into(),
         prompt: "continue".into(),
-        status: "running".into(),
-        started_at: chrono::Utc::now(),
-        completed_at: None,
-        duration_ms: None,
-        tool_calls: None,
-        turns: None,
-        error: None,
-        effective_context_source: None,
-        context_normalized: false,
-        fork_copy_error: None,
-        persona: None,
         resumed_from: Some("prev-subagent-id".into()),
-        child_cwd: None,
-        worktree_path: None,
-        snapshot_ref: None,
-        effective_model_id: None,
+        ..base_meta()
     };
     let json = serde_json::to_string(&meta).unwrap();
     assert!(json.contains("resumed_from"));
@@ -378,22 +361,7 @@ fn resumed_from_none_not_serialized_in_meta() {
         subagent_type: "explore".into(),
         description: "d".into(),
         prompt: "p".into(),
-        status: "running".into(),
-        started_at: chrono::Utc::now(),
-        completed_at: None,
-        duration_ms: None,
-        tool_calls: None,
-        turns: None,
-        error: None,
-        effective_context_source: None,
-        context_normalized: false,
-        fork_copy_error: None,
-        persona: None,
-        resumed_from: None,
-        child_cwd: None,
-        worktree_path: None,
-        snapshot_ref: None,
-        effective_model_id: None,
+        ..base_meta()
     };
     let json = serde_json::to_string(&meta).unwrap();
     assert!(
@@ -420,27 +388,15 @@ fn backward_compat_meta_without_resumed_from() {
 fn snapshot_ref_field_in_meta_roundtrips() {
     let meta = SubagentMeta {
         subagent_id: "sa-snap".into(),
-        parent_session_id: "parent".into(),
-        child_session_id: "child".into(),
-        subagent_type: "general-purpose".into(),
         description: "snapshot task".into(),
-        prompt: "do work".into(),
         status: "completed".into(),
-        started_at: chrono::Utc::now(),
         completed_at: Some(chrono::Utc::now()),
         duration_ms: Some(10),
         tool_calls: Some(1),
         turns: Some(1),
-        error: None,
-        effective_context_source: None,
-        context_normalized: false,
-        fork_copy_error: None,
-        persona: None,
-        resumed_from: None,
-        child_cwd: None,
         worktree_path: Some("/tmp/grok-wt/sa-snap".into()),
         snapshot_ref: Some("refs/grok/subagent-snapshots/sa-snap".into()),
-        effective_model_id: None,
+        ..base_meta()
     };
     let json = serde_json::to_string(&meta).unwrap();
     assert!(json.contains("snapshot_ref"));
@@ -466,21 +422,22 @@ fn backward_compat_meta_without_snapshot_ref() {
     let meta: SubagentMeta = serde_json::from_str(json).unwrap();
     assert!(meta.snapshot_ref.is_none());
 }
-/// Minimal completed-status meta for the snapshot-ref persistence tests.
-fn snapshot_test_meta(id: &str) -> SubagentMeta {
+/// Canonical running-status `SubagentMeta`; tests override only the fields
+/// under test via `..base_meta()`.
+fn base_meta() -> SubagentMeta {
     SubagentMeta {
-        subagent_id: id.into(),
-        parent_session_id: "session-A".into(),
-        child_session_id: format!("child-{id}"),
+        subagent_id: "sa".into(),
+        parent_session_id: "parent".into(),
+        child_session_id: "child".into(),
         subagent_type: "general-purpose".into(),
         description: "task".into(),
         prompt: "do work".into(),
-        status: "completed".into(),
+        status: "running".into(),
         started_at: chrono::Utc::now(),
-        completed_at: Some(chrono::Utc::now()),
-        duration_ms: Some(1),
-        tool_calls: Some(0),
-        turns: Some(1),
+        completed_at: None,
+        duration_ms: None,
+        tool_calls: None,
+        turns: None,
         error: None,
         effective_context_source: None,
         context_normalized: false,
@@ -488,9 +445,24 @@ fn snapshot_test_meta(id: &str) -> SubagentMeta {
         persona: None,
         resumed_from: None,
         child_cwd: None,
-        worktree_path: Some("/tmp/grok-wt/subagent-x".into()),
+        worktree_path: None,
         snapshot_ref: None,
         effective_model_id: None,
+    }
+}
+/// Minimal completed-status meta for the snapshot-ref persistence tests.
+fn snapshot_test_meta(id: &str) -> SubagentMeta {
+    SubagentMeta {
+        subagent_id: id.into(),
+        parent_session_id: "session-A".into(),
+        child_session_id: format!("child-{id}"),
+        status: "completed".into(),
+        completed_at: Some(chrono::Utc::now()),
+        duration_ms: Some(1),
+        tool_calls: Some(0),
+        turns: Some(1),
+        worktree_path: Some("/tmp/grok-wt/subagent-x".into()),
+        ..base_meta()
     }
 }
 /// The follow-up writer persists `snapshot_ref` into an already-finalized
@@ -576,7 +548,9 @@ fn subagent_worktree_snapshot_gate_remote_enables() {
 #[test]
 fn subagent_worktree_snapshot_gate_local_overrides_remote() {
     let mut config = crate::agent::config::Config::default();
-    config.features.subagent_worktree_snapshot = Some(false);
+    config
+        .feature_values
+        .insert(crate::agent::config::Feature::SubagentWorktreeSnapshot, false);
     let mut ctx = ctx_with_toggle(std::collections::HashMap::new());
     ctx.agent_config = Some(config);
     ctx.remote_settings = Some(crate::util::config::RemoteSettings {
@@ -592,7 +566,9 @@ fn subagent_worktree_snapshot_gate_local_overrides_remote() {
 #[test]
 fn subagent_worktree_snapshot_gate_local_enables() {
     let mut config = crate::agent::config::Config::default();
-    config.features.subagent_worktree_snapshot = Some(true);
+    config
+        .feature_values
+        .insert(crate::agent::config::Feature::SubagentWorktreeSnapshot, true);
     let mut ctx = ctx_with_toggle(std::collections::HashMap::new());
     ctx.agent_config = Some(config);
     assert!(ctx.resolve_subagent_worktree_snapshot_enabled());
@@ -613,52 +589,134 @@ fn subagent_tool_params_carry_ask_user_question_timeouts() {
     assert!(ask.get("timeout_enabled").is_some_and(|v| v.is_boolean()));
     assert!(ask.get("timeout_secs").is_some_and(|v| v.is_u64()));
 }
-/// End-to-end glue: gate ON + a worktree present runs the completion
-/// sequence (snapshot → persist ref to meta.json → remove) and verifies the
-/// durable shell resume fallback sees the ref after removal.
+/// The gate keeping a worktree must leave no resume pointer. A pointer sends
+/// resume down the rehydrate path, which deletes the directory and rebuilds
+/// it from a snapshot that, by construction, lacks whatever kept it.
 #[tokio::test]
-async fn completion_snapshot_sequence_persists_ref_then_removes_worktree() {
+async fn kept_worktree_leaves_no_resume_pointer() {
     xai_test_utils::require_git!();
-    use xai_test_utils::git::{git_commit_all, init_git_repo};
+    use xai_test_utils::git::{git_commit_all, seed_repo};
     let temp = tempfile::TempDir::new().unwrap();
-    let repo = temp.path().join("repo");
-    std::fs::create_dir(&repo).unwrap();
-    init_git_repo(&repo);
-    std::fs::write(repo.join("tracked.txt"), "original").unwrap();
-    git_commit_all(&repo, "initial");
-    let wt = temp.path().join("subagent-glue-1");
+    let repo = seed_repo(temp.path());
+    std::fs::write(repo.join(".gitignore"), ".env\n").unwrap();
+    git_commit_all(&repo, "ignore env");
+    let wt = temp.path().join("subagent-keeps");
     xai_fast_worktree::WorktreeBuilder::new(&repo, &wt)
         .standalone(true)
         .create()
         .unwrap();
-    std::fs::write(wt.join("tracked.txt"), "edited").unwrap();
+    std::fs::write(wt.join(".env"), b"SECRET").unwrap();
     let mut config = crate::agent::config::Config::default();
-    config.features.subagent_worktree_snapshot = Some(true);
+    config
+        .feature_values
+        .insert(crate::agent::config::Feature::SubagentWorktreeSnapshot, true);
     let mut ctx = ctx_with_toggle(std::collections::HashMap::new());
     ctx.agent_config = Some(config);
     assert!(ctx.resolve_subagent_worktree_snapshot_enabled());
     let meta_dir = temp.path().join("meta");
-    write_subagent_meta(&meta_dir, &snapshot_test_meta("glue-1"));
-    let ref_name = "refs/grok/subagents/glue-1";
-    let snapshot_ref = crate::session::worktree::snapshot_subagent_worktree(
+    write_subagent_meta(&meta_dir, &snapshot_test_meta("keeps-1"));
+    let disposal = crate::agent::subagent::handle_request::dispose_worktree_after_completion(
             &wt,
             &repo,
-            ref_name,
-        )
-        .await
-        .unwrap();
-    assert!(update_subagent_meta_snapshot_ref(
             &meta_dir,
-            &snapshot_ref,
-            "completed"
+            "completed",
+            "keeps-1",
+        )
+        .await;
+    assert!(matches!(
+            disposal,
+            crate::agent::subagent::handle_request::Disposal::Kept
         ));
-    crate::session::worktree::remove_subagent_worktree(&wt).await.unwrap();
-    let data = std::fs::read_to_string(meta_dir.join("meta.json")).unwrap();
-    let reread: SubagentMeta = serde_json::from_str(&data).unwrap();
-    assert_eq!(reread.snapshot_ref.as_deref(), Some(ref_name));
+    assert_eq!(
+            std::fs::read(wt.join(".env")).expect("the secret is gone"),
+            b"SECRET"
+        );
+    let meta: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(meta_dir.join("meta.json")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+            meta.snapshot_ref, None,
+            "a pointer here sends resume down the path that deletes the directory"
+        );
+    assert_eq!(
+            crate::agent::subagent::resume_worktree_action(true, meta.snapshot_ref.as_deref()),
+            crate::agent::subagent::ResumeWorktreeAction::Reuse
+        );
+}
+/// Everything the disposal does once the gate says Delete, on the linked
+/// worktree the completion path actually makes: the resume pointer reaches
+/// meta.json and the directory goes.
+///
+/// Linked on purpose. A linked worktree is the only shape where the
+/// registration's reflog is the last name for a commit, which is what the
+/// second half of this test is about.
+#[tokio::test]
+async fn disposed_linked_worktree_persists_the_pointer_then_removes_the_directory() {
+    xai_test_utils::require_git!();
+    use xai_test_utils::git::seed_repo_with_remote;
+    let temp = tempfile::TempDir::new().unwrap();
+    let (repo, _remote) = seed_repo_with_remote(temp.path());
+    let wt = temp.path().join("subagent-reclaim-1");
+    xai_fast_worktree::WorktreeBuilder::new(&repo, &wt).create().unwrap();
+    let meta_dir = temp.path().join("meta");
+    write_subagent_meta(&meta_dir, &snapshot_test_meta("reclaim-1"));
+    let disposal = crate::agent::subagent::handle_request::dispose_worktree_after_completion(
+            &wt,
+            &repo,
+            &meta_dir,
+            "completed",
+            "reclaim-1",
+        )
+        .await;
+    let snapshot_ref = "refs/grok/subagents/reclaim-1";
+    assert!(disposal.worktree_removed(), "the gate cleared, so it goes");
+    assert!(!wt.exists(), "the worktree directory is still on disk");
+    let meta: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(meta_dir.join("meta.json")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+            meta.snapshot_ref.as_deref(),
+            Some(snapshot_ref),
+            "a removed worktree with no pointer leaves resume nothing to open"
+        );
+    assert_eq!(
+            crate::agent::subagent::resume_worktree_action(false, meta.snapshot_ref.as_deref()),
+            crate::agent::subagent::ResumeWorktreeAction::Rehydrate
+        );
+}
+/// A commit the registration's reflog is the only name for. The disposal
+/// gives it a second name in the repository that outlives the worktree,
+/// and only then removes the directory, so the commit is still readable.
+#[tokio::test]
+async fn disposal_names_a_reflog_only_commit_before_removing_the_worktree() {
+    xai_test_utils::require_git!();
+    use xai_test_utils::git::{reflog_only_commit, run_git, seed_repo_with_remote};
+    let temp = tempfile::TempDir::new().unwrap();
+    let (repo, _remote) = seed_repo_with_remote(temp.path());
+    let wt = temp.path().join("subagent-reclaim-2");
+    xai_fast_worktree::WorktreeBuilder::new(&repo, &wt).create().unwrap();
+    let discarded = reflog_only_commit(&wt, None);
+    let meta_dir = temp.path().join("meta");
+    write_subagent_meta(&meta_dir, &snapshot_test_meta("reclaim-2"));
+    let disposal = crate::agent::subagent::handle_request::dispose_worktree_after_completion(
+            &wt,
+            &repo,
+            &meta_dir,
+            "completed",
+            "reclaim-2",
+        )
+        .await;
     assert!(
-            !wt.exists(),
-            "worktree dir should be removed after the sequence"
+            disposal.worktree_removed(),
+            "the commit has a lasting name now, so nothing keeps the worktree"
+        );
+    assert!(!wt.exists(), "the worktree is still there");
+    run_git(&repo, &["gc", "--prune=now"]);
+    assert_eq!(
+            run_git(&repo, &["show", &format!("{discarded}:tracked.txt")]),
+            "three hours of work"
         );
 }
 #[test]
@@ -667,25 +725,16 @@ fn subagent_session_metadata_roundtrip() {
         subagent_id: "sa-1".into(),
         parent_session_id: "parent-1".into(),
         child_session_id: "child-1".into(),
-        subagent_type: "general-purpose".into(),
         description: "test task".into(),
         prompt: "do something".into(),
         status: "completed".into(),
-        started_at: chrono::Utc::now(),
         completed_at: Some(chrono::Utc::now()),
         duration_ms: Some(1234),
         tool_calls: Some(5),
         turns: Some(2),
-        error: None,
         effective_context_source: Some("new".into()),
-        context_normalized: false,
-        fork_copy_error: None,
         persona: Some("reviewer".into()),
-        resumed_from: None,
-        child_cwd: None,
-        worktree_path: None,
-        snapshot_ref: None,
-        effective_model_id: None,
+        ..base_meta()
     };
     let session_meta = SubagentSessionMetadata::from_meta(
         &meta,
@@ -730,22 +779,9 @@ fn subagent_session_metadata_non_forked() {
         subagent_type: "explore".into(),
         description: "search code".into(),
         prompt: "find auth".into(),
-        status: "running".into(),
-        started_at: chrono::Utc::now(),
-        completed_at: None,
-        duration_ms: None,
-        tool_calls: None,
-        turns: None,
-        error: None,
         effective_context_source: Some("new".into()),
-        context_normalized: false,
-        fork_copy_error: None,
         persona: Some("implementer".into()),
-        resumed_from: None,
-        child_cwd: None,
-        worktree_path: None,
-        snapshot_ref: None,
-        effective_model_id: None,
+        ..base_meta()
     };
     let session_meta = SubagentSessionMetadata::from_meta(
         &meta,
@@ -791,25 +827,12 @@ fn upload_lifecycle_spawn_then_completion_preserves_fields() {
         subagent_id: "sa-lifecycle".into(),
         parent_session_id: "parent-1".into(),
         child_session_id: "child-1".into(),
-        subagent_type: "general-purpose".into(),
         description: "test task".into(),
         prompt: "do something".into(),
-        status: "running".to_string(),
-        started_at: chrono::Utc::now(),
-        completed_at: None,
-        duration_ms: None,
-        tool_calls: None,
-        turns: None,
-        error: None,
         effective_context_source: Some("forked".into()),
         context_normalized: true,
-        fork_copy_error: None,
         persona: Some("implementer".into()),
-        resumed_from: None,
-        child_cwd: None,
-        worktree_path: None,
-        snapshot_ref: None,
-        effective_model_id: None,
+        ..base_meta()
     };
     let spawn_gcs = SubagentSessionMetadata::from_meta(
         &spawn_meta,
@@ -878,21 +901,13 @@ fn upload_lifecycle_failure_preserves_error() {
         description: "d".into(),
         prompt: "p".into(),
         status: "failed".to_string(),
-        started_at: chrono::Utc::now(),
         completed_at: Some(chrono::Utc::now()),
         duration_ms: Some(100),
         tool_calls: Some(0),
         turns: Some(0),
         error: Some("session spawn error".into()),
         effective_context_source: Some("new".into()),
-        context_normalized: false,
-        fork_copy_error: None,
-        persona: None,
-        resumed_from: None,
-        child_cwd: None,
-        worktree_path: None,
-        snapshot_ref: None,
-        effective_model_id: None,
+        ..base_meta()
     };
     let gcs = SubagentSessionMetadata::from_meta(
         &meta,
@@ -922,25 +937,11 @@ fn session_metadata_session_kind_for_resumed() {
         subagent_id: "sa-resume".into(),
         parent_session_id: "p".into(),
         child_session_id: "c".into(),
-        subagent_type: "general-purpose".into(),
         description: "d".into(),
         prompt: "p".into(),
-        status: "running".into(),
-        started_at: chrono::Utc::now(),
-        completed_at: None,
-        duration_ms: None,
-        tool_calls: None,
-        turns: None,
-        error: None,
         effective_context_source: Some("resumed".into()),
-        context_normalized: false,
-        fork_copy_error: None,
-        persona: None,
         resumed_from: Some("prev-id".into()),
-        child_cwd: None,
-        worktree_path: None,
-        snapshot_ref: None,
-        effective_model_id: None,
+        ..base_meta()
     };
     let gcs = SubagentSessionMetadata::from_meta(
         &meta,
@@ -1215,25 +1216,18 @@ fn durable_fallback_roundtrips_child_cwd_and_worktree() {
         subagent_id: "sa-dur".into(),
         parent_session_id: "parent-dur".into(),
         child_session_id: "child-dur".into(),
-        subagent_type: "general-purpose".into(),
         description: "d".into(),
         prompt: "p".into(),
         status: "completed".into(),
-        started_at: chrono::Utc::now(),
         completed_at: Some(chrono::Utc::now()),
         duration_ms: Some(100),
         tool_calls: Some(1),
         turns: Some(1),
-        error: None,
-        effective_context_source: None,
-        context_normalized: false,
-        fork_copy_error: None,
         persona: Some("implementer".into()),
-        resumed_from: None,
         child_cwd: Some("/workspace/project".into()),
         worktree_path: Some("/tmp/grok-wt/sa-dur".into()),
-        snapshot_ref: None,
         effective_model_id: Some("grok-3".into()),
+        ..base_meta()
     };
     write_subagent_meta(&dir, &meta);
     let data = std::fs::read_to_string(dir.join("meta.json")).unwrap();
@@ -1257,22 +1251,8 @@ fn durable_fallback_rejects_running_status() {
         subagent_type: "explore".into(),
         description: "d".into(),
         prompt: "p".into(),
-        status: "running".into(),
-        started_at: chrono::Utc::now(),
-        completed_at: None,
-        duration_ms: None,
-        tool_calls: None,
-        turns: None,
-        error: None,
-        effective_context_source: None,
-        context_normalized: false,
-        fork_copy_error: None,
-        persona: None,
-        resumed_from: None,
         child_cwd: Some("/workspace".into()),
-        worktree_path: None,
-        snapshot_ref: None,
-        effective_model_id: None,
+        ..base_meta()
     };
     write_subagent_meta(&parent_dir, &meta);
     let data = std::fs::read_to_string(parent_dir.join("meta.json")).unwrap();
@@ -1351,24 +1331,8 @@ fn running_test_meta(id: &str, parent_session_id: &str) -> SubagentMeta {
         parent_session_id: parent_session_id.into(),
         child_session_id: format!("child-{id}"),
         subagent_type: "explore".into(),
-        description: "task".into(),
-        prompt: "do work".into(),
-        status: "running".into(),
-        started_at: chrono::Utc::now(),
-        completed_at: None,
-        duration_ms: None,
-        tool_calls: None,
-        turns: None,
-        error: None,
-        effective_context_source: None,
-        context_normalized: false,
-        fork_copy_error: None,
-        persona: None,
-        resumed_from: None,
         child_cwd: Some("/workspace".into()),
-        worktree_path: None,
-        snapshot_ref: None,
-        effective_model_id: None,
+        ..base_meta()
     }
 }
 fn inspection(id: &str, status: SubagentSnapshotStatus) -> SubagentInspection {
@@ -2018,27 +1982,16 @@ fn durable_meta_roundtrips_effective_model_id() {
     let _ = std::fs::create_dir_all(&dir);
     let meta = SubagentMeta {
         subagent_id: "sa-model".into(),
-        parent_session_id: "parent".into(),
-        child_session_id: "child".into(),
-        subagent_type: "general-purpose".into(),
         description: "d".into(),
         prompt: "p".into(),
         status: "completed".into(),
-        started_at: chrono::Utc::now(),
         completed_at: Some(chrono::Utc::now()),
         duration_ms: Some(100),
         tool_calls: Some(1),
         turns: Some(1),
-        error: None,
-        effective_context_source: None,
-        context_normalized: false,
-        fork_copy_error: None,
-        persona: None,
-        resumed_from: None,
         child_cwd: Some("/workspace".into()),
-        worktree_path: None,
-        snapshot_ref: None,
         effective_model_id: Some("grok-3".into()),
+        ..base_meta()
     };
     write_subagent_meta(&dir, &meta);
     let data = std::fs::read_to_string(dir.join("meta.json")).unwrap();

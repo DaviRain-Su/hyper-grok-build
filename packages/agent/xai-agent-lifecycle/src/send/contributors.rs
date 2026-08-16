@@ -7,6 +7,7 @@ pub use command::{CommandAction, CommandContributor, CommandInvocation, CommandS
 pub use session_lifecycle::{SessionIdleInput, SessionLifecycleContributor};
 pub use turn_input::{TurnInputContext, TurnInputContributor, TurnInputFragment};
 pub use turn_lifecycle::{
-    TurnAbortInput, TurnAbortReason, TurnDoneInput, TurnErrorInput, TurnLifecycleContributor,
-    TurnStartInput,
+    AnalyticsClass, CompactionClass, InputAuthority, InputPolicy, QueuePolicy, ShutdownPolicy,
+    TurnAbortInput, TurnAbortReason, TurnBoundary, TurnDoneInput, TurnErrorInput,
+    TurnLifecycleContributor, TurnStartInput,
 };

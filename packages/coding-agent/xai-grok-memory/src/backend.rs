@@ -15,8 +15,38 @@ use std::sync::Arc;
 use xai_grok_tools::types::memory_backend::{MemoryBackend, MemorySearchResult};
 
 use super::embedding::EmbeddingProvider as _;
+use super::observation::{
+    MemoryObservationSink, MemoryRetrievalMode, MemorySearchErrorClass, MemorySearchObservation,
+    MemorySearchOutcome, MemorySearchSource, MemoryWatcherSyncObservation,
+    noop_memory_observation_sink,
+};
 use super::storage::MemoryStorage;
 use super::watcher::MemoryFileWatcher;
+
+fn merge_fts_results<E>(
+    primary: Result<Vec<super::index::FtsResult>, E>,
+    evergreen: Result<Vec<super::index::FtsResult>, E>,
+) -> Vec<super::index::FtsResult> {
+    let mut results = primary.unwrap_or_default();
+    let existing: std::collections::HashSet<_> = results
+        .iter()
+        .map(|result| result.chunk_id.clone())
+        .collect();
+    results.extend(
+        evergreen
+            .into_iter()
+            .flatten()
+            .filter(|result| !existing.contains(&result.chunk_id)),
+    );
+    results
+}
+
+fn select_search_error_class(
+    fts_error_class: Option<MemorySearchErrorClass>,
+    is_vector_degraded: bool,
+) -> Option<MemorySearchErrorClass> {
+    fts_error_class.or_else(|| is_vector_degraded.then_some(MemorySearchErrorClass::Vector))
+}
 
 /// Embedding-client credentials scoped to a trusted endpoint. Only
 /// [`Self::for_endpoint`] retains a live credential; the empty default fails closed.
@@ -65,7 +95,7 @@ impl EndpointScopedCredentials {
         }
         if auth_credentials.is_some() || api_key_provider.is_some() {
             tracing::info!(
-                target: xai_grok_telemetry::memory_log::TARGET,
+                target: crate::MEMORY_LOG_TARGET,
                 endpoint,
                 "memory embeddings: session credentials withheld for non-first-party endpoint; its own key, if any, still applies"
             );
@@ -97,7 +127,6 @@ impl EndpointScopedCredentials {
 /// `[memory.search]` config because no single place applied all builder methods.
 #[derive(Clone)]
 pub struct MemoryBackendParams {
-    /// Session ID for telemetry events.
     pub session_id: String,
     /// Embedding provider config — `None` forces FTS-only fallback everywhere.
     pub embed_config: Option<xai_grok_config_types::MemoryEmbeddingConfig>,
@@ -112,13 +141,8 @@ pub struct MemoryBackendParams {
     pub watcher: Option<Arc<MemoryFileWatcher>>,
     /// Seconds before a stale reindex claim is forcibly released.
     pub stale_claim_secs: i64,
-    /// Telemetry label emitted with every search event from this backend.
-    ///
-    /// Differentiates the three runtime search paths in dashboards and logs:
-    /// - `"tool"` — model-initiated `memory_search` tool call (ToolBridge)
-    /// - `"injection"` — first-turn memory context injection
-    /// - `"compaction_recovery"` — post-compaction context re-injection
-    pub search_source: &'static str,
+    pub search_source: MemorySearchSource,
+    pub observation_sink: Arc<dyn MemoryObservationSink>,
     pub embedding_credentials: EndpointScopedCredentials,
 }
 
@@ -152,7 +176,7 @@ async fn build_embedding_provider(
     let credentials_approved = credentials.approved_for(base_url);
     if !credentials_approved {
         tracing::error!(
-            target: xai_grok_telemetry::memory_log::TARGET,
+            target: crate::MEMORY_LOG_TARGET,
             base_url,
             approved = ?credentials.endpoint,
             "memory embeddings: scoped credentials do not match the request URL; dropping them"
@@ -196,10 +220,9 @@ pub struct MemoryBackendImpl {
     watcher: Option<Arc<MemoryFileWatcher>>,
     /// Stale claim threshold for reindex coordination.
     stale_claim_secs: i64,
-    /// Session ID for telemetry events.
     session_id: String,
-    /// Telemetry label for search events — mirrors [`MemoryBackendParams::search_source`].
-    search_source: &'static str,
+    search_source: MemorySearchSource,
+    observation_sink: Arc<dyn MemoryObservationSink>,
     /// Shared search counter — read by session summary telemetry.
     ///
     /// Only the ToolBridge backend's counter is shared back to the session actor;
@@ -222,13 +245,13 @@ impl MemoryBackendImpl {
             watcher: None,
             stale_claim_secs: 60,
             session_id: String::new(),
-            search_source: "tool",
+            search_source: MemorySearchSource::Tool,
+            observation_sink: noop_memory_observation_sink(),
             embedding_credentials: EndpointScopedCredentials::none(),
             search_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
-    /// Set the session ID for telemetry.
     pub fn with_session_id(mut self, session_id: String) -> Self {
         self.session_id = session_id;
         self
@@ -280,19 +303,13 @@ impl MemoryBackendImpl {
     }
 
     /// Build a fully configured backend for a live session.
-    ///
-    /// Prefer this over calling `new()` + individual builder methods: it ensures
-    /// session_id, embeddings, search config, and the file watcher are applied
-    /// consistently at every call site (ToolBridge, first-turn injection,
-    /// post-compaction recovery).  Using the factory eliminates the silent
-    /// per-site drift where some paths got hybrid search while others fell back
-    /// to FTS-only, and where `[memory.search]` config was effectively ignored.
     pub fn from_session_params(storage: MemoryStorage, params: &MemoryBackendParams) -> Self {
         let db_path = storage.workspace_dir().join("index.sqlite");
         let mut backend = Self::new(db_path, storage)
             .with_session_id(params.session_id.clone())
             .with_search_config(params.search_config.clone());
         backend.search_source = params.search_source;
+        backend.observation_sink = params.observation_sink.clone();
         if let Some(ec) = &params.embed_config {
             backend = backend.with_embedding(
                 ec.clone(),
@@ -308,19 +325,8 @@ impl MemoryBackendImpl {
     }
 }
 
-/// Test-only field accessors.
-///
-/// These expose private fields so tests can assert that `from_session_params`
-/// actually stored the values it was given, without routing through a full
-/// runtime search call whose semantics override some config fields.
 #[cfg(test)]
 impl MemoryBackendImpl {
-    /// Returns the session ID stored in this backend.
-    pub fn session_id_for_test(&self) -> &str {
-        &self.session_id
-    }
-
-    /// Returns the search config stored in this backend.
     pub fn search_config_for_test(&self) -> &xai_grok_config_types::MemorySearchConfig {
         &self.search_config
     }
@@ -337,23 +343,36 @@ impl MemoryBackend for MemoryBackendImpl {
         max_results: usize,
         min_score: f64,
     ) -> Result<Vec<MemorySearchResult>, Box<dyn std::error::Error + Send + Sync>> {
-        // Open a MemoryIndex for this query (open-per-query, ~1ms).
-        //
-        // IMPORTANT: `MemoryIndex` is `Send` but `!Sync`, so `&MemoryIndex`
-        // is `!Send`. To keep this future `Send`, we must never hold a
-        // `&index` borrow across an `.await` point. The code below is
-        // structured into sync phases (borrow &index) and async phases
-        // (no &index borrow) to satisfy this constraint.
+        let search_start = std::time::Instant::now();
+        let query_length = query.len();
+        let keyword_count = super::query_expansion::extract_keywords(query).len();
+
         let embed_dims = self.embed_config.as_ref().map_or(1024, |ec| ec.dimensions);
-        let mut index = super::index::MemoryIndex::open_or_create(
+        let mut index = match super::index::MemoryIndex::open_or_create(
             &self.db_path,
             self.storage.clone(),
             xai_grok_config_types::MemoryIndexConfig::default(),
             embed_dims,
-        )
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-            Box::new(std::io::Error::other(e.to_string()))
-        })?;
+        ) {
+            Ok(index) => index,
+            Err(error) => {
+                self.observation_sink
+                    .observe_search(MemorySearchObservation {
+                        source: self.search_source,
+                        mode: MemoryRetrievalMode::FtsOnly,
+                        outcome: MemorySearchOutcome::Error,
+                        query_length,
+                        keyword_count,
+                        result_count: 0,
+                        top_score: 0.0,
+                        min_score_threshold: min_score,
+                        duration_ms: search_start.elapsed().as_millis() as u64,
+                        is_vector_available: false,
+                        error_class: Some(MemorySearchErrorClass::IndexOpen),
+                    });
+                return Err(Box::new(std::io::Error::other(error.to_string())));
+            }
+        };
 
         // ── Sync phase 1: reindex dirty files, collect chunks needing embeddings ──
         let mut reindex_chunks: Vec<(String, String)> = Vec::new();
@@ -414,7 +433,7 @@ impl MemoryBackend for MemoryBackendImpl {
                     }
                     Err(e) => {
                         tracing::warn!(
-                            target: xai_grok_telemetry::memory_log::TARGET,
+                            target: crate::MEMORY_LOG_TARGET,
                             error = %e,
                             "embedding batch failed during sync-on-search, skipping"
                         );
@@ -429,18 +448,15 @@ impl MemoryBackend for MemoryBackendImpl {
         }
         if needs_release {
             index.release_claim();
-            // Fire watcher-sync telemetry now that we know the embedded count.
-            if let Some((dirty_count, reindexed_count, sync_start)) = watcher_sync_stats {
-                xai_grok_telemetry::session_ctx::log_event(
-                    xai_grok_telemetry::memory_telemetry::MemoryWatcherSync {
-                        session_id: self.session_id.clone(),
-                        dirty_file_count: dirty_count,
-                        claimed: true,
+            if let Some((dirty_file_count, reindexed_count, sync_start)) = watcher_sync_stats {
+                self.observation_sink
+                    .observe_watcher_sync(MemoryWatcherSyncObservation {
+                        dirty_file_count,
+                        is_claimed: true,
                         reindexed_count,
                         embedded_count,
                         duration_ms: sync_start.elapsed().as_millis() as u64,
-                    },
-                );
+                    });
             }
         }
 
@@ -449,57 +465,45 @@ impl MemoryBackend for MemoryBackendImpl {
         search_config.max_results = max_results;
         search_config.min_score = min_score as f32;
 
-        let search_start = std::time::Instant::now();
-        let keyword_count = super::query_expansion::extract_keywords(query).len();
         let candidate_limit = search_config.max_results * 3;
-        let mut fts_results = index.search_fts(query, candidate_limit).unwrap_or_default();
-
-        // Supplemental evergreen query: ensure global/workspace MEMORY.md
-        // chunks appear in candidates even when session volume crowds them
-        // out of the base FTS results. Mirrors hybrid_search() in search.rs.
-        let evergreen = index
-            .search_fts_by_sources(query, candidate_limit, &["global", "workspace"])
-            .unwrap_or_default();
-        let existing: std::collections::HashSet<String> =
-            fts_results.iter().map(|r| r.chunk_id.clone()).collect();
-        for r in evergreen {
-            if !existing.contains(&r.chunk_id) {
-                fts_results.push(r);
-            }
-        }
-
-        let vec_available = index.vec_available() && provider.is_some();
+        let primary = index.search_fts(query, candidate_limit);
+        let fts_error_class = primary.as_ref().err().map(|error| {
+            tracing::warn!(target: crate::MEMORY_LOG_TARGET, %error, "FTS search failed");
+            MemorySearchErrorClass::Fts
+        });
+        let fts_results = merge_fts_results(
+            primary,
+            index.search_fts_by_sources(query, candidate_limit, &["global", "workspace"]),
+        );
 
         // ── Async phase: embed query for vector search (no &index borrow) ──
-        let query_embedding = if vec_available {
-            if let Some(ref provider) = provider {
-                match provider.embed_batch(&[query]).await {
-                    Ok(embeddings) if !embeddings.is_empty() => {
-                        Some(embeddings.into_iter().next().unwrap())
-                    }
-                    Ok(_) => None,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "embedding query failed, falling back to FTS-only");
-                        None
-                    }
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let query_embedding = super::search::resolve_query_embedding(
+            provider
+                .as_ref()
+                .map(|provider| provider as &dyn super::embedding::EmbeddingProvider),
+            index.vec_available(),
+            query,
+        )
+        .await;
 
         // ── Sync phase 3: vector search + scoring + merge (borrows &index) ──
-        let results = super::search::hybrid_search_merge(
+        let merged = super::search::hybrid_search_merge(
             &index,
             fts_results,
-            query_embedding.as_deref(),
+            query_embedding.embedding(),
             &search_config,
         )
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-            Box::new(std::io::Error::other(e.to_string()))
+        .map_err(|error| {
+            Box::new(std::io::Error::other(error.to_string()))
+                as Box<dyn std::error::Error + Send + Sync>
         })?;
+        let mode = if merged.is_vector_degraded {
+            MemoryRetrievalMode::FtsOnly
+        } else {
+            query_embedding.mode()
+        };
+        let error_class = select_search_error_class(fts_error_class, merged.is_vector_degraded);
+        let results = merged.results;
 
         // Record accesses for the returned chunks so access_count and
         // last_accessed stay current.  Non-fatal: a failed write is a no-op
@@ -508,39 +512,24 @@ impl MemoryBackend for MemoryBackendImpl {
             let _ = index.record_access(&result.chunk_id);
         }
 
-        let duration_ms = search_start.elapsed().as_millis() as u64;
-        let search_mode = if vec_available { "hybrid" } else { "fts_only" };
-        let top_score = results.first().map_or(0.0, |r| r.score);
-
-        if results.is_empty() {
-            xai_grok_telemetry::session_ctx::log_event(
-                xai_grok_telemetry::memory_telemetry::MemorySearchEmpty {
-                    session_id: self.session_id.clone(),
-                    query_length: query.len(),
-                    keyword_count,
-                    min_score_threshold: min_score,
-                    search_mode: search_mode.to_owned(),
-                    duration_ms,
-                    vec_available,
-                    source: self.search_source.to_owned(),
+        self.observation_sink
+            .observe_search(MemorySearchObservation {
+                source: self.search_source,
+                mode,
+                outcome: if results.is_empty() {
+                    MemorySearchOutcome::Empty
+                } else {
+                    MemorySearchOutcome::Results
                 },
-            );
-        } else {
-            xai_grok_telemetry::session_ctx::log_event(
-                xai_grok_telemetry::memory_telemetry::MemorySearch {
-                    session_id: self.session_id.clone(),
-                    query_length: query.len(),
-                    keyword_count,
-                    result_count: results.len(),
-                    top_score,
-                    min_score_threshold: min_score,
-                    search_mode: search_mode.to_owned(),
-                    duration_ms,
-                    vec_available,
-                    source: self.search_source.to_owned(),
-                },
-            );
-        }
+                query_length,
+                keyword_count,
+                result_count: results.len(),
+                top_score: results.first().map_or(0.0, |result| result.score),
+                min_score_threshold: min_score,
+                duration_ms: search_start.elapsed().as_millis() as u64,
+                is_vector_available: query_embedding.mode() != MemoryRetrievalMode::FtsOnly,
+                error_class,
+            });
         self.search_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -592,6 +581,33 @@ impl MemoryBackend for MemoryBackendImpl {
 #[cfg(test)]
 mod factory_tests {
     use super::*;
+
+    #[test]
+    fn fts_failures_keep_other_results() {
+        let primary = Err::<Vec<_>, _>("primary");
+        assert_eq!(merge_fts_results(primary, Ok(vec![])).len(), 0);
+        let base = vec![crate::index::FtsResult {
+            chunk_id: "base".into(),
+            rowid: 1,
+            rank: -1.0,
+        }];
+        assert_eq!(
+            merge_fts_results(Ok(base), Err("evergreen"))[0].chunk_id,
+            "base"
+        );
+    }
+
+    #[test]
+    fn fts_error_takes_precedence_when_vector_search_also_degrades() {
+        assert_eq!(
+            select_search_error_class(Some(MemorySearchErrorClass::Fts), true),
+            Some(MemorySearchErrorClass::Fts)
+        );
+        assert_eq!(
+            select_search_error_class(None, true),
+            Some(MemorySearchErrorClass::Vector)
+        );
+    }
     use crate::index::{MemoryIndex, init_sqlite_vec};
     use crate::storage::MemoryStorage;
     use tempfile::TempDir;
@@ -605,25 +621,21 @@ mod factory_tests {
 
     fn make_params_fts_only(session_id: &str) -> MemoryBackendParams {
         MemoryBackendParams {
-            session_id: session_id.to_string(),
+            session_id: session_id.to_owned(),
             embed_config: None,
             embed_base_url: String::new(),
             embed_api_key: None,
             search_config: MemorySearchConfig::default(),
             watcher: None,
             stale_claim_secs: 60,
-            search_source: "tool",
+            search_source: MemorySearchSource::Tool,
+            observation_sink: noop_memory_observation_sink(),
             embedding_credentials: EndpointScopedCredentials::none(),
         }
     }
 
-    /// from_session_params stores the session_id it was given.
-    ///
-    /// Direct assertion via the `#[cfg(test)]` accessor proves the factory
-    /// actually stored the value rather than discarding it.  The counter
-    /// increment check additionally confirms the backend is functional.
     #[tokio::test]
-    async fn test_factory_sets_session_id() {
+    async fn test_factory_backend_increments_search_counter() {
         let tmp = TempDir::new().unwrap();
         init_sqlite_vec();
         let storage = make_storage(&tmp);
@@ -643,14 +655,6 @@ mod factory_tests {
         let params = make_params_fts_only("test-session-abc");
         let backend = MemoryBackendImpl::from_session_params(storage, &params);
 
-        // Direct assertion: the stored session_id matches what the factory was given.
-        assert_eq!(
-            backend.session_id_for_test(),
-            "test-session-abc",
-            "session_id must be stored exactly as supplied"
-        );
-
-        // Functional check: the backend actually runs a search.
         let before = backend
             .search_counter
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -767,16 +771,17 @@ mod factory_tests {
         let tmp = TempDir::new().unwrap();
         let storage = make_storage(&tmp);
 
-        for source in ["tool", "injection", "compaction_recovery"] {
+        for source in [
+            MemorySearchSource::Tool,
+            MemorySearchSource::Injection,
+            MemorySearchSource::CompactionRecovery,
+        ] {
             let params = MemoryBackendParams {
                 search_source: source,
                 ..make_params_fts_only("test-source")
             };
             let backend = MemoryBackendImpl::from_session_params(storage.clone(), &params);
-            assert_eq!(
-                backend.search_source, source,
-                "search_source must be propagated for source='{source}'"
-            );
+            assert_eq!(source, backend.search_source);
         }
     }
 
@@ -787,18 +792,18 @@ mod factory_tests {
         let db_path = tmp.path().join("test.sqlite");
         let storage = make_storage(&tmp);
         let backend = MemoryBackendImpl::new(db_path, storage);
-        assert_eq!(backend.search_source, "tool");
+        assert_eq!(MemorySearchSource::Tool, backend.search_source);
     }
 
     /// MemoryBackendParams with different search_source values is Clone.
     #[test]
     fn test_params_clone_preserves_search_source() {
         let params = MemoryBackendParams {
-            search_source: "injection",
+            search_source: MemorySearchSource::Injection,
             ..make_params_fts_only("test-clone-source")
         };
         let cloned = params.clone();
-        assert_eq!(cloned.search_source, "injection");
+        assert_eq!(MemorySearchSource::Injection, cloned.search_source);
     }
 
     /// Watcher startup telemetry reflects actual runtime state.
@@ -1215,7 +1220,8 @@ mod factory_tests {
             search_config: MemorySearchConfig::default(),
             watcher: None,
             stale_claim_secs: 60,
-            search_source: "tool",
+            search_source: MemorySearchSource::Tool,
+            observation_sink: noop_memory_observation_sink(),
             // Trusted endpoint + no auth_credentials exercises the api_key_provider path.
             embedding_credentials: EndpointScopedCredentials::for_endpoint(
                 "http://example/v1",

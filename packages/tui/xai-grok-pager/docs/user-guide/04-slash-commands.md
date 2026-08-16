@@ -201,7 +201,7 @@ Open a preview of the current saved plan. Aliases: `/show-plan`, `/plan-view`.
 
 ## Memory
 
-`/flush`, `/dream`, and `/memory` require memory to be enabled (`--experimental-memory` or `GROK_MEMORY=1`); `/memory` also needs a configured memory backend. `/remember` is always available.
+`/flush`, `/dream`, and `/memory` require memory enabled through `GROK_MEMORY=1`, `[memory] enabled = true`, or managed remote settings; `/memory` also needs a configured memory backend. `/remember` is always available.
 
 ### `/memory`
 

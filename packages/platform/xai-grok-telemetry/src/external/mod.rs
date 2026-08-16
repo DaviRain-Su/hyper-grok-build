@@ -27,7 +27,7 @@
 
 pub mod config;
 mod emit;
-mod providers;
+pub(crate) mod providers;
 mod redact;
 pub mod schema;
 pub mod truncate;
@@ -99,9 +99,20 @@ pub struct ExternalTelemetry {
     include_version_on_metrics: bool,
     app_version: String,
     health: Arc<redact::ExportHealth>,
+    /// True when any signal was configured with a client cert/key pair.
+    mtls_identity_configured: bool,
     /// Init summary for the adoption meta-event (emitted once, post-auth).
     configured_meta: ConfiguredMeta,
     meta_event_once: std::sync::Once,
+}
+
+/// Snapshot of external-stream export-health counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExportHealthSnapshot {
+    pub records_dropped: u64,
+    pub metric_exports_dropped: u64,
+    pub export_failures: u64,
+    pub export_successes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -110,7 +121,7 @@ struct ConfiguredMeta {
     logs_exporter: &'static str,
     logs_endpoint_origin: String,
     metrics_endpoint_origin: String,
-    protocol: &'static str,
+    protocol: String,
     prompts_gate: bool,
     details_gate: bool,
     source: &'static str,
@@ -158,7 +169,10 @@ fn build_handle(cfg: ExternalOtelConfig) -> Option<Arc<ExternalTelemetry>> {
     let built = match providers::build(&cfg, gates.clone(), health.clone()) {
         Ok(built) => built,
         Err(e) => {
-            tracing::warn!(error = %e, "external otel: exporter construction failed; stream disabled");
+            tracing::warn!(
+                error = %e,
+                "external otel: exporter construction failed; stream disabled"
+            );
             return None;
         }
     };
@@ -181,11 +195,24 @@ fn build_handle(cfg: ExternalOtelConfig) -> Option<Arc<ExternalTelemetry>> {
         logs_endpoint_origin: crate::redact_common::url_origin(&cfg.logs_endpoint).into_owned(),
         metrics_endpoint_origin: crate::redact_common::url_origin(&cfg.metrics_endpoint)
             .into_owned(),
-        protocol: cfg.transport.as_protocol_str(),
+        protocol: if cfg.logs_transport == cfg.metrics_transport {
+            cfg.logs_transport.as_protocol_str().to_string()
+        } else {
+            format!(
+                "logs={},metrics={}",
+                cfg.logs_transport.as_protocol_str(),
+                cfg.metrics_transport.as_protocol_str()
+            )
+        },
         prompts_gate: cfg.gates.log_user_prompts,
         details_gate: cfg.gates.log_tool_details,
         source: cfg.enabled_source,
     };
+
+    let mtls_identity_configured = cfg.logs_client_certificate.is_some()
+        || cfg.logs_client_key.is_some()
+        || cfg.metrics_client_certificate.is_some()
+        || cfg.metrics_client_key.is_some();
 
     tracing::debug!(
         metrics_exporter = configured_meta.metrics_exporter,
@@ -207,6 +234,7 @@ fn build_handle(cfg: ExternalOtelConfig) -> Option<Arc<ExternalTelemetry>> {
         include_version_on_metrics: cfg.include_version_on_metrics,
         app_version: cfg.client.client_version.clone(),
         health,
+        mtls_identity_configured,
         configured_meta,
         meta_event_once: std::sync::Once::new(),
     }))
@@ -420,7 +448,6 @@ pub fn shutdown() {
     };
     ext.shutdown_once.call_once(|| {
         ext.active.store(false, Ordering::Relaxed);
-        emit_export_health(&ext);
         let logger_provider = ext.logger_provider.clone();
         let meter_provider = ext.meter_provider.clone();
         let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -442,6 +469,10 @@ pub fn shutdown() {
         if rx.recv_timeout(std::time::Duration::from_secs(2)).is_err() {
             tracing::debug!("external otel: shutdown watchdog expired; abandoning flush thread");
         }
+        // After provider shutdown (which flushes pending batches). Short-lived
+        // CLI exits often only export on this path, so health counters and the
+        // mTLS total-failure warn must run after it — not before.
+        emit_export_health(&ext);
     });
 }
 
@@ -463,9 +494,41 @@ fn emit_export_health(ext: &ExternalTelemetry) {
         export_successes = snapshot.export_successes,
         "external otel: export health"
     );
+    // mTLS misconfig (expired/wrong CA client cert) otherwise looks like a
+    // clean exit with an empty collector. Surface that at warn once on
+    // shutdown when every export attempt failed.
+    if ext.mtls_identity_configured
+        && snapshot.export_failures > 0
+        && snapshot.export_successes == 0
+    {
+        let last_error = health
+            .last_export_error
+            .lock()
+            .clone()
+            .map(|e| crate::redact_common::redact_urls_in_text(&e))
+            .unwrap_or_else(|| "unknown".into());
+        tracing::warn!(
+            logs_endpoint_origin = %ext.configured_meta.logs_endpoint_origin,
+            metrics_endpoint_origin = %ext.configured_meta.metrics_endpoint_origin,
+            export_failures = snapshot.export_failures,
+            last_error = %last_error,
+            "external otel: mTLS identity configured but every export failed"
+        );
+    }
     if tokio::runtime::Handle::try_current().is_ok() {
         crate::session_ctx::log_session_event(snapshot);
     }
+}
+
+/// Snapshot of export-health counters for the active external stream.
+/// `None` when the stream was never activated.
+pub fn export_health() -> Option<ExportHealthSnapshot> {
+    handle().map(|ext| ExportHealthSnapshot {
+        records_dropped: ext.health.records_dropped.load(Ordering::Relaxed),
+        metric_exports_dropped: ext.health.metric_exports_dropped.load(Ordering::Relaxed),
+        export_failures: ext.health.export_failures.load(Ordering::Relaxed),
+        export_successes: ext.health.export_successes.load(Ordering::Relaxed),
+    })
 }
 
 #[cfg(test)]
@@ -523,12 +586,13 @@ pub(crate) mod test_support {
             include_version_on_metrics: false,
             app_version: String::new(),
             health,
+            mtls_identity_configured: false,
             configured_meta: ConfiguredMeta {
                 metrics_exporter: "test",
                 logs_exporter: "test",
                 logs_endpoint_origin: String::new(),
                 metrics_endpoint_origin: String::new(),
-                protocol: "test",
+                protocol: "test".into(),
                 prompts_gate: gates.log_user_prompts,
                 details_gate: gates.log_tool_details,
                 source: "env",

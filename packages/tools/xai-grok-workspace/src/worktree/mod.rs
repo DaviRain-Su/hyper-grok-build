@@ -2521,9 +2521,9 @@ pub struct RehydrateSessionResponse {
 // ============================================================================
 
 use xai_fast_worktree::{
-    AutoGcOptions, DbStats, GcOptions, GcReport, ListFilter, WorktreeAutoGcLayer, WorktreeDb,
-    WorktreeKind, WorktreeRecord, gc_worktrees as fw_gc_worktrees, maybe_auto_gc,
-    rebuild_worktree_db, resolve_grok_home, resolve_worktree_auto_gc_from_layers,
+    DbStats, GcOptions, GcReport, ListFilter, WorktreeAutoGcLayer, WorktreeDb, WorktreeKind,
+    WorktreeRecord, gc_worktrees as fw_gc_worktrees, rebuild_worktree_db, resolve_grok_home,
+    resolve_worktree_auto_gc_from_layers, run_auto_gc_pass,
 };
 
 pub fn open_db() -> Result<WorktreeDb> {
@@ -2588,8 +2588,21 @@ pub fn worktree_auto_gc_layer_from_settings(
     use std::collections::BTreeMap;
     use xai_grok_config_types::WorktreeKindMaxAge;
 
-    let max_age_by_kind = s
-        .max_age_by_kind
+    // Exhaustive destructure so a new settings field becomes a compile error
+    // here rather than a silently dropped knob on both the shell and workspace
+    // resolve paths.
+    let xai_grok_config_types::WorktreeAutoGcSettings {
+        enabled,
+        max_age_secs,
+        min_interval_secs,
+        dry_run,
+        include_orphan_snapshots,
+        max_age_by_kind,
+        include_rebuild,
+        rebuild_min_interval_secs,
+    } = s;
+
+    let max_age_by_kind = max_age_by_kind
         .as_ref()
         .map(|m| {
             m.iter()
@@ -2606,53 +2619,79 @@ pub fn worktree_auto_gc_layer_from_settings(
         .unwrap_or_default();
 
     WorktreeAutoGcLayer {
-        enabled: s.enabled,
-        max_age_secs: s.max_age_secs,
-        min_interval_secs: s.min_interval_secs,
-        dry_run: s.dry_run,
-        include_orphan_snapshots: s.include_orphan_snapshots,
+        enabled: *enabled,
+        max_age_secs: *max_age_secs,
+        min_interval_secs: *min_interval_secs,
+        dry_run: *dry_run,
+        include_orphan_snapshots: *include_orphan_snapshots,
         max_age_by_kind,
-        include_rebuild: s.include_rebuild,
-        rebuild_min_interval_secs: s.rebuild_min_interval_secs,
+        include_rebuild: *include_rebuild,
+        rebuild_min_interval_secs: *rebuild_min_interval_secs,
     }
 }
 
-/// Env + `$GROK_HOME/config.toml` only — **`remote=None` is intentional**.
+/// Parse `[worktree.auto_gc]` out of the workspace's `$GROK_HOME/config.toml`.
 ///
-/// Workspace handle startup has no remote-settings blob (unlike shell agent
-/// init, which resolves env > TOML > remote). Remote `worktree_auto_gc`
-/// kill-switch / staged rollout therefore does not apply on pure-workspace
-/// processes; use `GROK_WORKTREE_AUTO_GC=0` / `GROK_WORKTREE_AUTO_GC_DRY_RUN=1`
-/// or local TOML until remote is plumbed into `make_workspace_handle`.
-fn resolve_worktree_auto_gc_local() -> xai_fast_worktree::ResolvedWorktreeAutoGc {
-    use xai_grok_config_types::WorktreeAutoGcSettings;
+/// Returns `None` when the table is absent or fails to deserialize.
+fn worktree_auto_gc_settings_from_toml(
+    root: &toml::Value,
+) -> Option<xai_grok_config_types::WorktreeAutoGcSettings> {
+    root.get("worktree")
+        .and_then(|w| w.get("auto_gc"))
+        // toml::Value only deserializes by value (no &Value Deserializer).
+        .and_then(|v| xai_grok_config_types::WorktreeAutoGcSettings::deserialize(v.clone()).ok())
+}
 
+/// Env + `$GROK_HOME/config.toml` only — this process has no remote-settings
+/// blob (unlike shell agent init, which resolves env > TOML > remote). Because a
+/// server-side `worktree_auto_gc` kill-switch / staged-rollout / dry-run is
+/// invisible here, this path opts in only when local config explicitly enables
+/// it (`[worktree.auto_gc] enabled = true`); otherwise it returns `None` and the
+/// caller skips the pass entirely.
+///
+/// Skipping (rather than running a forced dry-run) is deliberate: the shell
+/// agent already runs the authoritative remote-aware pass against the same
+/// `$GROK_HOME` DB. A forced dry-run here would still spend the pass budget and,
+/// worse, stamp the shared throttle meta — blacking out the real deleting pass
+/// for a full `min_interval`. Skipping keeps the same fail-safe (never delete
+/// against an unseen remote policy) at none of that cost.
+fn resolve_worktree_auto_gc_local() -> Option<xai_fast_worktree::ResolvedWorktreeAutoGc> {
     let local = if let Ok(home) = resolve_grok_home() {
         let path = home.join("config.toml");
         if let Ok(text) = std::fs::read_to_string(&path)
             && let Ok(root) = text.parse::<toml::Value>()
         {
-            root.get("worktree")
-                .and_then(|w| w.get("auto_gc"))
-                // toml::Value only deserializes by value (no &Value Deserializer).
-                .and_then(|v| WorktreeAutoGcSettings::deserialize(v.clone()).ok())
+            worktree_auto_gc_settings_from_toml(&root)
         } else {
             None
         }
     } else {
         None
     };
-    let layer = local.as_ref().map(worktree_auto_gc_layer_from_settings);
-    // remote=None: see doc comment on this function.
-    resolve_worktree_auto_gc_from_layers(layer.as_ref(), None)
+    local_auto_gc_policy(local.as_ref())
+}
+
+/// Pure opt-in decision (no IO): `None` unless local config explicitly enables
+/// the pass. Split out of `resolve_worktree_auto_gc_local` so the fail-safe is
+/// testable without touching `$GROK_HOME`.
+fn local_auto_gc_policy(
+    local: Option<&xai_grok_config_types::WorktreeAutoGcSettings>,
+) -> Option<xai_fast_worktree::ResolvedWorktreeAutoGc> {
+    // No explicit local opt-in ⇒ let the remote-aware shell pass own GC.
+    if !local.and_then(|s| s.enabled).unwrap_or(false) {
+        return None;
+    }
+    let layer = local.map(worktree_auto_gc_layer_from_settings);
+    Some(resolve_worktree_auto_gc_from_layers(layer.as_ref(), None))
 }
 
 /// Sync auto-GC for handle startup (caller must `spawn_blocking`).
 pub fn run_auto_gc_best_effort() {
-    let opts = AutoGcOptions::from_resolved(resolve_worktree_auto_gc_local());
-    if let Err(e) = WorktreeDb::open_default().and_then(|db| maybe_auto_gc(&db, &opts)) {
-        tracing::warn!(error = %e, "auto worktree gc failed");
-    }
+    let Some(policy) = resolve_worktree_auto_gc_local() else {
+        tracing::debug!("auto worktree gc skipped at workspace startup: no local opt-in");
+        return;
+    };
+    run_auto_gc_pass(&policy, "workspace startup");
 }
 
 pub fn worktree_db_stats() -> Result<DbStats> {
@@ -2789,6 +2828,38 @@ mod tests {
         let cfg = crate::StatusConfig::default();
         assert_eq!(cfg.agent_rpc_timeout, Duration::from_secs(30));
         assert_eq!(cfg.agent_connect_timeout, Duration::from_secs(5));
+    }
+
+    /// The workspace hook is remote-blind, so it runs only on an explicit local
+    /// opt-in. Without one it must return `None` (skip) — not a forced dry-run
+    /// pass, which would stamp the shared throttle and black out the shell
+    /// agent's real deleting pass.
+    #[test]
+    fn local_auto_gc_policy_opts_in_only_when_enabled() {
+        use xai_grok_config_types::WorktreeAutoGcSettings;
+
+        assert!(local_auto_gc_policy(None).is_none(), "no config ⇒ skip");
+        assert!(
+            local_auto_gc_policy(Some(&WorktreeAutoGcSettings::default())).is_none(),
+            "enabled unset ⇒ skip"
+        );
+        assert!(
+            local_auto_gc_policy(Some(&WorktreeAutoGcSettings {
+                enabled: Some(false),
+                ..Default::default()
+            }))
+            .is_none(),
+            "enabled=false ⇒ skip"
+        );
+        let policy = local_auto_gc_policy(Some(&WorktreeAutoGcSettings {
+            enabled: Some(true),
+            ..Default::default()
+        }))
+        .expect("enabled=true ⇒ run");
+        assert!(
+            !policy.dry_run,
+            "an explicit local opt-in runs a real pass, not a forced dry-run"
+        );
     }
 
     // ── snapshot_and_remove_subagent_worktree ────────────────────────────

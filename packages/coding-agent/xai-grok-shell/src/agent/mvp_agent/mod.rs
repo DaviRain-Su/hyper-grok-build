@@ -58,7 +58,8 @@ use crate::agent::folder_trust;
 use crate::agent::models::{resolve_catalog_key, selectable_catalog_key_for_persisted};
 use crate::agent::session_config;
 use xai_grok_sampling_types::{
-    REASONING_EFFORT_META_KEY, ReasoningEffortOption, reasoning_effort_meta_value,
+    REASONING_EFFORT_META_KEY, ReasoningEffort, ReasoningEffortOption,
+    parse_reasoning_effort_meta, reasoning_effort_meta_value,
     supports_reasoning_effort_meta,
 };
 use crate::agent::update_chunk_merge;
@@ -267,6 +268,8 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub session_meta: Option<&'a acp::Meta>,
     pub model_agent_type: Option<&'a str>,
     pub session_model_id: acp::ModelId,
+    /// A `session/new` reasoning-effort hint applied to the spawn sampling; `None` for loads.
+    pub initial_reasoning_effort: Option<ReasoningEffort>,
     pub session_yolo_mode: bool,
     pub session_auto_mode: bool,
     pub prompt_display_cwd: Option<String>,
@@ -442,6 +445,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         session_meta,
         model_agent_type,
         session_model_id,
+        initial_reasoning_effort: None,
         session_yolo_mode,
         session_auto_mode: false,
         prompt_display_cwd: None,
@@ -504,8 +508,10 @@ pub(crate) struct PromptResponseMeta {
     /// Whole-prompt billing (sibling token fields are last call only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::extensions::notification::PromptUsage>,
-    /// Cancellation category when the turn was terminated by the system
-    /// (e.g. doom loop). `None` for normal completions and user cancels.
+    /// Why the turn ended early (`cancellation_category_meta`): a cancel's
+    /// category (`"HookDenied"`, `"MidTurnAbort"`, …) or a synthetic end
+    /// (`"max_turns_reached"`, `"action_stationarity"`); `None` for normal
+    /// completions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cancellation_category: Option<String>,
     /// What triggered a cancelled turn's cancel (`"send_now"`, `"ctrl_c"`,
@@ -606,6 +612,7 @@ struct SettingsUpdateNotification {
     gate_url: Option<String>,
     gate_label: Option<String>,
     allow_access: Option<bool>,
+    consent_gate: Option<crate::util::config::ConsentGate>,
     subscription_tier_display: Option<String>,
     auto_permission_mode_enabled: Option<bool>,
     /// Soft-default permission mode for the pager (post-auth / `/new` refresh).
@@ -821,7 +828,7 @@ pub struct MvpAgent {
     /// [`Self::sync_collection_config_gate`] on every mid-session
     /// `remote_settings` rewrite.
     pub(crate) trace_upload_live: Arc<std::sync::atomic::AtomicBool>,
-    /// Memory system configuration (None when --experimental-memory not set).
+    /// Memory system configuration (None when memory is disabled).
     memory_config: Option<crate::config::MemoryConfig>,
     /// Optional channel to the leader's `ConfigFileWatcher` for dynamic
     /// per-cwd registration as new sessions open. Each
@@ -852,6 +859,9 @@ pub struct MvpAgent {
     /// LEADER-SAFE(shared): agent-level code-nav index manager, keyed by cwd,
     /// no per-client state.
     codebase_indexes: Arc<parking_lot::Mutex<CodebaseIndexManager>>,
+    /// LEADER-SAFE(init-once): one index for the process. Empty until
+    /// [`MvpAgent::start_search_index_once`] decides, so reading cannot decide.
+    search_index: crate::session::storage::search::SharedSearchIndex,
     /// Worktree creation type (resolved: local config > remote > default Linked).
     pub(crate) worktree_type: crate::util::config::WorktreeType,
     /// Restore codebase state on worktree resume (resolved: local config > remote > default false).
@@ -1008,6 +1018,9 @@ pub struct MvpAgent {
     /// in-flight guard.
     #[cfg(test)]
     settings_reapply_spawn_count: std::cell::Cell<usize>,
+    /// Test-only: counts auto-GC runs spawned past the settled guard.
+    #[cfg(test)]
+    auto_gc_spawn_count: std::cell::Cell<usize>,
     /// Test-only: counts `spawn_post_auth_settings` tasks spawned past its
     /// own guard.
     #[cfg(test)]
@@ -1398,6 +1411,7 @@ mod session_lifecycle;
 mod subagent_coordinator;
 mod agent_ops;
 mod acp_agent;
+pub(crate) mod reasoning_effort;
 mod session_setup;
 use session_registry::SessionRegistry;
 pub(crate) use session_lifecycle::RegistrySnapshot;
@@ -1692,7 +1706,7 @@ impl MvpAgent {
             {
                 self.install_remote_settings(settings);
                 if remote_was_absent {
-                    self.spawn_auto_worktree_gc();
+                    self.run_deferred_remote_work();
                 }
             }
             if crate::util::config::resolve_remote_fetch_enabled()
@@ -1720,7 +1734,6 @@ impl MvpAgent {
                 .refresh_chain(
                     crate::auth::token_type::TokenType::OidcSession,
                     crate::auth::manager::RefreshReason::ServerRejected,
-                    crate::auth::manager::RefreshUrgency::UserFacing,
                 )
                 .await
             {
@@ -1870,26 +1883,92 @@ impl MvpAgent {
             return;
         }
         let Some(auth) = self.auth_manager.current() else {
+            self.run_deferred_remote_work();
             return;
         };
         let Some(settings) = self.fetch_settings_resolving_gate(&auth).await else {
+            self.run_deferred_remote_work();
             return;
         };
         tracing::info!("post-auth remote_settings fetch succeeded");
         self.install_remote_settings(settings);
+        self.run_deferred_remote_work();
+    }
+    /// Remote settings are on the config, or they are never coming.
+    pub(super) fn remote_settings_settled(&self) -> bool {
+        let arrived = self.cfg.borrow().remote_settings.is_some();
+        arrived || !crate::util::config::resolve_remote_fetch_enabled()
+    }
+    /// The two switches `initialize` defers, which share no precondition:
+    /// auto-GC guards itself, the index decides on whatever has arrived.
+    pub(super) fn run_deferred_remote_work(&self) {
         self.spawn_auto_worktree_gc();
+        self.start_search_index_once();
+    }
+    /// Settles whether this process keeps an index. Touches no disk until
+    /// something bootstraps it.
+    fn decide_search_index(&self) {
+        self.search_index
+            .decide(|| {
+                crate::session::storage::search::start_if_enabled(&self.cfg.borrow())
+                    .started()
+                    .map(Arc::new)
+            });
+    }
+    /// Decides, then bootstraps. The first decision is kept: a later switch would
+    /// serve an index missing everything written meanwhile.
+    pub(super) fn start_search_index_once(&self) {
+        self.decide_search_index();
+        if let crate::session::storage::search::IndexDecision::On(index) = self
+            .search_index()
+        {
+            index.bootstrap_once(crate::util::grok_home::grok_home());
+        }
+    }
+    pub(crate) fn search_index(
+        &self,
+    ) -> crate::session::storage::search::IndexDecision<'_> {
+        self.search_index.decision()
+    }
+    /// For code that cannot borrow the agent, notably the persistence actor.
+    pub(crate) fn search_index_cell(
+        &self,
+    ) -> crate::session::storage::search::SharedSearchIndex {
+        self.search_index.clone()
     }
     /// Resolve current auto-GC policy and run it on the blocking pool.
     pub(super) fn spawn_auto_worktree_gc(&self) {
+        if !self.remote_settings_settled() {
+            static DEFERRED_ONCE: std::sync::Once = std::sync::Once::new();
+            DEFERRED_ONCE
+                .call_once(|| {
+                    tracing::info!(
+                    "worktree auto cleanup is waiting for the server to answer, and will not run \
+                     until it does or until remote_fetch is set to false"
+                );
+                });
+            return;
+        }
+        #[cfg(test)] self.auto_gc_spawn_count.set(self.auto_gc_spawn_count.get() + 1);
         let auto_gc_policy = self.cfg.borrow().resolve_worktree_auto_gc();
-        tokio::task::spawn_blocking(move || {
-            let opts = xai_fast_worktree::AutoGcOptions::from_resolved(auto_gc_policy);
-            if let Err(e) = xai_fast_worktree::WorktreeDb::open_default()
-                .and_then(|db| xai_fast_worktree::maybe_auto_gc(&db, &opts))
-            {
-                tracing::warn!(error = %e, "auto worktree gc failed");
-            }
-        });
+        let grok_home = xai_fast_worktree::resolve_grok_home();
+        tokio::task::spawn_blocking(move || Self::reclaim_worktrees(
+            grok_home,
+            auto_gc_policy,
+        ));
+    }
+    /// The caller resolves the home: read here, $GROK_HOME would be read when the
+    /// blocking thread starts, and this deletes worktrees under what it finds.
+    pub(super) fn reclaim_worktrees(
+        grok_home: anyhow::Result<std::path::PathBuf>,
+        policy: xai_fast_worktree::ResolvedWorktreeAutoGc,
+    ) {
+        if let Err(e) = grok_home
+            .and_then(|home| xai_fast_worktree::WorktreeDb::open(&home))
+            .and_then(|db| xai_fast_worktree::maybe_auto_gc(&db, &policy))
+        {
+            tracing::warn!(error = %e, "auto worktree gc failed");
+        }
     }
     /// Fire-and-forget `x.ai/settings/update` from the current remote snapshot.
     pub(super) fn emit_settings_update_notification(&self) {
@@ -1911,6 +1990,7 @@ impl MvpAgent {
                 gate_url: rs.and_then(|s| s.gate_url.clone()),
                 gate_label: rs.and_then(|s| s.gate_label.clone()),
                 allow_access: rs.and_then(|s| s.allow_access),
+                consent_gate: rs.and_then(|s| s.consent_gate.clone()),
                 subscription_tier_display: rs
                     .and_then(|s| s.subscription_tier_display.clone()),
                 auto_permission_mode_enabled: crate::util::config::remote_auto_mode_enabled(
@@ -2365,7 +2445,6 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
                             .refresh_chain(
                                 crate::auth::token_type::TokenType::OidcSession,
                                 crate::auth::manager::RefreshReason::ServerRejected,
-                                crate::auth::manager::RefreshUrgency::Background,
                             )
                             .await;
                         let jwt_claim = auth_manager

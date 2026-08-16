@@ -2,7 +2,8 @@ use opentelemetry::global;
 use opentelemetry::trace::{SpanContext, TraceContextExt, TracerProvider as _};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{
-    InMemorySpanExporter, InMemorySpanExporterBuilder, SdkTracerProvider, SimpleSpanProcessor,
+    InMemorySpanExporter, InMemorySpanExporterBuilder, Sampler, SdkTracerProvider,
+    SimpleSpanProcessor,
 };
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -18,7 +19,10 @@ impl OtelTestEnv {
     pub fn install() -> Self {
         global::set_text_map_propagator(TraceContextPropagator::new());
         let exporter = InMemorySpanExporterBuilder::new().build();
+        // Twin of `xai-tracing-test`: AlwaysOn so children of an unsampled
+        // OTel parent still reach the in-memory exporter.
         let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOn)
             .with_span_processor(SimpleSpanProcessor::new(exporter.clone()))
             .build();
         let tracer = provider.tracer("xai-tracing-test");

@@ -152,6 +152,9 @@ fn test_app() -> AppView {
         ))],
         auth_state: AuthState::Done,
         trust_state: TrustState::Done,
+        consent_state: crate::app::consent::ConsentState::Done,
+        account_email: None,
+        consent_answered: None,
         login_label: None,
         login_method_id: None,
         auth_start_mode: AuthMode::Pending,
@@ -418,7 +421,7 @@ fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::Sub
         prompt: None,
         child_cwd: None,
         worktree_path: None,
-        child_updates_replayed: false,
+        transcript: Default::default(),
     }
 }
 fn cta_entry(name: &str, status: &str) -> xai_hooks_plugins_types::MarketplacePluginEntry {
@@ -500,12 +503,27 @@ fn arm_reconcile_with_trigger(
     cancel_trigger: Option<&str>,
     age: std::time::Duration,
 ) {
+    arm_reconcile_with_meta(app, id, prompt_id, stop_reason, cancel_trigger, None, age);
+}
+/// [`arm_reconcile`] with explicit `_meta.cancelTrigger` /
+/// `_meta.cancellationCategory`.
+#[allow(clippy::too_many_arguments)]
+fn arm_reconcile_with_meta(
+    app: &mut AppView,
+    id: AgentId,
+    prompt_id: &str,
+    stop_reason: &str,
+    cancel_trigger: Option<&str>,
+    cancellation_category: Option<&str>,
+    age: std::time::Duration,
+) {
     app.agents.get_mut(&id).unwrap().pending_turn_end_reconcile =
         Some(crate::app::agent_view::PendingTurnEnd {
             prompt_id: prompt_id.into(),
             stop_reason: Some(stop_reason.into()),
             agent_result: None,
             cancel_trigger: cancel_trigger.map(str::to_string),
+            cancellation_category: cancellation_category.map(str::to_string),
             received_at: std::time::Instant::now() - age,
         });
 }
@@ -781,6 +799,7 @@ fn make_picker_entry(id: &str, cwd: &str) -> crate::app::app_view::SessionPicker
         repo_name: "repo".into(),
         worktree_label: None,
         last_turn_summary: None,
+        last_recap: None,
         card_detail: None,
     }
 }

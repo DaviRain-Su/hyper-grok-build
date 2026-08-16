@@ -245,6 +245,7 @@ mod tests {
         CompactionStateContext {
             cwd_generation: 0,
             destination_project_instructions: None,
+            agent_message_anchor: None,
             running_subagents: vec![RunningSubagentSummary {
                 subagent_id: "sub-1".into(),
                 subagent_type: "explore".into(),
@@ -283,6 +284,7 @@ mod tests {
         let ctx = CompactionStateContext {
             cwd_generation: 0,
             destination_project_instructions: None,
+            agent_message_anchor: None,
             connected_mcp_servers: vec![
                 CompactionServerSummary {
                     name: "grafana".into(),
@@ -322,6 +324,7 @@ mod tests {
         let ctx = CompactionStateContext {
             cwd_generation: 0,
             destination_project_instructions: None,
+            agent_message_anchor: None,
             running_tasks: vec![BackgroundTaskSummary {
                 task_id: "019ea7f0-cb66-7aa2-9a09-488a3a795795".into(),
                 command: "cargo test".into(),
@@ -363,6 +366,7 @@ mod tests {
         CompactionStateContext {
             cwd_generation: 0,
             destination_project_instructions: None,
+            agent_message_anchor: None,
             todos,
             recent_messages: vec![],
             last_user_query: None,

@@ -471,7 +471,7 @@ impl AgentView {
             .retain(|(pid, _, _)| pid != prompt_id);
     }
 
-    /// Toggle queue pane visibility (shared by Ctrl-; shortcut and badge click).
+    /// Toggle queue pane visibility (Ctrl-; shortcut).
     pub(in crate::app) fn toggle_queue_pane(&mut self) {
         self.queue.overlay.toggle();
         self.queue.on_state_change();

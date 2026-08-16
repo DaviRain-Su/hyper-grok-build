@@ -72,9 +72,9 @@ impl StaticShellSnapshot {
             let mut cmd = tokio::process::Command::new(shell_binary(shell));
             cmd.args(["-lc", &script])
                 .current_dir(cwd)
-                .stdin(Stdio::null())
+                .stdin(xai_tty_utils::null_stdio())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(xai_tty_utils::null_stdio())
                 .kill_on_drop(true);
             crate::util::detach_command(&mut cmd);
             cmd.envs(crate::util::pager_env());

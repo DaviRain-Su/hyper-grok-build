@@ -36,6 +36,19 @@
 //! cmd.envs(pager_env());
 //! ```
 
+// A panic on a teardown path leaks whatever it was about to free; tests panic freely.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
+
 use std::collections::HashMap;
 use std::io;
 
@@ -196,8 +209,133 @@ pub fn detach_command(cmd: &mut tokio::process::Command) {
 /// killed and queued for reaping if its future is dropped (cancellation).
 pub fn detach_search_command(cmd: &mut tokio::process::Command) {
     detach_command(cmd);
-    cmd.stdin(std::process::Stdio::null());
+    // `null_stdio`, not `Stdio::null()`: the latter opens `/dev/null` by path
+    // during spawn setup, so an unlinked device fails the spawn outright and
+    // takes out search for the rest of the process's life. See `null_stdio`.
+    cmd.stdin(null_stdio());
     cmd.kill_on_drop(true);
+}
+
+// ---------------------------------------------------------------------------
+// Null stdio that outlives /dev/null
+// ---------------------------------------------------------------------------
+
+/// A null stdio handle for a child, taken from a descriptor opened once rather
+/// than from the `/dev/null` path.
+///
+/// Use this instead of [`std::process::Stdio::null`] on every spawn path, for
+/// stdin and for discarded stdout/stderr alike. `Stdio::null()` opens
+/// `/dev/null` *by path*, in the parent, during spawn setup — so if anything
+/// in the sandbox unlinks the device, `spawn` fails with `ENOENT` before
+/// fork/exec and **every** process-spawning tool dies for the rest of the
+/// process's life, while tools that only touch the filesystem keep working and
+/// make it look like a workspace fault. Nothing recreates the device, and
+/// recreating it would itself require spawning something. A root
+/// `go build -o /dev/null` whose build fails is enough to trigger it: Go
+/// removes its `-o` target on failure.
+///
+/// An already-open descriptor keeps working after its directory entry is gone,
+/// so this opens `/dev/null` once, read-write, and hands out dups.
+///
+/// A process that starts *after* the deletion has nothing to open and falls
+/// back to the read end of a pipe whose write end is already closed: reads see
+/// immediate EOF, as with `/dev/null`. That fallback is correct for stdin only
+/// — a child writing to it gets `EBADF` — but it is reachable solely once the
+/// device is already gone, where the alternative is not spawning at all. If
+/// even that fails it degrades to `Stdio::null()`, i.e. today's behaviour.
+#[cfg(unix)]
+pub fn null_stdio() -> std::process::Stdio {
+    use std::sync::OnceLock;
+
+    static NULL_FD: OnceLock<Option<std::os::fd::OwnedFd>> = OnceLock::new();
+
+    let cached = NULL_FD
+        .get_or_init(|| open_null_fd(std::path::Path::new("/dev/null")).or_else(eof_pipe_fd));
+    match cached {
+        // dup(2) per spawn: `Stdio` takes ownership, the cache keeps the original.
+        Some(fd) => fd
+            .try_clone()
+            .map_or_else(|_| std::process::Stdio::null(), std::process::Stdio::from),
+        None => std::process::Stdio::null(),
+    }
+}
+
+/// Windows has no `/dev/null` path to lose; `Stdio::null()` is already a handle.
+#[cfg(windows)]
+pub fn null_stdio() -> std::process::Stdio {
+    std::process::Stdio::null()
+}
+
+/// Read-only descriptor for `path`, or `None` if it cannot be opened.
+///
+/// Split out so the "the descriptor outlives the path" property can be tested
+/// against an ordinary file, without a mount namespace or root.
+#[cfg(unix)]
+fn open_null_fd(path: &std::path::Path) -> Option<std::os::fd::OwnedFd> {
+    // Read AND write, because one cached descriptor serves both directions:
+    // stdin reads EOF from it, stdout/stderr discard into it. A read-only fd
+    // would look fine until a child wrote to it — `write` on `O_RDONLY` fails
+    // with `EBADF`, which turns a discarded diagnostic into a failed command
+    // (and, in a shell, spills the text onto stdout, corrupting captured
+    // output). This mirrors `Stdio::null()` itself, which opens `/dev/null`
+    // readable for stdin and writable for stdout/stderr.
+    //
+    // `OpenOptions` sets CLOEXEC, so the cached fd is not inherited wholesale.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .ok()
+        .map(Into::into)
+}
+
+/// Read end of a pipe whose write end is already closed — a reader sees EOF at
+/// once, which is what `/dev/null` gives a child's stdin.
+///
+/// The last resort for a process that came up with no `/dev/null` to cache.
+///
+/// Both ends are close-on-exec, atomically via `pipe2(O_CLOEXEC)` on Linux.
+/// That matters more here than for an ordinary pipe: a concurrent `fork`/`exec`
+/// landing between `pipe()` and `fcntl(F_SETFD)` could inherit the **write**
+/// end, and a child holding it open means no reader of the cached read end ever
+/// sees EOF — a child given it as stdin would block instead of starting
+/// cleanly. Since the descriptor is cached for the process's lifetime, that
+/// would be sticky, and a hang is a worse outcome than the `ENOENT` this
+/// fallback exists to avoid. Mirrors `os_pipe` in xai-grok-tools' shell_state,
+/// including the best-effort `fcntl` path where `pipe2` is unavailable.
+#[cfg(unix)]
+fn eof_pipe_fd() -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let mut fds = [0 as libc::c_int; 2];
+
+    // SAFETY: `fds` is a valid, writable two-element array for the call's duration.
+    #[cfg(target_os = "linux")]
+    let created = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    // SAFETY: same.
+    #[cfg(not(target_os = "linux"))]
+    let created = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if created != 0 {
+        return None;
+    }
+
+    // SAFETY: the pipe call reported success, so both descriptors are open and unowned.
+    let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+
+    // Non-Linux has no atomic form: close the window as fast as possible and
+    // accept it, as the sibling helper does.
+    #[cfg(not(target_os = "linux"))]
+    {
+        use std::os::fd::AsRawFd;
+        for fd in [read.as_raw_fd(), write.as_raw_fd()] {
+            // SAFETY: both descriptors are live and owned here.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+    }
+
+    // Closing the write end is what turns reads into an immediate EOF.
+    drop(write);
+    Some(read)
 }
 
 // ---------------------------------------------------------------------------
@@ -1718,6 +1856,199 @@ mod tests {
             "killpg must reap the WHOLE group incl. the grandchild (tree-kill), not just the \
              leader; grandchild pid {gc_pid} still alive after group kill"
         );
+    }
+
+    /// The whole point of the cached descriptor: it keeps working after the
+    /// path it came from is unlinked, which is what `Stdio::null()` cannot do.
+    /// An ordinary file stands in for `/dev/null` so this needs no privileges.
+    #[cfg(unix)]
+    #[test]
+    fn null_fd_outlives_its_path() {
+        let path = std::env::temp_dir().join(format!("xai-tty-utils-null-{}", std::process::id()));
+        std::fs::write(&path, b"").expect("create stand-in null");
+        let fd = open_null_fd(&path).expect("open stand-in null");
+        std::fs::remove_file(&path).expect("unlink stand-in null");
+
+        assert!(
+            std::fs::File::open(&path).is_err(),
+            "the path must be gone, or the test proves nothing"
+        );
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .stdin(std::process::Stdio::from(fd.try_clone().expect("dup")))
+            .status()
+            .expect("spawn with a descriptor whose path was unlinked must still work");
+        assert!(status.success());
+    }
+
+    /// The fallback descriptor must be close-on-exec, or a concurrently
+    /// spawned child inherits the pipe and the cached read end never reaches
+    /// EOF — a hang, and a sticky one, since the fd is cached for the process's
+    /// lifetime. Also checks it reads EOF, which is the point of the fallback.
+    #[cfg(unix)]
+    #[test]
+    fn eof_pipe_fd_is_cloexec_and_reads_eof() {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+
+        let fd = eof_pipe_fd().expect("pipe fallback");
+        // SAFETY: `fd` is a live descriptor owned by this test.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0, "F_GETFD failed");
+        assert_ne!(
+            flags & libc::FD_CLOEXEC,
+            0,
+            "the cached fallback fd must be close-on-exec"
+        );
+
+        let mut buf = [0u8; 1];
+        let read = std::fs::File::from(fd).read(&mut buf).expect("read");
+        assert_eq!(read, 0, "the write end is closed, so reads must see EOF");
+    }
+
+    /// One cached descriptor serves both directions, so a child must be able
+    /// to WRITE to it as well as read EOF from it.
+    ///
+    /// A read-only fd passes every stdin test and then fails here: `write` on
+    /// `O_RDONLY` returns `EBADF`, so a discarded diagnostic becomes a failed
+    /// command — and a shell spills the text onto stdout, corrupting output
+    /// that callers parse.
+    #[cfg(unix)]
+    #[test]
+    fn null_stdio_accepts_child_writes() {
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", "echo diagnostic >&2; echo rc=$?"])
+            .stdin(null_stdio())
+            .stderr(null_stdio())
+            .output()
+            .expect("spawn");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("rc=0"),
+            "writing to a nulled stderr must succeed, got {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("diagnostic"),
+            "stderr text must be discarded, not spilled onto stdout: {stdout:?}"
+        );
+    }
+
+    /// The real thing: `/dev/null` genuinely removed, in a throwaway mount
+    /// namespace so only this process tree sees it gone.
+    ///
+    /// Covers both orders, because they exercise different halves of the fix:
+    ///
+    /// * `deleted-midway` — the production sequence. The device exists when the
+    ///   server boots (so the descriptor is cached), then the sandbox loses it.
+    ///   Asserts the control too: `Stdio::null()` must fail with `ENOENT` here,
+    ///   or the test is not reproducing the bug it guards against.
+    /// * `never-existed` — a process that comes up with no device at all, which
+    ///   has no descriptor to cache and must reach the pipe fallback.
+    ///
+    /// Ignored by default: needs Linux with unprivileged user namespaces. Run
+    /// with `cargo test -p xai-tty-utils -- --ignored --nocapture`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs Linux + unprivileged user namespaces (unshare -Urm)"]
+    fn null_stdio_survives_a_deleted_dev_null() {
+        const PROBE_VAR: &str = "XAI_TTY_UTILS_DEV_NULL_PROBE";
+
+        fn spawn_with(stdin: std::process::Stdio) -> std::io::Result<std::process::ExitStatus> {
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .stdin(stdin)
+                .status()
+        }
+
+        // Inner half: re-entered inside the namespace.
+        match std::env::var(PROBE_VAR).ok().as_deref() {
+            Some("deleted-midway") => {
+                // A regular file stands in for the device: creatable on the
+                // namespace's tmpfs without privileges, and indistinguishable
+                // for this purpose (an fd is an fd).
+                assert!(
+                    std::path::Path::new("/dev/null").exists(),
+                    "setup: stand-in missing"
+                );
+                assert!(
+                    spawn_with(null_stdio()).expect("prime").success(),
+                    "priming spawn must succeed while the device is present"
+                );
+
+                std::fs::remove_file("/dev/null").expect("delete the device mid-run");
+
+                let control = spawn_with(std::process::Stdio::null());
+                assert!(
+                    matches!(&control, Err(e) if e.kind() == std::io::ErrorKind::NotFound),
+                    "control: Stdio::null() must fail with ENOENT once the device is gone, got {control:?}"
+                );
+                for i in 1..=3 {
+                    assert!(
+                        spawn_with(null_stdio())
+                            .expect("spawn after deletion")
+                            .success(),
+                        "null_stdio() spawn #{i} must still work"
+                    );
+                }
+                return;
+            }
+            Some("never-existed") => {
+                assert!(
+                    !std::path::Path::new("/dev/null").exists(),
+                    "setup: device present"
+                );
+                assert!(
+                    spawn_with(null_stdio())
+                        .expect("pipe fallback must spawn")
+                        .success(),
+                    "a process that starts without /dev/null must still spawn"
+                );
+                return;
+            }
+            _ => {}
+        }
+
+        // Outer half: build a namespace per case and re-enter this same test.
+        let exe = std::env::current_exe().expect("current_exe");
+        for (case, setup) in [
+            (
+                "deleted-midway",
+                "mount -t tmpfs tmpfs /dev && : > /dev/null",
+            ),
+            ("never-existed", "mount -t tmpfs tmpfs /dev"),
+        ] {
+            let script = format!(
+                "{setup} && exec {} --exact tests::null_stdio_survives_a_deleted_dev_null --ignored --nocapture",
+                exe.display()
+            );
+            let out = std::process::Command::new("unshare")
+                .args(["-Urm", "sh", "-c", &script])
+                .env(PROBE_VAR, case)
+                .output()
+                .expect("unshare must be available on Linux CI");
+            assert!(
+                out.status.success(),
+                "case {case} failed:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+    }
+
+    /// Every spawn takes its own dup, so the helper must survive repeated use
+    /// and give the child an immediate EOF (as `/dev/null` does).
+    #[cfg(unix)]
+    #[test]
+    fn null_stdio_reads_eof_every_time() {
+        for i in 0..3 {
+            let status = std::process::Command::new("/bin/sh")
+                .args(["-c", "cat"])
+                .stdin(null_stdio())
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("spawn");
+            assert!(status.success(), "spawn {i} must succeed and see EOF");
+        }
     }
 
     /// [`ProcessGroupId`] rejects degenerate pids (0, 1, own group) at

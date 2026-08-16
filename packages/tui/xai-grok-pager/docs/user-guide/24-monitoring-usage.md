@@ -62,11 +62,13 @@ without the master switch.
 | `GROK_EXTERNAL_OTEL` | `0` | Master switch. Distinct from `GROK_TELEMETRY_ENABLED`, which controls SpaceXAI-internal product analytics — the two govern opposite-pointing data flows. |
 | `OTEL_METRICS_EXPORTER` | `none` | `otlp` \| `console` \| `none`. |
 | `OTEL_LOGS_EXPORTER` | `none` | `otlp` \| `console` \| `none`. Gates the event stream. |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | `http/protobuf` \| `grpc`. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` for HTTP, `http://localhost:4317` for gRPC | Base endpoint. For `http/protobuf`, `/v1/logs` and `/v1/metrics` are appended per the OTLP spec; for `grpc`, the collector endpoint is used as-is. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | `http/protobuf` \| `grpc`. Base protocol for both signals. |
+| `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` / `..._METRICS_PROTOCOL` | — | Per-signal protocol overrides (same values as the base protocol). Unrecognized values disable the stream. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` for HTTP, `http://localhost:4317` for gRPC | Base endpoint. For `http/protobuf`, `/v1/logs` and `/v1/metrics` are appended per the OTLP spec; for `grpc`, the collector endpoint is used as-is. Path appending uses **that signal’s** protocol. |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` / `..._METRICS_ENDPOINT` | — | Signal-specific overrides, used verbatim. For gRPC these should normally be collector endpoints without `/v1/...` paths. |
 | `OTEL_EXPORTER_OTLP_HEADERS` (+ signal-specific variants) | — | Collector auth (`k=v,k2=v2`). The **only** headers the external exporters send, and the only supported collector-auth mechanism (no config-file headers key — tokens never live on disk). |
-| `OTEL_EXPORTER_OTLP_CERTIFICATE` (+ signal-specific variants) | — | Path to a PEM bundle with additional trusted CA certificate(s) for verifying the collector — for collectors behind a private/corporate CA. Additive to the default trust roots (system store and embedded Mozilla roots). |
+| `OTEL_EXPORTER_OTLP_CERTIFICATE` (+ signal-specific variants) | — | Path to a PEM bundle with additional trusted CA certificate(s) for verifying the collector — for collectors behind a private/corporate CA. Additive to the default trust roots (system store and embedded Mozilla roots). Also settable via `[telemetry] otel_certificate`. |
+| `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` / `OTEL_EXPORTER_OTLP_CLIENT_KEY` (+ signal-specific `…_LOGS_…` / `…_METRICS_…` variants) | — | PEM **paths** for mTLS client identity. Both cert and key must be set (base or same signal); half-config is ignored with a warning. Unencrypted PEM keys only. Also settable via `[telemetry] otel_client_certificate` / `otel_client_key`. |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` (ms) | Export timeout. |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `60000` (ms) | Metric export interval. |
 | `OTEL_BLRP_SCHEDULE_DELAY` (or alias `OTEL_LOGS_EXPORT_INTERVAL`) | `5000` (ms) | Log batch interval. |
@@ -99,6 +101,10 @@ otel_metrics_exporter = "otlp"
 otel_logs_exporter = "otlp"
 otel_endpoint = "https://collector.corp.example:4318"
 otel_protocol = "http/protobuf"  # or "grpc"
+# Optional PEM *paths* for private-CA trust and mTLS (never PEM contents):
+otel_certificate = "/etc/ssl/corp-ca.pem"
+otel_client_certificate = "/etc/ssl/client.crt"
+otel_client_key = "/etc/ssl/client.key"
 otel_log_user_prompts = false   # admins can pin these via requirements
 otel_log_tool_details = false
 ```
@@ -106,10 +112,16 @@ otel_log_tool_details = false
 The config keys are `otel_*` under `[telemetry]`; the **env vars keep their
 standard OTEL names** (`GROK_EXTERNAL_OTEL`, `OTEL_*`) for ecosystem
 interop, so the two layers use deliberately different namespaces. The
-`otel_protocol` config key maps to `OTEL_EXPORTER_OTLP_PROTOCOL`.
+`otel_protocol` config key maps to `OTEL_EXPORTER_OTLP_PROTOCOL`. Env vars
+win over config file paths for CA and client identity.
 
 There is deliberately no `headers` key: supply collector auth via
-`OTEL_EXPORTER_OTLP_HEADERS` so tokens are never stored on disk.
+`OTEL_EXPORTER_OTLP_HEADERS` so tokens are never stored on disk. Certificate
+and key config keys are **paths only** — never embed private key material
+in TOML.
+
+The external stream exports **logs and metrics only** (no customer-facing
+traces exporter).
 
 Managed deployments can additionally enable org-wide telemetry by distributing
 the `[telemetry]` `otel_*` keys through `grok setup` managed config /

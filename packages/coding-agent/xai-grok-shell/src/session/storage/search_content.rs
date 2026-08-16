@@ -361,6 +361,7 @@ pub(super) fn test_summary(
         reasoning_effort: None,
         last_turn_summary: None,
         last_turn_summary_prompt_id: None,
+        last_recap: None,
     }
 }
 

@@ -1645,7 +1645,8 @@ impl SessionActor {
                     crate::session::memory::MemoryBackendImpl::from_session_params(
                         storage.clone(),
                         &crate::session::memory::MemoryBackendParams {
-                            search_source: "compaction_recovery",
+                            search_source:
+                                crate::session::memory::MemorySearchSource::CompactionRecovery,
                             ..params.clone()
                         },
                     )

@@ -7,7 +7,23 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
+
+/// Install a process-wide test tracing subscriber so construction/export
+/// failures surface under `--test_output=errors` without production
+/// `eprintln!` side effects.
+pub fn init_test_tracing() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            )
+            .with_test_writer()
+            .try_init();
+    });
+}
 
 use prost::Message as _;
 
@@ -174,16 +190,14 @@ async fn start_grpc_collector(collected: Collected, addr_tx: std::sync::mpsc::Se
         .expect("collector serve");
 }
 
-/// A freshly generated CA plus a `localhost` server certificate signed by it,
-/// all PEM-encoded — for the TLS collector variants.
 pub struct TestTlsMaterial {
     pub ca_cert_pem: String,
     pub server_cert_pem: String,
     pub server_key_pem: String,
+    pub client_cert_pem: String,
+    pub client_key_pem: String,
 }
 
-/// Generate a self-signed CA and a `localhost`/`127.0.0.1` server certificate
-/// signed by it.
 pub fn generate_tls_material() -> TestTlsMaterial {
     use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 
@@ -200,19 +214,49 @@ pub fn generate_tls_material() -> TestTlsMaterial {
         .signed_by(&server_key, &ca_cert, &ca_key)
         .expect("sign server cert");
 
+    let client_key = KeyPair::generate().expect("generate client key");
+    let client_params =
+        CertificateParams::new(vec!["grok-client".to_string()]).expect("client params");
+    let client_cert = client_params
+        .signed_by(&client_key, &ca_cert, &ca_key)
+        .expect("sign client cert");
+
     TestTlsMaterial {
         ca_cert_pem: ca_cert.pem(),
         server_cert_pem: server_cert.pem(),
         server_key_pem: server_key.serialize_pem(),
+        client_cert_pem: client_cert.pem(),
+        client_key_pem: client_key.serialize_pem(),
     }
 }
 
-/// Start a **TLS** gRPC collector presenting `server_cert_pem`; returns its
-/// base URL (`https://localhost:PORT`).
 pub fn start_grpc_tls_collector(
     collected: Collected,
     server_cert_pem: String,
     server_key_pem: String,
+) -> String {
+    start_grpc_tls_collector_inner(collected, server_cert_pem, server_key_pem, None)
+}
+
+pub fn start_grpc_mtls_collector(
+    collected: Collected,
+    server_cert_pem: String,
+    server_key_pem: String,
+    client_ca_pem: String,
+) -> String {
+    start_grpc_tls_collector_inner(
+        collected,
+        server_cert_pem,
+        server_key_pem,
+        Some(client_ca_pem),
+    )
+}
+
+fn start_grpc_tls_collector_inner(
+    collected: Collected,
+    server_cert_pem: String,
+    server_key_pem: String,
+    client_ca_pem: Option<String>,
 ) -> String {
     use opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::LogsServiceServer;
     use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
@@ -238,9 +282,13 @@ pub fn start_grpc_tls_collector(
                 .send(incoming.local_addr().expect("collector addr"))
                 .expect("send addr");
             let identity = tonic::transport::Identity::from_pem(server_cert_pem, server_key_pem);
+            let mut tls = tonic::transport::ServerTlsConfig::new().identity(identity);
+            if let Some(ca_pem) = client_ca_pem {
+                tls = tls.client_ca_root(tonic::transport::Certificate::from_pem(ca_pem));
+            }
             let service = GrpcCollector { collected };
             tonic::transport::Server::builder()
-                .tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))
+                .tls_config(tls)
                 .expect("collector TLS config")
                 .add_service(LogsServiceServer::new(service.clone()))
                 .add_service(MetricsServiceServer::new(service))
@@ -252,6 +300,95 @@ pub fn start_grpc_tls_collector(
     let addr = addr_rx
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("collector must start");
+    format!("https://localhost:{}", addr.port())
+}
+
+pub fn start_http_mtls_collector(
+    collected: Collected,
+    server_cert_pem: String,
+    server_key_pem: String,
+    client_ca_pem: String,
+) -> String {
+    use axum::{Router, body::Bytes, extract::State, routing::post};
+    use axum_server::tls_rustls::RustlsConfig;
+    use rustls::RootCertStore;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+    use rustls::server::WebPkiClientVerifier;
+    use std::sync::Arc;
+
+    // Same process-level CryptoProvider pin as gRPC mTLS tests: the binary
+    // links both ring and aws-lc-rs, so rustls will not auto-pick. Prefer
+    // aws-lc to match the workspace `rustls` feature set and tonic path.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("collector runtime");
+        rt.block_on(async move {
+            async fn sink(
+                State((store, which)): State<(Collected, &'static str)>,
+                body: Bytes,
+            ) -> &'static str {
+                let target = match which {
+                    "logs" => &store.logs,
+                    _ => &store.metrics,
+                };
+                target.lock().unwrap().push(body.to_vec());
+                ""
+            }
+            let app = Router::new()
+                .route(
+                    "/v1/logs",
+                    post(sink).with_state((collected.clone(), "logs")),
+                )
+                .route(
+                    "/v1/metrics",
+                    post(sink).with_state((collected.clone(), "metrics")),
+                );
+
+            let certs: Vec<CertificateDer<'static>> =
+                CertificateDer::pem_slice_iter(server_cert_pem.as_bytes())
+                    .collect::<Result<_, _>>()
+                    .expect("parse server cert pem");
+            let key = PrivateKeyDer::from_pem_slice(server_key_pem.as_bytes())
+                .expect("parse server key pem");
+
+            let mut roots = RootCertStore::empty();
+            for ca in CertificateDer::pem_slice_iter(client_ca_pem.as_bytes()) {
+                roots
+                    .add(ca.expect("parse client CA"))
+                    .expect("add client CA");
+            }
+            let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+                .build()
+                .expect("client cert verifier");
+            let mut server_config = rustls::ServerConfig::builder()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(certs, key)
+                .expect("server TLS config");
+            server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind HTTP mTLS");
+            listener.set_nonblocking(true).expect("nonblocking");
+            addr_tx
+                .send(listener.local_addr().expect("local addr"))
+                .expect("send addr");
+            let config = RustlsConfig::from_config(Arc::new(server_config));
+            axum_server::from_tcp_rustls(listener, config)
+                .expect("tls server")
+                .serve(app.into_make_service())
+                .await
+                .expect("HTTP mTLS collector serve");
+        });
+    });
+    let addr = addr_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("collector must start");
+    // Prefer localhost so the server cert SAN (localhost + 127.0.0.1) matches
+    // whatever the client/rustls hostname check uses.
     format!("https://localhost:{}", addr.port())
 }
 

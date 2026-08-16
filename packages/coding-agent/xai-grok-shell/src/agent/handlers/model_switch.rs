@@ -2,17 +2,19 @@
 //! enforces the `allowed_models` gate before delegating here; internal callers
 //! (`new_session`, `load_session`) call `apply` directly.
 use crate::agent::config;
+use crate::agent::mvp_agent::reasoning_effort::EffortTarget;
 use crate::agent::mvp_agent::{
     MvpAgent, agent_name_after_model_switch, harnesses_are_compatible, resolve_required_agent_type,
 };
 use crate::session::SessionCommand;
 use agent_client_protocol::{self as acp};
 use tokio::sync::oneshot;
-use xai_grok_sampling_types::parse_reasoning_effort_meta;
+use xai_grok_sampling_types::ReasoningEffort;
 /// Apply a model switch to a session (no gate — `set_session_model` gates first).
 pub(crate) async fn apply(
     agent: &MvpAgent,
     args: acp::SetSessionModelRequest,
+    effort_override: Option<ReasoningEffort>,
 ) -> Result<acp::SetSessionModelResponse, acp::Error> {
     tracing::info!("Received set session model request {args:?}");
     xai_grok_telemetry::unified_log::info(
@@ -21,7 +23,6 @@ pub(crate) async fn apply(
         Some(serde_json::json!({"model": args.model_id.0.as_ref()})),
     );
     tracing::debug!("session_session_model::mvp_agent: {:?}", &args);
-    let effort_override = parse_reasoning_effort_meta(args.meta.as_ref());
     let acp::SetSessionModelRequest {
         session_id,
         model_id,
@@ -124,26 +125,12 @@ pub(crate) async fn apply(
     }
     let mut model_sampling =
         agent.prepare_sampling_config_for_model(&model, handle.origin_client.clone());
-    if let Some(eff) = effort_override {
-        if agent
-            .models_manager
-            .model_supports_reasoning_effort(model_id.0.as_ref())
-        {
-            tracing::info!(
-                session_id = %session_id.0,
-                effort = %eff,
-                "set_session_model: applying reasoning_effort override from meta"
-            );
-            model_sampling.reasoning_effort = Some(eff);
-        } else {
-            tracing::warn!(
-                session_id = %session_id.0,
-                model_id = %model_id.0,
-                effort = %eff,
-                "set_session_model: ignoring reasoning_effort override — model does not support it"
-            );
-        }
-    }
+    agent.models_manager.apply_supported_effort(
+        &mut model_sampling,
+        effort_override,
+        &session_id,
+        EffortTarget::ModelSwitch,
+    );
     let applied_effort = model_sampling.reasoning_effort;
     let gate_closed = !handle
         .gateway_enabled

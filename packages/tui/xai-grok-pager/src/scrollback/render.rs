@@ -541,8 +541,11 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                 block_line_idx: 0,
                 screen_y: render_y,
                 screen_x: entry_row_layout.content.x.saturating_add(chrome_offset),
-                selectable_cols: 0..(label.line.width() as u16),
+                // Painted-cell width (per grapheme), matching the reorder/hit map.
+                selectable_cols: 0..(crate::scrollback::types::str_display_cells(&label.text)
+                    as u16),
                 text: label.text.clone(),
+                painted_region: None,
                 joiner_to_previous: None,
             });
         }
@@ -574,20 +577,28 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                     &highlight_text,
                     re,
                     true,
+                    // Scrollback content paints bidi-reordered; remap matches.
+                    true,
                 );
             }
             if let (Some(range_id), Some(cols)) = (
                 line.selection_range,
                 selectable_cols(&line.content, &line.selectable),
             ) {
+                // Logical text; drag columns are visual and remapped on copy
+                // via `logical_slice_for_visual_cols`.
                 let resolved_line = ResolvedSelectableLine {
                     entry_idx: logical_idx,
                     range_id,
                     block_line_idx,
                     screen_y,
                     screen_x: entry_row_layout.content.x,
-                    selectable_cols: cols,
+                    // Visual span so the hit box matches the reordered cells
+                    // even when a non-selectable suffix shifts the region.
+                    selectable_cols: crate::scrollback::types::visual_selectable_cols(line)
+                        .unwrap_or(cols),
                     text: derive_selection_text(line),
+                    painted_region: Some(crate::scrollback::types::painted_selectable_region(line)),
                     joiner_to_previous: line.joiner.clone(),
                 };
                 if let Some(boundary) = cached_boundaries.get(block_line_idx) {
@@ -651,32 +662,40 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                     if start >= end {
                         continue;
                     }
-                    let (Ok(start), Ok(end)) = (u16::try_from(start), u16::try_from(end)) else {
-                        continue;
-                    };
-                    let (Some(col_start), Some(col_end)) = (
-                        entry_row_layout.content.x.checked_add(start),
-                        entry_row_layout.content.x.checked_add(end),
-                    ) else {
-                        continue;
-                    };
-                    if result.link_overlay.overlaps(screen_row, col_start, col_end) {
-                        continue;
-                    }
                     let painted = derive_selection_text(bl);
                     let fully_visible = cols.end <= visible_width;
-                    result.link_overlay.push(OverlayLink {
-                        screen_row,
-                        col_start,
-                        col_end,
-                        target: target.clone(),
-                        presentation: if fully_visible {
-                            crate::render::osc8::file_link_presentation(&painted, target, cwd)
-                        } else {
-                            crate::render::osc8::LinkPresentation::Opaque
-                        },
-                        id: None,
-                    });
+                    // The row paints bidi-reordered when rtl_bidi is on, so map
+                    // the logical path span to its visual cell range(s) — the
+                    // hit box and OSC 8 underline must sit on the drawn glyphs.
+                    // Identity (one range) under LTR / no reorder.
+                    let plain = crate::scrollback::types::line_plain_text(&bl.content);
+                    for (vs, ve) in crate::render::bidi::logical_cols_to_visual(&plain, start, end)
+                    {
+                        let (Ok(vs), Ok(ve)) = (u16::try_from(vs), u16::try_from(ve)) else {
+                            continue;
+                        };
+                        let (Some(col_start), Some(col_end)) = (
+                            entry_row_layout.content.x.checked_add(vs),
+                            entry_row_layout.content.x.checked_add(ve),
+                        ) else {
+                            continue;
+                        };
+                        if result.link_overlay.overlaps(screen_row, col_start, col_end) {
+                            continue;
+                        }
+                        result.link_overlay.push(OverlayLink {
+                            screen_row,
+                            col_start,
+                            col_end,
+                            target: target.clone(),
+                            presentation: if fully_visible {
+                                crate::render::osc8::file_link_presentation(&painted, target, cwd)
+                            } else {
+                                crate::render::osc8::LinkPresentation::Opaque
+                            },
+                            id: None,
+                        });
+                    }
                 }
             }
 
@@ -953,6 +972,9 @@ pub(crate) fn map_hyperlinks_to_overlay(
     // `[videos/1.mp4](videos/1.mp4)` resolve against generated media, then
     // against existing files under the session `cwd`.
     let scheme_filter = crate::terminal::hyperlinks::SchemeFilter::Standard;
+    // Reused across every link segment so the row's plain text is not
+    // reallocated per segment per frame; only written when reordering is on.
+    let mut row_plain_buf = String::new();
     for h in hyperlinks {
         let target = if crate::app::link_opener::is_safe_to_open(&h.url, scheme_filter) {
             crate::render::osc8::LinkTarget::Url(Arc::from(h.url.as_str()))
@@ -986,17 +1008,38 @@ pub(crate) fn map_hyperlinks_to_overlay(
                 continue;
             }
 
-            let local_col_start = (overlap_start - seg_col_start) as u16;
-            let local_col_end = (overlap_end - seg_col_start) as u16;
+            let local_col_start = overlap_start - seg_col_start;
+            let local_col_end = overlap_end - seg_col_start;
 
-            overlay.push(OverlayLink {
-                screen_row,
-                col_start: content_x + local_col_start,
-                col_end: content_x + local_col_end,
-                target: target.clone(),
-                presentation: crate::render::osc8::LinkPresentation::Opaque,
-                id: Some(h.id),
-            });
+            // Link columns are logical; map to visual only when paint reorders.
+            let visual_ranges = if crate::render::bidi::is_enabled() {
+                row_plain_buf.clear();
+                line_plain_text_into(&block_output.lines[wrapped_idx].content, &mut row_plain_buf);
+                if crate::render::bidi::needs_bidi(&row_plain_buf) {
+                    crate::render::bidi::logical_cols_to_visual(
+                        &row_plain_buf,
+                        local_col_start,
+                        local_col_end,
+                    )
+                } else {
+                    vec![(local_col_start, local_col_end)]
+                }
+            } else {
+                vec![(local_col_start, local_col_end)]
+            };
+            for (vs, ve) in visual_ranges {
+                if vs >= ve {
+                    continue;
+                }
+                overlay.push(OverlayLink {
+                    screen_row,
+                    col_start: content_x + vs as u16,
+                    col_end: content_x + ve as u16,
+                    target: target.clone(),
+                    presentation: crate::render::osc8::LinkPresentation::Opaque,
+                    id: Some(h.id),
+                });
+            }
         }
     }
 }

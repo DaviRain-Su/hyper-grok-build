@@ -32,6 +32,7 @@ members = [
     "packages/platform/xai-grok-env",
     "packages/platform/xai-grok-extra-ca",
     "packages/tools/xai-grok-foreign-sessions",
+    "packages/platform/xai-grok-home",
     "packages/coding-agent/xai-grok-hooks",
     "packages/extensions/xai-grok-extension-api",
     "packages/extensions/xai-grok-extension-macros",
@@ -135,6 +136,7 @@ async-trait = "0.1"
 # media stack that this subsystem ports, to keep Opus/WebRTC ABI compatible.
 audiopus_sys = { version = "0.2.2", features = ["static"] }
 axum = { version = "0.8", features = ["macros", "ws"] }
+axum-server = "0.8"
 backon = { version = "1.6" }
 backtrace = "0.3"
 base64 = "0.22"
@@ -299,6 +301,8 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 ts-rs = "12.0"
 tui-scrollbar = "0.2"
 two-face = { version = "0.4", default-features = false, features = ["syntect-fancy"] }
+unicode-bidi = "0.3"
+unicode-bidi-mirroring = "0.4"
 unicode-normalization = "0.1"
 unicode-segmentation = "1.12.0"
 unicode-width = "0.2"
@@ -342,6 +346,7 @@ xai-grok-extension-runtime = { path = "packages/extensions/xai-grok-extension-ru
 xai-grok-extension-sdk = { path = "packages/extensions/xai-grok-extension-sdk" }
 xai-grok-extra-ca = { path = "packages/platform/xai-grok-extra-ca" }
 xai-grok-foreign-sessions = { path = "packages/tools/xai-grok-foreign-sessions" }
+xai-grok-home = { path = "packages/platform/xai-grok-home" }
 xai-grok-http = { path = "packages/ai/xai-grok-http" }
 xai-grok-markdown = { path = "packages/tui/xai-grok-markdown" }
 xai-grok-markdown-core = { path = "packages/tui/xai-grok-markdown-core" }

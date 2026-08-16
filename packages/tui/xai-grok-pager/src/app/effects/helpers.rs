@@ -363,7 +363,7 @@ impl SessionFlags {
     /// `askUserQuestion: false` into the meta, even when paired with
     /// `GROK_AGENT` — the env var chooses the *agent*, but the tool-strip is
     /// independent. Chat mode additionally stamps `x.ai/session.kind`.
-    pub(super) fn to_meta(&self) -> Option<acp::Meta> {
+    pub(crate) fn to_meta(&self) -> Option<acp::Meta> {
         let mut meta = serde_json::Map::new();
         if self.chat_mode {
             if self.plan_mode || self.agent_override.is_some()
@@ -840,6 +840,11 @@ pub(super) fn parse_session_picker_entries(
                 .or_else(|| v.get("last_turn_summary"))
                 .and_then(|s| s.as_str())
                 .map(String::from);
+            let last_recap = v
+                .get("lastRecap")
+                .or_else(|| v.get("last_recap"))
+                .and_then(|s| s.as_str())
+                .map(String::from);
             let repo_name = crate::views::session_picker::repo_name_from_cwd(&cwd_str);
             Some(SessionPickerEntry {
                 id,
@@ -856,6 +861,7 @@ pub(super) fn parse_session_picker_entries(
                 repo_name,
                 worktree_label,
                 last_turn_summary,
+                last_recap,
                 card_detail: None,
             })
         })

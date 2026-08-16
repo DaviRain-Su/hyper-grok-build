@@ -7,7 +7,8 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
 use xai_grok_shell::session::storage::{
-    ReplayEmission, ReplayLookupFallback, ReplayPathHint, stream_replay_updates_at_hinted,
+    ReplayEmission, ReplayLookupFallback, ReplayPathHint, ReplayedUpdate, replay_would_emit,
+    stream_replay_updates_at_hinted,
 };
 /// Enriched subagent tracking info.
 ///
@@ -83,9 +84,54 @@ pub struct SubagentInfo {
     pub prompt: Option<Arc<str>>,
     pub child_cwd: Option<Arc<str>>,
     pub worktree_path: Option<Arc<str>>,
-    /// Set after the first `replay_inherited_updates` attempt (spawn or open).
-    /// Prevents duplicate replay when scrollback is prompt-only after spawn.
-    pub child_updates_replayed: bool,
+    /// Where the child's authoritative transcript lives. Drives the
+    /// deferred replay-on-open and the eviction decision for the view.
+    pub transcript: ChildTranscript,
+}
+/// Where a child's authoritative transcript lives.
+///
+/// A single state feeds both the replay-on-open and the eviction predicates
+/// so the two cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChildTranscript {
+    /// No disk copy proven yet: the next fullscreen open replays
+    /// `updates.jsonl`. Failed and `Empty` replays stay here so a lagging
+    /// child persistence flush is retried instead of settling on a husk.
+    #[default]
+    NeedsReplay,
+    /// An emitting replay proved disk reproduces the transcript: the
+    /// retained view may be dropped and rebuilt.
+    DiskBacked,
+    /// The in-memory view is the only copy (disk resolved to nothing while
+    /// the view held content). Exempt from eviction, like a background
+    /// child's: evicting would lose the transcript permanently.
+    MemoryOnly,
+}
+impl ChildTranscript {
+    /// Whether the next fullscreen open must attempt the disk replay.
+    pub(crate) fn needs_replay(self) -> bool {
+        matches!(self, Self::NeedsReplay)
+    }
+    /// Whether the retained view may be dropped and rebuilt from disk later.
+    pub(crate) fn evictable(self) -> bool {
+        matches!(self, Self::DiskBacked)
+    }
+    /// Record a replay attempt: only an emitting replay proves the disk
+    /// copy. `Empty` and failed replays stay `NeedsReplay` so the next open
+    /// retries (post-eviction, disk is the only copy).
+    pub(crate) fn record_replay(&mut self, outcome: &std::io::Result<ReplayEmission>) {
+        if matches!(outcome, Ok(ReplayEmission::Emitted)) {
+            *self = Self::DiskBacked;
+        }
+    }
+    /// The view was reset to the prompt-only baseline: rebuild on next open.
+    pub(crate) fn evicted(&mut self) {
+        *self = Self::NeedsReplay;
+    }
+    /// Disk cannot reproduce the content the view holds: never evict.
+    pub(crate) fn discovered_memory_only(&mut self) {
+        *self = Self::MemoryOnly;
+    }
 }
 impl SubagentInfo {
     /// Whether the subagent is currently running (not finished).
@@ -182,60 +228,51 @@ fn enrich_from_meta_with_home(
     info.child_cwd = meta.child_cwd.map(Arc::from);
     info.worktree_path = meta.worktree_path.map(Arc::from);
 }
-/// Best-effort replay of a child's inherited conversation, streamed one typed
-/// update at a time. No-ops when the child session or file is missing.
+/// Best-effort streamed replay of a child's inherited conversation.
 ///
-/// `child_cwd` is the worktree / custom cwd when known; lookup tries it before
-/// `parent_cwd` so children that persist under their own encoded cwd hit the
-/// fast path instead of a full RelocationView scan.
+/// `Err`: read failed, so callers must not mark the child replayed (the next
+/// open retries; post-eviction, disk is the only copy). `Ok(Empty)`: nothing
+/// on disk, so callers holding detached content restore it. The `child_cwd`
+/// hint skips the full RelocationView scan when it matches.
 pub(crate) fn replay_inherited_updates(
     child_view: &mut crate::app::agent_view::AgentView,
     child_session_id: &str,
     parent_cwd: &std::path::Path,
     child_cwd: Option<&std::path::Path>,
-) {
-    replay_inherited_updates_with_fallback(
-        child_view,
-        child_session_id,
-        parent_cwd,
-        child_cwd,
-        ReplayLookupFallback::Relocation,
-    );
-}
-pub(crate) fn replay_inherited_updates_with_fallback(
-    child_view: &mut crate::app::agent_view::AgentView,
-    child_session_id: &str,
-    parent_cwd: &std::path::Path,
-    child_cwd: Option<&std::path::Path>,
     fallback: ReplayLookupFallback,
-) {
+) -> std::io::Result<ReplayEmission> {
     let home = effective_grok_home();
-    let replay_meta = crate::acp::meta::NotificationMeta {
-        is_replay: true,
-        ..Default::default()
-    };
     let hint = ReplayPathHint {
         parent_cwd: Some(parent_cwd),
         child_cwd,
         fallback,
     };
     child_view.scrollback.begin_batch();
-    let outcome = stream_replay_updates_at_hinted(child_session_id, &home, hint, |update| {
-        child_view
-            .session
-            .handle_update(update, &replay_meta, &mut child_view.scrollback);
-    });
+    let outcome =
+        stream_replay_updates_at_hinted(child_session_id, &home, hint, |update| match update {
+            ReplayedUpdate::Acp(update, meta) => {
+                let mut meta = crate::acp::meta::NotificationMeta::from_json(meta.as_ref());
+                meta.is_replay = true;
+                child_view
+                    .session
+                    .handle_update(update, &meta, &mut child_view.scrollback);
+            }
+            ReplayedUpdate::Xai(update) => {
+                crate::app::acp_handler::apply_child_view_session_event(child_view, &update, false);
+            }
+        });
     child_view.scrollback.end_batch();
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(e) => {
             tracing::warn!(session_id = %child_session_id, error = %e, "failed to read updates for replay");
-            return;
+            return Err(e);
         }
     };
     if outcome == ReplayEmission::Emitted {
         crate::memory_release::release_retained_memory_with("subagent-replay");
     }
+    Ok(outcome)
 }
 /// Compare two strings after collapsing internal whitespace (no allocation).
 pub(crate) fn subagent_prompt_text_eq(a: &str, b: &str) -> bool {
@@ -273,14 +310,14 @@ pub(crate) fn child_scrollback_already_shows_prompt(
     }
     false
 }
-/// True when the child scrollback has no substantive replay content yet.
-fn subagent_child_needs_replay(child_view: &crate::app::agent_view::AgentView) -> bool {
-    let len = child_view.scrollback.len();
+/// True when a scrollback holds nothing beyond injected task prompts.
+fn scrollback_is_prompt_only(scrollback: &crate::scrollback::state::ScrollbackState) -> bool {
+    let len = scrollback.len();
     if len == 0 {
         return true;
     }
     for i in 0..len {
-        let Some(entry) = child_view.scrollback.entry(i) else {
+        let Some(entry) = scrollback.entry(i) else {
             continue;
         };
         match &entry.block {
@@ -290,51 +327,224 @@ fn subagent_child_needs_replay(child_view: &crate::app::agent_view::AgentView) -
     }
     true
 }
-/// Replay child `updates.jsonl` when opening fullscreen if spawn-time replay
-/// has not run yet and scrollback only has the injected task prompt (or is empty).
+/// True when a scrollback holds nothing a fresh rebuild would not recreate:
+/// injected task prompts plus the `TurnCompleted` footer stamped after a
+/// rebuild. Restoring such a husk as the authoritative copy would settle it
+/// `MemoryOnly` and permanently suppress the replay of a late persistence
+/// flush.
+fn scrollback_is_rebuildable_husk(scrollback: &crate::scrollback::state::ScrollbackState) -> bool {
+    for i in 0..scrollback.len() {
+        let Some(entry) = scrollback.entry(i) else {
+            continue;
+        };
+        match &entry.block {
+            crate::scrollback::block::RenderBlock::UserPrompt(_) => {}
+            crate::scrollback::block::RenderBlock::SessionEvent(b)
+                if matches!(
+                    b.event,
+                    crate::scrollback::blocks::SessionEvent::TurnCompleted { .. }
+                ) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+/// Replay child `updates.jsonl` on fullscreen open when not yet replayed:
+/// finished foreground children always rebuild from disk; live/background
+/// views hydrate only while still prompt-only.
 pub(crate) fn ensure_subagent_child_replayed(
     parent: &mut crate::app::agent_view::AgentView,
     child_sid: &str,
 ) {
-    let should_replay = parent
-        .subagent_sessions
-        .get(child_sid)
-        .is_some_and(|info| !info.child_updates_replayed)
-        && parent
-            .subagent_views
-            .get(child_sid)
-            .is_some_and(|v| subagent_child_needs_replay(v.as_ref()));
-    if !should_replay {
+    let Some(info) = parent.subagent_sessions.get(child_sid) else {
+        return;
+    };
+    if !info.transcript.needs_replay() {
         return;
     }
-    let finished_elapsed = parent
-        .subagent_sessions
-        .get(child_sid)
-        .filter(|info| info.finished)
-        .and_then(|info| info.duration_ms)
+    let finished = info.finished;
+    let is_background = info.is_background;
+    let resumed = info.resumed_from.is_some() || info.context_source.as_deref() == Some("resumed");
+    let finished_elapsed = finished
+        .then_some(info.duration_ms)
+        .flatten()
         .map(std::time::Duration::from_millis);
+    let Some(child_view) = parent.subagent_views.get(child_sid) else {
+        return;
+    };
+    if (!finished || is_background) && !scrollback_is_prompt_only(&child_view.scrollback) {
+        return;
+    }
+    let taken = if finished && !is_background {
+        reset_child_view_to_prompt(parent, child_sid)
+    } else {
+        None
+    };
+    let fallback = if (finished && !is_background) || resumed {
+        ReplayLookupFallback::Relocation
+    } else {
+        ReplayLookupFallback::HintedOnly
+    };
+    let outcome = replay_child_and_mark(parent, child_sid, fallback);
+    let restore = match &outcome {
+        Ok(ReplayEmission::Emitted) => false,
+        Ok(ReplayEmission::Empty) => taken
+            .as_ref()
+            .is_some_and(|t| !scrollback_is_rebuildable_husk(&t.scrollback)),
+        Err(_) => true,
+    };
+    let mut restored = false;
+    if restore
+        && let Some(taken) = taken
+        && let Some(child_view) = parent.subagent_views.get_mut(child_sid)
+    {
+        child_view.restore_replay_rebuilt_state(taken);
+        restored = true;
+        if matches!(outcome, Ok(ReplayEmission::Empty))
+            && let Some(info) = parent.subagent_sessions.get_mut(child_sid)
+        {
+            info.transcript.discovered_memory_only();
+        }
+    }
     let parent_turn_running =
         parent.session.state.is_turn_running() || parent.session.state.is_cancelling();
+    if let Some(child_view) = parent.subagent_views.get_mut(child_sid) {
+        match finished_elapsed {
+            Some(elapsed) if outcome.is_ok() && !restored => {
+                finalize_finished_child_view(child_view, elapsed)
+            }
+            Some(_) => {}
+            None if !parent_turn_running => {
+                child_view.scrollback.finish_all_running();
+            }
+            None => {}
+        }
+    }
+}
+/// Replay the child's on-disk transcript and record the outcome on
+/// [`SubagentInfo::transcript`]: only an emitting replay marks the child
+/// `DiskBacked`; `Empty` and failed reads stay `NeedsReplay` so the next
+/// open retries (a lagging persistence flush must not settle as replayed).
+/// Shared by the eager live-spawn path and the deferred open.
+pub(crate) fn replay_child_and_mark(
+    parent: &mut crate::app::agent_view::AgentView,
+    child_sid: &str,
+    fallback: ReplayLookupFallback,
+) -> std::io::Result<ReplayEmission> {
+    let parent_cwd = parent.session.cwd.clone();
     let child_cwd = parent
         .subagent_sessions
         .get(child_sid)
         .and_then(|info| info.child_cwd.clone());
+    let mut outcome = Ok(ReplayEmission::Empty);
     if let Some(child_view) = parent.subagent_views.get_mut(child_sid) {
-        replay_inherited_updates(
+        outcome = replay_inherited_updates(
             child_view,
             child_sid,
-            &parent.session.cwd,
+            &parent_cwd,
             child_cwd.as_deref().map(std::path::Path::new),
+            fallback,
         );
-        if let Some(elapsed) = finished_elapsed {
-            finalize_finished_child_view(child_view, elapsed);
-        } else if !parent_turn_running {
-            child_view.scrollback.finish_all_running();
+    }
+    if let Some(info) = parent.subagent_sessions.get_mut(child_sid) {
+        info.transcript.record_replay(&outcome);
+    }
+    outcome
+}
+/// Reset a child view to the resume-state baseline: detach every
+/// replay-rebuilt field, drop the media caches, and re-inject the task
+/// prompt (`expect_user_echo` lets a later replay dedup its on-disk echo).
+///
+/// Returns the detached state so a rebuild that produced nothing can
+/// restore it (eviction drops it). Lossless because the replay fails before
+/// any callback, and restore raises the id floors past the discarded
+/// sibling's allocations.
+#[must_use = "dropping the detached state destroys the only in-memory copy; eviction must drop it explicitly"]
+fn reset_child_view_to_prompt(
+    parent: &mut crate::app::agent_view::AgentView,
+    child_sid: &str,
+) -> Option<crate::app::agent_view::ReplayRebuiltState> {
+    let prompt = parent
+        .subagent_sessions
+        .get(child_sid)
+        .and_then(|info| info.prompt.clone())
+        .filter(|p| !p.trim().is_empty());
+    let child_view = parent.subagent_views.get_mut(child_sid)?;
+    let taken = child_view.take_replay_rebuilt_state();
+    child_view.inline_media_cache = Default::default();
+    child_view.inline_media_load_failed = Default::default();
+    if let Some(prompt) = prompt {
+        child_view
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::user_prompt(
+                prompt.as_ref(),
+            ));
+        child_view.session.tracker.expect_user_echo();
+    }
+    Some(taken)
+}
+/// Evict a finished child view's retained transcript. Child views live for
+/// the whole process, so without this every finished scrollback + tracker is
+/// retained forever. The view resets to the resume-state baseline (task
+/// prompt only) and first open rebuilds it from disk via
+/// [`ensure_subagent_child_replayed`], footer included.
+///
+/// Returns `false` when a guard applies and the caller should finalize in
+/// place: the child open fullscreen (never blanked under the user; dashboard
+/// *peek* tails do blank, like resumed sessions), unfinished children,
+/// background children (they receive post-finish output not on disk), and
+/// memory-only transcripts (disk has nothing to rebuild from).
+///
+/// Content no replay ever verified (`NeedsReplay`: a live-streamed child,
+/// or a restored failed rebuild) is dropped only after a disk probe proves
+/// the persisted transcript would actually emit on replay. A probe miss
+/// keeps the view (and `NeedsReplay`, so later opens/closes still retry): a
+/// child whose persistence never wrote, wrote a non-emitting prefix, or
+/// whose finish raced the flush, cannot lose its only copy to a close. The
+/// next open's `Empty` rebuild then restores it and settles `MemoryOnly`.
+pub(crate) fn evict_finished_child_view(
+    parent: &mut crate::app::agent_view::AgentView,
+    child_sid: &str,
+) -> bool {
+    if parent.active_subagent.as_deref() == Some(child_sid) {
+        return false;
+    }
+    let Some(info) = parent.subagent_sessions.get(child_sid) else {
+        return false;
+    };
+    if !info.finished
+        || info.is_background
+        || matches!(info.transcript, ChildTranscript::MemoryOnly)
+    {
+        return false;
+    }
+    let Some(child_view) = parent.subagent_views.get(child_sid) else {
+        if let Some(info) = parent.subagent_sessions.get_mut(child_sid) {
+            info.transcript.evicted();
+        }
+        return true;
+    };
+    let had_content = !scrollback_is_prompt_only(&child_view.scrollback)
+        || !child_view.inline_media_cache.is_empty();
+    if !info.transcript.evictable() && had_content {
+        let child_cwd = info.child_cwd.clone();
+        let hint = ReplayPathHint {
+            parent_cwd: Some(&parent.session.cwd),
+            child_cwd: child_cwd.as_deref().map(std::path::Path::new),
+            fallback: ReplayLookupFallback::HintedOnly,
+        };
+        if !replay_would_emit(child_sid, &effective_grok_home(), hint).unwrap_or(false) {
+            return false;
         }
     }
     if let Some(info) = parent.subagent_sessions.get_mut(child_sid) {
-        info.child_updates_replayed = true;
+        info.transcript.evicted();
     }
+    drop(reset_child_view_to_prompt(parent, child_sid));
+    if had_content {
+        crate::memory_release::request_release_after_draw_with("subagent-evict");
+    }
+    true
 }
 /// Finalize a finished child view: end the turn and append the `TurnCompleted`
 /// footer. Shared by the live `SubagentFinished` path and the deferred resume path.
@@ -608,7 +818,7 @@ mod tests {
             prompt: None,
             child_cwd: None,
             worktree_path: None,
-            child_updates_replayed: false,
+            transcript: Default::default(),
         }
     }
     fn make_min_child_view() -> AgentView {
@@ -694,33 +904,33 @@ mod tests {
         ));
     }
     #[test]
-    fn subagent_child_needs_replay_empty_scrollback() {
+    fn prompt_only_true_for_empty_scrollback() {
         let view = make_min_child_view();
-        assert!(subagent_child_needs_replay(&view));
+        assert!(scrollback_is_prompt_only(&view.scrollback));
     }
     #[test]
-    fn subagent_child_needs_replay_prompt_only() {
+    fn prompt_only_true_for_injected_prompt() {
         let mut view = make_min_child_view();
         view.scrollback
             .push_block(RenderBlock::user_prompt("scan src/"));
-        assert!(subagent_child_needs_replay(&view));
+        assert!(scrollback_is_prompt_only(&view.scrollback));
     }
     #[test]
-    fn subagent_child_needs_replay_false_when_tool_call_present() {
+    fn prompt_only_false_when_tool_call_present() {
         let mut view = make_min_child_view();
         seed_tool_call(&mut view);
-        assert!(!subagent_child_needs_replay(&view));
+        assert!(!scrollback_is_prompt_only(&view.scrollback));
     }
     #[test]
-    fn subagent_child_needs_replay_false_when_prompt_and_tool_call() {
+    fn prompt_only_false_when_prompt_and_tool_call() {
         let mut view = make_min_child_view();
         view.scrollback
             .push_block(RenderBlock::user_prompt("scan src/"));
         seed_tool_call(&mut view);
-        assert!(!subagent_child_needs_replay(&view));
+        assert!(!scrollback_is_prompt_only(&view.scrollback));
     }
     #[test]
-    fn ensure_subagent_child_replayed_skips_when_spawn_flag_set() {
+    fn ensure_subagent_child_replayed_skips_when_transcript_settled() {
         let mut parent = make_min_child_view();
         let child_sid = "child-skip";
         let mut child = make_min_child_view();
@@ -732,7 +942,7 @@ mod tests {
             .insert(child_sid.to_string(), Box::new(child));
         let mut info = make_info();
         info.child_session_id = child_sid.into();
-        info.child_updates_replayed = true;
+        info.transcript = ChildTranscript::DiskBacked;
         parent.subagent_sessions.insert(child_sid.to_string(), info);
         ensure_subagent_child_replayed(&mut parent, child_sid);
         let child = parent.subagent_views.get(child_sid).unwrap();
@@ -780,8 +990,10 @@ mod tests {
             "a real replay must purge after the parsed transient drops"
         );
         assert!(
-            parent.subagent_sessions[child_sid].child_updates_replayed,
-            "fixture sanity: the replay attempt must mark the child replayed"
+            !parent.subagent_sessions[child_sid]
+                .transcript
+                .needs_replay(),
+            "fixture sanity: the emitting replay must settle the transcript"
         );
         let before = test_support::calls();
         ensure_subagent_child_replayed(&mut parent, child_sid);
@@ -806,7 +1018,12 @@ mod tests {
             before,
             "a no-op replay (missing transcript) must not purge"
         );
-        assert!(parent.subagent_sessions[ghost_sid].child_updates_replayed);
+        assert!(
+            parent.subagent_sessions[ghost_sid]
+                .transcript
+                .needs_replay(),
+            "nothing on disk proves nothing: the next open retries"
+        );
         let empty_sid = "child-purge-empty";
         let empty_dir = home
             .path()
@@ -831,7 +1048,90 @@ mod tests {
             before,
             "an empty replay (zero updates parsed) must not purge"
         );
-        assert!(parent.subagent_sessions[empty_sid].child_updates_replayed);
+        assert!(
+            parent.subagent_sessions[empty_sid]
+                .transcript
+                .needs_replay()
+        );
+        set_replay_grok_home_for_tests(None);
+    }
+    /// A rebuilt transcript must show the run's original timestamps: the
+    /// replay threads each persisted line's `_meta` through the tracker, so
+    /// `created_at` comes from `agentTimestampMs`/`turnStartMs` (as on live
+    /// arrival and main-session resume), not the rebuild wall clock. Covers
+    /// both the injected task prompt (retro-stamped by the echo dedup) and a
+    /// replayed agent message.
+    #[test]
+    fn rebuilt_child_transcript_keeps_persisted_timestamps() {
+        use chrono::TimeZone;
+        let child_sid = "child-timestamps";
+        let prompt_ms: i64 = 1_700_000_000_000;
+        let msg_ms: i64 = 1_700_000_060_000;
+        let home = tempfile::tempdir().unwrap();
+        let session_dir = home
+            .path()
+            .join("sessions")
+            .join(urlencoding::encode("/tmp").as_ref())
+            .join(child_sid);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join("summary.json"), "{}").unwrap();
+        let echo = format!(
+            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"user_message_chunk","content":{{"type":"text","text":"scan src/"}}}},"_meta":{{"agentTimestampMs":{prompt_ms},"turnStartMs":{prompt_ms}}}}}}}"#
+        );
+        let msg = format!(
+            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"done"}}}},"_meta":{{"agentTimestampMs":{msg_ms}}}}}}}"#
+        );
+        std::fs::write(
+            session_dir.join("updates.jsonl"),
+            format!("{echo}\n{msg}\n"),
+        )
+        .unwrap();
+        set_replay_grok_home_for_tests(Some(home.path().to_path_buf()));
+        let mut parent = make_min_child_view();
+        parent
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(make_min_child_view()));
+        let mut info = make_info();
+        info.child_session_id = child_sid.into();
+        info.prompt = Some("scan src/".into());
+        info.finished = true;
+        info.duration_ms = Some(1_000);
+        parent.subagent_sessions.insert(child_sid.to_string(), info);
+        ensure_subagent_child_replayed(&mut parent, child_sid);
+        let expected = |ms: i64| {
+            chrono::Utc
+                .timestamp_millis_opt(ms)
+                .single()
+                .unwrap()
+                .with_timezone(&chrono::Local)
+        };
+        let child = parent.subagent_views.get(child_sid).unwrap();
+        let mut prompt_seen = false;
+        let mut msg_seen = false;
+        for i in 0..child.scrollback.len() {
+            let entry = child.scrollback.entry(i).unwrap();
+            match &entry.block {
+                RenderBlock::UserPrompt(_) => {
+                    assert_eq!(
+                        entry.created_at,
+                        Some(expected(prompt_ms)),
+                        "injected task prompt must carry the persisted turn start, not the rebuild time"
+                    );
+                    prompt_seen = true;
+                }
+                RenderBlock::AgentMessage(_) => {
+                    assert_eq!(
+                        entry.created_at,
+                        Some(expected(msg_ms)),
+                        "replayed agent message must carry the persisted timestamp, not the rebuild time"
+                    );
+                    msg_seen = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(prompt_seen, "fixture must produce a user prompt entry");
+        assert!(msg_seen, "fixture must produce an agent message entry");
         set_replay_grok_home_for_tests(None);
     }
     #[test]
@@ -867,7 +1167,16 @@ mod tests {
         .unwrap();
         set_replay_grok_home_for_tests(Some(home.path().to_path_buf()));
         let mut view = make_min_child_view();
-        replay_inherited_updates(&mut view, child_sid, std::path::Path::new("/tmp"), None);
+        assert!(matches!(
+            replay_inherited_updates(
+                &mut view,
+                child_sid,
+                std::path::Path::new("/tmp"),
+                None,
+                ReplayLookupFallback::Relocation,
+            ),
+            Ok(ReplayEmission::Emitted)
+        ));
         assert!(
             !view.scrollback.in_batch(),
             "end_batch must run after streamed apply"
@@ -901,7 +1210,16 @@ mod tests {
         std::fs::create_dir(session_dir.join("updates.jsonl")).unwrap();
         set_replay_grok_home_for_tests(Some(home.path().to_path_buf()));
         let mut view = make_min_child_view();
-        replay_inherited_updates(&mut view, child_sid, std::path::Path::new("/tmp"), None);
+        assert!(
+            replay_inherited_updates(
+                &mut view,
+                child_sid,
+                std::path::Path::new("/tmp"),
+                None,
+                ReplayLookupFallback::Relocation,
+            )
+            .is_err()
+        );
         assert!(
             !view.scrollback.in_batch(),
             "end_batch must run after a read error"
@@ -926,12 +1244,16 @@ mod tests {
         std::fs::write(session_dir.join("updates.jsonl"), format!("{user}\n")).unwrap();
         set_replay_grok_home_for_tests(Some(home.path().to_path_buf()));
         let mut view = make_min_child_view();
-        replay_inherited_updates(
-            &mut view,
-            child_sid,
-            std::path::Path::new("/tmp"),
-            Some(std::path::Path::new(child_cwd)),
-        );
+        assert!(matches!(
+            replay_inherited_updates(
+                &mut view,
+                child_sid,
+                std::path::Path::new("/tmp"),
+                Some(std::path::Path::new(child_cwd)),
+                ReplayLookupFallback::Relocation,
+            ),
+            Ok(ReplayEmission::Emitted)
+        ));
         assert_ne!(
             view.scrollback.len(),
             0,

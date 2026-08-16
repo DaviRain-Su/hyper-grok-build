@@ -189,7 +189,7 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
 
         let telemetry_mode = cfg.resolve_telemetry_mode();
         let trace_upload = cfg.resolve_trace_upload();
-        let feedback = cfg.resolve_feedback();
+        let feedback = cfg.feature(config::Feature::Feedback);
         let feedback_url = cfg.endpoints.resolve_feedback_base_url();
         let trace_upload_url = cfg.endpoints.resolve_trace_upload_url();
         tracing::info!(

@@ -80,6 +80,22 @@ impl Drop for TurnActiveGuard {
     }
 }
 
+pub(crate) struct TurnInputRequest {
+    pub(crate) prompt_id: String,
+    pub(crate) input_origin: InputOrigin,
+    pub(crate) prompt_blocks: Vec<ContentBlock>,
+    pub(crate) prompt_mode: PromptMode,
+    pub(crate) trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
+    pub(crate) artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+    pub(crate) client_identifier: Option<String>,
+    pub(crate) screen_mode: Option<String>,
+    pub(crate) verbatim: bool,
+    pub(crate) send_now: bool,
+    pub(crate) json_schema: Option<serde_json::Value>,
+    pub(crate) persist_ack: Option<oneshot::Sender<()>>,
+    pub(crate) parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
+}
+
 pub(crate) struct AgentTask {
     pub(crate) prompt_id: String,
     pub(crate) handle: tokio::task::AbortHandle,
@@ -88,21 +104,10 @@ pub(crate) struct AgentTask {
 impl AgentTask {
     pub(super) fn new_prompt(
         session: Arc<SessionActor>,
-        prompt_id: String,
-        input: Vec<ContentBlock>,
-        prompt_mode: PromptMode,
-        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-        artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
-        client_identifier: Option<String>,
-        screen_mode: Option<String>,
-        verbatim: bool,
-        send_now: bool,
-        json_schema: Option<serde_json::Value>,
+        request: TurnInputRequest,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
-        persist_ack: Option<oneshot::Sender<()>>,
-        parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
     ) -> Self {
-        let pid = prompt_id.clone();
+        let prompt_id = request.prompt_id.clone();
         Self {
             prompt_id,
             // Box the task future so the large `handle_prompt` state machine
@@ -110,23 +115,7 @@ impl AgentTask {
             // into the spawn frame). Same root cause as the auth_retry_budget
             // stack overflow: composing huge async fns without boxing.
             handle: tokio::task::spawn_local(Box::pin(async move {
-                run_task(
-                    session.clone(),
-                    input,
-                    prompt_mode,
-                    trace_gcs_config,
-                    artifact_tracker,
-                    client_identifier,
-                    screen_mode,
-                    verbatim,
-                    send_now,
-                    json_schema,
-                    pid,
-                    completion_tx,
-                    persist_ack,
-                    parsed_prompt_tx,
-                )
-                .await
+                run_task(session.clone(), request, completion_tx).await
             }))
             .abort_handle(),
         }
@@ -177,39 +166,28 @@ impl<T> TaskSlot<T> {
 
 async fn run_task(
     session: Arc<SessionActor>,
-    input: Vec<ContentBlock>,
-    prompt_mode: PromptMode,
-    trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-    artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
-    client_identifier: Option<String>,
-    screen_mode: Option<String>,
-    verbatim: bool,
-    send_now: bool,
-    json_schema: Option<serde_json::Value>,
-    prompt_id: String,
+    request: TurnInputRequest,
     completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
-    persist_ack: Option<oneshot::Sender<()>>,
-    parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
 ) {
-    // Pin the large `handle_prompt` future from a thin never-inlined frame
-    // (see turn.rs `box_turn_future` / docs/test-isolation.md §8.3).
-    let result = super::turn::box_turn_future(|| {
-        session.handle_prompt(
-            &prompt_id,
-            input,
-            prompt_mode,
-            trace_gcs_config,
-            artifact_tracker,
-            client_identifier,
-            screen_mode,
-            verbatim,
-            send_now,
-            json_schema,
-            persist_ack,
-            parsed_prompt_tx,
+    let prompt_id = request.prompt_id.clone();
+    // `handle_prompt` pins its own large future from a thin never-inlined
+    // frame (see turn.rs `box_turn_future` / docs/test-isolation.md §8.3).
+    let result = session
+        .handle_prompt(
+            &request.prompt_id,
+            request.prompt_blocks,
+            request.prompt_mode,
+            request.trace_gcs_config,
+            request.artifact_tracker,
+            request.client_identifier,
+            request.screen_mode,
+            request.verbatim,
+            request.send_now,
+            request.json_schema,
+            request.persist_ack,
+            request.parsed_prompt_tx,
         )
-    })
-    .await;
+        .await;
     let _ = completion_tx.send((prompt_id, result));
 }
 
@@ -492,8 +470,10 @@ impl SessionActor {
             // prompt id, so this is an origin check); other fronts take a
             // plain cancel rather than silently losing their message.
             let front_is_user_row = state.pending_inputs.front().is_some_and(|f| {
-                matches!(f.origin, crate::session::PromptOrigin::User)
-                    && !super::interjection::is_interject_fallback(&f.prompt_id)
+                matches!(
+                    f.input_origin.as_prompt_origin(),
+                    crate::session::PromptOrigin::User
+                ) && !super::interjection::is_interject_fallback(&f.prompt_id)
             });
             // Names the turn being torn down, for the claim release, the report, and the abort
             // announcement below. All three run after awaits a newer turn could start across.
@@ -572,7 +552,7 @@ impl SessionActor {
                         cancelled.push_back(item);
                     } else if suppress_task_wakes
                         && matches!(
-                            &item.origin,
+                            item.input_origin.as_prompt_origin(),
                             super::PromptOrigin::TaskCompleted { .. }
                                 | super::PromptOrigin::WorkflowCompleted { .. }
                         )
@@ -596,7 +576,7 @@ impl SessionActor {
             let had_queued_user_prompt = state
                 .pending_inputs
                 .iter()
-                .any(|i| !i.origin.is_synthetic());
+                .any(|i| !i.input_origin.is_synthetic());
             // NOTE: `current_prompt_id` is deliberately NOT cleared here —
             // cancel usage attribution must snapshot the ledger against the
             // live pin first; it is cleared below, right after the
@@ -738,13 +718,17 @@ impl SessionActor {
         if rewound_input.is_none()
             && let Some(prompt_id) = cancelled_prompt_id
         {
-            // Stamp `cancelTrigger` on the terminal `_meta` so clients can tell
-            // a send-now cancel from an interactive Ctrl+C/Esc.
+            // `cancelTrigger` tells clients a send-now cancel from Ctrl+C/Esc;
+            // `MidTurnAbort` matches what the prompt's RPC resolves with below
+            // so the two rails agree.
             self.emit_turn_completed(
                 prompt_id,
                 &Ok(acp::StopReason::Cancelled),
                 cancelled_usage.clone(),
                 trigger.as_ref().map(crate::session::CancelTrigger::as_str),
+                Some(crate::session::commands::meta_category_str(
+                    crate::session::events::CancellationCategory::MidTurnAbort,
+                )),
             )
             .await;
         }
@@ -785,7 +769,7 @@ impl SessionActor {
         for (idx, input) in pending_inputs.into_iter().enumerate() {
             // Running turn is idx 0; queued prompts never spent tokens.
             let is_running_turn = idx == 0;
-            if let Some(task_id) = input.origin.completion_id()
+            if let Some(task_id) = input.input_origin.completion_id()
                 && let Some(reservations) = &self.tool_context.task_completion_reservations
             {
                 reservations.release(task_id);
@@ -797,12 +781,10 @@ impl SessionActor {
                     total_tokens,
                     turn_snapshot: None,
                     completion_kind: PromptCompletionKind::Cancelled {
-                        // Previously hard-coded `None`, which dropped the
-                        // category on the abort path so `streaming_partial.json`
-                        // recorded a bare `"cancelled"`. Carry `MidTurnAbort`
-                        // so the partial's `reason` and any downstream consumer
-                        // match what `emit_turn_ended` wrote to `events.jsonl`.
-                        category: Some(crate::session::events::CancellationCategory::MidTurnAbort),
+                        // Running turn only, matching events.jsonl's category;
+                        // queued prompts were removed, not mid-turn aborted.
+                        category: is_running_turn
+                            .then_some(crate::session::events::CancellationCategory::MidTurnAbort),
                         // Thread the trigger on the running turn only (idx 0);
                         // MvpAgent stamps it on the `PromptResponse` `_meta`.
                         context: if is_running_turn {

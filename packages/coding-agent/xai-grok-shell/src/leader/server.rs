@@ -235,7 +235,7 @@ impl AuthProvider for LeaderAuthProvider {
                 let am = Arc::clone(&self.auth_manager);
                 handle.spawn(async move {
                     let _guard = guard;
-                    if let Err(e) = am.auth_background().await {
+                    if let Err(e) = am.auth().await {
                         tracing::debug!(error = %e, "leader hub auth: background refresh failed");
                     }
                 });

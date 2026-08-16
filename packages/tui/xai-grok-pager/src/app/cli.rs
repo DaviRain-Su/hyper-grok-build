@@ -531,7 +531,7 @@ pub struct LeaderArgs {
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "grok",
-    version = env!("VERSION_WITH_COMMIT"),
+    version = xai_grok_version::full_version(),
     about = "Grok Build TUI",
     disable_version_flag = true,
     next_display_order = None,
@@ -775,11 +775,19 @@ pub struct PagerArgs {
     /// Disable structured question prompts from the agent.
     #[arg(long = "no-ask-user", hide = true)]
     pub no_ask_user: bool,
-    /// Enable cross-session memory.
-    #[arg(long = "experimental-memory", conflicts_with = "no_memory")]
+    /// Legacy compatibility flag for enabling cross-session memory.
+    #[arg(
+        long = "experimental-memory",
+        conflicts_with = "no_memory",
+        hide = true
+    )]
     pub experimental_memory: bool,
-    /// Disable cross-session memory for this session.
-    #[arg(long = "no-memory", conflicts_with = "experimental_memory")]
+    /// Legacy compatibility flag for disabling cross-session memory.
+    #[arg(
+        long = "no-memory",
+        conflicts_with = "experimental_memory",
+        hide = true
+    )]
     pub no_memory: bool,
     /// Agent name or definition file path.
     #[arg(long = "agent", value_name = "NAME")]
@@ -949,6 +957,24 @@ fn strip_cur_dir(path: PathBuf) -> PathBuf {
         .collect()
 }
 impl PagerArgs {
+    pub(crate) fn memory_enabled_override(&self) -> Option<bool> {
+        if self.experimental_memory {
+            Some(true)
+        } else if self.no_memory {
+            Some(false)
+        } else {
+            None
+        }
+    }
+    pub(crate) fn memory_override_flag(&self) -> Option<&'static str> {
+        if self.experimental_memory {
+            Some("--experimental-memory")
+        } else if self.no_memory {
+            Some("--no-memory")
+        } else {
+            None
+        }
+    }
     /// Parse CLI arguments without applying side effects.
     pub fn parse_cli() -> Self {
         let bin_name = std::env::args()

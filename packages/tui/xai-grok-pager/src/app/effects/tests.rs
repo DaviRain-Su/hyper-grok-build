@@ -293,6 +293,33 @@ fn picker_keeps_untitled_conversation_as_untitled() {
     assert_eq!(entries[0].summary, "Untitled");
     assert_eq!(entries[0].source, "conversation");
 }
+/// The recap and last-turn summary ride the session-list wire and land on
+/// the picker entry so the expanded card can show them.
+#[test]
+fn picker_parses_last_recap_and_last_turn_summary() {
+    let recent = chrono::Utc::now().to_rfc3339();
+    let payload = serde_json::json!({
+            "sessions": [{
+                "sessionId": "s_recap",
+                "cwd": "/Users/me/xai",
+                "summary": "Auth refactor",
+                "source": "local",
+                "updatedAt": recent,
+                "lastTurnSummary": "Wired retries into billing",
+                "lastRecap": "Where we left off: auth refactor across the API"
+            }]
+        });
+    let entries = parse_session_picker_entries(&payload);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+            entries[0].last_turn_summary.as_deref(),
+            Some("Wired retries into billing")
+        );
+    assert_eq!(
+            entries[0].last_recap.as_deref(),
+            Some("Where we left off: auth refactor across the API")
+        );
+}
 /// Canary: the empty-summary drop still applies to Build rows.
 #[test]
 fn picker_still_drops_build_row_with_empty_summary() {
@@ -2734,6 +2761,7 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
         repo_name: "repo-app".to_string(),
         worktree_label: Some("wt".to_string()),
         last_turn_summary: Some("Fixed the parser".to_string()),
+        last_recap: None,
         card_detail: None,
     };
     let roster = session_picker_entry_to_roster(&entry);

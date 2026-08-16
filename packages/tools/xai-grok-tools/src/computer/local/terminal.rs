@@ -694,7 +694,7 @@ impl LocalTerminalActor {
         let mut cmd = tokio::process::Command::new(&prep.binary);
         cmd.args(&prep.args)
             .current_dir(cwd)
-            .stdin(Stdio::null())
+            .stdin(xai_tty_utils::null_stdio())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -818,7 +818,7 @@ impl LocalTerminalActor {
         let mut cmd = tokio::process::Command::new(&prep.binary);
         cmd.args(&prep.args)
             .current_dir(&prep.cwd)
-            .stdin(Stdio::null())
+            .stdin(xai_tty_utils::null_stdio())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -3031,9 +3031,9 @@ async fn capture_login_env() -> HashMap<String, String> {
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         let mut cmd = tokio::process::Command::new(shell.binary_path());
         cmd.args(["-lc", &script])
-            .stdin(Stdio::null())
+            .stdin(xai_tty_utils::null_stdio())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(xai_tty_utils::null_stdio())
             .kill_on_drop(true);
         crate::util::detach_command(&mut cmd);
         cmd.envs(crate::util::pager_env());
@@ -3207,7 +3207,7 @@ fn spawn_shell_command(
         cmd.arg("-c")
             .arg(&wrapped_command)
             .current_dir(cwd)
-            .stdin(Stdio::null())
+            .stdin(xai_tty_utils::null_stdio())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // NOTE: do NOT set .process_group(0) here — std runs setpgid()
@@ -3246,7 +3246,7 @@ fn spawn_shell_command(
         let mut cmd = tokio::process::Command::new(&inv.program);
         cmd.args(&inv.args)
             .current_dir(cwd)
-            .stdin(Stdio::null())
+            .stdin(xai_tty_utils::null_stdio())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);

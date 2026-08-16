@@ -701,6 +701,31 @@ fn scroll_lines_noop_at_bottom_edge() {
 }
 
 #[test]
+fn scroll_does_not_panic_when_items_cleared_before_relayout() {
+    // Layout still has rows from the previous frame; the model was emptied
+    // before the next prepare_layout (viewer rebuild / rewind).
+    let items: Vec<TestItem> = (0..10).map(TestItem::new).collect();
+    let mut state = ListPaneState::new(WrapMode::NoWrap, false);
+    state.prepare_layout(&items, 80, 5);
+    state.select_at(4, &items);
+    assert_eq!(state.selected_index(), Some(4));
+
+    let empty: &[TestItem] = &[];
+    state.half_page_down(empty);
+    state.scroll_lines(3, empty);
+    state.select_next(empty);
+    state.select_prev(empty);
+    state.select_first(empty);
+    state.select_last(empty);
+    state.select_at(4, empty);
+    assert!(!state.select_at_y(4, empty));
+
+    let short: Vec<TestItem> = (0..2).map(TestItem::new).collect();
+    state.half_page_down(&short);
+    state.scroll_lines(1, &short);
+}
+
+#[test]
 fn click_bottom_row_stable_after_append() {
     // Click the bottom visible row, then append items.
     // Selection and scroll should NOT be yanked by ensure_selected_visible.

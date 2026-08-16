@@ -120,8 +120,10 @@ pub struct AcpConnection {
 #[derive(Debug, Clone, Default)]
 pub struct ConnectFlags {
     pub subagents: bool,
-    pub experimental_memory: bool,
-    pub no_memory: bool,
+    /// CLI memory override set by a legacy compatibility flag.
+    pub memory_enabled_override: Option<bool>,
+    /// Original compatibility flag spelling for leader-mode warnings.
+    pub memory_override_flag: Option<&'static str>,
     pub disable_web_search: bool,
     /// Session-scoped `--todo-gate` override. Forces
     /// `ReminderPolicy.todo_gate.enabled = true` for this session.
@@ -179,8 +181,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         cli_subagents: Some(flags.subagents),
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: flags.experimental_memory,
-        cli_no_memory: flags.no_memory,
+        memory_enabled_override: flags.memory_enabled_override,
         disable_web_search: flags.disable_web_search,
         todo_gate: flags.todo_gate,
         laziness_debug_log: flags.laziness_debug_log.as_deref(),
@@ -407,11 +408,8 @@ fn warn_unsupported_leader_flags(flags: &ConnectFlags) {
 
 fn unsupported_leader_flags(flags: &ConnectFlags) -> Vec<&'static str> {
     let mut out = Vec::new();
-    if flags.experimental_memory {
-        out.push("--experimental-memory");
-    }
-    if flags.no_memory {
-        out.push("--no-memory");
+    if let Some(flag) = flags.memory_override_flag {
+        out.push(flag);
     }
     if flags.disable_web_search {
         out.push("--disable-web-search");
@@ -1139,20 +1137,29 @@ mod tests {
     #[test]
     fn unsupported_leader_flags_detects_all() {
         let flags = ConnectFlags {
-            experimental_memory: true,
-            no_memory: true,
+            memory_enabled_override: Some(true),
+            memory_override_flag: Some("--experimental-memory"),
             disable_web_search: true,
             storage_mode: Some("writeback".into()),
             subagents: true,
             ..Default::default()
         };
         let detected = unsupported_leader_flags(&flags);
-        assert_eq!(detected.len(), 5);
+        assert_eq!(detected.len(), 4);
         assert!(detected.contains(&"--experimental-memory"));
-        assert!(detected.contains(&"--no-memory"));
         assert!(detected.contains(&"--disable-web-search"));
         assert!(detected.contains(&"--storage-mode"));
         assert!(detected.contains(&"--subagents"));
+    }
+
+    #[test]
+    fn unsupported_leader_flags_preserves_no_memory_spelling() {
+        let flags = ConnectFlags {
+            memory_enabled_override: Some(false),
+            memory_override_flag: Some("--no-memory"),
+            ..Default::default()
+        };
+        assert_eq!(unsupported_leader_flags(&flags), vec!["--no-memory"]);
     }
 
     #[test]

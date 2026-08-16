@@ -1471,7 +1471,7 @@ impl BlockViewerPane {
                 && let Some(Some(j)) = joiners.get(i)
             {
                 absolute_col = absolute_col
-                    .saturating_add(unicode_width::UnicodeWidthStr::width(j.as_str()) as u16);
+                    .saturating_add(crate::scrollback::types::str_display_cells(j.as_str()) as u16);
             }
             let line_w = line_display_width_u16(line);
             if i == sub_row as usize {
@@ -1479,13 +1479,21 @@ impl BlockViewerPane {
                     // Cursor at/past the right edge of a non-last sub-row:
                     // snap to end of logical line.
                     let text = item.copy_text();
-                    let total = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
+                    let total = crate::scrollback::types::str_display_cells(&text)
+                        .min(u16::MAX as usize) as u16;
                     return Some(TextEndpoint {
                         item_idx,
                         col: total,
                     });
                 }
-                absolute_col = absolute_col.saturating_add(col_in_sub.min(line_w));
+                // Endpoints are logical (copy slices logical text), so map the
+                // clicked visual cell back to its logical column in this sub-row.
+                let sub_logical = crate::scrollback::types::line_plain_text(line);
+                let logical_in_sub = crate::render::bidi::visual_col_to_logical_col(
+                    &sub_logical,
+                    col_in_sub.min(line_w) as usize,
+                ) as u16;
+                absolute_col = absolute_col.saturating_add(logical_in_sub);
                 return Some(TextEndpoint {
                     item_idx,
                     col: absolute_col,
@@ -1662,8 +1670,9 @@ impl BlockViewerPane {
                 if sub_i > 0
                     && let Some(Some(j)) = joiners.get(sub_i)
                 {
-                    acc_col = acc_col
-                        .saturating_add(unicode_width::UnicodeWidthStr::width(j.as_str()) as u16);
+                    acc_col = acc_col.saturating_add(crate::scrollback::types::str_display_cells(
+                        j.as_str(),
+                    ) as u16);
                 }
                 let line_w = line_display_width_u16(line);
                 let sub_start = acc_col;
@@ -1686,13 +1695,29 @@ impl BlockViewerPane {
                 }
                 let local_lo = sel_start - sub_start;
                 let local_hi = sel_end - sub_start;
-                let x_lo = pane.x + local_lo;
-                let x_hi = pane.x + local_hi;
-                let x_lo = x_lo.min(pane.x + pane.width);
-                let x_hi = x_hi.min(pane.x + pane.width);
-                for x in x_lo..x_hi {
-                    if let Some(cell) = buf.cell_mut((x, screen_y)) {
-                        crate::scrollback::text_selection::apply_selection_highlight(&theme, cell);
+                // Selection is logical; map it to the visual cells that hold it.
+                let sub_logical = crate::scrollback::types::line_plain_text(line);
+                let visual_ranges = if crate::render::bidi::is_enabled()
+                    && crate::render::bidi::needs_bidi(&sub_logical)
+                {
+                    crate::render::bidi::logical_cols_to_visual(
+                        &sub_logical,
+                        local_lo as usize,
+                        local_hi as usize,
+                    )
+                } else {
+                    vec![(local_lo as usize, local_hi as usize)]
+                };
+                let pane_right = pane.x + pane.width;
+                for (vlo, vhi) in visual_ranges {
+                    let x_lo = pane.x.saturating_add(vlo as u16).min(pane_right);
+                    let x_hi = pane.x.saturating_add(vhi as u16).min(pane_right);
+                    for x in x_lo..x_hi {
+                        if let Some(cell) = buf.cell_mut((x, screen_y)) {
+                            crate::scrollback::text_selection::apply_selection_highlight(
+                                &theme, cell,
+                            );
+                        }
                     }
                 }
             }
@@ -1700,10 +1725,15 @@ impl BlockViewerPane {
     }
 }
 
-/// Display width of a `Line` in terminal columns, clamped to `u16::MAX`.
+/// Painted width of a `Line` in terminal cells, clamped to `u16::MAX`. Counts
+/// per-grapheme cells (like `types::str_display_cells`) so it agrees with
+/// `visual_col_to_logical_col` on ligature rows (Arabic lam-alef).
 fn line_display_width_u16(line: &Line<'_>) -> u16 {
-    use unicode_width::UnicodeWidthStr;
-    let w: usize = line.spans.iter().map(|s| s.content.as_ref().width()).sum();
+    let w: usize = line
+        .spans
+        .iter()
+        .map(|s| crate::scrollback::types::str_display_cells(s.content.as_ref()))
+        .sum();
     w.min(u16::MAX as usize) as u16
 }
 

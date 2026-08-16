@@ -9,6 +9,11 @@ use super::*;
 use crate::session::SideQuestionError;
 use xai_grok_sampling_types::SamplingError;
 
+/// Max characters of a recap persisted to `summary.json` for listing surfaces.
+/// The full recap can be long and rides every row of the session-list response;
+/// listing cards only show a short preview, so bound what goes on the wire.
+const RECAP_PERSIST_MAX_CHARS: usize = 240;
+
 /// Retry policy for the one-shot `/btw` model call: 3 attempts total
 /// (1 try + 2 retries), 500ms → 1s jittered backoff. Deliberately short —
 /// nothing like the sampler actor's budget — so a fleet-wide capacity event
@@ -265,12 +270,12 @@ impl SessionActor {
         let started_at = chrono::Utc::now().to_rfc3339();
         let x_grok_conv_id = format!("recap-{}", uuid::Uuid::new_v4());
         let x_grok_req_id = format!("xai-recap-{}", uuid::Uuid::new_v4());
-        // Clone the exact request items for the on-disk artifact (recap never
-        // mutates conversation state, so this file is the only durable record).
-        let chat_history_for_artifact = items.clone();
         let request = self
             .side_call_request(&setup, items, x_grok_conv_id.clone(), x_grok_req_id.clone())
             .await;
+        // The artifact records the exact model-facing items after trust
+        // projection; canonical conversation state remains raw.
+        let chat_history_for_artifact = request.items.clone();
 
         let response = match setup.client.conversation_collect(request).await {
             Ok(r) => r,
@@ -397,6 +402,15 @@ impl SessionActor {
             }
             return;
         }
+        // Persist a bounded preview of the committed recap so listing surfaces
+        // (`/resume`, `/session-info`) can show it whenever available. Only a
+        // preview: the full recap can be long and rides every row of the
+        // session-list response, while the card shows a short line. Distinct
+        // from the per-turn `last_turn_summary`; last-writer-wins.
+        let recap_preview: String = summary.chars().take(RECAP_PERSIST_MAX_CHARS).collect();
+        let _ = self.notifications.persistence_tx.send(
+            crate::session::persistence::PersistenceMsg::LastRecap(Some(recap_preview)),
+        );
         self.send_xai_notification(
             crate::extensions::notification::SessionUpdate::SessionRecap { summary, auto },
         )

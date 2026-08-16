@@ -393,6 +393,7 @@ impl ScrollbackState {
 
     /// Update the appearance configuration.
     pub fn set_appearance(&mut self, appearance: AppearanceConfig) {
+        crate::render::bidi::set_enabled(appearance.scrollback.display.rtl_bidi);
         self.appearance = appearance;
         // Invalidate caches since appearance affects rendering
         self.layout_cache = None;

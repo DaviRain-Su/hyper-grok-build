@@ -21,7 +21,6 @@ mod replay;
 mod replay_tests;
 pub mod search;
 mod search_content;
-pub(crate) mod search_gate;
 pub(crate) mod summary_write;
 
 /// The session search index moved to its own crate; re-exported here so
@@ -1009,12 +1008,27 @@ pub trait StorageAdapter: Send + Sync {
         session_title: String,
     ) -> io::Result<bool>;
 
+    /// Overwrite an existing auto title with a refreshed one (early-session
+    /// title refresh at turns 3 and 6), but never a manual `/rename`. The
+    /// manual check and write are atomic under the summary lock, so a
+    /// concurrent manual rename always wins. Returns `true` if the title was
+    /// written, `false` if a manual pin was preserved.
+    async fn regenerate_generated_title(
+        &self,
+        info: &Info,
+        session_title: String,
+    ) -> io::Result<bool>;
+
     /// Clear a manual `/rename` pin (`/rename --auto`). Sets
     /// `title_is_manual = false` and, when a pin was present, blanks
     /// `generated_title` and `session_summary` so `display_title()` is
     /// empty. Returns `true` iff a manual pin was actually cleared.
     /// Idempotent when the title is not manual.
     async fn reset_title_to_auto(&self, info: &Info) -> io::Result<bool>;
+
+    /// Replace or clear (`None`) the latest session recap preview in
+    /// `summary.json`; last-writer-wins. Distinct from `last_turn_summary`.
+    async fn set_last_recap(&self, info: &Info, recap: Option<String>) -> io::Result<()>;
 
     /// Replace or clear (`None`) the per-turn dashboard summary
     /// (`(text, prompt_id)`) in `summary.json`; last-writer-wins.
@@ -1301,8 +1315,9 @@ pub use jsonl::JsonlStorageAdapter;
 #[cfg(any(test, feature = "test-support"))]
 pub use replay::load_updates_for_replay_at;
 pub use replay::{
-    PreparedReplay, ReplayEmission, ReplayLookupFallback, ReplayPathHint, load_updates_for_replay,
-    prepare_replay_lines, stream_replay_updates_at, stream_replay_updates_at_hinted,
+    PreparedReplay, ReplayEmission, ReplayLookupFallback, ReplayPathHint, ReplayedUpdate,
+    load_updates_for_replay, prepare_replay_lines, replay_would_emit, stream_replay_updates_at,
+    stream_replay_updates_at_hinted,
 };
 pub(crate) use replay::{ReplayToolCollapser, filter_delta_replay_lines};
 

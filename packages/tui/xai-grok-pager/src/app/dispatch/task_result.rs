@@ -597,6 +597,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             tracing::trace!("Cancel notification sent successfully");
             vec![]
         }
+        TaskResult::ConsentRecorded { notice_id, version } => {
+            vec![Effect::PersistConsentAnswer {
+                account: app.account_email.clone(),
+                notice_id,
+                version,
+                acked: true,
+            }]
+        }
         TaskResult::KillSubagentComplete {
             session_id,
             subagent_id,

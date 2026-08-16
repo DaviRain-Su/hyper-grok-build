@@ -118,6 +118,19 @@ fn flatten_renders_roles_in_order_without_synthesising_an_assistant_turn() {
 }
 
 #[test]
+fn flatten_marks_agent_message_as_untrusted_not_human() {
+    let items = vec![ConversationItem::agent_message("review this change")];
+    let out = flatten_transcript_for_classifier(&items, true);
+    assert_eq!(
+        out,
+        format!(
+            "[agent_message] {} review this change\n",
+            xai_chat_state::compaction_utils::AGENT_MESSAGE_MODEL_LABEL
+        )
+    );
+}
+
+#[test]
 fn flatten_renders_tool_calls_as_lines() {
     let items = vec![assistant_with_tool_call(
         "checking",

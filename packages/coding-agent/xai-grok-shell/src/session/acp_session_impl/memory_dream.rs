@@ -6,7 +6,7 @@ use super::*;
 #[derive(Debug)]
 pub(super) struct MemoryFlushSnapshot {
     counts: xai_chat_state::ConversationCounts,
-    chat_history: Vec<ChatRequestMessage>,
+    chat_history: Vec<ConversationItem>,
 }
 
 /// Build first-turn injection backend params without mutating the shared
@@ -22,7 +22,7 @@ pub(super) fn build_initial_injection_backend_params(
     initial_injection_config: &crate::config::MemoryInitialInjectionConfig,
 ) -> (crate::session::memory::MemoryBackendParams, f64) {
     let mut injection_params = params.clone();
-    injection_params.search_source = "injection";
+    injection_params.search_source = crate::session::memory::MemorySearchSource::Injection;
     let effective_min_score = initial_injection_config
         .min_score
         .map(|min_score| {
@@ -76,6 +76,7 @@ impl SessionActor {
         xai_grok_telemetry::session_ctx::log_event(
             xai_grok_telemetry::memory_telemetry::MemorySessionSummary {
                 session_id: self.session_info.id.to_string(),
+                memory_enabled: self.memory.is_enabled(),
                 session_duration_secs: self.session_start.elapsed().as_secs(),
                 flush_count: telem.flush_count,
                 flush_success_count: telem.flush_success_count,
@@ -158,6 +159,7 @@ impl SessionActor {
                 target: xai_grok_telemetry::memory_log::TARGET,
                 "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
             );
+            return;
         }
         if run_exit_dream {
             self.maybe_run_dream().await;
@@ -495,7 +497,9 @@ impl SessionActor {
                 "MEMORY_FLUSH: sending {n} recent messages to model (+ system prompt + user closer)",
                 n = recent.len(),
             );
-            items.extend(recent.into_iter().map(ConversationItem::from));
+            items.extend(
+                xai_chat_state::compaction_utils::ModelRequestHistory::from_raw(recent).into_items(),
+            );
             items.push(ConversationItem::user(
                 "Now write the memory summary as described in the system prompt.",
             ));
@@ -685,16 +689,6 @@ impl SessionActor {
             },
         );
 
-        // Rolling session summary on each flush — crash-safe telemetry.
-        let total_chunks = self
-            .memory
-            .storage
-            .borrow()
-            .as_ref()
-            .map_or(0, |s| s.total_chunk_count());
-        let telem = self.memory.telemetry_snapshot();
-        self.emit_memory_session_summary(&telem, total_chunks, "flush_checkpoint");
-
         let flush_trigger = match trigger {
             "slash_command" => xai_grok_telemetry::events::MemoryFlushTrigger::SlashCommand,
             "interval" => xai_grok_telemetry::events::MemoryFlushTrigger::Interval,
@@ -723,9 +717,8 @@ impl SessionActor {
             self.chat_state_handle.get_conversation_counts(),
             self.chat_state_handle.get_conversation(),
         );
-        let chat_history = crate::sampling::conversation_to_chat_messages(
-            xai_chat_state::compaction_utils::prepare_conversation_for_summarization(conversation),
-        );
+        let chat_history =
+            xai_chat_state::compaction_utils::prepare_conversation_for_summarization(conversation);
         MemoryFlushSnapshot {
             counts,
             chat_history,

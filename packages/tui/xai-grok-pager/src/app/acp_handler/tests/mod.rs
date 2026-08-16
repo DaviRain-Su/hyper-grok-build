@@ -113,7 +113,7 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         prompt: None,
         child_cwd: None,
         worktree_path: None,
-        child_updates_replayed: false,
+        transcript: Default::default(),
     }
 }
 #[test]
@@ -944,6 +944,7 @@ pub(super) fn prompt_complete_ext_with_prompt_id(
                 prompt_id: Some(prompt_id.to_string()),
                 agent_result: None,
                 cancel_trigger: None,
+                cancellation_category: None,
                 meta: None,
             },
         )
@@ -1516,6 +1517,21 @@ pub(super) fn child_scrollback_tool_call_count(
                 .scrollback
                 .entry(*i)
                 .is_some_and(|e| matches!(e.block, RenderBlock::ToolCall(_)))
+        })
+        .count()
+}
+/// `SessionEvent` blocks (the `TurnCompleted` footer) in a child scrollback.
+pub(super) fn child_scrollback_session_event_count(
+    agent: &AgentView,
+    child_sid: &str,
+) -> usize {
+    let child = agent.subagent_views.get(child_sid).expect("child subagent view");
+    (0..child.scrollback.len())
+        .filter(|i| {
+            child
+                .scrollback
+                .entry(*i)
+                .is_some_and(|e| matches!(e.block, RenderBlock::SessionEvent(_)))
         })
         .count()
 }

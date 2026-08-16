@@ -303,7 +303,8 @@ pub(crate) fn format_runtime_state_line(
 /// continuing the conversation as the agent.
 ///
 /// Format per item:
-/// - `[user] <text>` — concatenation of all `Text` content parts
+/// - `[user] <text>` — genuine human input
+/// - `[agent_message] <warning> <text>` — typed agent-authored input
 ///   (images dropped; this is a text classifier)
 /// - `[assistant reasoning] <text>` — chain-of-thought (emitted only
 ///   when `reasoning.text` is a non-empty, non-whitespace string;
@@ -355,7 +356,16 @@ pub(crate) fn flatten_transcript_for_classifier(
                         text.push_str(t);
                     }
                 }
-                let _ = writeln!(out, "[user] {}", truncate(&text));
+                if user.synthetic_reason == Some(SyntheticReason::AgentMessage) {
+                    let _ = writeln!(
+                        out,
+                        "[agent_message] {} {}",
+                        xai_chat_state::compaction_utils::AGENT_MESSAGE_MODEL_LABEL,
+                        truncate(&text)
+                    );
+                } else {
+                    let _ = writeln!(out, "[user] {}", truncate(&text));
+                }
             }
             ConversationItem::Assistant(asst) => {
                 if !asst.content.is_empty() {
