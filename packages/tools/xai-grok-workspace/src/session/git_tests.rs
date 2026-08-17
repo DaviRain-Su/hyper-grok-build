@@ -1458,3 +1458,111 @@ fn resolve_normalized_remote_urls_deduplicates_across_transports() {
     // Both should normalize to the same value and dedup.
     assert_eq!(urls, vec!["github.com/xai-org/example"]);
 }
+
+// A well-formed OID that no fresh repo has an object for.
+const MISSING_OID: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// Repo with one empty-tree commit; returns the repo and commit OID.
+fn init_git2_repo_with_commit(dir: &Path) -> (git2::Repository, git2::Oid) {
+    let repo = git2::Repository::init(dir).expect("init repo");
+    let oid = {
+        let sig = git2::Signature::now("test", "test@test.com").expect("signature");
+        let mut index = repo.index().expect("index");
+        let tree_id = index.write_tree().expect("write tree");
+        let tree = repo.find_tree(tree_id).expect("find tree");
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .expect("commit")
+    };
+    (repo, oid)
+}
+
+/// Point HEAD's branch at an `oid` with no backing object (git2's ref API
+/// refuses, so write the ref file directly), then assert peeling now fails —
+/// the precondition that makes the refs-only tests real.
+fn point_head_at_missing_object(repo: &git2::Repository, oid: &str) {
+    let head_ref = repo.head().expect("head").name().expect("name").to_string();
+    std::fs::write(repo.commondir().join(&head_ref), format!("{oid}\n")).expect("write ref");
+
+    // Fresh handle: git2 caches refs.
+    let fresh = git2::Repository::open(repo.path()).expect("reopen repo");
+    assert!(
+        fresh.head().expect("head").peel_to_commit().is_err(),
+        "peel must fail, else the test misses the refs-only path",
+    );
+}
+
+#[test]
+fn metadata_resolves_head_when_object_missing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (repo, _) = init_git2_repo_with_commit(tmp.path());
+    let branch = repo
+        .head()
+        .expect("head")
+        .shorthand()
+        .expect("branch")
+        .to_string();
+
+    point_head_at_missing_object(&repo, MISSING_OID);
+
+    let metadata = resolve_persisted_session_git_metadata_sync(tmp.path());
+    assert_eq!(metadata.head_commit.as_deref(), Some(MISSING_OID));
+    // Commit and branch come from the same ref resolution.
+    assert_eq!(metadata.head_branch.as_deref(), Some(branch.as_str()));
+}
+
+/// `get_current_commit`: unborn → `None`, live → OID, missing object → OID.
+#[tokio::test]
+async fn get_current_commit_reads_head_from_refs() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    git2::Repository::init(tmp.path()).expect("init repo");
+    assert!(get_current_commit(tmp.path()).await.is_none());
+
+    // Same dir; init is idempotent, now with a commit.
+    let (repo, commit_oid) = init_git2_repo_with_commit(tmp.path());
+    assert_eq!(
+        get_current_commit(tmp.path()).await.as_deref(),
+        Some(commit_oid.to_string().as_str()),
+    );
+
+    point_head_at_missing_object(&repo, MISSING_OID);
+    assert_eq!(
+        get_current_commit(tmp.path()).await.as_deref(),
+        Some(MISSING_OID),
+    );
+}
+
+/// End-to-end: `status()` reports the HEAD hash even when the commit object is
+/// gone. libgit2's status tolerates a missing HEAD tree (it diffs against an
+/// empty tree), so the refs-only OID read supplies it; the old peel gave `None`.
+#[tokio::test]
+async fn status_reports_head_oid_when_object_missing() {
+    xai_test_utils::require_git!();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (repo, _) = init_git2_repo_with_commit(tmp.path());
+    point_head_at_missing_object(&repo, MISSING_OID);
+
+    let data = status(
+        tmp.path(),
+        /*include_untracked*/ false,
+        /*include_stats*/ false,
+        /*ignore_submodules*/ true,
+        /*include_patches*/ false,
+    )
+    .await
+    .expect("status");
+    assert_eq!(data.commit.as_deref(), Some(MISSING_OID));
+}
+
+/// A HEAD whose object is missing must not report "already checked out"; the
+/// fast path falls through to the repair fetch (which fails here — no origin).
+#[tokio::test]
+async fn checkout_commit_with_fetch_repairs_missing_head_object() {
+    xai_test_utils::require_git!();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (repo, _) = init_git2_repo_with_commit(tmp.path());
+    point_head_at_missing_object(&repo, MISSING_OID);
+
+    let resp = checkout_commit_with_fetch(tmp.path(), MISSING_OID, /*stash_if_dirty*/ false).await;
+    assert!(!resp.checked_out);
+}

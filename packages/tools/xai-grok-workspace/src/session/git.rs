@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 pub use crate::restore_fetch::git_object_exists;
 use anyhow::Result;
-use git2::{DiffOptions, Repository, StatusOptions};
+use git2::{DiffOptions, Reference, Repository, StatusOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -364,15 +364,13 @@ pub fn resolve_normalized_remote_urls(cwd: &Path) -> Vec<String> {
 pub struct PersistedGitMetadata {
     pub git_root_dir: Option<String>,
     pub git_remotes: Vec<String>,
+    /// HEAD's OID as `git rev-parse HEAD` reports it (not verified to exist).
     pub head_commit: Option<String>,
     pub head_branch: Option<String>,
 }
-/// Resolve git metadata for session persistence: worktree root and
-/// deduplicated, credential-stripped remote URLs.
-///
-/// Reuses [`discover_git_root`] (libgit2) for repo discovery and
-/// `repo.remotes()` / `repo.find_remote()` for remote enumeration,
-/// which correctly handles worktrees via the shared commondir.
+/// Resolve session-persistence git metadata: worktree root, HEAD, and
+/// deduplicated, credential-stripped remotes. Reads refs and config only, via
+/// the repo's commondir so linked worktrees resolve like the main repo.
 pub fn resolve_persisted_session_git_metadata_sync(cwd: &Path) -> PersistedGitMetadata {
     let git_root = match discover_git_root(cwd) {
         GitDiscoveryResult::Found(root) => root,
@@ -399,16 +397,14 @@ pub fn resolve_persisted_session_git_metadata_sync(cwd: &Path) -> PersistedGitMe
             }
         }
     }
-    let head_ref = repo.head().ok();
+    let head_ref = head_reference(&repo);
     let head_commit = head_ref
         .as_ref()
-        .and_then(|h| h.peel_to_commit().ok())
-        .map(|c| c.id().to_string());
-    let head_branch = head_ref.as_ref().and_then(|h| {
-        h.shorthand()
-            .filter(|s| *s != "HEAD")
-            .map(|s| s.to_string())
-    });
+        .and_then(|h| h.target())
+        .map(|oid| oid.to_string());
+    let head_branch = head_ref
+        .as_ref()
+        .and_then(|h| h.shorthand().filter(|s| *s != "HEAD").map(str::to_owned));
     PersistedGitMetadata {
         git_root_dir: Some(git_root.to_string_lossy().to_string()),
         git_remotes: remotes.into_iter().collect(),
@@ -635,6 +631,32 @@ fn compute_ahead_behind(repo: &Repository) -> Option<(usize, usize)> {
     let upstream = local_branch.upstream().ok()?;
     let upstream_oid = upstream.get().target()?;
     repo.graph_ahead_behind(local_oid, upstream_oid).ok()
+}
+/// HEAD resolved from refs only. `None` before the first commit; other failures
+/// are logged and also `None`.
+///
+/// Never peel to the commit: on a huge or corrupt pack that read can hang,
+/// allocating until the process dies — it hung session startup, and the file
+/// watcher hits this on every git event.
+fn head_reference(repo: &Repository) -> Option<Reference<'_>> {
+    match repo.head() {
+        Ok(head) => Some(head),
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => None,
+        Err(e) => {
+            tracing::debug!(
+                path = %repo.path().display(),
+                code = ?e.code(),
+                error = %e,
+                "git.head: unresolvable",
+            );
+            None
+        }
+    }
+}
+/// The hash stored in HEAD, as `git rev-parse HEAD` prints it. Never loads the
+/// object, so it may name one this repo does not have (see [`head_reference`]).
+fn head_sha(repo: &Repository) -> Option<String> {
+    Some(head_reference(repo)?.target()?.to_string())
 }
 fn read_blob_from_tree(repo: &Repository, tree: &git2::Tree, path: &str) -> Result<Vec<u8>> {
     let entry = tree
@@ -983,15 +1005,13 @@ pub async fn list_branches(git_root: &Path) -> Result<GitBranchListData> {
     })
     .await?
 }
-/// Get the current commit hash for cache validation.
-/// Returns None if not in a git repository or no commits exist.
+/// HEAD's commit hash for cache validation and `--restore-code` (see
+/// [`head_sha`]). `None` outside a git repo or before the first commit.
 pub async fn get_current_commit(git_root: &Path) -> Option<String> {
     let cwd = git_root.to_path_buf();
     tokio::task::spawn_blocking(move || -> Option<String> {
         let repo = Repository::discover(&cwd).ok()?;
-        let head = repo.head().ok()?;
-        let commit = head.peel_to_commit().ok()?;
-        Some(commit.id().to_string())
+        head_sha(&repo)
     })
     .await
     .ok()
@@ -1368,11 +1388,7 @@ async fn status_ungated(
             .commondir()
             .parent()
             .map(|p| p.to_string_lossy().trim_end_matches('/').to_string());
-        let commit = repo
-            .head()
-            .ok()
-            .and_then(|h| h.peel_to_commit().ok())
-            .map(|c| c.id().to_string());
+        let commit = head_sha(&repo);
         let (ahead, behind) = compute_ahead_behind(&repo)
             .map(|(a, b)| (Some(a), Some(b)))
             .unwrap_or((None, None));
@@ -2192,6 +2208,9 @@ pub(crate) async fn checkout_commit_with_fetch(
 ) -> CheckoutCommitResponse {
     if let Some(current) = get_current_commit(git_root).await
         && current == head_commit
+        && git_cli(git_root, &["cat-file", "-t", head_commit])
+            .await
+            .is_ok()
     {
         return CheckoutCommitResponse {
             checked_out: true,
