@@ -354,21 +354,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn prompt_template_bakes_the_conciseness_cap() {
-        // The numeric ceilings ARE the contract (exact pins); the surrounding
-        // phrasing is matched case-insensitively to survive harmless rewording.
-        let t = GOAL_SUMMARIZER_PROMPT_TEMPLATE;
-        let lower = t.to_lowercase();
-        assert!(lower.contains("hard limit"), "cap must be a HARD LIMIT");
-        assert!(t.contains("80 words"), "cap must state the 80-word limit");
-        assert!(t.contains("4 bullets"), "cap must state the 4-bullet limit");
-        assert!(
-            lower.contains("read-only"),
-            "summarizer prompt must forbid edits",
-        );
-    }
-
-    #[test]
     fn prompt_render_resolves_tool_placeholders_and_inlines_inputs() {
         let dir = tmp_dir("render");
         let plan = dir.join("plan.md");

@@ -1161,13 +1161,14 @@ fn session_startup_allowed_requires_auth_and_trust() {
     );
 }
 fn painted_notice(id: &str, version: i32) -> crate::app::consent::ConsentState {
-    use crate::app::consent::{ConsentLegibility, ConsentNotice, ConsentState};
+    use crate::app::consent::{ConsentLegibility, ConsentNotice, ConsentSegment, ConsentState};
     ConsentState::Pending {
         notice: ConsentNotice {
             id: id.to_string(),
             version,
             title: "Updated terms".to_string(),
-            body: "Review them.".to_string(),
+            segments: vec![ConsentSegment::Text("Review them.".to_string())],
+            links: Vec::new(),
             accept_label: "Got it".to_string(),
         },
         legibility: ConsentLegibility::Painted,
@@ -1246,6 +1247,82 @@ fn accepting_records_the_answer_and_replays_deferred_startup() {
         "deferred startup must replay once the notice is answered",
     );
     assert!(app.deferred_startup.session.is_none());
+}
+/// An api key carries no email, so an answer written under it would be filed against nobody and
+/// would overwrite the answer of whoever signed in on this machine. Both writes have to skip it.
+#[test]
+fn an_api_key_run_writes_no_answer_on_either_path() {
+    let mut app = test_app();
+    app.account_email = None;
+    app.consent_state = painted_notice("tos-2026", 3);
+    let accepted = dispatch_accept_consent(&mut app);
+    assert!(
+        !accepted
+            .iter()
+            .any(|e| matches!(e, Effect::PersistConsentAnswer { .. })),
+        "an answer under no account belongs to nobody",
+    );
+    assert!(
+        accepted
+            .iter()
+            .any(|e| matches!(e, Effect::RecordConsentUpstream { .. })),
+        "the acceptance still has to reach the server",
+    );
+    let acked = dispatch(
+        Action::TaskComplete(TaskResult::ConsentRecorded {
+            notice_id: "tos-2026".to_string(),
+            version: 3,
+        }),
+        &mut app,
+    );
+    assert!(
+        !acked
+            .iter()
+            .any(|e| matches!(e, Effect::PersistConsentAnswer { .. })),
+        "the server ack must not write the answer the accept path refused to",
+    );
+}
+/// The index a click or a number key carries is only worth anything if it reaches the right url.
+#[serial_test::serial(GROK_TEST_OPEN_URL_FILE)]
+#[test]
+fn a_consent_link_opens_the_url_its_label_stands_for() {
+    use crate::app::consent::{ConsentSegment, ConsentState};
+    let url_file =
+        std::env::temp_dir().join(format!("grok-consent-open-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&url_file);
+    unsafe { std::env::set_var("GROK_TEST_OPEN_URL_FILE", &url_file) };
+    let opened = || std::fs::read_to_string(&url_file).unwrap_or_default();
+    let mut app = test_app();
+    app.consent_state = painted_notice("tos-2026", 3);
+    if let ConsentState::Pending { notice, .. } = &mut app.consent_state {
+        notice.segments = vec![
+            ConsentSegment::Link {
+                index: 0,
+                label: "Terms".to_string(),
+            },
+            ConsentSegment::Link {
+                index: 1,
+                label: "Acceptable Use Policy".to_string(),
+            },
+        ];
+        notice.links = vec![
+            "https://x.ai/legal/tos".to_string(),
+            "https://x.ai/legal/aup".to_string(),
+        ];
+    }
+    dispatch(Action::OpenConsentLink(1), &mut app);
+    assert!(
+        opened().lines().any(|l| l == "https://x.ai/legal/aup"),
+        "the second link must open the second url; got {:?}",
+        opened(),
+    );
+    let _ = std::fs::write(&url_file, "");
+    dispatch(Action::OpenConsentLink(9), &mut app);
+    app.consent_state = ConsentState::Done;
+    dispatch(Action::OpenConsentLink(0), &mut app);
+    assert!(opened().trim().is_empty(), "got {:?}", opened());
+    unsafe { std::env::remove_var("GROK_TEST_OPEN_URL_FILE") };
+    let _ = std::fs::remove_file(&url_file);
 }
 /// Accepting the trust question (its `finish_trust` tail) resolves trust and
 /// replays the deferred startup when auth is already done. (Declining quits

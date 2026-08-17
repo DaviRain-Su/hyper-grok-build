@@ -165,6 +165,8 @@ pub(crate) fn test_app() -> AppView {
         trust_state: TrustState::Done,
         consent_state: crate::app::consent::ConsentState::Done,
         account_email: None,
+        welcome_consent_link_rects: Vec::new(),
+        welcome_consent_hover_link: None,
         consent_answered: None,
         login_label: None,
         login_method_id: None,
@@ -2198,9 +2200,9 @@ fn welcome_trust_decline_keys_quit() {
     let outcome = app.handle_input(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
     assert!(matches!(outcome, InputOutcome::Action(Action::TrustFolder)));
 }
-/// A notice already on screen, with both menu rows painted.
+/// A notice already on screen, with both menu rows and both of its links painted.
 fn consent_pending_app() -> AppView {
-    use crate::app::consent::{ConsentLegibility, ConsentNotice};
+    use crate::app::consent::{ConsentLegibility, ConsentNotice, ConsentSegment};
     use ratatui::layout::Rect;
     let mut app = test_app();
     app.trust_state = TrustState::Pending {
@@ -2211,13 +2213,28 @@ fn consent_pending_app() -> AppView {
             id: "notice".to_string(),
             version: 1,
             title: "Title".to_string(),
-            body: "Review the terms.".to_string(),
+            segments: vec![
+                ConsentSegment::Link {
+                    index: 0,
+                    label: "Terms".to_string(),
+                },
+                ConsentSegment::Link {
+                    index: 1,
+                    label: "AUP".to_string(),
+                },
+            ],
+            links: vec![
+                "https://x.ai/legal/tos".to_string(),
+                "https://x.ai/legal/aup".to_string(),
+            ],
             accept_label: "Accept".to_string(),
         },
         legibility: ConsentLegibility::Painted,
         painted_at: Some(std::time::Instant::now()),
     };
     app.welcome_menu_rects = vec![Rect::new(10, 20, 30, 1), Rect::new(10, 21, 30, 1)];
+    app.welcome_consent_link_rects =
+        vec![(0, Rect::new(5, 12, 5, 1)), (1, Rect::new(20, 12, 6, 1))];
     app
 }
 /// Accept is `a` alone. `y` belongs to the trust question one screen later, Enter may be buffered,
@@ -2259,28 +2276,51 @@ fn welcome_consent_answers_only_to_its_own_keys() {
         "the screen offers Quit, so the key has to work",
     );
 }
-/// A key that reached the process before the notice painted was aimed at the screen before it.
+/// Every event from before the notice painted was aimed at the screen it replaced, and acting on
+/// one would quit and take the composer's text with it. Ctrl+C is the exception, because nothing
+/// else on this screen handles it.
 #[test]
-fn welcome_consent_ignores_an_accept_key_typed_before_it_painted() {
+fn welcome_consent_ignores_everything_from_before_the_paint() {
     use crate::app::consent::ConsentState;
+    let unpainted = || {
+        let mut app = consent_pending_app();
+        if let ConsentState::Pending { painted_at, .. } = &mut app.consent_state {
+            *painted_at = None;
+        }
+        app
+    };
     let mut app = consent_pending_app();
     let painted = match &app.consent_state {
         ConsentState::Pending { painted_at, .. } => painted_at.expect("painted"),
         ConsentState::Done => unreachable!(),
     };
-    let typed_earlier = painted - std::time::Duration::from_millis(1);
     let outcome = app.handle_input_at_with_paste_provenance(
         &key_event(KeyCode::Char('a'), KeyModifiers::NONE),
-        typed_earlier,
+        painted - std::time::Duration::from_millis(1),
         crate::app::app_view::PasteProvenance::Terminal,
     );
     assert!(
         matches!(outcome, InputOutcome::Unchanged),
         "a key that predates the notice was aimed at the composer, got {outcome:?}",
     );
+    for ev in [
+        left_mouse(MouseEventKind::Down(MouseButton::Left), 12, 20),
+        key_event(KeyCode::Char('q'), KeyModifiers::NONE),
+    ] {
+        assert!(matches!(
+            unpainted().handle_input(&ev),
+            InputOutcome::Unchanged
+        ));
+    }
+    let mut app = unpainted();
+    assert!(matches!(app.handle_input(&ctrl_c()), InputOutcome::Changed));
+    assert!(
+        app.pending_action.is_some(),
+        "a notice that never painted must still be escapable",
+    );
 }
 #[test]
-fn welcome_consent_menu_rows_are_clickable() {
+fn welcome_consent_answers_and_links_are_reachable_by_key_and_click() {
     let click = |col, row| left_mouse(MouseEventKind::Down(MouseButton::Left), col, row);
     let mut app = consent_pending_app();
     assert!(matches!(
@@ -2293,16 +2333,107 @@ fn welcome_consent_menu_rows_are_clickable() {
         InputOutcome::Action(Action::Quit)
     ));
     let mut app = consent_pending_app();
-    if let crate::app::consent::ConsentState::Pending { painted_at, .. } = &mut app.consent_state {
-        *painted_at = None;
+    assert!(matches!(
+        app.handle_input(&click(21, 12)),
+        InputOutcome::Action(Action::OpenConsentLink(1))
+    ));
+    let mut app = consent_pending_app();
+    assert!(matches!(
+        app.handle_input(&key_event(KeyCode::Char('2'), KeyModifiers::NONE)),
+        InputOutcome::Action(Action::OpenConsentLink(1))
+    ));
+    for code in [KeyCode::Char('0'), KeyCode::Char('3')] {
+        let mut app = consent_pending_app();
+        assert!(
+            matches!(
+                app.handle_input(&key_event(code, KeyModifiers::NONE)),
+                InputOutcome::Unchanged
+            ),
+            "{code:?} addresses no link",
+        );
+    }
+}
+/// What the renderer reports is the only thing standing between a click and an acceptance, so the
+/// three answers it can give have to land in the state exactly.
+#[test]
+fn consent_paint_records_what_the_renderer_reported() {
+    use crate::app::consent::{ConsentLegibility, ConsentNotice, ConsentState};
+    let pending = || ConsentState::Pending {
+        notice: ConsentNotice {
+            id: "notice".to_string(),
+            version: 1,
+            title: "Title".to_string(),
+            segments: Vec::new(),
+            links: Vec::new(),
+            accept_label: "Accept".to_string(),
+        },
+        legibility: ConsentLegibility::Illegible,
+        painted_at: None,
+    };
+    let mut state = pending();
+    record_consent_paint(&mut state, Some(ConsentLegibility::Illegible));
+    let ConsentState::Pending {
+        painted_at,
+        legibility,
+        ..
+    } = &state
+    else {
+        panic!("expected pending");
+    };
+    assert!(painted_at.is_some(), "an illegible paint is still a paint");
+    assert_eq!(*legibility, ConsentLegibility::Illegible);
+    let mut state = pending();
+    record_consent_paint(&mut state, Some(ConsentLegibility::Painted));
+    record_consent_paint(&mut state, None);
+    let ConsentState::Pending {
+        painted_at,
+        legibility,
+        ..
+    } = &state
+    else {
+        panic!("expected pending");
+    };
+    assert_eq!(
+        *legibility,
+        ConsentLegibility::Illegible,
+        "a frame that did not paint the notice cannot leave it acceptable",
+    );
+    assert!(painted_at.is_some(), "the first paint still happened");
+}
+/// An unreadable notice still has to take `q`, so the paint stamp cannot wait for legibility.
+#[test]
+fn welcome_consent_quit_works_while_the_body_is_unreadable() {
+    use crate::app::consent::{ConsentLegibility, ConsentState};
+    let mut app = consent_pending_app();
+    if let ConsentState::Pending { legibility, .. } = &mut app.consent_state {
+        *legibility = ConsentLegibility::Illegible;
+    }
+    app.welcome_menu_rects.truncate(1);
+    assert!(matches!(
+        app.handle_input(&key_event(KeyCode::Char('q'), KeyModifiers::NONE)),
+        InputOutcome::Action(Action::Quit)
+    ));
+    let mut app = consent_pending_app();
+    if let ConsentState::Pending { legibility, .. } = &mut app.consent_state {
+        *legibility = ConsentLegibility::Illegible;
+    }
+    for ev in [
+        key_event(KeyCode::Char('1'), KeyModifiers::NONE),
+        left_mouse(MouseEventKind::Down(MouseButton::Left), 6, 12),
+    ] {
+        assert!(matches!(app.handle_input(&ev), InputOutcome::Unchanged));
+    }
+    let mut app = consent_pending_app();
+    if let ConsentState::Pending { legibility, .. } = &mut app.consent_state {
+        *legibility = ConsentLegibility::Illegible;
     }
     assert!(matches!(
-        app.handle_input(&click(12, 20)),
+        app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 12, 20)),
         InputOutcome::Action(Action::Quit)
     ));
 }
 #[test]
-fn welcome_consent_hover_tracks_the_menu_row() {
+fn welcome_consent_hover_tracks_the_menu_row_and_the_link() {
     let mut app = consent_pending_app();
     app.welcome_menu_rects.truncate(1);
     let moved = |col, row| left_mouse(MouseEventKind::Moved, col, row);
@@ -2316,10 +2447,21 @@ fn welcome_consent_hover_tracks_the_menu_row() {
         InputOutcome::Unchanged
     ));
     assert!(matches!(
+        app.handle_input(&moved(6, 12)),
+        InputOutcome::Changed
+    ));
+    assert_eq!(app.welcome_consent_hover_link, Some(0));
+    assert_eq!(app.welcome_menu_index, None);
+    assert!(matches!(
+        app.handle_input(&moved(21, 12)),
+        InputOutcome::Changed
+    ));
+    assert_eq!(app.welcome_consent_hover_link, Some(1));
+    assert!(matches!(
         app.handle_input(&moved(0, 0)),
         InputOutcome::Changed
     ));
-    assert_eq!(app.welcome_menu_index, None);
+    assert_eq!(app.welcome_consent_hover_link, None);
     assert!(matches!(
         app.handle_input(&moved(1, 0)),
         InputOutcome::Unchanged

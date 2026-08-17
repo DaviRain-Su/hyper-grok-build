@@ -228,11 +228,20 @@ impl CancelTrigger {
         }
     }
 }
+/// What a cancel does to the in-memory conversation history.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum CancelHistoryDisposition {
+    /// Leave the cancelled turn's user message in history.
+    #[default]
+    Keep,
+    /// Pop the named front if the no-output window is still open. `None` is a legacy client.
+    RewindIfNoOutput { prompt_id: Option<String> },
+}
 #[derive(Debug, Clone, Default)]
 pub struct CancelOptions {
     pub cancel_subagents: bool,
     pub kill_background_tasks: bool,
-    pub rewind_if_no_output: bool,
+    pub history: CancelHistoryDisposition,
     pub trigger: Option<CancelTrigger>,
     /// Drives the cancel-rate metric, and marks an untriggered cancel as the user's.
     pub user_initiated: bool,

@@ -728,18 +728,6 @@ impl BlockContent for ExecuteToolCallBlock {
         self.description_display(true).is_some() || self.output.is_some() || self.error.is_some()
     }
 
-    /// Fold cycle. Agent tools toggle Collapsed <-> Truncated (glanceable
-    /// preview; full output in the viewer). User `!` commands toggle
-    /// Collapsed <-> Expanded: re-expanding must restore the full output,
-    /// never the lossy first/last window.
-    fn next_fold_mode(&self, current: DisplayMode, _is_running: bool) -> DisplayMode {
-        match current {
-            DisplayMode::Collapsed if self.bash_mode => DisplayMode::Expanded,
-            DisplayMode::Collapsed => DisplayMode::Truncated,
-            DisplayMode::Truncated | DisplayMode::Expanded => DisplayMode::Collapsed,
-        }
-    }
-
     /// Minimum fold mode used by collapse + the running expand chevron.
     ///
     /// Agent tools default to Collapsed (title only) — no auto-expand. User
@@ -1003,15 +991,6 @@ mod tests {
         assert_eq!(bash.finished_display_mode(), Some(DisplayMode::Expanded));
         assert_eq!(bash.collapse_mode(true), DisplayMode::Truncated);
         assert_eq!(bash.collapse_mode(false), DisplayMode::Collapsed);
-        // Fold cycle for user bash skips the lossy Truncated window.
-        assert_eq!(
-            bash.next_fold_mode(DisplayMode::Collapsed, false),
-            DisplayMode::Expanded
-        );
-        assert_eq!(
-            bash.next_fold_mode(DisplayMode::Expanded, false),
-            DisplayMode::Collapsed
-        );
 
         let failed = ExecuteToolCallBlock::new("false").with_error("exit 1");
         assert_eq!(failed.default_display_mode(), DisplayMode::Collapsed);

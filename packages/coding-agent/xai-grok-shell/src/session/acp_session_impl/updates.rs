@@ -2,6 +2,15 @@
 //! its buffered/transient/direct variants, xAI-notification handling, and
 //! the gateway-bridge dispatch shims.
 use super::*;
+/// Hook / image-intake diagnostics leave the no-output rewind window open; every other variant closes it.
+pub(super) fn closes_cancel_rewind_window(update: &XaiSessionUpdate) -> bool {
+    !matches!(
+        update,
+        XaiSessionUpdate::HookExecution { .. }
+            | XaiSessionUpdate::ImageCompressed { .. }
+            | XaiSessionUpdate::ImageDropped { .. }
+    )
+}
 fn scrub_inbound_session_summary(
     notification: &mut crate::extensions::notification::SessionNotification,
 ) {
@@ -956,7 +965,9 @@ impl SessionActor {
         update: XaiSessionUpdate,
         extra_meta: Option<serde_json::Map<String, serde_json::Value>>,
     ) {
-        self.close_rewind_window().await;
+        if closes_cancel_rewind_window(&update) {
+            self.close_rewind_window().await;
+        }
         let meta = {
             let mut meta = self.build_notification_meta();
             if let (Some(obj), Some(extra)) = (meta.as_object_mut(), extra_meta) {

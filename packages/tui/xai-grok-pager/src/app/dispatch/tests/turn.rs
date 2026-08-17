@@ -376,7 +376,7 @@ fn lost_cancel_is_resent_while_still_cancelling() {
             resent.as_slice(),
             [Effect::CancelTurn {
                 trigger: Some(CancelTrigger::Mouse),
-                rewind_if_no_output: false,
+                rewind_prompt_id: None,
                 ..
             }]
         ),
@@ -659,7 +659,7 @@ fn cancel_after_local_send_during_wake_does_not_arm_resend() {
             effects.as_slice(),
             [Effect::CancelTurn {
                 trigger: Some(CancelTrigger::Esc),
-                rewind_if_no_output: false,
+                rewind_prompt_id: None,
                 ..
             }]
         ),
@@ -729,7 +729,7 @@ fn do_cancel_turn_cancels_running_wake_turn() {
             effects.as_slice(),
             [Effect::CancelTurn {
                 cancel_subagents: true,
-                rewind_if_no_output: false,
+                rewind_prompt_id: None,
                 trigger: None,
                 ..
             }]
@@ -770,7 +770,7 @@ fn stop_click_cancels_running_wake_turn() {
             effects.as_slice(),
             [Effect::CancelTurn {
                 trigger: Some(CancelTrigger::Mouse),
-                rewind_if_no_output: false,
+                rewind_prompt_id: None,
                 ..
             }]
         ),
@@ -1062,7 +1062,7 @@ fn cancel_turn_in_subagent_overlay_cancels_child_while_parent_idle() {
             [Effect::CancelTurn {
                 session_id,
                 cancel_subagents: true,
-                rewind_if_no_output: false,
+                rewind_prompt_id: None,
                 ..
             }] if session_id.0.as_ref() == child_sid
         ),
@@ -1207,7 +1207,7 @@ fn cancel_turn_in_subagent_overlay_retries_when_child_already_cancelling() {
             [Effect::CancelTurn {
                 session_id,
                 cancel_subagents: true,
-                rewind_if_no_output: false,
+                rewind_prompt_id: None,
                 ..
             }] if session_id.0.as_ref() == child_sid
         ),
@@ -1394,7 +1394,7 @@ fn reconcile_overdue_cancels_resends_for_overlay_child() {
             [Effect::CancelTurn {
                 session_id,
                 trigger: Some(CancelTrigger::Mouse),
-                rewind_if_no_output: false,
+                rewind_prompt_id: None,
                 ..
             }] if session_id.0.as_ref() == child_sid
         ),

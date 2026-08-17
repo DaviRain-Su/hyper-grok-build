@@ -164,6 +164,16 @@ impl<T> TaskSlot<T> {
     }
 }
 
+/// Client-visible user rows only; interjection fallbacks take a plain cancel.
+fn front_is_rewind_poppable(front: Option<&InputItem>) -> bool {
+    front.is_some_and(|f| {
+        matches!(
+            f.input_origin.as_prompt_origin(),
+            crate::session::PromptOrigin::User
+        ) && !super::interjection::is_interject_fallback(&f.prompt_id)
+    })
+}
+
 async fn run_task(
     session: Arc<SessionActor>,
     request: TurnInputRequest,
@@ -319,6 +329,63 @@ impl SessionActor {
         );
     }
 
+    /// One line per rewind-requested cancel: `rewound | legacy_rewound | stale_prompt_id | window_closed | non_user_front`.
+    fn log_rewind_decision(
+        &self,
+        requested_prompt_id: Option<&str>,
+        front_prompt_id: Option<&str>,
+        rewind_disposition: &str,
+    ) {
+        xai_grok_telemetry::unified_log::info(
+            "shell.cancel.rewind_decision",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "requested_prompt_id": requested_prompt_id,
+                "front_prompt_id": front_prompt_id,
+                "rewind_disposition": rewind_disposition,
+            })),
+        );
+    }
+
+    /// Trim the rewound turn from in-memory history and resolve it as `Rewound`.
+    /// `target_prompt_index` is the claim-time cut; `None` uses a fresh snapshot (legacy id-less).
+    async fn finish_rewound_cancel(
+        &self,
+        input: InputItem,
+        target_prompt_index: Option<usize>,
+        total_tokens: u64,
+        turn_stopped: bool,
+    ) -> CancelOutcome {
+        if let Some(mut snapshot) = self.chat_state_handle.snapshot().await {
+            let target_prompt_index =
+                target_prompt_index.unwrap_or_else(|| snapshot.prompt_index.saturating_sub(1));
+            snapshot.prompt_index = target_prompt_index;
+            snapshot.prompt_texts.truncate(target_prompt_index);
+            // Marker-first cut; this path never replays, so post-compact talks rely on the marker.
+            let keep_count =
+                conversation_truncate_for_prompt(&snapshot.conversation, target_prompt_index);
+            snapshot.conversation.truncate(keep_count);
+            self.chat_state_handle.restore_snapshot(snapshot);
+            self.file_state_tracker
+                .truncate_from(target_prompt_index)
+                .await;
+        }
+        let _ = input.respond_to.send(Ok(PromptTurnOk {
+            stop_reason: acp::StopReason::Cancelled,
+            total_tokens,
+            turn_snapshot: None,
+            completion_kind: PromptCompletionKind::Rewound,
+            structured_output: None,
+            usage: None,
+            tool_overrides: self.effective_tool_overrides().await,
+        }));
+        // The rewind cleared the barrier when it claimed/popped; wakes flow.
+        CancelOutcome {
+            barrier: WakeBarrier::Clear,
+            turn_stopped,
+        }
+    }
+
     pub(super) async fn cancel_running_task(
         &self,
         options: crate::session::CancelOptions,
@@ -331,10 +398,95 @@ impl SessionActor {
         let crate::session::CancelOptions {
             cancel_subagents,
             kill_background_tasks,
-            rewind_if_no_output,
+            history,
             trigger,
             user_initiated,
         } = options;
+        let rewind_requested = matches!(
+            history,
+            crate::session::CancelHistoryDisposition::RewindIfNoOutput { .. }
+        );
+        let requested_prompt_id = match &history {
+            crate::session::CancelHistoryDisposition::RewindIfNoOutput { prompt_id } => {
+                prompt_id.clone()
+            }
+            crate::session::CancelHistoryDisposition::Keep => None,
+        };
+        // Claim the named front under one lock before teardown; a stale id
+        // (NEW already promoted) is a no-op. Legacy (no id) uses the path below.
+        let mut claimed_rewound: Option<(InputItem, TurnEpoch, usize)> = None;
+        if let Some(requested) = requested_prompt_id.as_deref() {
+            let mut state = self.state.lock().await;
+            let front_prompt_id = state.pending_inputs.front().map(|f| f.prompt_id.clone());
+            if front_prompt_id.as_deref() != Some(requested) {
+                drop(state);
+                self.log_rewind_decision(
+                    Some(requested),
+                    front_prompt_id.as_deref(),
+                    "stale_prompt_id",
+                );
+                return CancelOutcome {
+                    barrier: WakeBarrier::Clear,
+                    turn_stopped: false,
+                };
+            }
+            let poppable = front_is_rewind_poppable(state.pending_inputs.front());
+            let rewind_disposition = if state.rewindable && poppable {
+                // Drain here — claimed rewind never reaches the generic sweep.
+                self.sweep_monitor_buffer_into_pending(&mut state, "monitor-cancel-drain");
+                let turn_epoch = self.turn_report.epoch();
+                if let Some(task) = state.running_task.take_if(|t| t.prompt_id == requested) {
+                    self.abort_turn_task(&task, turn_epoch);
+                }
+                if let Some(gate) = &self.tool_context.task_wake_suppressed {
+                    gate.set(false);
+                }
+                state.notifications_suppressed = false;
+                xai_grok_telemetry::unified_log::info(
+                    "shell.task_wake.gate_cleared",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({ "reason": "rewind" })),
+                );
+                state.rewindable = false;
+                // Cut captured under the lock so later commits cannot move it.
+                let target_prompt_index = self
+                    .chat_state_handle
+                    .get_prompt_index()
+                    .await
+                    .saturating_sub(1);
+                claimed_rewound = state
+                    .pending_inputs
+                    .pop_front()
+                    .map(|input| (input, turn_epoch, target_prompt_index));
+                "rewound"
+            } else if !state.rewindable {
+                // Window closed: fall through to a normal cancel of this front.
+                "window_closed"
+            } else {
+                "non_user_front"
+            };
+            drop(state);
+            self.log_rewind_decision(
+                Some(requested),
+                front_prompt_id.as_deref(),
+                rewind_disposition,
+            );
+        }
+        // Claimed rewind owns only OLD. Generic teardown targets "whatever is
+        // running now" and must not run — NEW may already be promoted.
+        if let Some((input, epoch, target_prompt_index)) = claimed_rewound {
+            self.notify_turn_abort(epoch, xai_agent_lifecycle::TurnAbortReason::Interrupted)
+                .await;
+            let total_tokens = self.chat_state_handle.get_total_tokens().await;
+            return self
+                .finish_rewound_cancel(
+                    input,
+                    Some(target_prompt_index),
+                    total_tokens,
+                    cancel_reason.is_some(),
+                )
+                .await;
+        }
         let suppress_task_wakes = kind == Some(crate::session::CancelKind::StopGesture);
         // Abort in-flight `/compact` or auto-compact generation (stream select +
         // pre-replace guard). Safe when no compact is running.
@@ -365,7 +517,8 @@ impl SessionActor {
                     "prompt_id": &pinned_prompt_id,
                     "cancel_subagents": cancel_subagents,
                     "kill_background_tasks": kill_background_tasks,
-                    "rewind_if_no_output": rewind_if_no_output,
+                    "rewind_if_no_output": rewind_requested,
+                    "requested_prompt_id": &requested_prompt_id,
                     "trigger": trigger.as_ref().map(crate::session::CancelTrigger::as_str),
                 })),
             );
@@ -395,7 +548,7 @@ impl SessionActor {
         };
 
         // A rewind is not a cancel either: the turn is being replaced, not stopped.
-        if user_initiated && !rewind_if_no_output {
+        if user_initiated && !rewind_requested {
             self.signals_handle().record_cancellation();
         }
 
@@ -466,19 +619,22 @@ impl SessionActor {
                 state.clear_pending_notifications();
             }
 
-            // Only a client-visible user front may pop (the wire carries no
-            // prompt id, so this is an origin check); other fronts take a
-            // plain cancel rather than silently losing their message.
-            let front_is_user_row = state.pending_inputs.front().is_some_and(|f| {
-                matches!(
-                    f.input_origin.as_prompt_origin(),
-                    crate::session::PromptOrigin::User
-                ) && !super::interjection::is_interject_fallback(&f.prompt_id)
-            });
+            let front_is_user_row = front_is_rewind_poppable(state.pending_inputs.front());
+            let front_prompt_id = state.pending_inputs.front().map(|f| f.prompt_id.clone());
+            // Window-closed / non-user-front: the front can change across the
+            // teardown awaits; a now-stale id must not cancel the promoted turn.
+            let identity_matches = requested_prompt_id
+                .as_deref()
+                .is_none_or(|id| front_prompt_id.as_deref() == Some(id));
+            let was_rewindable = state.rewindable;
             // Names the turn being torn down, for the claim release, the report, and the abort
             // announcement below. All three run after awaits a newer turn could start across.
             let turn_epoch = self.turn_report.epoch();
-            let rewound_input = if rewind_if_no_output && state.rewindable && front_is_user_row {
+            let rewound_input = if rewind_requested
+                && requested_prompt_id.is_none()
+                && state.rewindable
+                && front_is_user_row
+            {
                 if let Some(task) = state.running_task.take() {
                     self.abort_turn_task(&task, turn_epoch);
                 }
@@ -496,13 +652,44 @@ impl SessionActor {
             } else {
                 None
             };
-            let running_task = if rewound_input.is_some() {
+            if rewind_requested && requested_prompt_id.is_none() {
+                self.log_rewind_decision(
+                    None,
+                    front_prompt_id.as_deref(),
+                    if rewound_input.is_some() {
+                        "legacy_rewound"
+                    } else if !was_rewindable {
+                        "window_closed"
+                    } else {
+                        "non_user_front"
+                    },
+                );
+            }
+            let running_task = if rewound_input.is_some() || !identity_matches {
                 None
             } else {
                 state.running_task.take()
             };
             if let Some(task) = &running_task {
                 self.abort_turn_task(task, turn_epoch);
+            }
+            // Front changed across our awaits — leave the promoted turn alone.
+            if !identity_matches {
+                self.log_rewind_decision(
+                    requested_prompt_id.as_deref(),
+                    front_prompt_id.as_deref(),
+                    "stale_prompt_id",
+                );
+                if suppress_task_wakes {
+                    if let Some(gate) = &self.tool_context.task_wake_suppressed {
+                        gate.set(false);
+                    }
+                    state.notifications_suppressed = false;
+                }
+                return CancelOutcome {
+                    barrier: WakeBarrier::Clear,
+                    turn_stopped: false,
+                };
             }
 
             // Decide which queued inputs get resolved with `Cancelled` now vs.
@@ -650,17 +837,16 @@ impl SessionActor {
                     crate::session::events::CancellationCategory::MidTurnAbort,
                 );
             }
-            // Arm a one-shot interjection-shaped frame for the next real user
-            // query, but only when the abort leaves the model with NO other
-            // signal: the partial assistant text is discarded out-of-band, so
-            // the only remaining cue is the dangling-tool-call repair. If a
-            // tool call is committed but unanswered (a tool mid-execution, OR
-            // a turn parked on a permission prompt where no tool is marked
-            // active yet), the next-turn repair already emits a "cancelled"
-            // tool-result, so we skip the frame to avoid a duplicate signal.
-            // Gating on the actual dangling state (not `had_active_tool`)
-            // covers the permission-prompt and partial-parallel-call cases too.
-            if !send_now && !self.chat_state_handle.has_dangling_tool_calls().await {
+            // Interjection frame only if this abort cut assistant text and left
+            // no other signal (a dangling tool already emits a cancelled result).
+            if !send_now
+                && !self.chat_state_handle.has_dangling_tool_calls().await
+                && self
+                    .chat_state_handle
+                    .get_last_assistant_text_in_turn()
+                    .await
+                    .is_some()
+            {
                 self.events.set_pending_interrupt_reminder();
             }
             // Shared `redirect_kind` for the data pipeline: the next user turn's
@@ -734,36 +920,9 @@ impl SessionActor {
         }
 
         if let Some(input) = rewound_input {
-            if let Some(mut snapshot) = self.chat_state_handle.snapshot().await {
-                let target_prompt_index = snapshot.prompt_index.saturating_sub(1);
-                snapshot.prompt_index = target_prompt_index;
-                snapshot.prompt_texts.truncate(target_prompt_index);
-                // Cut at the rewound turn's user item (target 0 keeps only
-                // the preamble). Marker-first matters here: unlike
-                // handle_rewind, this path never replays, so post-compaction
-                // conversations rely on the marker for a correct cut.
-                let keep_count =
-                    conversation_truncate_for_prompt(&snapshot.conversation, target_prompt_index);
-                snapshot.conversation.truncate(keep_count);
-                self.chat_state_handle.restore_snapshot(snapshot);
-                self.file_state_tracker
-                    .truncate_from(target_prompt_index)
-                    .await;
-            }
-            let _ = input.respond_to.send(Ok(PromptTurnOk {
-                stop_reason: acp::StopReason::Cancelled,
-                total_tokens,
-                turn_snapshot: None,
-                completion_kind: PromptCompletionKind::Rewound,
-                structured_output: None,
-                usage: None,
-                tool_overrides: self.effective_tool_overrides().await,
-            }));
-            // The rewound branch cleared the barrier above; wakes flow again.
-            return CancelOutcome {
-                barrier: WakeBarrier::Clear,
-                turn_stopped,
-            };
+            return self
+                .finish_rewound_cancel(input, None, total_tokens, turn_stopped)
+                .await;
         }
 
         for (idx, input) in pending_inputs.into_iter().enumerate() {

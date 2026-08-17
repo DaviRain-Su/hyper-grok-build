@@ -601,7 +601,7 @@ pub(in crate::app::dispatch) fn dispatch_delete_current_session_answered(
         session_id: session_id.clone(),
         cancel_subagents: true,
         trigger: None,
-        rewind_if_no_output: false,
+        rewind_prompt_id: None,
     }];
     effects.extend(
         running_bg_tasks
@@ -658,15 +658,16 @@ pub(in crate::app::dispatch) fn dispatch_accept_consent(app: &mut AppView) -> Ve
     let notice_id = notice.id.clone();
     let version = notice.version;
     app.consent_answered = Some((notice_id.clone(), version));
-    let mut effects = vec![
-        Effect::PersistConsentAnswer {
-            account: app.account_email.clone(),
+    let mut effects = Vec::new();
+    if let Some(account) = app.account_email.clone() {
+        effects.push(Effect::PersistConsentAnswer {
+            account: Some(account),
             notice_id: notice_id.clone(),
             version,
             acked: false,
-        },
-        Effect::RecordConsentUpstream { notice_id, version },
-    ];
+        });
+    }
+    effects.push(Effect::RecordConsentUpstream { notice_id, version });
     effects.extend(finish_consent(app));
     effects
 }

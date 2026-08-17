@@ -78,7 +78,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             agent.clear_send_now_expectation();
             return vec![emit_cancel_turn(
                 agent, session_id, /* cancel_subagents */ true,
-                /* rewind_if_no_output */ false,
+                /* rewind_prompt_id */ None,
             )];
         }
         return cancel_agent_turn(
@@ -146,7 +146,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 agent,
                 session_id,
                 cancel_subagents,
-                /* rewind_if_no_output */ false,
+                /* rewind_prompt_id */ None,
             )];
         }
         // Compact owns the pane (`CommandRunning`) even if a leftover wake
@@ -168,7 +168,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 agent,
                 session_id,
                 cancel_subagents,
-                /* rewind_if_no_output */ false,
+                /* rewind_prompt_id */ None,
             )];
         } else if !agent.session.state.is_turn_running() {
             return vec![];
@@ -281,7 +281,7 @@ fn cancel_agent_turn(
             agent,
             session_id,
             cancel_subagents,
-            /* rewind_if_no_output */ false,
+            /* rewind_prompt_id */ None,
         )];
     }
     // Wake marker, not idle-only — same reason as `dispatch_cancel_turn`.
@@ -295,7 +295,7 @@ fn cancel_agent_turn(
             agent,
             session_id,
             cancel_subagents,
-            /* rewind_if_no_output */ false,
+            /* rewind_prompt_id */ None,
         )];
     }
     if !agent.session.state.is_turn_running() {
@@ -340,15 +340,18 @@ fn cancel_agent_turn(
     // non-empty composer holds a NEWER draft the rewind would clobber.
     // Trigger-agnostic on purpose: fall back to the standard cancel.
     let composer_has_draft = !agent.prompt.text().is_empty() || !agent.prompt.images.is_empty();
+    // Captured before `finish_turn` clears it; no id → standard cancel.
+    let rewind_prompt_id = agent.session.current_prompt_id.clone();
     let rewinding = agent.shared_queue.is_empty()
         && cancel_rewind_enabled
         && agent.session.in_flight_prompt.is_some()
         && agent.session.pending_prompts.is_empty()
         && !in_flight_committed
-        && !composer_has_draft;
+        && !composer_has_draft
+        && rewind_prompt_id.is_some();
     if rewinding && let Some(stashed) = agent.session.in_flight_prompt.take() {
-        if let Some(pid) = agent.session.current_prompt_id.clone() {
-            agent.note_rewound_prompt(&pid);
+        if let Some(pid) = rewind_prompt_id.as_deref() {
+            agent.note_rewound_prompt(pid);
         }
         agent.prompt.set_text(&stashed.text);
         agent.prompt.restore_chip_elements(&stashed.chip_elements);
@@ -397,7 +400,7 @@ fn cancel_agent_turn(
         agent,
         session_id,
         cancel_subagents,
-        rewinding,
+        if rewinding { rewind_prompt_id } else { None },
     )]
 }
 
@@ -407,8 +410,9 @@ pub(super) fn emit_cancel_turn(
     agent: &mut crate::app::agent_view::AgentView,
     session_id: agent_client_protocol::SessionId,
     cancel_subagents: bool,
-    rewind_if_no_output: bool,
+    rewind_prompt_id: Option<String>,
 ) -> Effect {
+    let rewind_if_no_output = rewind_prompt_id.is_some();
     let target_prompt_id = if agent.session.state.is_compact_running()
         || matches!(
             agent.session.state,
@@ -469,7 +473,7 @@ pub(super) fn emit_cancel_turn(
         session_id,
         cancel_subagents,
         trigger,
-        rewind_if_no_output,
+        rewind_prompt_id,
     }
 }
 
@@ -537,7 +541,7 @@ fn overdue_cancel_for_agent(agent: &mut AgentView) -> Option<Effect> {
         session_id,
         cancel_subagents: pending.cancel_subagents,
         trigger: Some(pending.trigger),
-        rewind_if_no_output: false,
+        rewind_prompt_id: None,
     })
 }
 

@@ -1340,7 +1340,7 @@ pub(crate) fn execute(
             session_id,
             cancel_subagents,
             trigger,
-            rewind_if_no_output,
+            rewind_prompt_id,
         } => {
             let tx = acp_tx.clone();
             let trigger_str = trigger.map(|t| t.as_wire_str());
@@ -1353,7 +1353,8 @@ pub(crate) fn execute(
                             serde_json::json!({
                         "cancel_subagents": cancel_subagents,
                         "trigger": trigger_str,
-                        "rewind_if_no_output": rewind_if_no_output,
+                        "rewind_if_no_output": rewind_prompt_id.is_some(),
+                        "rewind_prompt_id": rewind_prompt_id.as_deref(),
                     }),
                         ),
                     );
@@ -1362,9 +1363,10 @@ pub(crate) fn execute(
                     if let Some(t) = trigger_str {
                         meta[crate::app::turn_completion::CANCEL_TRIGGER_KEY] = t.into();
                     }
-                    if rewind_if_no_output {
+                    if let Some(pid) = rewind_prompt_id {
                         meta["rewindIfNoOutput"] = true.into();
                         meta["rewindIfPristine"] = true.into();
+                        meta["promptId"] = pid.into();
                     }
                     let req = acp::CancelNotification::new(session_id.clone())
                         .meta(meta.as_object().cloned());
@@ -2136,7 +2138,7 @@ pub(crate) fn execute(
         Effect::PersistConsentAnswer { account, notice_id, version, acked } => {
             tasks
                 .spawn(async move {
-                    if let Err(e) = xai_grok_shell::util::config::set_consent_answer(
+                    match xai_grok_shell::util::config::set_consent_answer(
                             account,
                             notice_id,
                             version,
@@ -2144,9 +2146,17 @@ pub(crate) fn execute(
                         )
                         .await
                     {
-                        tracing::warn!(error = %e, "failed to persist consent answer; the notice will re-arm next launch");
+                        Ok(()) => TaskResult::CancelComplete,
+                        Err(e) if !acked => {
+                            TaskResult::ConsentPersistFailed {
+                                error: e.to_string(),
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "consent ack not persisted");
+                            TaskResult::CancelComplete
+                        }
                     }
-                    TaskResult::CancelComplete
                 });
         }
         Effect::RecordConsentUpstream { notice_id, version } => {
@@ -3400,7 +3410,8 @@ pub(crate) fn execute(
                 .spawn(async move {
                     match fetch_session_info(&session_id, &tx).await {
                         Ok(info) => {
-                            let title = lookup_session_title(&session_id).await;
+                            let title = lookup_session_title(&session_id, &info.cwd)
+                                .await;
                             let text = format_session_info(
                                 &info,
                                 title.as_deref(),
@@ -4736,14 +4747,31 @@ async fn session_rename_rpc(
         Err(e) => Err(sanitize_user_error(&format!("couldn't {verb}: {e}"))),
     }
 }
-/// Look up the session title/summary from local persistence.
-async fn lookup_session_title(session_id: &acp::SessionId) -> Option<String> {
-    let summaries = xai_grok_shell::session::persistence::list_summaries(None)
+/// Session title from local persistence: loads only this session's summary
+/// (`cwd` from the `x.ai/session/info` response), never the all-sessions list.
+async fn lookup_session_title(session_id: &acp::SessionId, cwd: &str) -> Option<String> {
+    lookup_session_title_in(
+            xai_grok_shell::util::grok_home::grok_home(),
+            session_id,
+            cwd,
+        )
         .await
-        .ok()?;
-    summaries
-        .into_iter()
-        .find(|s| s.info.id == *session_id)
+}
+/// [`lookup_session_title`] against an explicit root, for tests.
+async fn lookup_session_title_in(
+    root: std::path::PathBuf,
+    session_id: &acp::SessionId,
+    cwd: &str,
+) -> Option<String> {
+    use xai_grok_shell::session::storage::{JsonlStorageAdapter, StorageAdapter};
+    let info = xai_grok_shell::session::info::Info {
+        id: session_id.clone(),
+        cwd: cwd.to_string(),
+    };
+    JsonlStorageAdapter::with_root(root)
+        .load_summary(&info)
+        .await
+        .ok()
         .and_then(|s| s.display_title_opt())
 }
 /// Format session info into a human-readable string.

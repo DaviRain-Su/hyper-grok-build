@@ -2091,7 +2091,7 @@ fn stop_top_level_activity(agent: &mut crate::app::agent_view::AgentView) -> Opt
                 agent,
                 session_id.clone(),
                 /* cancel_subagents */ true,
-                /* rewind_if_no_output */ false,
+                /* rewind_prompt_id */ None,
             ));
         }
         let running: Vec<String> = agent

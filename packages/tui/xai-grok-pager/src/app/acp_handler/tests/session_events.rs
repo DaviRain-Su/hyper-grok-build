@@ -1008,6 +1008,48 @@
         );
     }
 
+    /// Hook / image-intake diagnostics must not consume the Ctrl+C rewind stash.
+    #[test]
+    fn hook_and_image_intake_notifications_keep_in_flight_prompt() {
+        let updates = [
+            XaiSessionUpdate::HookExecution {
+                event_name: "user_prompt_submit".into(),
+                tool_name: None,
+                prompt_id: Some("p1".into()),
+                runs: vec![],
+            },
+            XaiSessionUpdate::ImageCompressed {
+                images: vec![],
+                message: "resized".into(),
+            },
+            XaiSessionUpdate::ImageDropped { notes: vec![] },
+        ];
+        for update in updates {
+            let label = format!("{update:?}");
+            let mut app = make_app_with_agent("sess-1");
+            {
+                let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+                agent.session.state = AgentState::TurnRunning;
+                agent.turn_started_at = Some(Instant::now());
+                agent.session.in_flight_prompt = Some(InFlightPrompt {
+                    text: "hi".into(),
+                    images: Vec::new(),
+                    scrollback_entry: EntryId::new(1),
+                    combined_scrollback_entries: Vec::new(),
+                    chip_elements: Vec::new(),
+                });
+            }
+
+            let _ = handle(make_ext_session_notification("sess-1", update), &mut app);
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                agent.session.in_flight_prompt.is_some(),
+                "intake diagnostic must not eat the rewind stash: {label}"
+            );
+        }
+    }
+
     /// Deltas carry no prompt id — while a wake turn is in flight the chunk is
     /// dropped whole: no tracker write, no rewind-stash consumption, no TTFA.
     #[test]

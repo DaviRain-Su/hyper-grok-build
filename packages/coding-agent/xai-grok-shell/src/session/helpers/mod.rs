@@ -2,7 +2,7 @@ pub mod chat;
 pub mod compaction_context;
 pub mod full_replace_compaction;
 pub mod memory_context;
-pub mod memory_flush;
+pub mod memory_flush_window;
 pub mod prepared_compaction_history;
 pub mod prompt_suggest;
 pub mod replay;

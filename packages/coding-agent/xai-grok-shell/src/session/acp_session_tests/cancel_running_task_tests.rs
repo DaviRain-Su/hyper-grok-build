@@ -1331,13 +1331,9 @@ async fn cancel_records_mid_turn_abort_interrupt_marker() {
         })
         .await;
 }
-/// A mid-stream abort with NO tool in flight leaves the model with no visible
-/// signal: the partial assistant text is discarded out-of-band and there is no
-/// dangling tool call to repair into a "cancelled" tool-result. So
-/// `cancel_running_task` must arm the one-shot `pending_interrupt_reminder` that
-/// the next real user prompt frames as an interjection-shaped envelope.
+/// No assistant text → do not arm the interrupt reminder.
 #[tokio::test(flavor = "current_thread")]
-async fn cancel_without_active_tool_arms_interrupt_reminder() {
+async fn cancel_without_assistant_text_skips_interrupt_reminder() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1371,8 +1367,8 @@ async fn cancel_without_active_tool_arms_interrupt_reminder() {
                 })
                 .await;
             assert!(
-                actor.events.take_pending_interrupt_reminder(),
-                "a no-active-tool abort must arm the interrupt reminder"
+                !actor.events.take_pending_interrupt_reminder(),
+                "an abort with no assistant text must NOT arm the interrupt reminder"
             );
         })
         .await;

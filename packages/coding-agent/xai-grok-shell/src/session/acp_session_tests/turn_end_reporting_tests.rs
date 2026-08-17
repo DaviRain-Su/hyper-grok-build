@@ -394,7 +394,9 @@ async fn a_rewind_reports_nothing_but_still_settles_the_session() {
         let outcome = h
             .actor
             .cancel_running_task(crate::session::CancelOptions {
-                rewind_if_no_output: true,
+                history: crate::session::CancelHistoryDisposition::RewindIfNoOutput {
+                    prompt_id: None,
+                },
                 trigger: Some(CancelTrigger::Esc),
                 user_initiated: true,
                 ..Default::default()

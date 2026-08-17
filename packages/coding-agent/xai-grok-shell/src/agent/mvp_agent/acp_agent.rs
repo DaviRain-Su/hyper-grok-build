@@ -2428,6 +2428,19 @@ impl acp::Agent for MvpAgent {
                 })
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let rewind_prompt_id = args
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("promptId"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            let history = if rewind_if_no_output {
+                crate::session::CancelHistoryDisposition::RewindIfNoOutput {
+                    prompt_id: rewind_prompt_id,
+                }
+            } else {
+                crate::session::CancelHistoryDisposition::Keep
+            };
             let dispatch_lock = self.dispatch_lock(&args.session_id);
             let _dispatch_guard = dispatch_lock.lock().await;
             let _ = handle
@@ -2435,7 +2448,7 @@ impl acp::Agent for MvpAgent {
                 .send(
                     SessionCommand::Cancel(crate::session::CancelOptions {
                         cancel_subagents,
-                        rewind_if_no_output,
+                        history,
                         trigger: cancel_trigger,
                         user_initiated: true,
                         ..Default::default()

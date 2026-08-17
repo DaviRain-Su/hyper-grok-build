@@ -597,14 +597,24 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             tracing::trace!("Cancel notification sent successfully");
             vec![]
         }
-        TaskResult::ConsentRecorded { notice_id, version } => {
-            vec![Effect::PersistConsentAnswer {
-                account: app.account_email.clone(),
-                notice_id,
-                version,
-                acked: true,
-            }]
+        TaskResult::ConsentPersistFailed { error } => {
+            tracing::warn!(%error, "consent answer not persisted; the notice re-arms next launch");
+            app.show_toast(
+                "\u{2717} Could not save your answer, so this notice returns next launch",
+            );
+            vec![]
         }
+        TaskResult::ConsentRecorded { notice_id, version } => match app.account_email.clone() {
+            Some(account) => {
+                vec![Effect::PersistConsentAnswer {
+                    account: Some(account),
+                    notice_id,
+                    version,
+                    acked: true,
+                }]
+            }
+            None => vec![],
+        },
         TaskResult::KillSubagentComplete {
             session_id,
             subagent_id,

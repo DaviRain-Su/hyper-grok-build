@@ -2193,7 +2193,7 @@ pub(super) async fn run_session(
                                     .cancel_running_task(crate::session::CancelOptions {
                                         cancel_subagents: true,
                                         kill_background_tasks: true,
-                                        rewind_if_no_output: false,
+                                        history: crate::session::CancelHistoryDisposition::Keep,
                                         trigger: Some(crate::session::CancelTrigger::Shutdown),
                                         user_initiated: false,
                                     })

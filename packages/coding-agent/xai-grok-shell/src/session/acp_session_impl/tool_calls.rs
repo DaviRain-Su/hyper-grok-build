@@ -2833,7 +2833,7 @@ impl SessionActor {
                             let _ = this.cancel_running_task(crate::session::CancelOptions {
                                 cancel_subagents: false,
                                 kill_background_tasks: false,
-                                rewind_if_no_output: false,
+                                history: Default::default(),
                                 trigger: None,
                                 user_initiated: false,
                             })

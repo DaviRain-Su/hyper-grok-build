@@ -3272,12 +3272,152 @@ async fn promoter_arms_rewind_window_and_first_update_disarms_it() {
                 );
             }
 
+            // Intake diagnostics are not output — they must leave the window open.
+            for update in [
+                XaiSessionUpdate::HookExecution {
+                    event_name: "user_prompt_submit".into(),
+                    tool_name: None,
+                    prompt_id: Some("m1".into()),
+                    runs: vec![],
+                },
+                XaiSessionUpdate::ImageCompressed {
+                    images: vec![],
+                    message: "resized".into(),
+                },
+                XaiSessionUpdate::ImageDropped { notes: vec![] },
+            ] {
+                actor.send_xai_notification(update).await;
+                assert!(
+                    actor.state.try_lock().expect("uncontended").rewindable,
+                    "prompt-intake diagnostics must not close the rewind window"
+                );
+            }
+
             actor
                 .send_update(agent_msg_update("first delta"), Some(1))
                 .await;
             assert!(
                 !actor.state.try_lock().expect("uncontended").rewindable,
                 "the first outbound update must disarm the first-output window"
+            );
+        })
+        .await;
+}
+
+/// Claimed rewind pops OLD only; a queued NEW stays pending.
+#[tokio::test(flavor = "current_thread")]
+async fn claimed_rewind_leaves_queued_next_prompt_untouched() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (old_item, mut old_rx) =
+                input_with_origin_rx("old-0", crate::session::PromptOrigin::User);
+            let (new_item, mut new_rx) =
+                input_with_origin_rx("new-1", crate::session::PromptOrigin::User);
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(old_item);
+                state.pending_inputs.push_back(new_item);
+                state.running_task = Some(running_task_stub("old-0"));
+                state.rewindable = true;
+            }
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("old-0".into());
+
+            let outcome = actor
+                .cancel_running_task(crate::session::CancelOptions {
+                    cancel_subagents: true,
+                    history: crate::session::CancelHistoryDisposition::RewindIfNoOutput {
+                        prompt_id: Some("old-0".into()),
+                    },
+                    trigger: Some(crate::session::CancelTrigger::CtrlC),
+                    user_initiated: true,
+                    ..Default::default()
+                })
+                .await;
+
+            assert!(outcome.turn_stopped);
+            assert!(
+                matches!(
+                    old_rx.try_recv(),
+                    Ok(Ok(crate::session::commands::PromptTurnOk {
+                        completion_kind: PromptCompletionKind::Rewound,
+                        ..
+                    }))
+                ),
+                "OLD must resolve as Rewound"
+            );
+            assert!(
+                new_rx.try_recv().is_err(),
+                "NEW's respond_to must stay pending — the claimed rewind must not resolve it"
+            );
+            let state = actor.state.lock().await;
+            assert_eq!(
+                state.pending_inputs.front().map(|f| f.prompt_id.as_str()),
+                Some("new-1"),
+                "NEW must be the next front after OLD is popped"
+            );
+        })
+        .await;
+}
+
+/// Stale rewind `promptId` is a no-op: NEW's running turn is untouched.
+#[tokio::test(flavor = "current_thread")]
+async fn stale_rewind_prompt_id_does_not_cancel_promoted_front() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (item, mut rx) = input_with_origin_rx("new-1", crate::session::PromptOrigin::User);
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(item);
+                state.running_task = Some(running_task_stub("new-1"));
+                state.rewindable = true;
+            }
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("new-1".into());
+
+            let outcome = actor
+                .cancel_running_task(crate::session::CancelOptions {
+                    cancel_subagents: true,
+                    history: crate::session::CancelHistoryDisposition::RewindIfNoOutput {
+                        prompt_id: Some("old-0".into()),
+                    },
+                    trigger: Some(crate::session::CancelTrigger::CtrlC),
+                    user_initiated: true,
+                    ..Default::default()
+                })
+                .await;
+
+            assert!(!outcome.turn_stopped, "a stale rewind must not stop NEW");
+            assert!(
+                rx.try_recv().is_err(),
+                "NEW's respond_to must stay pending — a stale rewind must not resolve it"
+            );
+            let state = actor.state.lock().await;
+            let task = state
+                .running_task
+                .as_ref()
+                .expect("NEW's task slot must survive");
+            assert!(
+                !task.handle.is_finished(),
+                "NEW's running task must not be aborted"
+            );
+            assert_eq!(
+                state.pending_inputs.front().map(|f| f.prompt_id.as_str()),
+                Some("new-1"),
+                "NEW must stay at the queue front"
+            );
+            assert!(state.rewindable, "NEW's own rewind window must survive");
+            assert!(
+                !state.notifications_suppressed,
+                "a stale rewind must not arm the stop-gesture wake barrier"
             );
         })
         .await;
@@ -3453,7 +3593,9 @@ async fn rewind_if_pristine_never_pops_an_interjection_fallback_front() {
 
             let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
-                    rewind_if_no_output: true,
+                    history: crate::session::CancelHistoryDisposition::RewindIfNoOutput {
+                        prompt_id: None,
+                    },
                     trigger: Some(crate::session::CancelTrigger::Esc),
                     user_initiated: true,
                     ..Default::default()

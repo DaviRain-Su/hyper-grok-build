@@ -1,11 +1,8 @@
-//! Pure text-classification helpers shared by the memory flush
-//! (`session::helpers::memory_flush`) and dream (`session::memory::dream`)
-//! response-processing paths.
+//! Pure text-classification helpers shared by the sibling [`crate::flush`]
+//! and [`crate::dream`] response-processing modules.
 //!
-//! These live here, in the memory subsystem, so `dream` no longer reaches
-//! *up* into `session::helpers::memory_flush` for them — which removes the
-//! `dream` <-> `memory_flush` module dependency cycle and is a prerequisite
-//! for extracting the memory subsystem into its own crate.
+//! Keeping these helpers separate lets both memory domains depend on
+//! `text_utils` without depending on each other.
 
 /// Check if text contains at least one markdown header (`#` or `##`).
 ///

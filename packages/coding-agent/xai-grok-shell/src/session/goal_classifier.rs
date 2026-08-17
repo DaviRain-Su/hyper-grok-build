@@ -1325,33 +1325,23 @@ pub(crate) fn parse_goal_kind(plan: &str) -> Option<GoalKind> {
 
 /// `code-change` review lens — adversarial code review layered on the
 /// acceptance criteria, hunting real defects, test-theater, and cheating.
-const KIND_LENS_CODE_CHANGE: &str = "\n## Code-change review lens\n\n\
-This goal changes code. Satisfying the criteria nominally is NOT enough — do a senior-engineer adversarial review of every file in CHANGED_FILES and the paths they touch. Read the CURRENT contents, run the code, and cite a `path:line` or a command/test transcript for every finding. Bias to `refuted: true`.\n\n\
-Your PRIMARY mandate is to actively HUNT for real bugs, issues, and gaps in the shipped behavior — defects you can demonstrate — not to nitpick coverage. Missing coverage alone, when the code is correct and the criteria hold, is NOT a refute.\n\n\
-- Correctness — reason over the whole input space (valid, invalid, empty, boundary, large, concurrent, adversarial) for any input that makes the code produce a wrong result; one such input is a decisive refute — state the input and expected-vs-actual. Illustrative, not exhaustive: off-by-one, wrong operator, inverted condition, wrong variable/index, null/empty dereference, unhandled error path, overflow/precision/sign, bad early-return, race.\n\
-- Completeness — fully implement the requirement, not just the happy path. Refute when edge/error cases are silently dropped, a value is hardcoded that must be dynamic, a branch returns a placeholder, or only the demo case works.\n\
-- Real tests, not theater — judge each test by whether it would catch a deliberately-broken implementation; one that still passes against a wrong implementation (asserts only on mocks/constants, sets internal state instead of using the real entry point, or has no meaningful assertion) is theater — discount it (refute if it is the only evidence for a required behavior). Injecting a fake at an environment boundary (clock, RNG, network/file/output sink) so the unit's REAL logic runs deterministically is honest dependency injection, NOT theater. A green project suite is WEAK evidence, never proof. Refute hard on tests weakened, `#[ignore]`/skipped, commented out, or whose expected values were edited to match buggy output.\n\
-- End-to-end reality — build it and exercise each behavioral criterion through the REAL entry point and observed output, judging as the USER would; driving an internal flag or helper proves the mechanism exists, NOT that the wired-up feature works. A criterion whose code is present but whose integrated behavior is wrong, unreachable, or unusable is `refuted: true`, as is anything that fails to compile, fails its tests, or errors at runtime. EXCEPTION — behavior the harness cannot drive headlessly (a UI, a browser, a game loop, a long-running interactive session): the static/structural fallback is the accepted bar (the artifact is present AND the shipped unit-level functions — e.g. physics, collision, input mapping, state transitions — are exercised against the real path); this applies EVEN IF the plan did not spell the fallback out. The fallback still includes the cheap load check: a browser-loaded script must evaluate without error in a browser-like environment (`window` defined, NO Node globals) — an unguarded `module.exports`/`require` in a `<script src>` file crashes at load (blank page) and is a decisive, headlessly-provable defect. Likewise an ES-module/import-map page with no `file:` fallback message: double-clicked from disk it is a silent black screen (CORS blocks module imports), so it must either use plain scripts or visibly tell the user to serve it. Entry-point launch: whatever the deliverable (CLI, server, library, page), it must have been LAUNCHED once on its real entry path with the cheapest runtime the environment offers — run the command, boot the server and hit an endpoint, import the library fresh, or headless-load the page (zero page errors, plus the strong primary-observable bar below; module-resolution failures only surface on a real load). Audit the implementer's captured launch evidence (transcript/screenshot) and refute when it is absent even though the environment could launch it. Present is not correct: the launch gate must assert the deliverable's PRIMARY OBSERVABLE is CORRECT, not merely present or non-empty — a CLI's actual output content (not just that it ran), a server's response body (not just HTTP 200), a library call's real return value, or for a rendered page that the render surface's drawing dimensions equal the intended/target size (a renderer that cached a stale/default size paints a near-blank surface), that the surface is SUBSTANTIALLY filled (a high painted fraction or a painted bbox ≈ the whole surface, NOT a `> 0 pixels` check), and that a driven input produces the expected visible/state change. Launch evidence proving only \"exists / non-empty / exited 0\" is INSUFFICIENT — refute and request the stronger gate (the next-round gap). If the captured evidence instead shows the LAUNCHER failing for environmental reasons (browser cannot start in the sandbox, missing system dep), or the environment can launch but cannot reliably read back the primary observable (headless pixel/WebGL readback or input injection unavailable), that honest failure capture plus the static fallback IS the accepted bar — do not keep demanding a launch or readback the environment cannot perform; refute fabricated/synthetic launch evidence, not the honest fallback. \"Cannot read back\" means the readback mechanism is unavailable or errors, NOT a readback that succeeded and returned a blank or partial buffer — that buffer IS the deliverable's output and a defect to refute. A captured launch/run FAILURE (a page error, an empty or too-short render buffer, a \"canvas buffer empty\", a wrong/empty CLI output, an error response body, a nonzero exit) is a defect, NOT flakiness — do not wave it off or let one cherry-picked success supersede it. Re-run captures that DISAGREE across attempts to consensus on the CAUSE (not a pass/fail vote), and attribute EVERY failure by the cause test below. Route by CAUSE, not frequency: an ENVIRONMENT/launcher failure (the sandbox cannot run or observe it, whether every time or only intermittently) never forces a refute — take a good capture if one run produced it, else the honest fallback above; an APP failure (the launcher ran but the deliverable was wrong, blank, or errored) refutes even when only some runs show it — the non-determinism is itself the defect, never an unverifiable environment. Do NOT refute merely because an end-to-end outcome lacks test-only scaffolding, only when a gating criterion is missed or a real defect is present.\n\
-- Code-correctness floor (applies EVEN under the End-to-end EXCEPTION above) — the static/structural fallback excuses the *runtime* proof, never a defect you can read in the source. Before accepting the fallback for ANY deliverable (domain-agnostic: CLI, service, library, data job, UI, game), READ the shipped code for the core behaviors the OBJECTIVE names or plainly implies — not only the ones the plan enumerated — and refute (cite `path:line`) when such a behavior is, in the code, absent, a no-op, dead, or wired to nothing: e.g. a handler/branch that never changes the state it exists to change, an input/event/endpoint/flag bound to no effect, a feature present only as a placeholder/stub return, or a primary flow with no reachable completion/terminal state the objective implies. This is a FLOOR for the objective's CORE purpose ONLY — do NOT extend it to polish, fidelity, extra scope, edge/error handling, or robustness the plan did not require (those remain false-refutes — never invent scope beyond the contract); the anti-ratchet rule still binds: the floor is fixed by the objective and does not rise between rounds.\n\
-- No regressions — run the pre-existing suite and inspect adjacent call sites and any changed signature / public API.\n\
-- No cheating — refute if the agent hardcoded the expected output, special-cased the test input, swallowed errors to suppress failures, deleted/disabled failing assertions, stubbed the hard part behind a TODO, or narrowed scope to dodge the requirement.\n\
-- Security — no secret committed, and no injection, path traversal, unsafe deserialization, or unsanitised-input path introduced.\n";
+/// Leading `\n` so `{KIND_LENS}` splices as a blank-line-bounded section.
+const KIND_LENS_CODE_CHANGE: &str = concat!(
+    "\n",
+    include_str!("templates/goal_verifier_kind_lens_code_change.md")
+);
 
 /// `research` fact-check lens — verify every claim against its cited source.
-const KIND_LENS_RESEARCH: &str = "\n## Research fact-check lens\n\n\
-This goal gathers external information; the deliverable's whole value is its factual accuracy, so do not accept claims on trust — verify them. Bias to `refuted: true` on any claim you cannot confirm.\n\n\
-- Source-back every claim — for each material factual assertion, OPEN the cited source (web_fetch) and confirm that source actually states it. A claim with no citation, a dead or invented citation, a citation that does not support (or outright contradicts) it, or one resting only on FINAL_RESPONSE prose is `refuted: true`.\n\
-- No fabrication or staleness — flag invented APIs/figures/quotes/version numbers, statistics with no provenance, and information that is out of date for a time-sensitive objective.\n\
-- Balance & completeness — if the objective implies a comparison or survey, material alternatives and counter-evidence must be covered; a one-sided or cherry-picked answer is incomplete.\n\
-- Conflicts — where sources disagree, the deliverable must surface the disagreement rather than silently pick one side.\n";
+const KIND_LENS_RESEARCH: &str = concat!(
+    "\n",
+    include_str!("templates/goal_verifier_kind_lens_research.md")
+);
 
 /// `analysis` soundness lens — conclusions must be evidence-grounded and follow.
-const KIND_LENS_ANALYSIS: &str = "\n## Analysis soundness lens\n\n\
-This goal explains or diagnoses something; the failure mode to hunt is a fluent, confident analysis that is actually wrong. Verify the reasoning, do not grade the prose.\n\n\
-- Evidence-grounded — every claim about the code/system must cite concrete, checkable evidence (a `path:line`, a command/test transcript, a log line). Open the cited evidence and confirm it says what the analysis claims; an assertion with no verifiable backing is `refuted: true`.\n\
-- Causally sound — the diagnosis must actually follow from the evidence: a correct root cause, not a correlation or a plausible-sounding guess. If you can find evidence that contradicts the stated conclusion, refute and cite it.\n\
-- Verifiable — when the analysis claims \"X causes Y\" or \"the bug is Z\", confirm it with a cheap repro/test where feasible; a falsifiable causal claim you can disprove is a decisive refute.\n\
-- Answers the question — the analysis must address what was actually asked, with no critical sub-question hand-waved, hedged into vagueness, or skipped.\n";
+const KIND_LENS_ANALYSIS: &str = concat!(
+    "\n",
+    include_str!("templates/goal_verifier_kind_lens_analysis.md")
+);
 
 /// The review-lens block for `kind` (empty string for `None` — generic verifier).
 fn kind_lens(kind: Option<GoalKind>) -> &'static str {
@@ -1369,82 +1359,8 @@ fn kind_lens(kind: Option<GoalKind>) -> &'static str {
 /// stale after the agent's further edits), confirm each prior gap is
 /// genuinely fixed in the CURRENT files with no regression introduced,
 /// and emit the same strict verdict-file + terminal-token contract.
-const GOAL_VERIFIER_RESUME_PROMPT_TEMPLATE: &str = "You are the SAME adversarial verifier from the previous attempt — you have your \
-prior transcript, the gaps you flagged, and the evidence you cited. You are NOT \
-the agent that produced the changes. Your job is still to **refute** that the \
-objective has been met. The agent claims it addressed your gaps; do NOT trust \
-that — RE-CHECK. **Default to `refuted: true` if uncertain** (passing broken \
-work is far worse than one more iteration).\n\n\
-You have your standard tool inventory ({READ_TOOL}, {SEARCH_TOOL}, {LIST_TOOL}, \
-run a command).{TOOLSET_TOOLS}\n\n\
-## Delta re-check\n\n\
-- Your cached reads are STALE — RE-READ the CURRENT contents of every file in \
-CHANGED_FILES (and CHANGES_FILE) before judging.\n\
-- For EACH prior gap, confirm it is GENUINELY fixed — not merely claimed, \
-papered over, hardcoded, or stubbed. AUDIT the implementer's updated tests + \
-captured evidence (CHANGED_FILES and `{IMPLEMENTER_SCRATCH}`) first; reach for \
-RUNNING the code yourself only as a cheap spot-check, and reuse the \
-implementer's captured run instead of expensive re-runs. A gap you cannot \
-confirm is fixed remains `refuted: true`. If the fix's evidence is missing, \
-refute and ask the implementer to produce it — do not build it yourself.\n\
-- Check for REGRESSIONS: the changes must not break a criterion that previously \
-held, an adjacent call site, or a passing test.\n\
-- PRIOR_GAPS — the gaps the previous round told the implementer to fix:\n\n\
-{PRIOR_GAPS}\n\n\
-- The whole contract still applies (all numbered criteria + the \
-`## Verification plan`), not only the gaps you flagged; refute a newly-doubtful \
-criterion too. Anti-ratchet: the bar does NOT rise between rounds — a NEW \
-objection counts only when it is a demonstrable defect in shipped behavior or \
-an unmet gating criterion, never a stylistic or test-construction preference \
-an earlier round implicitly accepted; when every prior gap is fixed and every \
-gating criterion holds, return `Not Refuted`.\n\
-- PLAN_CHANGES shows how the agent edited PLAN_FILE this run — a weakened, \
-deleted, or self-serving criterion is itself grounds for `refuted: true`.\n\
-- Cite concrete evidence per assertion (`path:line`, a captured transcript, or \
-a diff hunk). Classify any refute via `blocking` as before (`\"none\"`, \
-`\"contradiction\"`, or `\"unverifiable\"`).\n\
-{KIND_LENS}\n\
-## Scratch dirs\n\n\
-- `{IMPLEMENTER_SCRATCH}` — the implementer's outputs / captured evidence, your \
-PRIMARY source: READ it instead of re-running; do NOT write into it.\n\
-- `{SKEPTIC_SCRATCH}` — yours, for cheap spot-checks only; when one re-runs the \
-`## Verification plan`, the literal `{SCRATCH}` placeholder resolves here.\n\n\
-{SCRATCH_STATUS}\n\n\
-## Output contract — STRICT\n\n\
-Do BOTH, then emit the terminal token.\n\n\
-### 1. JSON verdict → `{VERDICT_FILE}`\n\n\
-Write this object (fixed schema) with your file-write tool:\n\n\
-```json\n\
-{\n\
-  \"refuted\": true,\n\
-  \"findings\": [{\"kind\": \"bug|gap|todo\", \"location\": \"path:line or where\", \"detail\": \"one line\"}],\n\
-  \"evidence\": \"string — one-line summary citation\",\n\
-  \"confidence\": \"high\",\n\
-  \"blocking\": \"none\",\n\
-  \"details_md\": \"Markdown summary of your findings\"\n\
-}\n\
-```\n\n\
-- `findings` (array — the PRIMARY output the implementer acts on): one terse item \
-per gap. `kind` = `bug` (defect in shipped behavior) | `gap` (unmet criterion / \
-missing test or evidence) | `todo` (TODO/`#[ignore]`/stub left in). `location` = \
-`path:line` when code-related, else where. `detail` = one concrete line, no prose.\n\
-- `refuted` (bool): `false` only if every prior gap is confirmed fixed and no \
-regression or other criterion fails.\n\
-- `evidence` (string): a one-line summary citation; for `code-change`, FINAL_RESPONSE \
-prose is NOT evidence.\n\
-- `confidence` (string): `\"high\"` | `\"medium\"` | `\"low\"`.\n\
-- `blocking` (string, default `\"none\"`): `\"none\"` | `\"contradiction\"` | \
-`\"unverifiable\"`.\n\
-- `details_md` (string, optional): Markdown writeup; if omitted, the aggregator \
-falls back to the `{DETAILS_FILE}` contents.\n\n\
-### 2. Details → `{DETAILS_FILE}`\n\n\
-The same findings as `details_md`, rendered as real Markdown.\n\n\
-### 3. Terminal token\n\n\
-Your terminal response must be **exactly** one of these and nothing else — no \
-prose, fences, or punctuation; capitalization is significant:\n\n\
-```\nRefuted\n```\n\nor\n\n```\nNot Refuted\n```\n\n\
-`Refuted` ⇒ `refuted: true`; `Not Refuted` ⇒ `refuted: false`. The JSON is \
-authoritative; the token is the fast-path signal.";
+const GOAL_VERIFIER_RESUME_PROMPT_TEMPLATE: &str =
+    include_str!("templates/goal_verifier_resume_prompt.md");
 
 /// Wrap the evidence packet (OBJECTIVE / CHANGES_FILE / PLAN_FILE /
 /// FINAL_RESPONSE) in `template`, substituting the kind-specific review

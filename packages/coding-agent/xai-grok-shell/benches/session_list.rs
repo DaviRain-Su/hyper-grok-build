@@ -618,6 +618,23 @@ fn bench_session_list(c: &mut Criterion) {
         })
     });
 
+    // The `/session-info` title path: one summary loaded by (cwd, id).
+    storage.measurement_time(Duration::from_secs(5));
+    storage.throughput(Throughput::Elements(1));
+    storage.bench_function(BenchmarkId::new("single_summary_load", &fixture_id), |b| {
+        let info = Info {
+            id: acp::SessionId::new("bench-session-0000-00"),
+            cwd: fixture.picker_cwd.clone(),
+        };
+        b.iter_with_large_drop(|| {
+            black_box(
+                runtime
+                    .block_on(fixture.adapter.load_summary(black_box(&info)))
+                    .expect("load single summary"),
+            )
+        })
+    });
+
     storage.measurement_time(Duration::from_secs(20));
     storage.throughput(Throughput::Elements(TOTAL_SUMMARY_COUNT as u64));
     storage.bench_function(

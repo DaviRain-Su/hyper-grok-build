@@ -2629,6 +2629,35 @@ fn format_session_info_hides_resolved_when_disabled() {
     assert!(text.contains("Model: grok-4.5"));
     assert!(!text.contains("grok-4.3"));
 }
+/// The (cwd, id)-derived summary path resolves and `generated_title` wins.
+#[tokio::test]
+async fn lookup_session_title_loads_single_summary_by_cwd() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = "/workspace";
+    let dir = root
+        .path()
+        .join("sessions")
+        .join(xai_grok_shell::util::grok_home::encode_cwd_dirname(cwd))
+        .join("sess-1");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+            dir.join("summary.json"),
+            serde_json::json!({
+                "info": { "id": "sess-1", "cwd": cwd },
+                "session_summary": "raw summary",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "num_messages": 1,
+                "current_model_id": "m",
+                "generated_title": "Renamed title"
+            })
+                .to_string(),
+        )
+        .unwrap();
+    let id = acp::SessionId::new("sess-1");
+    let title = lookup_session_title_in(root.path().to_path_buf(), &id, cwd).await;
+    assert_eq!(title.as_deref(), Some("Renamed title"));
+}
 #[test]
 fn format_session_info_no_parens_when_resolved_matches_requested() {
     let info = make_session_info("grok-4.5", Some("grok-4.5"), 1000, 10000);

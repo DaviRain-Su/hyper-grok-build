@@ -4,6 +4,28 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.5-r1] — 2026-08-17
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `9fabade`
+  (monorepo `SOURCE_REV` `7bd63df…`), one sync commit past the previous
+  `5163763` baseline. Notable upstream:
+  - Goal planner/verifier rewrite: reflowed prompts, canonical attempt
+    record schema (`attempt_store`), kind-lens analysis/code-change/research
+    templates, resume prompt
+  - `/session-info` title row loads one session summary instead of scanning
+    all sessions
+  - Expand command output when unfolding folded sections in the PTY pager
+  - Consent notice link styling and review-findings fixes
+  - Drop yanked prompt on Ctrl+C rewind (`CancelOptions` lost
+    `rewind_if_no_output` in favor of `CancelHistoryDisposition`)
+  - Deflake bash full-output double-click fold in the PTY pager
+
+### Notes
+- `memory_flush` moved from `xai-grok-shell/session/helpers/` to
+  `xai-grok-memory/flush.rs` (upstream relocation); dev's directory layout
+  follows under `packages/`.
+
 ## [1.0.4-r1] — 2026-08-16
 
 ### Changed

@@ -761,6 +761,8 @@ pub enum Action {
     /// Replays any session startup deferred behind the notice.
     /// (Declining quits via [`Action::Quit`]; there is no decline action.)
     AcceptConsent,
+    /// Opens the notice's nth link. The url is re-read from validated state, never carried here.
+    OpenConsentLink(usize),
     /// A spawned task completed.
     TaskComplete(TaskResult),
     /// Share the current session via URL.
@@ -1654,14 +1656,9 @@ pub enum Effect {
         /// `mid_turn_abort` telemetry can distinguish them. `None` for
         /// programmatic cancels (login/reauth flows).
         trigger: Option<CancelTrigger>,
-        /// Ask the shell to trim the in-flight prompt from session history when
-        /// the turn has produced no output yet, sent as
-        /// `_meta.rewindIfNoOutput`. Set true ONLY when the pager has locally
-        /// rewound the prompt back into the composer, so the shell's history
-        /// matches the UI. Without it the shell keeps the prompt plus an
-        /// interruption marker, and a later resend pairs the kept copy with the
-        /// resend — the send+Ctrl+C double-prompt bug.
-        rewind_if_no_output: bool,
+        /// `_meta.rewindIfNoOutput` + `_meta.promptId` of the locally rewound turn.
+        /// Set only when the pager restored the prompt into the composer.
+        rewind_prompt_id: Option<String>,
     },
     /// Run a manual `/compact` command.
     Compact {
@@ -2631,6 +2628,11 @@ pub enum TaskResult {
     ConsentRecorded {
         notice_id: String,
         version: i32,
+    },
+    /// The answer stands for this run, but nothing on disk holds it,
+    /// so the notice returns at the next launch.
+    ConsentPersistFailed {
+        error: String,
     },
     /// Response to `x.ai/subagent/cancel`; see [`SubagentKillOutcome`].
     KillSubagentComplete {

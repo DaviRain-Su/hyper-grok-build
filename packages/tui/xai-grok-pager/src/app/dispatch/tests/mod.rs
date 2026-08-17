@@ -154,6 +154,8 @@ fn test_app() -> AppView {
         trust_state: TrustState::Done,
         consent_state: crate::app::consent::ConsentState::Done,
         account_email: None,
+        welcome_consent_link_rects: Vec::new(),
+        welcome_consent_hover_link: None,
         consent_answered: None,
         login_label: None,
         login_method_id: None,

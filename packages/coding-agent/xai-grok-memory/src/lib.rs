@@ -27,6 +27,7 @@ pub mod chunker;
 pub mod dream;
 pub mod dream_lock;
 pub mod embedding;
+pub mod flush;
 pub mod index;
 pub mod mmr;
 pub mod observation;

@@ -35,6 +35,9 @@ fn double_click_text(harness: &mut PtyHarness, needle: &str) {
 #[cfg(unix)]
 async fn bash_full_output_double_click_fold_pty() {
     let content = ContentController::start().await.expect("start content");
+    // Double-click folds only in flash (fold/nav). Pin it so a parallel
+    // suite sibling that seeds hold/word_select cannot change semantics.
+    seed_ui_config(&content, "keep_text_selection = \"flash\"");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} session ready."));
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -64,12 +67,17 @@ async fn bash_full_output_double_click_fold_pty() {
     // Truncated (default first=2, last=3) shows L01,L02 + L10–L12. A middle
     // line (L06) appears only after expand-on-finish — do not gate on L01:
     // that passes while still truncated and races the L03/L06/L09 asserts.
+    // Wait for turn idle first so expand-on-finish has committed before we
+    // sample middle lines (suite load used to race wait_for_text("L06")).
     harness
         .inject_keys(b"! printf 'L%02d\\n' $(seq 1 12)\r")
         .expect("submit bash-mode command");
     harness
         .wait_for_text("L12", Duration::from_secs(30))
         .expect("bash output tail");
+    harness
+        .wait_for_turn_idle(Duration::from_secs(20))
+        .expect("bash turn idle before expand-on-finish assert");
     harness
         .wait_for_text("L06", Duration::from_secs(20))
         .unwrap_or_else(|_| {
@@ -91,15 +99,27 @@ async fn bash_full_output_double_click_fold_pty() {
     harness
         .wait_for_text("Ctrl+e:", Duration::from_secs(10))
         .expect("scrollback owns keys");
-    double_click_text(&mut harness, "Run (user)");
-    harness
-        .wait_for_text_absent("L06", Duration::from_secs(15))
-        .unwrap_or_else(|_| {
+    // Retry the fold gesture: a single SGR burst can miss under load if the
+    // header cell moved between locate and inject, or if multi-click state
+    // from an earlier accidental click is still open.
+    let fold_deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        double_click_text(&mut harness, "Run (user)");
+        if harness
+            .wait_for_text_absent("L06", Duration::from_secs(3))
+            .is_ok()
+        {
+            break;
+        }
+        if Instant::now() >= fold_deadline {
             panic!(
                 "double-click must collapse the ! block; got:\n{}",
                 harness.screen_contents()
-            )
-        });
+            );
+        }
+        // MULTI_CLICK_TIMEOUT_MS is 300ms; clear before retrying.
+        harness.update(Duration::from_millis(500));
+    }
     // MULTI_CLICK_TIMEOUT_MS is 300ms; clear it before the expand gesture so
     // the second double-click is not counted as click 3/4 of the first.
     harness.update(Duration::from_millis(500));
@@ -125,6 +145,9 @@ async fn bash_full_output_double_click_fold_pty() {
     harness
         .wait_for_text("E12", Duration::from_secs(30))
         .expect("failed bash output tail");
+    harness
+        .wait_for_turn_idle(Duration::from_secs(20))
+        .expect("failed bash turn idle before expand-on-finish assert");
     harness
         .wait_for_text("E06", Duration::from_secs(20))
         .unwrap_or_else(|_| {

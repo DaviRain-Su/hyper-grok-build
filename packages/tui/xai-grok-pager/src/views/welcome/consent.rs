@@ -5,7 +5,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
 use super::menu::render_menu;
@@ -14,6 +14,7 @@ use super::{
     prompt, render_logo, render_version_badge,
 };
 use crate::app::consent::{BodyCell, BodyRow, ConsentLegibility, ConsentNotice, row_cols, wrap};
+use crate::render::SafeBuf;
 use crate::theme::Theme;
 
 /// Widest the body is allowed to run, so a long line stays readable on a wide terminal.
@@ -34,6 +35,7 @@ pub fn render_consent(
     theme: &Theme,
     notice: &ConsentNotice,
     selected: Option<usize>,
+    hovered_link: Option<usize>,
     pending_hint: Option<crate::views::shortcuts_bar::PendingHint>,
     h_margin: u16,
     compact: bool,
@@ -42,21 +44,21 @@ pub fn render_consent(
         .width
         .saturating_sub(h_margin * 2)
         .min(MAX_BODY_COLS);
-    let rows = wrap(&notice.body, body_width);
+    let rows = wrap(&notice.segments, body_width);
 
     let (layout, legibility) = fit_body(content_area, compact, &rows);
     let message = inset_horizontal(layout.error, h_margin);
 
     render_logo(layout.logo, buf, theme, content_area.height);
 
-    if legibility.can_accept() {
+    let link_rects = if legibility.can_accept() {
         paint_centered(
             message,
             buf,
             Style::default().fg(theme.gray_bright),
             &notice.title,
         );
-        paint_body(message, buf, theme, &rows);
+        paint_body(message, buf, theme, &rows, hovered_link)
     } else {
         // Title dropped: on a screen this small, why the notice is unreadable matters more.
         let text = if message.width < NARROW_COLS {
@@ -65,7 +67,8 @@ pub fn render_consent(
             TOO_SMALL
         };
         paint_centered(message, buf, Style::default().fg(theme.gray), text);
-    }
+        Vec::new()
+    };
 
     // Accept is refused while the body is unread, so the row is withheld rather than offered and
     // ignored. Quit stays, or the screen would show no way out at all.
@@ -96,45 +99,64 @@ pub fn render_consent(
 
     WelcomeRenderResult {
         menu_rects,
+        consent_link_rects: link_rects,
         consent_legibility: Some(legibility),
         ..Default::default()
     }
 }
 
-/// A body that does not fit is laid out around the fallback message instead, or it lands
-/// on top of the menu.
+/// Drops the logo rather than declaring the body unreadable, because the logo grows with the
+/// window and would make a notice that fits at 80x24 illegible at 80x25.
 fn fit_body(
     content_area: Rect,
     compact: bool,
     rows: &[BodyRow],
 ) -> (WelcomeLayout, ConsentLegibility) {
-    // No prompt is painted here, so the rows compute_stacked reserves go to the body.
-    let stacked = |message_height: u16| {
+    // No prompt is painted here, so the rows compute_stacked reserves go to the body. A compact
+    // layout gives the logo no rows at all, which is what dropping it means.
+    let stacked = |message_height: u16, hide_logo: bool| {
         WelcomeLayout::compute_stacked(WelcomeLayoutInput {
             content_area,
             error_height: message_height,
             menu_height: 2,
             prompt_height: Some(0),
-            compact,
+            compact: compact || hide_logo,
             prompt_compact: compact,
             ..Default::default()
         })
     };
 
     // Title, blank, body, then the spacer the menu sits below.
-    let mut layout = stacked(rows.len() as u16 + BODY_TOP_OFFSET + 1);
-    let legibility =
-        if layout.error.height >= rows.len() as u16 + BODY_TOP_OFFSET && !rows.is_empty() {
-            ConsentLegibility::Painted
-        } else {
-            layout = stacked(2);
-            ConsentLegibility::Illegible
-        };
-    (layout, legibility)
+    let wanted = rows.len() as u16 + BODY_TOP_OFFSET + 1;
+    // A menu clipped to one row would put quit where accept belongs.
+    let fits = |layout: &WelcomeLayout| {
+        layout.error.height >= rows.len() as u16 + BODY_TOP_OFFSET
+            && layout.menu.height >= 2
+            && !rows.is_empty()
+    };
+
+    let with_logo = stacked(wanted, false);
+    if fits(&with_logo) {
+        return (with_logo, ConsentLegibility::Painted);
+    }
+
+    let without_logo = stacked(wanted, true);
+    if fits(&without_logo) {
+        return (without_logo, ConsentLegibility::Painted);
+    }
+
+    (stacked(2, false), ConsentLegibility::Illegible)
 }
 
-/// Centres each row the way the trust question does.
-fn paint_body(area: Rect, buf: &mut Buffer, theme: &Theme, rows: &[BodyRow]) {
+/// Paints each row as runs of one style, so a link and the spaces inside it underline together.
+fn paint_body(
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+    rows: &[BodyRow],
+    hovered_link: Option<usize>,
+) -> Vec<(usize, Rect)> {
+    let mut link_rects = Vec::new();
     let top = area.y + BODY_TOP_OFFSET;
     for (index, row) in rows.iter().enumerate() {
         let y = top + index as u16;
@@ -142,15 +164,30 @@ fn paint_body(area: Rect, buf: &mut Buffer, theme: &Theme, rows: &[BodyRow]) {
             break;
         }
         let row = trim_end(row);
-        let x = area.x + area.width.saturating_sub(row_cols(row)) / 2;
-        let text: String = row.iter().map(|cell| cell.text.as_str()).collect();
-        buf.set_span(
-            x,
-            y,
-            &Span::styled(text, Style::default().fg(theme.gray)),
-            row_cols(row),
-        );
+        let mut x = area.x + area.width.saturating_sub(row_cols(row)) / 2;
+
+        for (link, run) in runs(row) {
+            let text: String = run.iter().map(|cell| cell.text.as_str()).collect();
+            let cols = row_cols(run);
+            let style = match link {
+                // Hover keys on the link, not the rect, so every run brightens together. Bold as
+                // well as brighter, because a 16-colour palette maps both colours to the same one.
+                Some(index) if hovered_link == Some(index) => theme
+                    .link_style()
+                    .fg(theme.text_primary)
+                    .add_modifier(Modifier::BOLD),
+                Some(_) => theme.link_style(),
+                None => Style::default().fg(theme.gray),
+            };
+
+            buf.set_span_safe(x, y, &Span::styled(text, style), cols);
+            if let Some(index) = link {
+                link_rects.push((index, Rect::new(x, y, cols, 1)));
+            }
+            x += cols;
+        }
     }
+    link_rects
 }
 
 /// A trailing space left by the wrap would underline past the label and shift the centring.
@@ -162,6 +199,12 @@ fn trim_end(row: &[BodyCell]) -> &[BodyCell] {
     &row[..end]
 }
 
+/// Consecutive cells sharing a link, so each run paints as one span and one hit rect.
+fn runs(row: &[BodyCell]) -> impl Iterator<Item = (Option<usize>, &[BodyCell])> {
+    row.chunk_by(|a, b| a.link == b.link)
+        .map(|run| (run[0].link, run))
+}
+
 /// Centred within the message block rather than the full width, and ellipsized, so an oversized
 /// title cannot run edge to edge.
 fn paint_centered(area: Rect, buf: &mut Buffer, style: Style, text: &str) {
@@ -171,7 +214,7 @@ fn paint_centered(area: Rect, buf: &mut Buffer, style: Style, text: &str) {
     let text = crate::render::line_utils::truncate_str(text, area.width as usize);
     let cols = unicode_width::UnicodeWidthStr::width(&*text) as u16;
     let x = area.x + area.width.saturating_sub(cols) / 2;
-    buf.set_span(x, area.y, &Span::styled(text, style), cols);
+    buf.set_span_safe(x, area.y, &Span::styled(text, style), cols);
 }
 
 #[cfg(test)]

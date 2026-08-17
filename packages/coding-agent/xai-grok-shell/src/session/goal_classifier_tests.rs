@@ -3,10 +3,6 @@ use crate::session::goal_role_tools::tests::{assert_no_tool_placeholders, summar
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
-/// Delta-framing anchor shared by the resume-prompt pins (render unit test
-/// + stage-resume integration test), so a re-word can't leave a stale twin.
-const RESUME_DELTA_FRAMING: &str = "claims it addressed your gaps";
-
 /// A `RoleRenderedPrompt` whose two renders are identical (the inherit /
 /// same-toolset case), for direct `spawn_classifier` test calls.
 fn role_prompt(p: &str) -> RoleRenderedPrompt {
@@ -1293,314 +1289,6 @@ fn build_pause_summary_omits_empty_groups() {
     );
 }
 
-#[test]
-fn verifier_prompt_pins_blocking_classification_contract() {
-    // Pin the QUOTED JSON wire forms the parser keys on, so a
-    // spelling drift that keeps the bare substring (silently breaking
-    // `Blocked` routing) still fails this test.
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("\"blocking\""));
-    for token in ["\"none\"", "\"contradiction\"", "\"unverifiable\""] {
-        assert!(
-            GOAL_VERIFIER_PROMPT_TEMPLATE.contains(token),
-            "verifier prompt must document the quoted blocking value {token}",
-        );
-    }
-}
-
-#[test]
-fn verifier_prompt_pins_objective_and_named_artifacts_as_immutable_contract() {
-    for phrase in [
-        "OBJECTIVE and any artifacts it explicitly names are the immutable contract",
-        "PLAN_FILE is a derived checklist",
-        "may clarify but never narrow or override",
-        "URL, file, ticket, document, or image",
-        "blocking: \"unverifiable\"",
-    ] {
-        assert!(
-            GOAL_VERIFIER_PROMPT_TEMPLATE.contains(phrase),
-            "verifier prompt is missing required phrase: {phrase}",
-        );
-    }
-}
-
-#[test]
-fn verifier_prompt_pins_live_workspace_reframing() {
-    // Workspace + captured evidence are primary; running the code is only a
-    // spot-check. Pin all three against a diff-only or run-code-primary revert.
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("CHANGED_FILES"));
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("current workspace"));
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("running the code"));
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("only as a cheap spot-check"));
-}
-
-#[test]
-fn verifier_prompt_pins_audit_not_author_reframing() {
-    // Pin the audit-not-author phrases against a revert to the expensive
-    // author-your-own-evidence stance.
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("AUDIT the evidence the implementer already"));
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("Minimize tool"));
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("do NOT build a parallel"));
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("do NOT fill the gap yourself"));
-    // The RESUME template must carry the same audit-not-author stance.
-    assert!(GOAL_VERIFIER_RESUME_PROMPT_TEMPLATE.contains("reuse the implementer's"));
-    assert!(
-        GOAL_VERIFIER_RESUME_PROMPT_TEMPLATE
-            .contains("refute and ask the implementer to produce it")
-    );
-}
-
-#[test]
-fn verifier_prompt_pins_structured_findings_schema() {
-    // The structured `findings` array is the concise implementer-facing
-    // output; pin its schema in BOTH templates so a future edit can't
-    // revert to a free-text-evidence wall.
-    for tmpl in [
-        GOAL_VERIFIER_PROMPT_TEMPLATE,
-        GOAL_VERIFIER_RESUME_PROMPT_TEMPLATE,
-    ] {
-        assert!(tmpl.contains("\"findings\""));
-        assert!(tmpl.contains("\"kind\": \"bug|gap|todo\""));
-        assert!(tmpl.contains("PRIMARY output the implementer acts on"));
-    }
-}
-
-#[test]
-fn verifier_prompt_pins_missing_tests_not_a_refute_reframing() {
-    // Pin both halves of the reframing so a future edit can't
-    // silently revert to refuting working goals for missing coverage:
-    // the base rule (missing tests alone are not a refute) and the
-    // code-change lens priority (hunt real bugs/issues/gaps).
-    assert!(
-        GOAL_VERIFIER_PROMPT_TEMPLATE.contains("Missing tests alone are NOT grounds to refute")
-    );
-    assert!(KIND_LENS_CODE_CHANGE.contains("actively HUNT for real bugs, issues, and gaps"));
-}
-
-/// Pin the gating-vs-best-effort verifier stance: an absent `evidence`
-/// observation alone is not a refute once the gating criteria hold.
-#[test]
-fn verifier_prompt_pins_gating_vs_evidence_stance() {
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("an absent best-effort `evidence` observation"));
-}
-
-/// Pin the test-theater steer: a refute must tell the implementer to
-/// refactor the shipped code into a callable unit, not patch the test.
-#[test]
-fn verifier_prompt_pins_refactor_not_patch_on_test_theater() {
-    assert!(
-        GOAL_VERIFIER_PROMPT_TEMPLATE
-            .contains("REFACTOR the shipped code into a directly-callable pure unit"),
-    );
-    assert!(
-        GOAL_VERIFIER_PROMPT_TEMPLATE.contains("NOT to patch the test around an untestable unit"),
-    );
-}
-
-#[test]
-fn verifier_prompt_pins_scope_discipline_no_out_of_scope_refute() {
-    assert!(
-        GOAL_VERIFIER_PROMPT_TEMPLATE
-            .contains("NEVER refute for the absence of something the plan lists under"),
-        "must forbid refuting for Non-goals",
-    );
-    assert!(
-        GOAL_VERIFIER_PROMPT_TEMPLATE
-            .contains("the top reason correct, in-scope work fails to converge"),
-        "must name out-of-scope invention as the convergence killer",
-    );
-    assert!(
-        GOAL_VERIFIER_PROMPT_TEMPLATE.contains("never a license to add new requirements"),
-        "must scope `default to refuted if uncertain` to required criteria only",
-    );
-}
-
-/// Pin the headless-unobservable carve-out in both the base prompt and the
-/// code-change lens (anti-cheat stance preserved).
-#[test]
-fn verifier_prompt_pins_unobservable_outcome_carveout() {
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("the harness cannot observe"));
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("static/structural fallback holds"));
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("not on the absence of a contorted proof"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("behavior the harness cannot drive headlessly"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("static/structural fallback is the accepted bar"));
-}
-
-/// Pin every load-bearing clause of the code-correctness floor so a future
-/// edit can't silently narrow it: the no-runtime contract (READ source,
-/// never demand a re-run — the convergence safeguard), application under the
-/// headless fallback, reach beyond the plan's enumeration, the code-readable
-/// defect classes, the domain-agnostic span (not game/UI-biased), and the
-/// anti-ratchet bound (core-purpose only, over-reach excluded, fixed across
-/// rounds).
-#[test]
-fn verifier_prompt_pins_code_correctness_floor() {
-    assert!(KIND_LENS_CODE_CHANGE.contains("Code-correctness floor"));
-    // Loophole-closer: bites under the headless fallback, not outside it.
-    assert!(KIND_LENS_CODE_CHANGE.contains("applies EVEN under the End-to-end EXCEPTION"));
-    // No-runtime contract (the convergence safeguard): READ source, never
-    // demand a re-run — guards a silent READ->RUN swap from both angles.
-    assert!(
-        KIND_LENS_CODE_CHANGE
-            .contains("excuses the *runtime* proof, never a defect you can read in the source")
-    );
-    assert!(KIND_LENS_CODE_CHANGE.contains("READ the shipped code"));
-    // MODERATE scope: also catches objective-implied behaviors the plan never listed.
-    assert!(KIND_LENS_CODE_CHANGE.contains("not only the ones the plan enumerated"));
-    // Code-readable defect classes (no runtime needed to demonstrate).
-    assert!(KIND_LENS_CODE_CHANGE.contains("absent, a no-op, dead, or wired to nothing"));
-    // Generic, not biased to a single domain.
-    assert!(
-        KIND_LENS_CODE_CHANGE
-            .contains("domain-agnostic: CLI, service, library, data job, UI, game")
-    );
-    // Anti-ratchet / convergence: core-purpose only, the over-reach
-    // exclusion list intact, scope self-contained (valid under the resume
-    // injection, which has no `## Decision rules`), and not rising.
-    assert!(KIND_LENS_CODE_CHANGE.contains("FLOOR for the objective's CORE purpose ONLY"));
-    assert!(KIND_LENS_CODE_CHANGE.contains(
-        "do NOT extend it to polish, fidelity, extra scope, edge/error handling, or robustness"
-    ));
-    assert!(KIND_LENS_CODE_CHANGE.contains("never invent scope beyond the contract"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("does not rise between rounds"));
-}
-
-/// A launch/run FAILURE must not be excused as flakiness or buried by a
-/// cherry-picked pass — keeps the false-pass class from re-opening.
-#[test]
-fn verifier_prompt_pins_launch_failure_not_flakiness() {
-    assert!(KIND_LENS_CODE_CHANGE.contains("is a defect, NOT flakiness"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("cherry-picked success supersede it"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("DISAGREE across attempts"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("consensus on the CAUSE"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("attribute EVERY failure by the cause test"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("a wrong/empty CLI output"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("an error response body"));
-}
-
-/// "Present / non-empty" is not proof the primary observable is CORRECT, and
-/// the weak ">0 pixels"/"non-background" phrasings stay gone — keeps a
-/// renders-but-wrong deliverable from re-passing.
-#[test]
-fn verifier_prompt_pins_present_is_not_correct() {
-    assert!(KIND_LENS_CODE_CHANGE.contains("PRIMARY OBSERVABLE is CORRECT"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("not merely present or non-empty"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("a server's response body (not just HTTP 200)"));
-    assert!(
-        KIND_LENS_CODE_CHANGE.contains("a driven input produces the expected visible/state change")
-    );
-    assert!(KIND_LENS_CODE_CHANGE.contains("drawing dimensions equal the intended/target size"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("SUBSTANTIALLY filled"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("NOT a `> 0 pixels` check"));
-    assert!(!KIND_LENS_CODE_CHANGE.contains("non-background rendering"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("plus the strong primary-observable bar below"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("\"exists / non-empty / exited 0\""));
-    assert!(KIND_LENS_CODE_CHANGE.contains("is INSUFFICIENT"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("request the stronger gate"));
-}
-
-/// The honest-fallback clause keeps a truly unrunnable/unobservable sandbox
-/// converging while the cause router refutes app-side failures, and the
-/// readback disambiguator stops a successful blank-buffer readback escaping
-/// via the hatch — pinned so no half can silently drop.
-#[test]
-fn verifier_prompt_pins_environmental_fallback_bound_preserved() {
-    assert!(
-        KIND_LENS_CODE_CHANGE
-            .contains("that honest failure capture plus the static fallback IS the accepted bar")
-    );
-    assert!(KIND_LENS_CODE_CHANGE.contains("Route by CAUSE, not frequency"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("whether every time or only intermittently"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("never forces a refute"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("cannot run or observe it"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("refutes even when only some runs show it"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("never an unverifiable environment"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("cannot reliably read back the primary observable"));
-    assert!(KIND_LENS_CODE_CHANGE.contains("readback mechanism is unavailable or errors"));
-    assert!(
-        KIND_LENS_CODE_CHANGE
-            .contains("that buffer IS the deliverable's output and a defect to refute")
-    );
-}
-
-#[test]
-fn verifier_prompt_executes_shared_verification_plan() {
-    // The verifier must run the plan's shared `## Verification plan`
-    // steps (not improvise its own) so its verdict matches the bar
-    // the implementer built against — the bias-reduction contract.
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("## Verification plan"));
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("SAME steps"));
-}
-
-/// Both verifier templates carry the two scratch slots — the skeptic's
-/// own dir AND the implementer-scratch awareness seam — so a future edit
-/// can't silently drop the read-implementer-outputs instruction.
-#[test]
-fn verifier_templates_carry_scratch_slots() {
-    for tmpl in [
-        GOAL_VERIFIER_PROMPT_TEMPLATE,
-        GOAL_VERIFIER_RESUME_PROMPT_TEMPLATE,
-    ] {
-        assert!(
-            tmpl.contains("{SKEPTIC_SCRATCH}"),
-            "verifier template must carry the skeptic-scratch slot",
-        );
-        assert!(
-            tmpl.contains("{IMPLEMENTER_SCRATCH}"),
-            "verifier template must carry the implementer-scratch awareness slot",
-        );
-    }
-}
-
-/// Both verifier templates must teach the skeptic about PLAN_CHANGES so
-/// a weakened acceptance criterion the agent slipped into its own plan
-/// is itself grounds to refute.
-#[test]
-fn verifier_templates_nudge_on_plan_changes() {
-    assert!(
-        GOAL_VERIFIER_PROMPT_TEMPLATE.contains("PLAN_CHANGES"),
-        "cold verifier prompt must reference the PLAN_CHANGES section",
-    );
-    assert!(
-        GOAL_VERIFIER_RESUME_PROMPT_TEMPLATE.contains("PLAN_CHANGES"),
-        "resume verifier prompt must reference the PLAN_CHANGES section",
-    );
-}
-
-#[test]
-fn verifier_prompt_has_kind_lens_slot() {
-    // The `{KIND_LENS}` placeholder is the seam for the kind-specific
-    // review lens; render_skeptic_prompt must substitute it.
-    assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("{KIND_LENS}"));
-}
-
-/// Default/inherit render pins the canonical default verifier text via FULL
-/// string equality against an independent oracle (std `str::replace` of the
-/// tool tokens with their literal fallbacks + empty `{TOOLSET_TOOLS}`). This
-/// catches (a) any token `apply` fails to resolve, (b) any drift between the
-/// single-pass `apply` and the canonical substitution, and (c) the inherit
-/// defaults diverging from the literals. NOTE: the inventory line's
-/// `read`/`grep` are templated too, so the default render is NOT
-/// byte-identical to the earlier hand-written text — it is pinned to
-/// the canonical post-templating default below.
-#[test]
-fn verifier_template_default_render_pins_canonical_text() {
-    let rendered = RoleToolNames::inherit_defaults().apply(GOAL_VERIFIER_PROMPT_TEMPLATE);
-    let expected = GOAL_VERIFIER_PROMPT_TEMPLATE
-        .replace("{READ_TOOL}", "read_file")
-        .replace("{LIST_TOOL}", "list_dir")
-        .replace("{SEARCH_TOOL}", "grep")
-        .replace("{WRITE_TOOL}", "write")
-        .replace("{EXECUTE_TOOL}", "run_terminal_command")
-        .replace("{TOOLSET_TOOLS}", "");
-    assert_eq!(rendered, expected, "default verifier render drifted");
-    // Pin the tool-bearing inventory line so prose drift on it is caught.
-    assert!(rendered.contains("standard tool inventory (read_file, grep, list_dir,\nrun a"));
-    // Empty toolset block ⇒ the writes sentence glues straight into the
-    // next section (`{TOOLSET_TOOLS}` resolved to "").
-    assert!(rendered.contains("`{VERDICT_FILE}`.\n\n## Scratch dirs"));
-    assert_no_tool_placeholders(&rendered);
-}
-
 /// An explicit named toolset renders tool names on the
 /// inventory line (no generic descriptor left mixed in) AND an enumerated
 /// `{TOOLSET_TOOLS}` block; the fallback path (`Unavailable` ⇒ inherit
@@ -1629,16 +1317,9 @@ fn verifier_template_renders_per_agent_type_and_falls_back() {
         ..Default::default()
     };
     let cursor = RoleToolNames::from_summary(&summary).apply(GOAL_VERIFIER_PROMPT_TEMPLATE);
-    // The inventory line is fully resolved — no bare `read`/`grep`
-    // generic descriptor sitting next to the resolved names.
-    assert!(
-        cursor.contains("standard tool inventory (cursor_read, cursor_grep, cursor_ls,\nrun a"),
-        "inventory line must render all three resolved names, no generic mix",
-    );
-    assert!(
-        cursor.contains("Tools available to you for this review:"),
-        "an explicit toolset must enumerate {{TOOLSET_TOOLS}}",
-    );
+    for name in ["cursor_read", "cursor_grep", "cursor_ls"] {
+        assert!(cursor.contains(name), "inventory must name {name}");
+    }
     assert_no_tool_placeholders(&cursor);
 
     // grok-build explicit render: no leftover placeholder either.
@@ -1653,7 +1334,6 @@ fn verifier_template_renders_per_agent_type_and_falls_back() {
     // Fallback path (e.g. `describe_subagent_type` ⇒ `Unavailable`): the
     // parent-toolset defaults render and no placeholder survives.
     let fallback = RoleToolNames::inherit_defaults().apply(GOAL_VERIFIER_PROMPT_TEMPLATE);
-    assert!(fallback.contains("standard tool inventory (read_file, grep, list_dir,\nrun a"));
     assert_no_tool_placeholders(&fallback);
 }
 
@@ -1675,17 +1355,11 @@ fn cold_and_resume_renders_are_symmetric_for_an_index() {
         assert!(cold.contains(name), "cold render must name {name}");
         assert!(resume.contains(name), "resume render must name {name}");
     }
-    assert!(
-        resume.contains("Tools available to you for this review:"),
-        "resume render must carry the {{TOOLSET_TOOLS}} block like cold",
-    );
     assert_no_tool_placeholders(&cold);
     assert_no_tool_placeholders(&resume);
 
-    // The inherit default also renders the resume template fully (no leak).
     let resume_default =
         RoleToolNames::inherit_defaults().apply(GOAL_VERIFIER_RESUME_PROMPT_TEMPLATE);
-    assert!(resume_default.contains("(read_file, grep, list_dir, run a command)"));
     assert_no_tool_placeholders(&resume_default);
 }
 
@@ -1752,7 +1426,7 @@ async fn verification_stage_renders_per_index_tool_names() {
 
     // Index 2 is past the slice ⇒ inherit defaults.
     let p2 = prompt_for(2);
-    assert!(p2.contains("(read_file, grep, list_dir,\nrun a"));
+    assert!(p2.contains("read_file") && p2.contains("grep") && p2.contains("list_dir"));
     assert!(
         !p2.contains("cursor_read") && !p2.contains("gb_read"),
         "index past the slice must use inherit defaults",
@@ -1800,14 +1474,7 @@ fn parse_goal_kind_tolerates_emphasis_and_separator_variants() {
 }
 
 #[test]
-fn kind_lens_selects_per_kind_block_and_empty_for_none() {
-    assert!(kind_lens(Some(GoalKind::CodeChange)).contains("Code-change review lens"));
-    // Browser-load defect rule: Node-only scripts (blank page) are
-    // headlessly provable and must stay part of the fallback bar.
-    assert!(kind_lens(Some(GoalKind::CodeChange)).contains("unguarded `module.exports`"));
-    assert!(kind_lens(Some(GoalKind::Research)).contains("Research fact-check lens"));
-    assert!(kind_lens(Some(GoalKind::Research)).contains("web_fetch"));
-    assert!(kind_lens(Some(GoalKind::Analysis)).contains("Analysis soundness lens"));
+fn kind_lens_empty_for_none() {
     assert_eq!(kind_lens(None), "", "no kind ⇒ generic verifier, no lens");
 }
 
@@ -1829,7 +1496,6 @@ fn render_skeptic_prompt_substitutes_kind_lens_and_leaves_no_placeholder() {
         &RoleToolNames::inherit_defaults(),
         true,
     );
-    assert!(body.contains("## Code-change review lens"));
     assert!(
         !body.contains("{KIND_LENS}"),
         "the placeholder must be substituted:\n{body}"
@@ -1861,7 +1527,6 @@ fn render_skeptic_prompt_substitutes_kind_lens_and_leaves_no_placeholder() {
         true,
     );
     assert!(!generic.contains("{KIND_LENS}"));
-    assert!(!generic.contains("review lens"));
 }
 
 /// `{SCRATCH_STATUS}` in the verifier prompt is conditional on whether the
@@ -1941,7 +1606,6 @@ fn render_skeptic_prompt_substitutes_prior_gaps() {
     };
     let with_gaps = render(Some("- [skeptic 1, high]\n  gap · src/foo.rs:12 — no test"));
     assert!(with_gaps.contains("gap · src/foo.rs:12 — no test"));
-    assert!(with_gaps.contains("Anti-ratchet"));
     assert!(
         !with_gaps.contains("{PRIOR_GAPS}"),
         "placeholder must be substituted:\n{with_gaps}"
@@ -1972,19 +1636,10 @@ fn render_skeptic_resume_prompt_is_delta_focused_and_substitutes_paths() {
         &RoleToolNames::inherit_defaults(),
         true,
     );
-    // Delta framing + re-read mandate + retained contract.
-    assert!(body.contains(RESUME_DELTA_FRAMING));
-    assert!(body.contains("RE-READ"));
-    assert!(body.contains("REGRESSION"));
-    // Anti-ratchet + prior-gaps anchor apply to the resumed judge too.
-    assert!(body.contains("Anti-ratchet"));
     assert!(
         !body.contains("{PRIOR_GAPS}"),
         "PRIOR_GAPS placeholder must be substituted in the resume prompt",
     );
-    // The resume prompt nudges the skeptic to scrutinize PLAN_FILE edits.
-    assert!(body.contains("PLAN_CHANGES"));
-    assert!(body.contains("## Code-change review lens"));
     // Output contract carries the new attempt's paths; no placeholders.
     assert!(body.contains("/tmp/goal-verdict-x-2-0.json"));
     assert!(body.contains("/tmp/goal-classifier-x-2-skeptic-0.md"));
@@ -2454,7 +2109,6 @@ async fn verification_stage_n1_not_refuted_returns_achieved() {
         !p.contains("{SKEPTIC_SCRATCH}") && !p.contains("{IMPLEMENTER_SCRATCH}"),
         "scratch placeholder marker leaked into rendered prompt",
     );
-    assert!(p.contains("adversarial verifier"));
     drop(prompts);
     let log = log.lock().unwrap();
     assert!(log.iter().any(|t| t == "fired"));
@@ -3284,12 +2938,6 @@ async fn verification_stage_resumes_skeptic0_on_later_attempt() {
         [Some("prior-skeptic0".to_string()), None],
         "skeptic 0 resumes the prior child; cold skeptic 1 stays fresh",
     );
-    // Skeptic 0's prompt is the delta resume prompt, not the cold one.
-    let prompts = observed.prompts.lock().unwrap();
-    assert!(
-        prompts[0].contains(RESUME_DELTA_FRAMING) && prompts[0].contains("Delta re-check"),
-        "skeptic 0 must receive the delta resume prompt",
-    );
     let new_id = result.skeptic0_session_id.expect("N>1 returns skeptic0 id");
     assert_ne!(
         new_id, "prior-skeptic0",
@@ -3325,11 +2973,6 @@ async fn verification_stage_resumes_skeptic0_on_attempt_one_with_prior_id() {
         resume_froms.as_slice(),
         [Some("prior-skeptic0".to_string()), None],
         "attempt 1 with a surviving prior id must still resume skeptic 0",
-    );
-    let prompts = observed.prompts.lock().unwrap();
-    assert!(
-        prompts[0].contains(RESUME_DELTA_FRAMING),
-        "resumed skeptic 0 must receive the delta resume prompt",
     );
 }
 

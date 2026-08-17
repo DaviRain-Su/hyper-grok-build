@@ -436,7 +436,7 @@ impl SessionActor {
         trigger: &str,
         snapshot: Option<MemoryFlushSnapshot>,
     ) -> bool {
-        use crate::session::helpers::memory_flush::*;
+        use xai_grok_memory::flush::*;
 
         // Atomically acquire the flushing lock. If another flush is already
         // running (idle timer, pre-compaction, or user-requested), skip.
@@ -479,7 +479,10 @@ impl SessionActor {
                 tool = counts.tool_result,
                 total = counts.total,
             );
-            let recent = super::helpers::memory_flush::select_flush_window(chat_history, 20);
+            let recent = crate::session::helpers::memory_flush_window::select_flush_window(
+                chat_history,
+                20,
+            );
 
             let flush_count = self.memory.flush_count.load(std::sync::atomic::Ordering::Relaxed);
             let system_prompt = if flush_count > 0 {

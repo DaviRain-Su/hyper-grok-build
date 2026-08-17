@@ -93,6 +93,71 @@ fn rewind_then_resubmit_drains_immediately_and_discards_orphan() {
     assert_eq!(app.agents[&id].session.current_prompt_id, second_pid);
 }
 
+/// Ctrl+C rewind cancel carries the rewound turn's prompt id.
+#[test]
+fn cancel_rewind_effect_carries_the_rewound_prompt_id() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    dispatch(Action::SendPrompt("rewind me".into()), &mut app);
+    let pid = app.agents[&id]
+        .session
+        .current_prompt_id
+        .clone()
+        .expect("turn running");
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::CancelTurn {
+                rewind_prompt_id: Some(p),
+                ..
+            }] if *p == pid
+        ),
+        "rewind cancel must carry the captured prompt id, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(agent.session.state.is_idle());
+    assert_eq!(agent.prompt.text(), "rewind me");
+    assert!(agent.is_rewound_prompt(&pid));
+}
+
+/// No prompt id → no optimistic rewind; send a standard cancel.
+#[test]
+fn cancel_without_prompt_id_skips_rewind_and_sends_normal_cancel() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    dispatch(Action::SendPrompt("cannot rewind".into()), &mut app);
+    assert!(app.agents[&id].session.in_flight_prompt.is_some());
+    // Simulate the id being gone while the stash survives.
+    app.agents.get_mut(&id).unwrap().session.current_prompt_id = None;
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::CancelTurn {
+                rewind_prompt_id: None,
+                ..
+            }]
+        ),
+        "id-less cancel must not request a rewind, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.prompt.text().is_empty(),
+        "no optimistic composer restore without an id"
+    );
+    assert_eq!(
+        agent.scrollback.len(),
+        1,
+        "the prompt block stays in scrollback (standard cancel)"
+    );
+    assert!(agent.session.state.is_cancelling());
+}
+
 /// Set up an app whose agent has one user prompt + one agent message in
 /// the transcript, is inline-editing that prompt with `edited` typed in,
 /// and has an unrelated draft sitting in the composer.

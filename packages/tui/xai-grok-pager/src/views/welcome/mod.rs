@@ -138,6 +138,8 @@ pub struct WelcomeRenderResult {
     pub refresh_rect: Option<Rect>,
     /// Hit-test rect for the gate URL link (click to open in browser).
     pub gate_url_rect: Option<Rect>,
+    /// Hit-test rects for the inline links, tagged with their index, one per row a link wraps to.
+    pub consent_link_rects: Vec<(usize, Rect)>,
     /// `None` when this frame did not paint the notice.
     pub consent_legibility: Option<crate::app::consent::ConsentLegibility>,
     /// Whether a "Changelog" menu action was rendered (above Quit), so the
@@ -622,6 +624,7 @@ pub struct WelcomeRenderParams<'a> {
     /// welcome screen renders the trust question instead of the normal prompt.
     pub trust_state: &'a TrustState,
     pub consent_state: &'a crate::app::consent::ConsentState,
+    pub consent_hover_link: Option<usize>,
     pub login_label: Option<&'a str>,
     pub auth_code_input: &'a str,
     pub auth_code_cursor_byte: usize,
@@ -829,6 +832,7 @@ pub fn render_welcome(
                     &theme,
                     notice,
                     params.selected,
+                    params.consent_hover_link,
                     params.pending_hint.clone(),
                     h_margin,
                     params.compact,
@@ -2299,6 +2303,7 @@ fn render_welcome_done(
         auth_fallback_rect: None,
         refresh_rect: refresh_hit_rect,
         gate_url_rect: gate_url_hit_rect,
+        consent_link_rects: Vec::new(),
         consent_legibility: None,
         changelog_action_present: show_changelog_action,
         changelog_cta_rect,
@@ -2913,6 +2918,7 @@ mod tests {
             auth_state,
             trust_state,
             consent_state: &ConsentState::Done,
+            consent_hover_link: None,
             login_label: None,
             auth_code_input: "",
             auth_code_cursor_byte: 0,

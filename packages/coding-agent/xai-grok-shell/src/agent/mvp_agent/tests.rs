@@ -4849,11 +4849,17 @@ fn explicit_close_finalizes_the_replica() {
             (
                 options.cancel_subagents,
                 options.kill_background_tasks,
-                options.rewind_if_no_output,
+                options.history.clone(),
                 options.trigger.as_ref().map(|t| t.as_str()),
                 options.user_initiated
             ),
-            (true, true, false, Some("session_close"), false),
+            (
+                true,
+                true,
+                crate::session::CancelHistoryDisposition::Keep,
+                Some("session_close"),
+                false
+            ),
         );
         assert!(
             matches!(

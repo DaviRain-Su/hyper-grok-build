@@ -37,6 +37,7 @@ xai-grok-http = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-grok-version = { workspace = true }
 xai-sqlite-journal = { workspace = true }
+xai-token-estimation = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }

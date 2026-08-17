@@ -11,7 +11,7 @@ fn gate() -> ConsentGate {
         version: Some(3),
         title: Some("Updated terms".to_owned()),
         body: Some(format!(
-            "Review our Terms of Service at {TOS_URL} before continuing."
+            "Review our [Terms of Service]({TOS_URL}) before continuing."
         )),
         ..Default::default()
     }
@@ -45,6 +45,18 @@ fn answered(notice_id: &str, version: i32) -> BTreeMap<String, ConsentAnswer> {
     )])
 }
 
+/// Everything the reader sees, in order; the urls never reach the screen.
+fn painted(notice: &ConsentNotice) -> String {
+    notice
+        .segments
+        .iter()
+        .map(|s| match s {
+            ConsentSegment::Text(text) => text.as_str(),
+            ConsentSegment::Link { label, .. } => label.as_str(),
+        })
+        .collect()
+}
+
 #[test]
 fn valid_gate_arms_pending() {
     let gate = gate();
@@ -56,7 +68,6 @@ fn valid_gate_arms_pending() {
     };
     assert_eq!(notice.version, 3);
     assert_eq!(notice.accept_label, "Got it");
-    assert!(notice.body.contains("Terms of Service"));
 }
 
 #[test]
@@ -88,6 +99,85 @@ fn an_answer_from_this_run_suppresses() {
     i.answered_this_run = Some((NOTICE_ID, 3));
 
     assert!(matches!(consent_verdict(&i), ConsentState::Done));
+}
+
+/// The index is what a click or a number key resolves through, so it is part of the parse.
+#[test]
+fn two_links_are_indexed_in_order() {
+    let mut gate = gate();
+    gate.body = Some("Read [Terms](https://x.ai/a) and [Policy](https://x.ai/b).".to_owned());
+
+    let notice = ConsentNotice::try_from_remote(&gate).expect("valid");
+
+    assert_eq!(
+        notice.segments,
+        vec![
+            ConsentSegment::Text("Read ".to_owned()),
+            ConsentSegment::Link {
+                index: 0,
+                label: "Terms".to_owned()
+            },
+            ConsentSegment::Text(" and ".to_owned()),
+            ConsentSegment::Link {
+                index: 1,
+                label: "Policy".to_owned()
+            },
+            ConsentSegment::Text(".".to_owned()),
+        ]
+    );
+    assert_eq!(notice.links, vec!["https://x.ai/a", "https://x.ai/b"]);
+}
+
+/// A url we would not open costs a hyperlink, not the whole notice: the sentence still reads.
+#[test]
+fn a_url_we_will_not_open_degrades_to_plain_text() {
+    for url in [
+        "http://x.ai/a",
+        // `cmd /c start` on Windows would read the tail as a second command.
+        "https://x.ai/a&calc",
+        // A percent pair is a variable to the same shell.
+        "https://x.ai/%USERNAME%",
+    ] {
+        let mut gate = gate();
+        gate.body = Some(format!("Read [Terms]({url}) now."));
+
+        let notice = ConsentNotice::try_from_remote(&gate).expect("valid");
+
+        assert!(notice.links.is_empty(), "{url} must not be openable");
+        assert_eq!(
+            notice.segments,
+            vec![
+                ConsentSegment::Text("Read ".to_owned()),
+                ConsentSegment::Text("Terms".to_owned()),
+                ConsentSegment::Text(" now.".to_owned()),
+            ],
+            "{url} must leave the sentence intact",
+        );
+    }
+}
+
+/// A label of spaces paints nothing, so its number key would open a url out of nowhere.
+#[test]
+fn a_link_with_nothing_to_paint_is_dropped() {
+    let mut gate = gate();
+    gate.body = Some("Read [ ](https://x.ai/a) and [Terms](https://x.ai/b).".to_owned());
+
+    let notice = ConsentNotice::try_from_remote(&gate).expect("valid");
+
+    assert_eq!(notice.links, vec!["https://x.ai/b"]);
+    // The surviving link takes index 0, so the dropped one leaves no gap for a key to fall into.
+    assert_eq!(
+        notice.segments,
+        vec![
+            ConsentSegment::Text("Read ".to_owned()),
+            ConsentSegment::Text(" and ".to_owned()),
+            ConsentSegment::Link {
+                index: 0,
+                label: "Terms".to_owned()
+            },
+            ConsentSegment::Text(".".to_owned()),
+        ]
+    );
 }
 
 #[test]
@@ -130,7 +220,15 @@ fn escapes_and_reordering_characters_are_stripped_from_the_body() {
 
     let notice = ConsentNotice::try_from_remote(&gate).expect("valid");
 
-    assert_eq!(notice.body, "before[31mafter");
+    let painted: String = notice
+        .segments
+        .iter()
+        .map(|s| match s {
+            ConsentSegment::Text(t) => t.as_str(),
+            ConsentSegment::Link { label, .. } => label.as_str(),
+        })
+        .collect();
+    assert_eq!(painted, "before[31mafter");
 }
 
 /// Not conditional on the server ack, or a missing backend would re-ask someone who answered.
@@ -175,6 +273,19 @@ fn answer_from_another_user_does_not_suppress() {
     assert!(matches!(verdict, ConsentState::Pending { .. }));
 }
 
+/// An api key carries no email. An answer filed under no account belongs to nobody in particular,
+/// so it must not answer for the next key-authenticated user on the machine.
+#[test]
+fn an_accountless_answer_does_not_suppress() {
+    let gate = gate();
+    let mut answers = answered(NOTICE_ID, 3);
+    answers.get_mut(NOTICE_ID).unwrap().account = None;
+    let mut i = inputs(Some(&gate), &answers);
+    i.account = None;
+
+    assert!(matches!(consent_verdict(&i), ConsentState::Pending { .. }));
+}
+
 #[test]
 fn minimal_mode_fails_open() {
     let gate = gate();
@@ -206,6 +317,99 @@ fn an_unusable_id_refuses() {
             ConsentNotice::try_from_remote(&gate),
             Err(ConsentArmRefusal::UnusableId),
             "{id:?} must not arm the gate",
+        );
+    }
+}
+
+/// Markup the parser cannot pair off would have to be painted or dropped. Painting shows a url,
+/// dropping serves a legal notice with a sentence missing, so neither is on offer.
+#[test]
+fn unpairable_markup_refuses() {
+    for body in [
+        // The byte cap can cut a link mid-url.
+        "Read our [Terms](https://x.ai/legal/te",
+        // A url holds no space, so this `)` closes the second link, not the first.
+        "Read [Terms](https://x.ai/a [Policy](https://x.ai/b) now.",
+        // The same, with the two links flush against each other and no space to give it away.
+        "Read [Terms](https://x.ai/a[Policy](https://x.ai/b) now.",
+        // A `]` too many desyncs the pairing and leaves the url with no `[` in front of it.
+        "[a] b](https://x.ai/legal/tos) applies.",
+    ] {
+        let mut gate = gate();
+        gate.body = Some(body.to_owned());
+
+        assert_eq!(
+            ConsentNotice::try_from_remote(&gate),
+            Err(ConsentArmRefusal::UnpairedMarkup),
+            "{body:?} must not arm the gate",
+        );
+    }
+}
+
+/// Terminals linkify a bare url on sight, so one outside a link would open without ever passing
+/// the checks a link's url goes through.
+#[test]
+fn a_url_outside_a_link_refuses() {
+    let mut gate = gate();
+    gate.body = Some("Review the terms at https://x.ai/legal/tos before continuing.".to_owned());
+
+    assert_eq!(
+        ConsentNotice::try_from_remote(&gate),
+        Err(ConsentArmRefusal::UrlInPlainText)
+    );
+}
+
+/// A body that reduces to nothing readable must refuse, not arm a notice with no text: the screen
+/// withholds accept for a body it did not paint, so the user could only ever quit.
+#[test]
+fn a_body_that_paints_nothing_refuses() {
+    for body in [
+        "[](https://x.ai/legal/tos)",
+        // Combining marks survive sanitizing and occupy no columns.
+        "\u{0301}\u{0301}\u{0301}",
+        // A space between them makes the row non-empty without making it readable.
+        "\u{0301} \u{0301}",
+    ] {
+        let mut gate = gate();
+        gate.body = Some(body.to_owned());
+
+        assert_eq!(
+            ConsentNotice::try_from_remote(&gate),
+            Err(ConsentArmRefusal::EmptyBody),
+            "{body:?} must not arm the gate",
+        );
+    }
+}
+
+/// Whatever the body does, no url and no raw markup may reach the screen, and no link may point
+/// somewhere the label does not say.
+#[test]
+fn no_body_shape_leaks_a_url_or_raw_markup() {
+    let bodies = [
+        "[](https://x.ai/legal/tos) applies.",
+        "[note] see [AUP](https://x.ai/legal/aup).",
+        "Read [Terms](javascript:alert(1)) now.",
+        "Read [Terms](https://x.ai/a&calc) now.",
+        // A `)` inside the url ends it early and leaves the rest to be painted as prose.
+        "Read [Terms](https://x.ai/a(b)https://evil.example) now.",
+    ];
+
+    for body in bodies {
+        let mut gate = gate();
+        gate.body = Some(body.to_owned());
+
+        let Ok(notice) = ConsentNotice::try_from_remote(&gate) else {
+            // Refusing is the other safe answer: nothing painted leaks nothing.
+            continue;
+        };
+
+        let painted = painted(&notice);
+        assert!(!painted.contains("http"), "{body:?} painted {painted:?}");
+        assert!(!painted.contains("]("), "{body:?} painted {painted:?}");
+        assert!(
+            notice.links.iter().all(|url| is_paintable_url(url)),
+            "{body:?} kept {:?}",
+            notice.links,
         );
     }
 }
