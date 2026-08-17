@@ -4,6 +4,14 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.5-r2] — 2026-08-18
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `d71f6e0`
+  (monorepo `SOURCE_REV` `c2dab05…`), one sync commit past the previous
+  `9fabade` baseline. Upstream changed only session HEAD metadata
+  resolution to read from refs only, never the object database.
+
 ## [1.0.5-r1] — 2026-08-17
 
 ### Changed
