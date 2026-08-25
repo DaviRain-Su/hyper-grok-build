@@ -86,7 +86,7 @@ mod tests {
     fn redact_owned_scrubs_secret_shapes() {
         let out = redact_owned("key sk-CANARYabcdefghij1234567890 end")
             .expect("secret must trigger a rewrite");
-        assert!(!out.contains("CANARY"), "secret survived: {out}");
+        assert!(!out.contains("CANARY"));
     }
 
     #[test]
@@ -109,11 +109,8 @@ mod tests {
     fn redact_urls_in_text_reduces_embedded_urls() {
         let err = "error sending request for url (https://collector.corp.example:4318/v1/logs?token=CANARY): connection reset";
         let out = redact_urls_in_text(err);
-        assert!(
-            out.contains("https://collector.corp.example:4318"),
-            "origin lost: {out}"
-        );
-        assert!(!out.contains("/v1/logs"), "path survived: {out}");
-        assert!(!out.contains("CANARY"), "query token survived: {out}");
+        assert!(out.contains("https://collector.corp.example:4318"));
+        assert!(!out.contains("/v1/logs"));
+        assert!(!out.contains("CANARY"));
     }
 }

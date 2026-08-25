@@ -1,10 +1,12 @@
-//! `/edit-prompt` -- edit the minimal-mode composer in an external editor.
+//! `/edit-prompt` -- edit the composer in an external editor.
+//!
+//! The full TUI's only route to the editor (`Ctrl+G` stays with the tasks
+//! pane there); in minimal mode it doubles as the fallback for terminals
+//! that reserve the `Ctrl+G` chord.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
-use crate::slash::{ModeSupport, Remedy};
 
-/// Minimal-only fallback for terminals that reserve `Ctrl+G`.
 pub struct EditPromptCommand;
 
 impl SlashCommand for EditPromptCommand {
@@ -22,12 +24,6 @@ impl SlashCommand for EditPromptCommand {
 
     fn session_scoped(&self) -> bool {
         true
-    }
-
-    fn mode_support(&self) -> ModeSupport {
-        ModeSupport::MinimalOnly(Remedy::SwitchMode {
-            why: "the full TUI has no external-editor path — Ctrl+G is the tasks pane there",
-        })
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
@@ -63,24 +59,21 @@ mod tests {
     }
 
     #[test]
-    fn opens_the_external_editor() {
+    fn opens_the_external_editor_in_both_modes() {
         let command = EditPromptCommand;
         let models = ModelState::default();
         let bundle = BundleState::default();
         let session_id = agent_client_protocol::SessionId::from("session".to_owned());
 
-        assert!(matches!(
-            command.run(
-                &mut exec_ctx(
-                    &models,
-                    &bundle,
-                    Some(&session_id),
-                    crate::app::ScreenMode::Minimal,
-                ),
-                "",
-            ),
-            CommandResult::Action(Action::EditPromptExternal)
-        ));
+        for mode in [
+            crate::app::ScreenMode::Minimal,
+            crate::app::ScreenMode::Fullscreen,
+        ] {
+            assert!(matches!(
+                command.run(&mut exec_ctx(&models, &bundle, Some(&session_id), mode), ""),
+                CommandResult::Action(Action::EditPromptExternal)
+            ));
+        }
     }
 
     #[test]

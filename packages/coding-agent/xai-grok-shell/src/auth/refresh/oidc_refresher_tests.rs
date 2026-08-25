@@ -776,8 +776,12 @@ async fn lock_timeout_falls_through_to_refresh() {
 
     // Use a very short timeout so the test doesn't wait 30s.
     let _lock = mgr
-        .try_lock_auth_file_async(std::time::Duration::from_millis(100))
-        .await;
+        .try_lock_auth_file_async(
+            std::time::Duration::from_millis(100),
+            crate::auth::manager::lock::Heartbeat::Skip,
+        )
+        .await
+        .into_guard();
     assert!(_lock.is_none(), "lock should timeout");
 
     // The refresh should still succeed (refresher doesn't need the lock).

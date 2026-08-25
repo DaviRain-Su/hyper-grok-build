@@ -38,7 +38,7 @@ pub(crate) fn detect_plain_urls_with_offset(
     let mut result = Vec::new();
     let mut current_id = next_id;
     let mut finder = LinkFinder::new();
-    finder.kinds(&[LinkKind::Url]);
+    finder.kinds(&[LinkKind::Url, LinkKind::Email]);
 
     for (i, line) in lines.iter().enumerate() {
         let line_index = line_index_offset + i;
@@ -48,12 +48,30 @@ pub(crate) fn detect_plain_urls_with_offset(
             let span_text: &str = span.content.as_ref();
 
             for link in finder.links(span_text) {
-                let before = &span_text[..link.start()];
-                let matched = &span_text[link.start()..link.end()];
+                let start = link.start();
+                let end = link.end();
+                if start > end
+                    || end > span_text.len()
+                    || !span_text.is_char_boundary(start)
+                    || !span_text.is_char_boundary(end)
+                {
+                    continue;
+                }
+                let before = &span_text[..start];
+                let matched = &span_text[start..end];
 
                 let col_start = display_col + unicode_display_width(before);
                 let col_end = col_start + unicode_display_width(matched);
-                let url = link.as_str().to_string();
+                let url = match link.kind() {
+                    LinkKind::Email => {
+                        // `git@github.com:org/repo` is an scp remote, not mail.
+                        if matches!(span_text.as_bytes().get(end), Some(b':' | b'/')) {
+                            continue;
+                        }
+                        format!("mailto:{}", link.as_str())
+                    }
+                    _ => link.as_str().to_string(),
+                };
 
                 // Dedup: skip if any existing or already-added target overlaps
                 // on the same line. Overlap: cand.start < ex.end && ex.start < cand.end.
@@ -188,6 +206,42 @@ mod tests {
             hyperlinks.len(),
             autolink_count,
             "plain-URL scan should not add duplicates on top of autolink targets"
+        );
+    }
+
+    #[test]
+    fn plain_email_in_prose_produces_mailto_target() {
+        let text = "Email foo@bar.com please.\n";
+        let hyperlinks = finish_and_get_hyperlinks(text);
+
+        assert_eq!(hyperlinks.len(), 1, "exactly one hyperlink expected");
+        assert_eq!(hyperlinks[0].url, "mailto:foo@bar.com");
+
+        let mut renderer = StreamingMarkdownRenderer::new(test_style::STYLE, true);
+        renderer.push_and_render(text, None);
+        let view = renderer.finish(None);
+        let rendered = line_to_string(&view.lines[hyperlinks[0].line_index]);
+        let slice: String = rendered
+            .chars()
+            .skip(hyperlinks[0].column_range.start)
+            .take(hyperlinks[0].column_range.len())
+            .collect();
+        assert_eq!(slice, "foo@bar.com");
+    }
+
+    #[test]
+    fn email_after_multibyte_prefix_is_mailto() {
+        let hyperlinks = finish_and_get_hyperlinks("連絡先: foo@bar.com です\n");
+        assert_eq!(hyperlinks.len(), 1);
+        assert_eq!(hyperlinks[0].url, "mailto:foo@bar.com");
+    }
+
+    #[test]
+    fn scp_git_remote_is_not_mailto() {
+        let hyperlinks = finish_and_get_hyperlinks("clone git@github.com:org/repo.git\n");
+        assert!(
+            hyperlinks.iter().all(|h| !h.url.starts_with("mailto:")),
+            "scp-style git remotes must not become mailto links: {hyperlinks:?}"
         );
     }
 

@@ -60,9 +60,15 @@ pub(crate) fn clear_quit_notify() {
 /// interact with this flag.
 static TERMINAL_OWNED: AtomicBool = AtomicBool::new(false);
 
+/// Mode-only update for in-process switches; never re-run [`install`] (it
+/// would spawn a second signal task).
+pub(crate) fn set_mode(mode: ScreenMode) {
+    SCREEN_MODE_FULLSCREEN.store(mode.is_fullscreen(), Ordering::Release);
+}
+
 /// Install signal handlers for the TUI lifecycle. Call after `init_terminal`.
 pub(crate) fn install(mode: ScreenMode) {
-    SCREEN_MODE_FULLSCREEN.store(mode.is_fullscreen(), Ordering::Release);
+    set_mode(mode);
     TERMINAL_OWNED.store(true, Ordering::Release);
 
     // Ignore SIGTTIN/SIGTTOU so the pager can't be suspended if a
@@ -257,6 +263,7 @@ fn flush_telemetry_and_exit(exit_code: i32) -> ! {
     xai_tty_utils::global_process_scope().kill_all();
     // Restore fd 2 so Sentry/OTEL flushes reach the terminal.
     xai_tty_utils::restore_native_stderr();
+    crate::app::status_line::metrics::global().report_health();
     xai_grok_telemetry::sentry::flush_on_shutdown();
     xai_grok_telemetry::otel_layer::shutdown_otel();
     // Flush the --debug firehose on TUI signal exit (this path bypasses main's flush).

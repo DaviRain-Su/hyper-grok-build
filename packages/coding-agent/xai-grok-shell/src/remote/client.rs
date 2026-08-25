@@ -290,12 +290,9 @@ impl Default for BackendClient {
 }
 impl BackendClient {
     fn build_default_client() -> reqwest::Client {
-        xai_grok_extra_ca::with_extra_root_certificates(
-                reqwest::Client::builder()
-                    .connect_timeout(Duration::from_secs(10))
-                    .timeout(DEFAULT_TIMEOUT),
-            )
-            .build()
+        xai_grok_extra_ca::build_reqwest_client(|builder| {
+                builder.connect_timeout(Duration::from_secs(10)).timeout(DEFAULT_TIMEOUT)
+            })
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "failed to build backend HTTP client; falling back to shared client");
                 crate::http::shared_client()
@@ -918,6 +915,9 @@ pub(crate) fn parse_remote_model_value(
             .or_else(|| get_u64(obj, "inference_idle_timeout_secs")),
         max_retries: get_u64(obj, "maxRetries")
             .or_else(|| get_u64(obj, "max_retries"))
+            .and_then(|v| u32::try_from(v).ok()),
+        subagent_rate_limit_max_attempts: get_u64(obj, "subagentRateLimitMaxAttempts")
+            .or_else(|| get_u64(obj, "subagent_rate_limit_max_attempts"))
             .and_then(|v| u32::try_from(v).ok()),
         hidden: obj
             .get("hidden")

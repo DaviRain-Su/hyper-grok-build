@@ -3,7 +3,7 @@
 //! Shared cache-aligned request setup lives in [`super::side_call`].
 //! Per-turn dashboard summary lifecycle lives in [`super::turn_summary`].
 
-use super::side_call::{AuxCall, log_prompt_cache_hit};
+use super::side_call::{AuxCall, log_prompt_cache_usage};
 use super::*;
 
 use crate::session::SideQuestionError;
@@ -57,14 +57,17 @@ impl SessionActor {
             .await
             .map_err(|e| SideQuestionError::PrepareClient(e.to_string()))?;
 
-        // Full conversation snapshot including system prompt, tool calls, and results.
-        let conversation = self.chat_state_handle.get_conversation().await;
-        let mut items: Vec<ConversationItem> =
-            if sampling_client.api_backend().requires_reasoning_strip() {
-                xai_chat_state::compaction_utils::strip_reasoning_blocks(conversation)
-            } else {
-                conversation
-            };
+        // Full conversation snapshot including system prompt, reasoning, tool calls, and results.
+        let mut items = self.chat_state_handle.get_conversation().await;
+
+        let sampling_config = self.chat_state_handle.get_sampling_config().await;
+        let reasoning_effort = sampling_config.as_ref().and_then(|c| c.reasoning_effort);
+        if super::side_call::should_strip_side_call_reasoning(
+            sampling_client.api_backend(),
+            reasoning_effort,
+        ) {
+            items = xai_chat_state::compaction_utils::strip_reasoning_blocks(items);
+        }
 
         // /btw fires mid-turn, so the snapshot may end with an assistant message whose tool_calls have no matching ToolResult yet.
         crate::session::helpers::session_recap::pop_trailing_tool_run(&mut items);
@@ -73,8 +76,6 @@ impl SessionActor {
             self.side_question_prompt_and_tools(question).await;
         items.push(instruction);
 
-        let sampling_config = self.chat_state_handle.get_sampling_config().await;
-        let reasoning_effort = sampling_config.as_ref().and_then(|c| c.reasoning_effort);
         let model = sampling_config.map(|c| c.model).unwrap_or_default();
 
         let persist = |answer: String, success: bool, error: Option<String>, attempts: u32| {
@@ -125,7 +126,7 @@ impl SessionActor {
 
         match result {
             Ok(response) => {
-                log_prompt_cache_hit("btw", sampling_client.api_backend(), &response);
+                log_prompt_cache_usage("btw", sampling_client.api_backend(), &response);
                 let content = response.assistant_text();
                 if content.is_empty() {
                     let err = SideQuestionError::EmptyResponse;
@@ -303,7 +304,7 @@ impl SessionActor {
             }
         };
 
-        log_prompt_cache_hit("recap", setup.client.api_backend(), &response);
+        log_prompt_cache_usage("recap", setup.client.api_backend(), &response);
         let raw_response = response.assistant_text();
         let summary = session_recap::clean_recap_text(&raw_response);
         if summary.is_empty() {

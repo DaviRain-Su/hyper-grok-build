@@ -797,7 +797,7 @@ mod tests {
         let path = dir.path().join("p.jsonl");
         let _guard = test_support::install_test_sink(path.clone(), 1 << 20);
 
-        crate::memory_release::release_retained_memory_with("unit-test-cliff");
+        crate::memory_release::release_retained_memory("unit-test-cliff");
 
         let body = std::fs::read_to_string(&path).unwrap();
         let purge_line = body

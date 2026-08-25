@@ -15,7 +15,13 @@ pub(crate) struct BuiltinCommand {
     /// Filtered by `CommandAvailability::allows()` at advertising time;
     /// commands that map to `BuiltinGate::AlwaysOn` are never gated.
     pub gate: BuiltinGate,
+    workflow_projection: WorkflowProjection,
     resolve: fn(args: &str) -> BuiltinAction,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowProjection {
+    None,
+    ExactName,
 }
 /// Capability gate that decides whether a `BuiltinCommand` is advertised
 /// and resolvable in a given session.
@@ -51,6 +57,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: Some("optional context about what to preserve"),
         aliases: &[],
         gate: BuiltinGate::AlwaysOn,
+        workflow_projection: WorkflowProjection::None,
         resolve: |args| BuiltinAction::Compact {
             user_context: if args.is_empty() {
                 None
@@ -65,6 +72,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: Some("on|off"),
         aliases: &["yolo"],
         gate: BuiltinGate::AlwaysOn,
+        workflow_projection: WorkflowProjection::None,
         resolve: |args| BuiltinAction::SetYolo {
             enabled: !matches!(
                 args.to_lowercase().as_str(),
@@ -78,6 +86,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: None,
         aliases: &[],
         gate: BuiltinGate::Memory,
+        workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::FlushMemory,
     },
     BuiltinCommand {
@@ -86,6 +95,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: None,
         aliases: &[],
         gate: BuiltinGate::Memory,
+        workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::Dream,
     },
     BuiltinCommand {
@@ -94,6 +104,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: Some("on|off"),
         aliases: &["mem"],
         gate: BuiltinGate::MemoryConfigured,
+        workflow_projection: WorkflowProjection::None,
         resolve: |args| {
             let trimmed = args.trim().to_lowercase();
             match trimmed.as_str() {
@@ -109,6 +120,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: None,
         aliases: &[],
         gate: BuiltinGate::AlwaysOn,
+        workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::ContextInfo,
     },
     BuiltinCommand {
@@ -117,6 +129,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: None,
         aliases: &[],
         gate: BuiltinGate::Hooks,
+        workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::HooksTrust,
     },
     BuiltinCommand {
@@ -125,6 +138,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: None,
         aliases: &[],
         gate: BuiltinGate::Hooks,
+        workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::HooksList,
     },
     BuiltinCommand {
@@ -133,6 +147,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: Some("path to hook file or directory"),
         aliases: &[],
         gate: BuiltinGate::Hooks,
+        workflow_projection: WorkflowProjection::None,
         resolve: |args| BuiltinAction::HooksAdd {
             path: args.trim().to_string(),
         },
@@ -143,6 +158,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: Some("path to hook file or directory"),
         aliases: &[],
         gate: BuiltinGate::Hooks,
+        workflow_projection: WorkflowProjection::None,
         resolve: |args| BuiltinAction::HooksRemove {
             path: args.trim().to_string(),
         },
@@ -153,6 +169,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: None,
         aliases: &[],
         gate: BuiltinGate::Hooks,
+        workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::HooksUntrust,
     },
     BuiltinCommand {
@@ -161,6 +178,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: Some("list | reload | trust <path> | add <path> | remove <path>"),
         aliases: &["plugin"],
         gate: BuiltinGate::Plugins,
+        workflow_projection: WorkflowProjection::None,
         resolve: |args| {
             let trimmed = args.trim();
             if trimmed.is_empty() || trimmed == "list" {
@@ -212,6 +230,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: None,
         aliases: &[],
         gate: BuiltinGate::Plugins,
+        workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::PluginsReload,
     },
     BuiltinCommand {
@@ -250,6 +269,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: None,
         aliases: &["status", "info"],
         gate: BuiltinGate::AlwaysOn,
+        workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::SessionInfo,
     },
     BuiltinCommand {
@@ -258,6 +278,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: Some("feedback text"),
         aliases: &[],
         gate: BuiltinGate::Feedback,
+        workflow_projection: WorkflowProjection::None,
         resolve: |args| BuiltinAction::Feedback {
             text: args.trim().to_string(),
         },
@@ -268,16 +289,20 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: Some("<query>"),
         aliases: &[],
         gate: BuiltinGate::WorkflowLaunches,
+        workflow_projection: WorkflowProjection::ExactName,
         resolve: |args| BuiltinAction::DeepResearch {
             query: args.trim().to_string(),
         },
     },
     BuiltinCommand {
         name: "workflow",
-        description: "Launch a saved workflow, or manage a run (pause, resume, stop, save)",
-        argument_hint: Some("<name> [args] | pause|resume|stop|save [name]"),
+        description: "Launch a saved workflow, list runs, or manage a run (pause, resume, stop, save)",
+        argument_hint: Some(
+            "<name> [--agent-budget N] [--effort LEVEL] [args] | runs | pause|resume|stop|save [name]",
+        ),
         aliases: &[],
         gate: BuiltinGate::WorkflowManagement,
+        workflow_projection: WorkflowProjection::None,
         resolve: |args| {
             const OPS: [&str; 4] = ["pause", "resume", "stop", "save"];
             let trimmed = args.trim();
@@ -285,14 +310,17 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
             let first = parts.next().unwrap_or_default();
             let second = parts.next().unwrap_or_default();
             let first_is_op = OPS.contains(&first.to_lowercase().as_str());
+            let first_is_runs = first.eq_ignore_ascii_case("runs") && second.is_empty();
             let second_is_final_op =
                 OPS.contains(&second.to_lowercase().as_str()) && parts.next().is_none();
-            if first.is_empty() || first_is_op || second_is_final_op {
+            if first.is_empty() || first_is_op || first_is_runs || second_is_final_op {
                 let (op, run_id) = if first_is_op {
                     (
                         first.to_lowercase(),
                         trimmed[first.len()..].trim_start().to_string(),
                     )
+                } else if first_is_runs {
+                    ("runs".to_string(), String::new())
                 } else if second_is_final_op {
                     (second.to_lowercase(), first.to_string())
                 } else {
@@ -313,6 +341,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: Some("<objective> [--budget <tokens>] | status | pause | resume | clear"),
         aliases: &[],
         gate: BuiltinGate::Goal,
+        workflow_projection: WorkflowProjection::None,
         resolve: |args| {
             let trimmed = args.trim();
             match trimmed.to_lowercase().as_str() {
@@ -372,6 +401,7 @@ const PROMPT_COMMANDS: &[BuiltinCommand] = &[BuiltinCommand {
     argument_hint: Some("[interval] <prompt>"),
     aliases: &[],
     gate: BuiltinGate::Scheduler,
+    workflow_projection: WorkflowProjection::None,
     resolve: |_| unreachable!("/loop is dispatched via the PROMPT_COMMANDS path in resolve()"),
 }];
 /// Per-session capability snapshot used to gate which built-in slash
@@ -535,6 +565,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "personas",
     "plan",
     "plan-view",
+    "plugin",
     "plugins",
     "preferences",
     "prefs",
@@ -583,6 +614,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "vim-mode",
     "voice",
     "welcome",
+    "workflow",
     "workflows",
     "yolo",
 ];
@@ -617,6 +649,32 @@ struct EffectiveCommandCatalog<'a> {
 struct SkillCommand<'a> {
     name: String,
     skill: &'a SkillInfo,
+}
+fn exact_workflow_projection<'a>(
+    command: &BuiltinCommand,
+    workflows: &'a [crate::session::workflow::registry::WorkflowListing],
+) -> Option<&'a crate::session::workflow::registry::WorkflowListing> {
+    match command.workflow_projection {
+        WorkflowProjection::None => None,
+        WorkflowProjection::ExactName => {
+            let mut matches = workflows
+                .iter()
+                .filter(|workflow| workflow.name == command.name);
+            let workflow = matches.next()?;
+            matches.next().is_none().then_some(workflow)
+        }
+    }
+}
+fn workflow_meta(workflow: &crate::session::workflow::registry::WorkflowListing) -> acp::Meta {
+    let mut meta = acp::Meta::new();
+    meta.insert(
+        "workflowSource".to_string(),
+        serde_json::json!(workflow.source),
+    );
+    if let Some(path) = &workflow.path {
+        meta.insert("workflowPath".to_string(), serde_json::json!(path));
+    }
+    meta
 }
 impl<'a> EffectiveCommandCatalog<'a> {
     fn build(
@@ -751,13 +809,13 @@ pub(super) fn available_commands(
             + scheme_commands.len(),
     );
     commands.extend(catalog.builtins.iter().map(|builtin| {
-        acp::AvailableCommand::new(builtin.name.to_string(), builtin.description.to_string()).input(
-            builtin.argument_hint.map(|hint| {
+        acp::AvailableCommand::new(builtin.name.to_string(), builtin.description.to_string())
+            .input(builtin.argument_hint.map(|hint| {
                 acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
                     hint.to_string(),
                 ))
-            }),
-        )
+            }))
+            .meta(exact_workflow_projection(builtin, workflows).map(workflow_meta))
     }));
     commands.extend(catalog.skills.iter().map(|command| {
         let skill = command.skill;
@@ -809,7 +867,9 @@ pub(super) fn available_commands(
             format!("Workflow: {}", workflow.description),
         )
         .input(Some(acp::AvailableCommandInput::Unstructured(
-            acp::UnstructuredCommandInput::new("<args>".to_string()),
+            acp::UnstructuredCommandInput::new(
+                "[--agent-budget N] [--effort LEVEL] [args]".to_string(),
+            ),
         )))
         .meta(meta)
     }));

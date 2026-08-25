@@ -25,13 +25,18 @@
 //!   cargo test -p xai-grok-shell --features test-support --test session_load_perf -- --nocapture
 //!   cargo test -p xai-grok-shell --features test-support --test session_load_perf full_session_load_e2e -- --ignored --nocapture
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::{self as acp};
+
+#[allow(dead_code)]
+#[path = "acp_harness/mod.rs"]
+mod acp_harness;
+#[path = "perf_harness/mod.rs"]
+mod perf_harness;
+use perf_harness::{PerfRecorder, SharedRecorded};
 use tempfile::TempDir;
 
 use xai_grok_shell::session::info::Info;
@@ -326,51 +331,18 @@ async fn phase_breakdown_real_functions() {
 
 // ───────────────────────── TEST 2: true e2e ─────────────────────────
 
-/// Counts replayed notifications and records first/last receipt timestamps so
-/// we can see how long the client streams history before `load` returns.
-#[derive(Default)]
-struct LoadCounters {
-    count: u64,
-    /// `available_commands_update` notifications forwarded during the load.
-    /// History replay skips the (thousands of) historical ones, so this stays tiny.
-    acu_count: u64,
-    first_at: Option<Instant>,
-    last_at: Option<Instant>,
-}
-
-struct CountingClient {
-    counters: Rc<RefCell<LoadCounters>>,
-}
-
-#[async_trait::async_trait(?Send)]
-impl acp::Client for CountingClient {
-    async fn request_permission(
-        &self,
-        args: acp::RequestPermissionRequest,
-    ) -> acp::Result<acp::RequestPermissionResponse> {
-        let outcome = args
-            .options
-            .first()
-            .map(|o| {
-                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
-                    o.option_id.clone(),
-                ))
-            })
-            .unwrap_or(acp::RequestPermissionOutcome::Cancelled);
-        Ok(acp::RequestPermissionResponse::new(outcome))
-    }
-
-    async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
-        let mut c = self.counters.borrow_mut();
-        let now = Instant::now();
-        c.count += 1;
-        if matches!(args.update, acp::SessionUpdate::AvailableCommandsUpdate(_)) {
-            c.acu_count += 1;
-        }
-        c.first_at.get_or_insert(now);
-        c.last_at = Some(now);
-        Ok(())
-    }
+/// Replay stats derived from the shared recorder's raw callback log.
+fn load_counters(rec: &SharedRecorded) -> (u64, u64, Option<Instant>, Option<Instant>) {
+    let rec = rec.borrow();
+    let count = rec.session_updates.len() as u64;
+    let acu = rec
+        .session_updates
+        .iter()
+        .filter(|(_, kind)| kind == "available_commands_update")
+        .count() as u64;
+    let first = rec.session_updates.first().map(|(at, _)| *at);
+    let last = rec.session_updates.last().map(|(at, _)| *at);
+    (count, acu, first, last)
 }
 
 /// Parse the production instrumentation JSON log into `(name -> elapsed_ms)`.
@@ -414,7 +386,7 @@ fn parse_instrumentation_log(path: &Path) -> Vec<(String, f64)> {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "heavy: builds a full MvpAgent and replays a large session; run with --ignored"]
 async fn full_session_load_e2e() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    xai_grok_extra_ca::ensure_default_crypto_provider();
 
     let server = xai_grok_test_support::MockInferenceServer::start()
         .await
@@ -466,10 +438,7 @@ async fn full_session_load_e2e() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
-            let counters = Rc::new(RefCell::new(LoadCounters::default()));
-            let client = CountingClient {
-                counters: counters.clone(),
-            };
+            let (client, rec) = PerfRecorder::new();
             let loaded = load_session_via_agent(
                 client,
                 "perf-test",
@@ -485,26 +454,20 @@ async fn full_session_load_e2e() {
             // Snapshot replay results immediately, before the post-load
             // AdvertiseCommands re-advertise can arrive, so `acu_replayed` counts
             // the ACUs forwarded during history replay (the skip count).
-            let (replay_count, acu_replayed, ttfn, ttln) = {
-                let c = counters.borrow();
-                (
-                    c.count,
-                    c.acu_count,
-                    c.first_at
-                        .map(|t| t.duration_since(load_started).as_secs_f64() * 1e3)
-                        .unwrap_or(0.0),
-                    c.last_at
-                        .map(|t| t.duration_since(load_started).as_secs_f64() * 1e3)
-                        .unwrap_or(0.0),
-                )
-            };
+            let (replay_count, acu_replayed, first_at, last_at) = load_counters(&rec);
+            let ttfn = first_at
+                .map(|t| t.duration_since(load_started).as_secs_f64() * 1e3)
+                .unwrap_or(0.0);
+            let ttln = last_at
+                .map(|t| t.duration_since(load_started).as_secs_f64() * 1e3)
+                .unwrap_or(0.0);
 
             // The post-load `AdvertiseCommands` re-advertise (the safety basis for
             // dropping historical ACUs on replay) must reach the client. It's
             // enqueued at the end of `load_session` and forwarded async, so poll.
             // Replay forwards 0 ACUs, so any received ACU is the re-advertise.
             let readvertised = tokio::time::timeout(Duration::from_secs(10), async {
-                while counters.borrow().acu_count == 0 {
+                while load_counters(&rec).1 == 0 {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })

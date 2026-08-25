@@ -139,6 +139,55 @@ where
             .map_err(serde::de::Error::custom),
     }
 }
+/// Parse a JSON value as a finite `f64`, accepting numbers (fractional
+/// allowed) and numeric string forms.
+fn parse_lenient_f64_value(value: &serde_json::Value) -> Result<f64, String> {
+    let f = match value {
+        serde_json::Value::Number(n) => n
+            .as_f64()
+            .ok_or("expected number, got invalid numeric representation".to_string())?,
+        serde_json::Value::String(s) => parse_string_to_f64(s)?,
+        other => return Err(format!("expected number, got {other}")),
+    };
+    if !f.is_finite() {
+        return Err("expected finite number".into());
+    }
+    Ok(f)
+}
+/// Deserialize `Option<f64>` from a JSON number or numeric string.
+/// Fractional values are allowed (unlike the lenient integer deserializers).
+pub fn deserialize_lenient_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => parse_lenient_f64_value(&v)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
+}
+/// Deserialize `Option<String>` from a JSON string, number, or boolean —
+/// scalar values are coerced to their string form. Mirrors zod's
+/// `z.coerce.string()` used by the TypeScript grok-computer tools, where
+/// models routinely send numeric-looking IDs (e.g. CDP request IDs such as
+/// `62576.34`) as JSON numbers.
+pub fn deserialize_lenient_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s)),
+        Some(serde_json::Value::Number(n)) => Ok(Some(n.to_string())),
+        Some(serde_json::Value::Bool(b)) => Ok(Some(b.to_string())),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "expected string, got {other}"
+        ))),
+    }
+}
 /// Lenient boolean deserializers (shared via `xai-tool-types`), re-exported so
 /// fields reference them under the same `crate::types::schema::` path as above.
 pub use xai_tool_types::{deserialize_lenient_bool, deserialize_lenient_option_bool};
@@ -312,6 +361,86 @@ mod tests {
     #[test]
     fn usize_accepts_negative_zero_float() {
         assert_eq!(deserialize_usize(r#"{"value":-0.0}"#).unwrap(), 0);
+    }
+    fn deserialize_f64(json: &str) -> Result<Option<f64>, serde_json::Error> {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(default, deserialize_with = "deserialize_lenient_f64")]
+            value: Option<f64>,
+        }
+        let w: Wrapper = serde_json::from_str(json)?;
+        Ok(w.value)
+    }
+    #[test]
+    fn f64_accepts_fractional_float() {
+        assert_eq!(deserialize_f64(r#"{"value":2.5}"#).unwrap(), Some(2.5));
+    }
+    #[test]
+    fn f64_accepts_integer() {
+        assert_eq!(deserialize_f64(r#"{"value":5}"#).unwrap(), Some(5.0));
+    }
+    #[test]
+    fn f64_accepts_numeric_string() {
+        assert_eq!(deserialize_f64(r#"{"value":"0.5"}"#).unwrap(), Some(0.5));
+    }
+    #[test]
+    fn f64_null_and_missing_are_none() {
+        assert_eq!(deserialize_f64(r#"{"value":null}"#).unwrap(), None);
+        assert_eq!(deserialize_f64(r#"{}"#).unwrap(), None);
+    }
+    #[test]
+    fn f64_rejects_non_numeric_string() {
+        let err = deserialize_f64(r#"{"value":"abc"}"#).unwrap_err();
+        assert!(err.to_string().contains("expected number"));
+    }
+    #[test]
+    fn f64_rejects_non_finite_string() {
+        let err = deserialize_f64(r#"{"value":"NaN"}"#).unwrap_err();
+        assert!(err.to_string().contains("finite"));
+    }
+    fn deserialize_string(json: &str) -> Result<Option<String>, serde_json::Error> {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(default, deserialize_with = "deserialize_lenient_string")]
+            value: Option<String>,
+        }
+        let w: Wrapper = serde_json::from_str(json)?;
+        Ok(w.value)
+    }
+    #[test]
+    fn string_passes_through() {
+        assert_eq!(
+            deserialize_string(r#"{"value":"62576.34"}"#).unwrap(),
+            Some("62576.34".to_string())
+        );
+    }
+    #[test]
+    fn string_coerces_numbers_like_zod() {
+        assert_eq!(
+            deserialize_string(r#"{"value":62576.34}"#).unwrap(),
+            Some("62576.34".to_string())
+        );
+        assert_eq!(
+            deserialize_string(r#"{"value":42}"#).unwrap(),
+            Some("42".to_string())
+        );
+    }
+    #[test]
+    fn string_coerces_booleans_like_zod() {
+        assert_eq!(
+            deserialize_string(r#"{"value":true}"#).unwrap(),
+            Some("true".to_string())
+        );
+    }
+    #[test]
+    fn string_null_and_missing_are_none() {
+        assert_eq!(deserialize_string(r#"{"value":null}"#).unwrap(), None);
+        assert_eq!(deserialize_string(r#"{}"#).unwrap(), None);
+    }
+    #[test]
+    fn string_rejects_composite_values() {
+        let err = deserialize_string(r#"{"value":["a"]}"#).unwrap_err();
+        assert!(err.to_string().contains("expected string"));
     }
     fn deserialize_i64(json: &str) -> Result<Option<i64>, serde_json::Error> {
         #[derive(Deserialize)]

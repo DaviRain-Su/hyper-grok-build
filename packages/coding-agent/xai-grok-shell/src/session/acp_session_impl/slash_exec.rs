@@ -857,6 +857,7 @@ impl SessionActor {
                     objective: query.clone(),
                     args: serde_json::json!({ "query": query }),
                     agent_budget: None,
+                    effort: None,
                     resume_run_id: None,
                 };
                 let launched = self.workflow_manager.lock().await.launch(resolved, spec);
@@ -879,7 +880,7 @@ impl SessionActor {
                         self.send_host_turn_slash_command_output(&format!(
                             "Deep research '{display}' started in the background. It will \
                              cross-check candidate claims and return a concise cited report here. \
-                             Use /workflows to follow progress."
+                             Use /workflow runs to follow progress."
                         ))
                         .await;
                         tokio::spawn(async move {

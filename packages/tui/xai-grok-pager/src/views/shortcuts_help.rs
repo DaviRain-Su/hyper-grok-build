@@ -147,6 +147,7 @@ const HISTORY_LONG_HELP: &str = "\
 Recalls previously sent prompts.\n\
 Press Up on an empty prompt to browse earlier prompts, newest first; each move \
 live-populates the composer so you can edit and resend.\n\
+With prompts queued, Up moves focus into the queue pane on the last row instead.\n\
 Run /history to open a searchable history panel and filter by text.";
 
 // Scrollback search has no ActionRegistry entry: it's the vim `/` inline handler,

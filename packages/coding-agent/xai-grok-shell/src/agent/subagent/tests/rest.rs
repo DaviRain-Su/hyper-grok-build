@@ -573,21 +573,23 @@ fn subagent_worktree_snapshot_gate_local_enables() {
     ctx.agent_config = Some(config);
     assert!(ctx.resolve_subagent_worktree_snapshot_enabled());
 }
-/// Subagent spawns carry concrete ask_user_question timeout params (the
-/// session-level config follows the child) while bash stays on tool
-/// defaults. Tier precedence itself is pinned by the resolver's own
-/// tests; asserting concrete values here would read the host's disk
-/// layers and flake on configured dev machines.
 #[test]
-fn subagent_tool_params_carry_ask_user_question_timeouts() {
-    let ctx = ctx_with_toggle(std::collections::HashMap::new());
-    let params = ctx.resolve_tool_params_json();
-    assert!(params.bash.is_none(), "bash must stay on tool defaults");
-    let ask = params
-        .ask_user_question
-        .expect("subagents must receive resolved ask_user_question params");
-    assert!(ask.get("timeout_enabled").is_some_and(|v| v.is_boolean()));
-    assert!(ask.get("timeout_secs").is_some_and(|v| v.is_u64()));
+fn subagent_tool_filter_removes_ask_user_question() {
+    let mut tools = vec![
+            xai_grok_sampling_types::ToolSpec {
+                name: "read_file".to_owned(),
+                description: None,
+                parameters: serde_json::json!({}),
+            },
+            xai_grok_sampling_types::ToolSpec {
+                name: "ask_user_question".to_owned(),
+                description: None,
+                parameters: serde_json::json!({}),
+            },
+        ];
+    strip_ask_user_question_tool(&mut tools);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "read_file");
 }
 /// The gate keeping a worktree must leave no resume pointer. A pointer sends
 /// resume down the rehydrate path, which deletes the directory and rebuilds
@@ -3710,7 +3712,7 @@ async fn progress_publisher_delivers_ticks_to_parent_cmd_channel() {
             tokio::task::yield_now().await;
             let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
             let cancel = tokio_util::sync::CancellationToken::new();
-            spawn_progress_publisher(
+            let _publisher = spawn_progress_publisher(
                 signals,
                 test_gateway(),
                 "parent-1".to_string(),

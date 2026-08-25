@@ -76,6 +76,14 @@ async fn scripted_mock_response() {
     run_scenario("mock_response.yaml").await;
 }
 
+/// GBT-6092: Esc on `/agents` opened from a dashboard conversation peek must
+/// close the modal and stay in the overlay, not pop back to the dashboard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "scripted scenario; run with cargo test -- --ignored"]
+async fn scripted_dashboard_overlay_agents_esc() {
+    run_scenario("dashboard_overlay_agents_esc.yaml").await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn scripted_input_modalities() {
@@ -523,6 +531,7 @@ fn scenarios_parse() {
         "goal_slash_presession_disabled.yaml",
         "folder_trust_prompt.yaml",
         "dashboard_model_list_click.yaml",
+        "dashboard_overlay_agents_esc.yaml",
         "paste_chip_double_click.yaml",
         "paste_chip_repaste.yaml",
         "slash_resize_storm.yaml",

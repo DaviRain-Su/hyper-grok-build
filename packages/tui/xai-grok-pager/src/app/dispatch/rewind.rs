@@ -472,7 +472,7 @@ pub(super) fn dispatch_rewind_success(
         // their render caches — potentially most of a long transcript)
         // must be freed for the release below to return its pages.
         drop(removed);
-        crate::memory_release::release_retained_memory_with("rewind-truncate");
+        crate::memory_release::release_retained_memory("rewind-truncate");
     }
 
     // An inline resubmit skips the confirmation — the edited prompt

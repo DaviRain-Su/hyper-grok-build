@@ -1,4 +1,5 @@
 //! Named session registry stored at ~/.local/state/ptyctl/sessions/.
+#![allow(clippy::disallowed_methods)] // talks to the local pty daemon; TLS policy N/A
 
 use std::fs;
 use std::path::PathBuf;

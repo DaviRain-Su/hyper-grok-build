@@ -258,8 +258,6 @@ pub(super) fn canonical_total_tokens(totals: &xai_chat_state::UsageTotals) -> u6
 pub(super) fn usage_is_incomplete(
     ledger_incomplete: bool,
     cancellation_may_hide_usage: bool,
-    _known_total_tokens: u64,
-    _has_usage_entries: bool,
 ) -> bool {
     ledger_incomplete || cancellation_may_hide_usage
 }
@@ -305,12 +303,8 @@ pub(super) async fn capture_and_fold_one_turn_usage(
         Ok(usage) => {
             let output_tokens = usage.totals.output_tokens;
             let total_tokens = canonical_total_tokens(&usage.totals);
-            let incomplete = usage_is_incomplete(
-                usage.incomplete,
-                input.cancellation_may_hide_usage,
-                total_tokens,
-                !usage.by_model.is_empty(),
-            );
+            let incomplete =
+                usage_is_incomplete(usage.incomplete, input.cancellation_may_hide_usage);
             (
                 Some(usage.by_model.into_iter().collect::<Vec<_>>()),
                 incomplete,

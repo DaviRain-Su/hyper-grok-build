@@ -3,7 +3,8 @@
 //! and the always-focused prompt.
 //!
 //! Layout (top → bottom): live tail · todos · `/btw` · status · prompt ·
-//! overlay/info. The tail shows the bottom of the uncommitted run (streaming
+//! overlay/info · the `[ui.status_line]` row.
+//! The tail shows the bottom of the uncommitted run (streaming
 //! message / running tool) so output is visible as it generates; finished blocks
 //! scroll up into native scrollback via [`super::commit`]. When idle the tail is
 //! empty and only status + prompt (+ optional panels) show.
@@ -111,6 +112,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
         "/transcript"
     };
     let transcript_progress = minimal_api::minimal_transcript_progress(app);
+    let status_line_frame = minimal_api::status_line_frame(app);
     let AppView {
         cursor,
         agents,
@@ -177,11 +179,14 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
         }
         if let Some(modal) = super::overlay::active_modal(agent) {
             let status_h = 1u16.min(area.height);
+            let sl_h = status_line_frame
+                .height()
+                .min(area.height.saturating_sub(status_h + 1));
             let content_w = area.width as usize;
             let modal_h = super::overlay::modal_height(modal, agent, term_h, content_w)
-                .min(area.height.saturating_sub(status_h))
+                .min(area.height.saturating_sub(status_h + sl_h))
                 .max(1);
-            let tail_h = area.height.saturating_sub(status_h + modal_h);
+            let tail_h = area.height.saturating_sub(status_h + modal_h + sl_h);
             let tick = (now_millis() / 100) as u64;
             if tail_h > 0 {
                 let turn_running = agent.session.state.is_turn_running();
@@ -223,6 +228,20 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                 width: area.width,
                 height: modal_h,
             };
+            if sl_h > 0 {
+                render_config_status_line(
+                    frame.buffer_mut(),
+                    Rect {
+                        x: area.x,
+                        y: modal_area.y + modal_h,
+                        width: area.width,
+                        height: sl_h,
+                    },
+                    agent,
+                    &status_line_frame,
+                    &theme,
+                );
+            }
             let cursor = super::overlay::render_modal(
                 frame.buffer_mut(),
                 modal_area,
@@ -234,14 +253,17 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
             return (cursor, None);
         }
         let status_h = 1u16.min(area.height);
-        let overlay_h = super::overlay::overlay_rows(&agent.prompt, area.width)
+        let sl_h = status_line_frame
+            .height()
             .min(area.height.saturating_sub(status_h + 1));
+        let overlay_h = super::overlay::overlay_rows(&agent.prompt, area.width)
+            .min(area.height.saturating_sub(status_h + sl_h + 1));
         let info_h = if overlay_h == 0 {
-            1u16.min(area.height.saturating_sub(status_h + 1))
+            1u16.min(area.height.saturating_sub(status_h + sl_h + 1))
         } else {
             0
         };
-        let below_h = overlay_h + info_h;
+        let below_h = overlay_h + info_h + sl_h;
         let avail = area.height.saturating_sub(status_h + below_h);
         let prompt_h = agent
             .prompt
@@ -357,9 +379,13 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
             height: prompt_h,
         };
         if overlay_h > 0 {
+            let overlay_area = Rect {
+                height: area.height.saturating_sub(sl_h),
+                ..area
+            };
             super::overlay::render(
                 frame.buffer_mut(),
-                area,
+                overlay_area,
                 prompt_area,
                 &mut agent.prompt,
                 layout_cfg,
@@ -388,6 +414,20 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                     &theme,
                 );
             }
+        }
+        if sl_h > 0 {
+            render_config_status_line(
+                frame.buffer_mut(),
+                Rect {
+                    x: area.x,
+                    y: prompt_area.y + prompt_h + overlay_h + info_h,
+                    width: area.width,
+                    height: sl_h,
+                },
+                agent,
+                &status_line_frame,
+                &theme,
+            );
         }
         let result = agent
             .prompt
@@ -581,6 +621,33 @@ fn render_minimal_status(
         },
     );
 }
+/// A `Reserved` frame paints nothing but must still record the size a command
+/// script is told (`COLUMNS`/`LINES`): it sizes the script's first run.
+fn render_config_status_line(
+    buf: &mut Buffer,
+    area: Rect,
+    agent: &mut xai_grok_pager::app::agent_view::AgentView,
+    frame: &xai_grok_pager::views::status_line::StatusLineFrame,
+    theme: &Theme,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let Some(padding) = frame.padding() else {
+        return;
+    };
+    if let Some(width) = minimal_api::status_line_inner_width(area.width, padding) {
+        agent.last_status_line_size = Some(xai_grok_pager::views::status_line::RowSize {
+            cols: width,
+            lines: area.height,
+        });
+    }
+    if let Some(display) = frame.display() {
+        let _ = xai_grok_pager::views::status_line::render_status_line(
+            buf, area, display, padding, theme,
+        );
+    }
+}
 /// Idle status: `minimal · [/fullscreen to go back ·] /help` (+ auto-set note).
 fn render_idle_hint(buf: &mut Buffer, area: Rect, theme: &Theme) {
     let style = theme.dim().bg(Color::Reset);
@@ -772,6 +839,54 @@ mod tests {
         assert!(paintable_btw_area(frame, Rect::new(0, 4, 80, 2)).is_none());
         assert!(paintable_btw_area(frame, Rect::new(0, 19, 80, 3)).is_none());
         assert!(paintable_btw_area(frame, Rect::new(79, 4, 2, 3)).is_none());
+    }
+    #[test]
+    fn config_status_line_paints_and_records_the_script_size() {
+        use std::sync::Arc;
+        use xai_grok_pager::views::status_line::{
+            RowSize, SanitizedText, StatusLineDisplay, StatusLineFrame,
+        };
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 40, 1);
+        let row_text = |buf: &Buffer| -> String {
+            (0..area.width)
+                .filter_map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()))
+                .collect()
+        };
+        let mut painted = agent();
+        let mut buf = Buffer::empty(area);
+        let frame = StatusLineFrame::On {
+            display: Arc::new(StatusLineDisplay::Text(SanitizedText::new("demo row"))),
+            padding: 2,
+        };
+        render_config_status_line(&mut buf, area, &mut painted, &frame, &theme);
+        assert_eq!(
+            painted.last_status_line_size,
+            Some(RowSize { cols: 36, lines: 1 }),
+            "a script's COLUMNS excludes the padding on both sides"
+        );
+        assert!(
+            row_text(&buf).contains("demo row"),
+            "the row must paint the script's text"
+        );
+        let mut reserved = agent();
+        let mut buf = Buffer::empty(area);
+        render_config_status_line(
+            &mut buf,
+            area,
+            &mut reserved,
+            &StatusLineFrame::Reserved { padding: 0 },
+            &theme,
+        );
+        assert_eq!(
+            reserved.last_status_line_size,
+            Some(RowSize { cols: 40, lines: 1 })
+        );
+        assert_eq!(
+            row_text(&buf).trim(),
+            "",
+            "a reserved row holds space but paints nothing"
+        );
     }
     #[test]
     fn tail_height_uses_owning_session_cwd_for_tool_paths() {

@@ -44,6 +44,8 @@ pub struct LogEntry {
     pub authorization: Option<String>,
     /// Lowercase names in arrival order. Empty for the GET endpoints.
     pub headers: Vec<(String, String)>,
+    /// Wall-clock arrival time, for latency-harness request timelines.
+    pub at: std::time::SystemTime,
 }
 
 impl LogEntry {
@@ -97,6 +99,7 @@ impl RequestLog {
             body: body.cloned(),
             authorization: authorization.map(String::from),
             headers,
+            at: std::time::SystemTime::now(),
         });
     }
 }
@@ -365,6 +368,13 @@ impl MockInferenceServer {
     /// falls back to the response mode.
     pub fn enqueue_response(&self, path: impl Into<String>, response: ScriptedResponse) {
         self.overrides.enqueue_response(path, response);
+    }
+
+    /// Default-responder concurrency cap: over `cap` in-flight (each held for
+    /// `hold`), extra requests get 429 + `Retry-After`. Scripts/expectations bypass.
+    pub fn set_inference_concurrency_cap(&self, cap: usize, hold: Duration, retry_after_secs: u64) {
+        self.overrides
+            .set_concurrency_cap(cap, hold, retry_after_secs);
     }
 
     /// Register one named response matched atomically by endpoint and request kind.
@@ -1112,6 +1122,7 @@ impl Drop for MockInferenceServer {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // test clients hit localhost mocks
 #[cfg(test)]
 mod tests {
     use super::*;

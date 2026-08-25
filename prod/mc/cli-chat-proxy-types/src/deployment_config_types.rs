@@ -180,8 +180,9 @@ mod tests {
             legacy.nonce, "",
             "pre-nonce payloads default to an empty nonce"
         );
-        assert!(is_server_nonce_shape("0123456789abcdef0123456789abcdef"));
-        assert!(!is_server_nonce_shape("short"));
+        let shaped = format!("{:032x}", std::process::id() as u128);
+        assert!(is_server_nonce_shape(&shaped));
+        assert!(!is_server_nonce_shape(&format!("x{}", std::process::id())));
     }
 
     /// The claim round-trips; `fail_closed` is additive (absent → permissive).

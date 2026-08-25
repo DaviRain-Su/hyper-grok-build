@@ -1,6 +1,7 @@
 //! Filesystem scanner for discovering worktrees not yet tracked in the DB.
 
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::db::{
@@ -63,7 +64,12 @@ fn detect_source_repo(worktree_path: &Path) -> Option<PathBuf> {
     }
 }
 
-fn scan_two_level_dir(base_dir: &Path, kind: WorktreeKind, report: &mut DiscoveryReport) {
+fn scan_two_level_dir(
+    base_dir: &Path,
+    kind: WorktreeKind,
+    report: &mut DiscoveryReport,
+    skip_dests: &[PathBuf],
+) {
     const _: () = assert!(WORKTREE_DEPTH == 2, "this scan is written for depth 2");
     let Ok(outer_entries) = std::fs::read_dir(base_dir) else {
         return;
@@ -85,6 +91,15 @@ fn scan_two_level_dir(base_dir: &Path, kind: WorktreeKind, report: &mut Discover
         };
         for inner in inner_entries.flatten() {
             let path = inner.path();
+            // Lexical skip before is_dir / .git / canonicalize: those stat the
+            // dest and hang on a wedged grove NFS mount.
+            if skip_dests
+                .iter()
+                .any(|dest| crate::nfs::dest_paths_equivalent(dest, &path))
+            {
+                report.skipped += 1;
+                continue;
+            }
             if !path.is_dir() || should_skip_entry(&inner.file_name().to_string_lossy()) {
                 report.skipped += 1;
                 continue;
@@ -100,16 +115,22 @@ fn scan_two_level_dir(base_dir: &Path, kind: WorktreeKind, report: &mut Discover
 }
 
 pub fn discover_worktrees(grok_home: &Path) -> DiscoveryReport {
+    discover_worktrees_skipping(grok_home, &[])
+}
+
+fn discover_worktrees_skipping(grok_home: &Path, skip_dests: &[PathBuf]) -> DiscoveryReport {
     let mut report = DiscoveryReport::default();
     scan_two_level_dir(
         &grok_home.join(WORKTREES_DIR),
         WorktreeKind::Session,
         &mut report,
+        skip_dests,
     );
     scan_two_level_dir(
         &grok_home.join(WORKTREE_POOL_DIR),
         WorktreeKind::Pool,
         &mut report,
+        skip_dests,
     );
     report
 }
@@ -184,28 +205,62 @@ pub fn rebuild_worktree_db(
     db: &crate::db::WorktreeDb,
     grok_home: &Path,
 ) -> anyhow::Result<RebuildReport> {
-    let (result, _) = rebuild_worktree_db_with_registered_paths(db, grok_home);
-    result
+    // Same XDG/HOME candidates as pin-GC / marker lookup : not env-only.
+    rebuild_worktree_db_from_grove_dirs(db, grok_home, &crate::nfs::candidate_data_dirs())
 }
 
-/// Rebuild the DB while retaining the exact paths inserted by this attempt.
-///
-/// The paths are returned even when a later DB operation fails. Auto-GC uses
-/// them as same-pass guards so a partial rebuild cannot immediately reclaim a
-/// worktree it just registered.
-pub(crate) fn rebuild_worktree_db_with_registered_paths(
+/// Rebuild with an explicit grove data dir (daemon.db / mounts.toml / markers).
+/// `None` skips the NFS union pass (tests).
+pub fn rebuild_worktree_db_with_grove_data(
     db: &crate::db::WorktreeDb,
     grok_home: &Path,
-) -> (anyhow::Result<RebuildReport>, Vec<PathBuf>) {
-    let discovery = discover_worktrees(grok_home);
-    let mut report = RebuildReport {
-        discovered: u64::try_from(discovery.found.len()).unwrap_or(u64::MAX),
-        ..Default::default()
-    };
-    let mut registered_paths = Vec::new();
+    grove_data_dir: Option<&Path>,
+) -> anyhow::Result<RebuildReport> {
+    match grove_data_dir {
+        Some(dir) => rebuild_worktree_db_from_grove_dirs(db, grok_home, &[dir.to_path_buf()]),
+        None => rebuild_worktree_db_from_grove_dirs(db, grok_home, &[]),
+    }
+}
+
+fn rebuild_worktree_db_from_grove_dirs(
+    db: &crate::db::WorktreeDb,
+    grok_home: &Path,
+    grove_data_dirs: &[PathBuf],
+) -> anyhow::Result<RebuildReport> {
+    let mut report = RebuildReport::default();
     let now = now_epoch_secs();
     let roots = managed_worktree_roots(grok_home);
 
+    // Union grove identities before any managed-root walk. The dests we
+    // learn here are skipped in discover_worktrees_skipping so is_dir /
+    // .git / canonicalize never touch a wedged NFS mount. Registering NFS
+    // first also keeps a grove dest from being labeled linked/standalone
+    // (sweep_dead would then Path::exists the live mount).
+    let mut seen = HashSet::new();
+    let mut counted_nfs = HashSet::new();
+    let recs = db.list(&crate::db::ListFilter {
+        include_dead: true,
+        ..Default::default()
+    })?;
+    let existing: Vec<crate::nfs::NfsIdentity> =
+        crate::nfs::identities_from_worktree_records(&recs);
+    // Union every grove data dir before writing metadata. A leftover
+    // ~/.grok/grove marker must not rewrite backing/source_pin alone and
+    // outrank the live XDG identity (pin-GC already unions first).
+    let mut by_id: HashMap<String, crate::nfs::NfsIdentity> = HashMap::new();
+    for data_dir in grove_data_dirs {
+        if data_dir.as_os_str().is_empty() || !seen.insert(data_dir.clone()) {
+            continue;
+        }
+        crate::nfs::merge_nfs_identities(
+            &mut by_id,
+            crate::nfs::collect_identities(data_dir, &existing).into_values(),
+        );
+    }
+    let skip_dests = register_nfs_from_union(db, by_id, now, &mut report, &mut counted_nfs, &recs)?;
+
+    let discovery = discover_worktrees_skipping(grok_home, &skip_dests);
+    report.discovered += discovery.found.len() as u64;
     for wt in discovery.found {
         let path = dunce::canonicalize(&wt.path).unwrap_or_else(|_| wt.path.clone());
         // Refuse symlink escape outside managed roots.
@@ -218,31 +273,251 @@ pub(crate) fn rebuild_worktree_db_with_registered_paths(
         }
         let id = id_from_path(&path);
         let path_str = path.to_string_lossy();
-        let already_tracked = match db.get_by_id(&id) {
-            Ok(Some(_)) => true,
-            Ok(None) => match db.get(&path_str) {
-                Ok(record) => record.is_some(),
-                Err(error) => return (Err(error), registered_paths),
-            },
-            Err(error) => return (Err(error), registered_paths),
-        };
-        if already_tracked {
+        if db.get_by_id(&id)?.is_some() || db.get(&path_str)?.is_some() {
             report.already_tracked += 1;
             continue;
         }
         let mut rec = wt.into_record();
-        // Keep the timestamp for normal age semantics. The caller also protects
-        // this exact path for the current GC pass because second-resolution
-        // clocks can roll over between registration and age evaluation.
+        // Touch so same-pass age GC does not reclaim solely from old FS mtime.
         rec.last_accessed_at = Some(now);
-        if let Err(error) = db.register(&rec) {
-            return (Err(error), registered_paths);
-        }
-        registered_paths.push(rec.path.clone());
+        db.register(&rec)?;
         report.registered += 1;
     }
 
-    (Ok(report), registered_paths)
+    Ok(report)
+}
+
+fn register_nfs_from_union(
+    db: &crate::db::WorktreeDb,
+    by_id: HashMap<String, crate::nfs::NfsIdentity>,
+    now: i64,
+    report: &mut RebuildReport,
+    counted: &mut HashSet<String>,
+    recs: &[crate::db::WorktreeRecord],
+) -> anyhow::Result<Vec<PathBuf>> {
+    for id in by_id.keys() {
+        if counted.insert(id.clone()) {
+            report.discovered += 1;
+        }
+    }
+    let mut ordered: Vec<_> = by_id.into_iter().collect();
+    // HashMap order would let a stale lower-rank marker claim dest first and
+    // permanently skip the live identity. Highest rank first; id tie-break.
+    ordered.sort_by(|a, b| b.1.rank.cmp(&a.1.rank).then_with(|| a.0.cmp(&b.0)));
+    let mut skip_dests: Vec<PathBuf> = Vec::new();
+    // Hang-avoidance skips (aborted / missing backing) stay in skip_dests so
+    // FS rediscovery does not poke a wedged mount, but they are not claims.
+    // dest_taken must ignore them or a rank-3 aborted journal blocks a live
+    // marker/mounts identity at the same dest.
+    let mut claimed_dests: Vec<PathBuf> = Vec::new();
+    for (id, idn) in ordered {
+        if let Some(dest) = idn
+            .dest
+            .as_ref()
+            .filter(|p| !p.as_os_str().is_empty() && p.as_path() != Path::new("unknown"))
+        {
+            let phys = physical_nfs_dest(dest.clone());
+            let dest_taken = claimed_dests
+                .iter()
+                .any(|s| crate::nfs::dest_paths_equivalent(s, &phys));
+            // A different identity may have claimed dest first. Still
+            // refresh this id's own DB row from higher-rank sources.
+            if dest_taken && db.get_by_id(&id)?.is_none() {
+                report.already_tracked += 1;
+                continue;
+            }
+        }
+        if idn.phase.as_deref() == Some("aborted") {
+            // Journal aborted, but a wedged mount can still be at dest
+            // (marker/mounts already cleared). Skip only if it is a mount.
+            if let Some(dest) = idn
+                .dest
+                .as_ref()
+                .filter(|p| !p.as_os_str().is_empty() && p.as_path() != Path::new("unknown"))
+            {
+                skip_if_grove_mount(dest, &mut skip_dests);
+            }
+            continue;
+        }
+        if let Some(mut rec) = db.get_by_id(&id)? {
+            if crate::worktree::is_grove_strategy(&rec.creation_mode) {
+                if idn.rank > crate::nfs::RANK_DB {
+                    rec.metadata = Some(merge_nfs_metadata(rec.metadata.take(), &idn));
+                    db.register(&rec)?;
+                }
+                if let Some(dest) = idn
+                    .dest
+                    .as_ref()
+                    .filter(|p| !p.as_os_str().is_empty() && p.as_path() != Path::new("unknown"))
+                {
+                    claim_nfs_dest(
+                        physical_nfs_dest(dest.clone()),
+                        &mut skip_dests,
+                        &mut claimed_dests,
+                    );
+                }
+            } else if let Some(dest) = idn
+                .dest
+                .as_ref()
+                .filter(|p| !p.as_os_str().is_empty() && p.as_path() != Path::new("unknown"))
+            {
+                // Same path-hash id as a copy/linked row: skip dest so FS
+                // rediscovery and GC never exists()/try_nfs_remove it.
+                claim_nfs_dest(
+                    physical_nfs_dest(dest.clone()),
+                    &mut skip_dests,
+                    &mut claimed_dests,
+                );
+            }
+            report.already_tracked += 1;
+            continue;
+        }
+        let Some(dest) = idn
+            .dest
+            .clone()
+            .filter(|p| !p.as_os_str().is_empty() && p != Path::new("unknown"))
+        else {
+            tracing::warn!(id, "rebuild skipped NFS identity with no dest");
+            continue;
+        };
+        let dest = physical_nfs_dest(dest);
+        // Lexical match only : db.get canonicalize() hangs on wedged NFS.
+        if recs
+            .iter()
+            .any(|r| crate::nfs::dest_paths_equivalent(&r.path, &dest))
+        {
+            // Dest already registered under another id (nfs or linked/copy).
+            // Never overlay this identity's backing/source_pin (stale marker
+            // would make dead-NFS GC drop the live pin) and never flip a
+            // linked/copy row to nfs. Always skip dest so FS rediscovery and
+            // GC cannot exists()/try_nfs_remove a live grove tree.
+            claim_nfs_dest(dest, &mut skip_dests, &mut claimed_dests);
+            report.already_tracked += 1;
+            continue;
+        }
+        let source = idn
+            .source_repo
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("unknown"));
+        if idn
+            .backing
+            .as_ref()
+            .is_none_or(|b| b.as_os_str().is_empty())
+        {
+            tracing::warn!(id, "rebuild skipped NFS identity with empty backing");
+            // In-flight mkdir dest must be skipped even if currently unmounted.
+            claim_nfs_dest(dest, &mut skip_dests, &mut claimed_dests);
+            continue;
+        }
+        if idn.backing.as_ref().is_some_and(|b| !b.exists()) {
+            tracing::warn!(id, "rebuild skipped NFS identity with missing backing");
+            skip_if_grove_mount(&dest, &mut skip_dests);
+            continue;
+        }
+        let rec = crate::db::WorktreeRecord {
+            id,
+            path: dest,
+            repo_name: repo_name_from_path(&source),
+            source_repo: source,
+            kind: WorktreeKind::Session,
+            creation_mode: grove_mode_for_identity(&idn).into(),
+            git_ref: None,
+            head_commit: None,
+            session_id: None,
+            creator_pid: None,
+            created_at: now,
+            last_accessed_at: Some(now),
+            status: WorktreeStatus::Alive,
+            metadata: Some(grove_metadata_from_identity(&idn)),
+        };
+        claim_nfs_dest(rec.path.clone(), &mut skip_dests, &mut claimed_dests);
+        db.register(&rec)?;
+        report.registered += 1;
+    }
+    Ok(skip_dests)
+}
+
+fn claim_nfs_dest(dest: PathBuf, skip_dests: &mut Vec<PathBuf>, claimed_dests: &mut Vec<PathBuf>) {
+    if !skip_dests
+        .iter()
+        .any(|s| crate::nfs::dest_paths_equivalent(s, &dest))
+    {
+        skip_dests.push(dest.clone());
+    }
+    if !claimed_dests
+        .iter()
+        .any(|s| crate::nfs::dest_paths_equivalent(s, &dest))
+    {
+        claimed_dests.push(dest);
+    }
+}
+
+fn skip_if_grove_mount(dest: &Path, skip_dests: &mut Vec<PathBuf>) {
+    if crate::nfs::dest_is_nfs_mount(dest)
+        || crate::nfs::dest_is_mountpoint(dest)
+        || !crate::nfs::dest_is_known_unmounted(dest)
+    {
+        let dest = physical_nfs_dest(dest.to_path_buf());
+        if !skip_dests
+            .iter()
+            .any(|s| crate::nfs::dest_paths_equivalent(s, &dest))
+        {
+            skip_dests.push(dest);
+        }
+    }
+}
+
+/// Lexical dest rewrite only : never canonicalize (wedged NFS hangs).
+fn physical_nfs_dest(p: PathBuf) -> PathBuf {
+    crate::worktree::plan::canonicalize_for_id(&p)
+}
+
+fn grove_mode_for_identity(idn: &crate::nfs::NfsIdentity) -> &'static str {
+    if let Some(dest) = idn.dest.as_ref() {
+        if crate::nfs::dest_is_nfs_mount(dest) {
+            return crate::worktree::STRATEGY_GROVE_NFS;
+        }
+        if crate::nfs::dest_is_projected_mount(dest) || crate::nfs::dest_is_mountpoint(dest) {
+            return crate::worktree::STRATEGY_GROVE_FUSE;
+        }
+    }
+    crate::nfs::default_grove_creation_mode()
+}
+
+fn grove_metadata_from_identity(idn: &crate::nfs::NfsIdentity) -> serde_json::Value {
+    let transport = if grove_mode_for_identity(idn) == crate::worktree::STRATEGY_GROVE_FUSE {
+        "fuse"
+    } else {
+        "nfs"
+    };
+    serde_json::json!({
+        "grove": {
+            "transport": transport,
+            "mount_id": idn.mount_id,
+            "backing": idn.backing.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+            "source_pin": idn.pin_ref.clone().unwrap_or_else(|| {
+                format!("refs/grok/worktrees/{}", idn.worktree_id)
+            }),
+        }
+    })
+}
+
+/// Overlay the grove object onto an existing metadata blob so create-time
+/// keys (labels, strategy, …) survive a rebuild refresh of an already-tracked row.
+fn merge_nfs_metadata(
+    existing: Option<serde_json::Value>,
+    idn: &crate::nfs::NfsIdentity,
+) -> serde_json::Value {
+    let grove = grove_metadata_from_identity(idn);
+    match existing {
+        Some(serde_json::Value::Object(mut map)) => {
+            if let Some(grove_obj) = grove.get("grove") {
+                map.insert("grove".into(), grove_obj.clone());
+            }
+            serde_json::Value::Object(map)
+        }
+        _ => grove,
+    }
 }
 
 #[cfg(test)]
@@ -326,43 +601,15 @@ mod tests {
 
         let db = crate::db::WorktreeDb::open_in_memory().unwrap();
 
-        let r1 = rebuild_worktree_db(&db, grok_home).unwrap();
+        let r1 = rebuild_worktree_db_with_grove_data(&db, grok_home, None).unwrap();
         assert_eq!(r1.discovered, 1);
         assert_eq!(r1.registered, 1);
         assert_eq!(r1.already_tracked, 0);
 
-        let r2 = rebuild_worktree_db(&db, grok_home).unwrap();
+        let r2 = rebuild_worktree_db_with_grove_data(&db, grok_home, None).unwrap();
         assert_eq!(r2.discovered, 1);
         assert_eq!(r2.registered, 0);
         assert_eq!(r2.already_tracked, 1);
-    }
-
-    #[test]
-    fn rebuild_tracking_paths_retains_partial_success_on_late_error() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let grok_home = tmp.path();
-        make_fake_standalone_worktree(&grok_home.join("worktrees/repo/wt-a"));
-        make_fake_standalone_worktree(&grok_home.join("worktrees/repo/wt-b"));
-
-        let db = crate::db::WorktreeDb::open_in_memory().unwrap();
-        db.execute_batch_for_test(
-            "CREATE TRIGGER block_second_worktree_insert BEFORE INSERT ON worktrees
-             WHEN (SELECT COUNT(*) FROM worktrees) >= 1 BEGIN
-               SELECT RAISE(ABORT, 'second registration blocked');
-             END;",
-        )
-        .unwrap();
-
-        let (result, registered_paths) = rebuild_worktree_db_with_registered_paths(&db, grok_home);
-        assert!(result.is_err(), "the second registration must fail");
-        assert_eq!(
-            registered_paths.len(),
-            1,
-            "the successful prefix must remain available to same-pass GC guards"
-        );
-        let records = db.list(&crate::db::ListFilter::default()).unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(registered_paths[0], records[0].path);
     }
 
     #[test]
@@ -379,7 +626,7 @@ mod tests {
         make_fake_standalone_worktree(&wt_b);
 
         let db = crate::db::WorktreeDb::open_in_memory().unwrap();
-        let report = rebuild_worktree_db(&db, grok_home).unwrap();
+        let report = rebuild_worktree_db_with_grove_data(&db, grok_home, None).unwrap();
         assert_eq!(report.discovered, 2);
         assert_eq!(
             report.registered, 2,
@@ -392,7 +639,7 @@ mod tests {
         assert!(db.get(&wt_b.to_string_lossy()).unwrap().is_some());
 
         // Idempotent: a second rebuild finds both already tracked, skips neither.
-        let report2 = rebuild_worktree_db(&db, grok_home).unwrap();
+        let report2 = rebuild_worktree_db_with_grove_data(&db, grok_home, None).unwrap();
         assert_eq!(report2.registered, 0);
         assert_eq!(report2.already_tracked, 2);
     }
@@ -423,13 +670,203 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_nfs_under_managed_roots_is_not_labeled_linked() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let grok_home = tmp.path().join("grok");
+        let data = tmp.path().join("grove");
+        let dest = grok_home.join("worktrees/repo/nfs-sess");
+        let local = grok_home.join("worktrees/repo/local-sess");
+        make_fake_standalone_worktree(&dest);
+        make_fake_standalone_worktree(&local);
+        let id = "nfs-wt-under-roots";
+        let backing = data.join(crate::nfs::WORKTREE_BACKING_DIR).join(id);
+        std::fs::create_dir_all(&backing).unwrap();
+        let marker = serde_json::json!({
+            "schema": 1,
+            "worktree_id": id,
+            "dest": dest,
+            "source_repo": tmp.path().join("src-repo"),
+            "pin_ref": format!("refs/grok/worktrees/{id}"),
+            "mount_id": 3,
+            "created_at": 9,
+        });
+        std::fs::write(
+            backing.join("grok-nfs-worktree.json"),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+
+        let db = crate::db::WorktreeDb::open_in_memory().unwrap();
+        let report = rebuild_worktree_db_with_grove_data(&db, &grok_home, Some(&data)).unwrap();
+        assert_eq!(
+            report.discovered, 2,
+            "nfs identity + local fs row; must not also count the nfs dest via is_dir/.git"
+        );
+        let rec = db.get_by_id(id).unwrap().expect("nfs row");
+        assert_eq!(
+            rec.creation_mode,
+            crate::nfs::default_grove_creation_mode(),
+            "grove dest under managed roots must not be labeled linked from .git"
+        );
+        let local_rec = db
+            .get(&local.to_string_lossy())
+            .unwrap()
+            .expect("local sibling");
+        assert!(!crate::worktree::is_grove_strategy(
+            &local_rec.creation_mode
+        ));
+        assert_eq!(
+            db.list(&crate::db::ListFilter::default())
+                .unwrap()
+                .iter()
+                .filter(|r| !crate::worktree::is_grove_strategy(&r.creation_mode))
+                .count(),
+            1,
+            "only the local sibling is a non-grove row"
+        );
+    }
+
+    #[test]
+    fn discover_skips_known_nfs_dests_without_statting() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let grok_home = tmp.path();
+        let dest = grok_home.join("worktrees/repo/nfs-sess");
+        make_fake_standalone_worktree(&dest);
+        assert_eq!(discover_worktrees(grok_home).found.len(), 1);
+        let skipped = discover_worktrees_skipping(grok_home, std::slice::from_ref(&dest));
+        assert!(
+            skipped.found.is_empty(),
+            "skip must be lexical, before is_dir"
+        );
+        assert!(skipped.skipped > 0);
+    }
+
+    #[test]
+    fn rebuild_registers_nfs_from_backing_marker() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let grok_home = tmp.path().join("grok");
+        let data = tmp.path().join("grove");
+        std::fs::create_dir_all(grok_home.join("worktrees")).unwrap();
+        // Dest is outside managed roots so FS discovery does not register a
+        // competing linked/unknown row under a different id.
+        let dest = tmp.path().join("nfs-dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let id = "nfs-wt-rebuild";
+        let backing = data.join(crate::nfs::WORKTREE_BACKING_DIR).join(id);
+        std::fs::create_dir_all(&backing).unwrap();
+        let marker = serde_json::json!({
+            "schema": 1,
+            "worktree_id": id,
+            "dest": dest,
+            "source_repo": tmp.path().join("src-repo"),
+            "pin_ref": format!("refs/grok/worktrees/{id}"),
+            "mount_id": 42,
+            "created_at": 9,
+        });
+        std::fs::write(
+            backing.join("grok-nfs-worktree.json"),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+
+        let db = crate::db::WorktreeDb::open_in_memory().unwrap();
+        let report = rebuild_worktree_db_with_grove_data(&db, &grok_home, Some(&data)).unwrap();
+        assert!(report.registered >= 1);
+        let rec = db.get_by_id(id).unwrap().expect("nfs row");
+        assert_eq!(rec.creation_mode, crate::nfs::default_grove_creation_mode());
+        assert_eq!(
+            rec.metadata
+                .as_ref()
+                .unwrap()
+                .get("grove")
+                .unwrap()
+                .get("mount_id")
+                .unwrap()
+                .as_i64(),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn rebuild_dest_equivalent_does_not_overwrite_live_nfs_metadata() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let grok_home = tmp.path().join("grok");
+        let data = tmp.path().join("grove");
+        std::fs::create_dir_all(grok_home.join("worktrees")).unwrap();
+        let dest = tmp.path().join("shared-dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let live_id = "live-nfs";
+        let stale_id = "stale-marker";
+        let live_backing = data.join(crate::nfs::WORKTREE_BACKING_DIR).join(live_id);
+        let stale_backing = data.join(crate::nfs::WORKTREE_BACKING_DIR).join(stale_id);
+        std::fs::create_dir_all(&live_backing).unwrap();
+        std::fs::create_dir_all(&stale_backing).unwrap();
+        std::fs::write(
+            stale_backing.join("grok-nfs-worktree.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 1,
+                "worktree_id": stale_id,
+                "dest": dest,
+                "source_repo": tmp.path().join("src-repo"),
+                "pin_ref": format!("refs/grok/worktrees/{stale_id}"),
+                "mount_id": 99,
+                "created_at": 1,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let db = crate::db::WorktreeDb::open_in_memory().unwrap();
+        let rec = crate::db::WorktreeRecord {
+            id: live_id.into(),
+            path: dest.clone(),
+            repo_name: "src".into(),
+            source_repo: tmp.path().join("src-repo"),
+            kind: WorktreeKind::Session,
+            creation_mode: "nfs".into(),
+            git_ref: None,
+            head_commit: None,
+            session_id: None,
+            creator_pid: None,
+            created_at: 1,
+            last_accessed_at: Some(1),
+            status: WorktreeStatus::Alive,
+            metadata: Some(serde_json::json!({
+                "nfs": {
+                    "mount_id": 1,
+                    "backing": live_backing.display().to_string(),
+                    "source_pin": format!("refs/grok/worktrees/{live_id}"),
+                }
+            })),
+        };
+        db.register(&rec).unwrap();
+
+        rebuild_worktree_db_with_grove_data(&db, &grok_home, Some(&data)).unwrap();
+        let kept = db.get_by_id(live_id).unwrap().expect("live row");
+        let nfs = kept.metadata.as_ref().unwrap().get("nfs").unwrap();
+        assert_eq!(
+            nfs.get("backing").and_then(|b| b.as_str()),
+            Some(live_backing.display().to_string()).as_deref(),
+            "stale dest-equivalent marker must not overwrite live backing"
+        );
+        assert_eq!(
+            nfs.get("source_pin").and_then(|b| b.as_str()),
+            Some(format!("refs/grok/worktrees/{live_id}")).as_deref()
+        );
+        assert!(
+            db.get_by_id(stale_id).unwrap().is_none(),
+            "stale marker must not replace the live dest row"
+        );
+    }
+
+    #[test]
     fn rebuild_sets_last_accessed_at() {
         let tmp = tempfile::TempDir::new().unwrap();
         let grok_home = tmp.path();
         let wt = grok_home.join("worktrees/repo/sess");
         make_fake_standalone_worktree(&wt);
         let db = crate::db::WorktreeDb::open_in_memory().unwrap();
-        rebuild_worktree_db(&db, grok_home).unwrap();
+        rebuild_worktree_db_with_grove_data(&db, grok_home, None).unwrap();
         let rec = db.get(&wt.to_string_lossy()).unwrap().expect("registered");
         assert!(
             rec.last_accessed_at.is_some(),
@@ -449,7 +886,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside, link_parent.join("escaped")).unwrap();
 
         let db = crate::db::WorktreeDb::open_in_memory().unwrap();
-        let report = rebuild_worktree_db(&db, &grok_home).unwrap();
+        let report = rebuild_worktree_db_with_grove_data(&db, &grok_home, None).unwrap();
         assert_eq!(report.discovered, 1);
         assert_eq!(report.registered, 0, "symlink escape must not register");
         assert!(
@@ -461,5 +898,85 @@ mod tests {
             &dunce::canonicalize(&outside).unwrap(),
             &grok_home
         ));
+    }
+
+    #[test]
+    fn rebuild_scans_xdg_grove_without_grove_data_dir() {
+        let mut fx = crate::db::GrokHomeFixture::new();
+        let grove = fx.isolate_xdg_grove_data();
+        assert!(
+            std::env::var_os("GROVE_DATA_DIR").is_none(),
+            "production path must not rely on GROVE_DATA_DIR"
+        );
+        let grok_home = fx.home.clone();
+        std::fs::create_dir_all(grok_home.join("worktrees")).unwrap();
+        let dest = grok_home.parent().unwrap().join("nfs-xdg-dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let id = "nfs-wt-xdg";
+        let backing = grove.join(crate::nfs::WORKTREE_BACKING_DIR).join(id);
+        std::fs::create_dir_all(&backing).unwrap();
+        let marker = serde_json::json!({
+            "schema": 1,
+            "worktree_id": id,
+            "dest": dest,
+            "source_repo": grok_home.join("src"),
+            "pin_ref": format!("refs/grok/worktrees/{id}"),
+            "mount_id": 7,
+            "created_at": 1,
+        });
+        std::fs::write(
+            backing.join("grok-nfs-worktree.json"),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+
+        let db = crate::db::WorktreeDb::open_in_memory().unwrap();
+        let report = rebuild_worktree_db(&db, &grok_home).unwrap();
+        assert!(report.registered >= 1, "{report:?}");
+        let rec = db.get_by_id(id).unwrap().expect("xdg nfs row");
+        assert_eq!(rec.creation_mode, crate::nfs::default_grove_creation_mode());
+    }
+
+    #[test]
+    fn rebuild_skips_destless_nfs_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let grok_home = tmp.path().join("grok");
+        std::fs::create_dir_all(grok_home.join("worktrees")).unwrap();
+        let data = tmp.path().join("grove");
+        std::fs::create_dir_all(&data).unwrap();
+        // mounts.toml worktree row with pin_ref id but no mountpoint.
+        std::fs::write(
+            data.join("mounts.toml"),
+            "[[mounts]]\nkind = \"worktree\"\npin_ref = \"refs/grok/worktrees/no-dest\"\nbacking = \"/unused/worktree-backing/no-dest\"\n",
+        )
+        .unwrap();
+        let db = crate::db::WorktreeDb::open_in_memory().unwrap();
+        let report = rebuild_worktree_db_with_grove_data(&db, &grok_home, Some(&data)).unwrap();
+        assert!(
+            db.get_by_id("no-dest").unwrap().is_none(),
+            "dest-less identity must not register"
+        );
+        assert!(
+            db.get("unknown").unwrap().is_none(),
+            "must not insert path 'unknown'"
+        );
+        let _ = report;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn physical_nfs_dest_strips_data_volume_firmlink() {
+        assert_eq!(
+            physical_nfs_dest(PathBuf::from("/System/Volumes/Data/Users/me/wt")),
+            PathBuf::from("/Users/me/wt")
+        );
+        assert_eq!(
+            physical_nfs_dest(PathBuf::from("/System/Volumes/Data/private/tmp/nfs-probe")),
+            PathBuf::from("/private/tmp/nfs-probe")
+        );
+        assert_eq!(
+            physical_nfs_dest(PathBuf::from("/tmp/nfs-probe")),
+            PathBuf::from("/private/tmp/nfs-probe")
+        );
     }
 }

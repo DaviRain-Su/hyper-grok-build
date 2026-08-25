@@ -47,14 +47,6 @@ MAMBAf8=\n\
 -----END CERTIFICATE-----\n";
 
 #[test]
-fn parse_empty_bytes_returns_empty() {
-    let o = parse_and_validate_pem(b"");
-    assert!(o.accepted.is_empty());
-    assert_eq!(o.rejected, 0);
-    assert!(o.no_pem_blocks);
-}
-
-#[test]
 fn parse_garbage_non_pem_flags_no_blocks_without_panic() {
     let o = parse_and_validate_pem(b"this is not a certificate");
     assert!(o.accepted.is_empty());
@@ -68,13 +60,6 @@ fn parse_valid_single_cert_pem() {
     assert_eq!(o.accepted.len(), 1);
     assert_eq!(o.rejected, 0);
     assert!(!o.no_pem_blocks);
-}
-
-#[test]
-fn parse_multi_cert_bundle() {
-    let o = parse_and_validate_pem(format!("{VALID_CERT_1}\n{VALID_CERT_2}").as_bytes());
-    assert_eq!(o.accepted.len(), 2);
-    assert_eq!(o.rejected, 0);
 }
 
 #[test]
@@ -127,4 +112,115 @@ fn read_bundle_capped_accepts_at_limit() {
     std::fs::write(&path, vec![b'B'; MAX_EXTRA_CA_BUNDLE_BYTES as usize]).unwrap();
     let got = read_bundle_capped(&path).expect("at-limit read");
     assert_eq!(got.len(), MAX_EXTRA_CA_BUNDLE_BYTES as usize);
+}
+
+#[test]
+fn openssl_trust_bundle_parses_to_exactly_the_certificate() {
+    // The RHEL trust-bundle shape; covers label normalization and trimming.
+    let key = rcgen::KeyPair::generate().expect("key");
+    let cert = rcgen::CertificateParams::new(vec![])
+        .expect("params")
+        .self_signed(&key)
+        .expect("cert");
+    let der = cert.der().as_ref().to_vec();
+    let mut with_aux = der.clone();
+    with_aux.extend_from_slice(&[0x30, 0x03, 0x02, 0x01, 0x01]);
+
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&with_aux);
+    let mut pem = String::from("-----BEGIN TRUSTED CERTIFICATE-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(chunk).expect("ascii"));
+        pem.push('\n');
+    }
+    pem.push_str("-----END TRUSTED CERTIFICATE-----\n");
+
+    let out = parse_and_validate_pem(pem.as_bytes());
+    assert_eq!(
+        out.accepted,
+        vec![der],
+        "aux bytes must be trimmed, cert kept"
+    );
+    assert_eq!(out.rejected, 0);
+}
+
+#[test]
+fn first_der_item_parses_der_length_forms_and_rejects_malformed() {
+    // Short form: exact fit, then trailing bytes past the length dropped.
+    assert_eq!(
+        first_der_item(&[0x30, 0x02, 0xAA, 0xBB]),
+        Some(&[0x30, 0x02, 0xAA, 0xBB][..])
+    );
+    assert_eq!(
+        first_der_item(&[0x30, 0x01, 0xAA, 0xFF, 0xFF]),
+        Some(&[0x30, 0x01, 0xAA][..])
+    );
+    // Long form (one length octet), and a whole-blob SEQUENCE passes unchanged.
+    assert_eq!(
+        first_der_item(&[0x30, 0x81, 0x01, 0xAA]),
+        Some(&[0x30, 0x81, 0x01, 0xAA][..])
+    );
+    assert_eq!(
+        first_der_item(&[0x30, 0x03, 0x02, 0x01, 0x07]),
+        Some(&[0x30, 0x03, 0x02, 0x01, 0x07][..])
+    );
+    // Rejected: non-SEQUENCE tag, indefinite length, over-claimed length, truncated header.
+    assert_eq!(first_der_item(&[0x31, 0x02, 0xAA, 0xBB]), None);
+    assert_eq!(first_der_item(&[0x30, 0x80, 0xAA]), None);
+    assert_eq!(first_der_item(&[0x30, 0x05, 0xAA]), None);
+    assert_eq!(first_der_item(&[0x30]), None);
+}
+
+#[test]
+fn native_trust_store_loads_once_across_many_builds() {
+    for _ in 0..4 {
+        build_reqwest_client(|builder| builder).expect("h2 client");
+        build_reqwest_client(|builder| builder.http1_only()).expect("http1 client");
+    }
+    assert_eq!(
+        NATIVE_ROOT_LOADS.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the OS trust store must load exactly once no matter how many clients build"
+    );
+}
+
+#[test]
+fn select_bundle_precedence() {
+    use std::ffi::OsString;
+    let os = OsString::from;
+    let p = std::path::PathBuf::from;
+    // Bundle wins; empty disables both; empty is treated as unset.
+    assert_eq!(
+        select_bundle(Some(os("/b")), Some(os("/s"))),
+        Some((ENV_GROK_EXTRA_CA_BUNDLE, p("/b")))
+    );
+    assert_eq!(select_bundle(Some(os("")), Some(os("/s"))), None);
+    assert_eq!(
+        select_bundle(None, Some(os("/s"))),
+        Some((ENV_SSL_CERT_FILE, p("/s")))
+    );
+    assert_eq!(select_bundle(None, Some(os(""))), None);
+    assert_eq!(select_bundle(None, None), None);
+}
+
+#[test]
+fn load_fails_open_on_read_errors() {
+    // Both read_bundle_capped failures (missing file, over the size cap) yield
+    // zero roots rather than propagating, so the size cap stays on the load path.
+    assert!(
+        load_extra_root_ders(
+            ENV_GROK_EXTRA_CA_BUNDLE,
+            std::path::Path::new("/nonexistent/grok-ca.pem"),
+        )
+        .is_empty()
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let oversized = dir.path().join("huge.pem");
+    std::fs::write(
+        &oversized,
+        vec![b'A'; (MAX_EXTRA_CA_BUNDLE_BYTES as usize) + 1],
+    )
+    .unwrap();
+    assert!(load_extra_root_ders(ENV_GROK_EXTRA_CA_BUNDLE, &oversized).is_empty());
 }

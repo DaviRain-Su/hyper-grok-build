@@ -7,6 +7,10 @@ edition.workspace = true
 [features]
 default = []
 dhat-heap = ["dep:dhat"]
+# Loom model-checking for src/auth/manager/lock/flock_wait.rs; test-only
+# (compile_error!-guarded). Run in release (debug overflows loom's stacks):
+#   cargo test --release --features loom -p xai-grok-shell --lib flock_wait::loom -- --test-threads=1
+loom = ["dep:loom"]
 # Session synthesis + in-process e2e harness (`session::testkit`) for soak,
 # load, and bench tests. Off by default; the tests/benches that use it declare
 # it via `required-features`.
@@ -14,9 +18,14 @@ test-support = []
 test-util = []
 # Local Computer Hub workspace_server (own/attach + crash-restart). Requires
 local-workspace = []
+# CI default set (preferred over cargo `default` for hermetic CI builds):
+# `config-docs` is on this set (not cargo `default`) so hermetic lib tests
+# parse the committed config-reference page.
+config-docs = []
 default-bazel = [
     "local-workspace",
     "test-support",
+    "config-docs",
 ]
 
 [dependencies]
@@ -44,6 +53,7 @@ futures = { workspace = true }
 glob = { workspace = true }
 globset = { workspace = true }
 kanal = "0.1"
+loom = { workspace = true, optional = true }
 regex = { workspace = true }
 # rmcp 2.1 + reqwest 0.13 are quarantined inside `xai-grok-mcp`. The remaining
 # MCP code in this crate (extensions/mcp.rs, mcp_doctor.rs) reaches rmcp model
@@ -81,7 +91,7 @@ tracing-subscriber = { workspace = true, features = [
     "time",
 ] }
 obfstr = { workspace = true }
-tokio-util = { workspace = true, features = ["compat"] }
+tokio-util = { workspace = true, features = ["compat", "rt"] }
 tokio-retry = { workspace = true }
 uuid = { workspace = true, features = ["v4", "v5", "v7"] }
 xai-acp-lib = { workspace = true }
@@ -100,7 +110,6 @@ rustls = { version = "0.23", default-features = false, features = [
     "std",
     "tls12",
 ] }
-rustls-native-certs = "0.8"
 futures-util = { workspace = true }
 urlencoding = { workspace = true }
 gethostname = { workspace = true }
@@ -128,7 +137,6 @@ base64 = { workspace = true }
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 sha2 = { workspace = true }
 rand = { workspace = true }
-shlex = { workspace = true }
 strum = { workspace = true }
 xai-fast-worktree = { path = "../../platform/xai-fast-worktree", features = ["metadata"] }
 
@@ -137,7 +145,9 @@ prost = { workspace = true, optional = true }
 xai-grok-paths = { path = "../../platform/xai-grok-paths" }
 xai-grok-shell-base = { workspace = true }
 xai-grok-shell-session-support = { workspace = true }
+xai-grok-shell-terminal = { workspace = true }
 xai-grok-shared = { workspace = true }
+xai-grok-status-line = { workspace = true }
 xai-tracing-macros = { path = "../../platform/xai-tracing-macros" }
 xai-fsnotify = { path = "../../platform/xai-fsnotify" }
 xai-codebase-graph = { path = "../../platform/xai-codebase-graph" }
@@ -189,8 +199,6 @@ url = { workspace = true }
 walkdir = { workspace = true }
 tdigests = "1.0"
 semver = { workspace = true }
-process-wrap = { version = "9.0.0", features = ["tokio1", "job-object", "creation-flags"] }
-portable-pty = "0.9"
 parking_lot.workspace = true
 dashmap.workspace = true
 
@@ -210,6 +218,8 @@ siphasher = { workspace = true }
 windows = { workspace = true }
 
 [dev-dependencies]
+# The fixture that builds a `[ui.status_line]` section field by field.
+xai-grok-status-line = { workspace = true, features = ["test-support"] }
 criterion = { workspace = true }
 # Pre-main unified-log redirect (`test_support::redirect_unified_log_for_tests`).
 ctor = { workspace = true }

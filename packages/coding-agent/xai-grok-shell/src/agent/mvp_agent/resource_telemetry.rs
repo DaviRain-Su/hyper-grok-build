@@ -73,6 +73,7 @@ impl MvpAgent {
                 rss_bytes: usage.rss_bytes,
                 peak_rss_bytes: usage.peak_rss_bytes,
                 footprint_bytes: usage.footprint_bytes,
+                allocated_bytes: crate::heap_profile::stats().map(|stats| stats.allocated),
                 threads: usage.threads,
                 open_files: usage.open_files,
                 resident_sessions: self.session_registry.resident_count(),

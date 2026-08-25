@@ -422,6 +422,46 @@ impl Drop for StashedPrompt {
     }
 }
 
+/// Feedback attachments in transit between the composer, the trace-consent
+/// card, and the send dispatch.
+///
+/// Owns its staged temp files: dropping without [`take`](Self::take) deletes them.
+#[derive(Debug, Default)]
+pub struct FeedbackImages(Vec<PastedImage>);
+
+impl From<Vec<PastedImage>> for FeedbackImages {
+    fn from(images: Vec<PastedImage>) -> Self {
+        Self(images)
+    }
+}
+
+impl Drop for FeedbackImages {
+    fn drop(&mut self) {
+        crate::prompt_images::drain_and_cleanup(&mut self.0);
+    }
+}
+
+impl FeedbackImages {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Read access for encoding; cleanup stays with this owner.
+    pub fn as_slice(&self) -> &[PastedImage] {
+        &self.0
+    }
+
+    /// Hand the records to a consumer that takes over cleanup (the prompt
+    /// widget adopting them as live chips).
+    pub fn take(&mut self) -> Vec<PastedImage> {
+        std::mem::take(&mut self.0)
+    }
+}
+
 impl StashedPrompt {
     pub(crate) fn from_submission(
         text: String,
@@ -771,6 +811,8 @@ impl PromptWidget {
         let Some(rest) = self.prompt_suggestion.accept(&text) else {
             return false;
         };
+        // Accepting rewrites the token — an unrelated highlight must not survive it.
+        self.textarea.clear_selection();
         self.textarea.insert_str(&rest);
         self.update_file_search_context();
         true
@@ -844,6 +886,8 @@ impl PromptWidget {
     /// written (`Stale` is a draft-preserving no-op); cursor lands after the
     /// insert.
     pub fn apply_completion_splice(&mut self, splice: CompletionSplice) -> bool {
+        // Accepting rewrites the token — an unrelated highlight must not survive it.
+        self.textarea.clear_selection();
         match splice {
             CompletionSplice::WholeLine(line) => {
                 self.set_text(&line);
@@ -1254,6 +1298,8 @@ impl PromptWidget {
         let Some(row) = snap.selection() else {
             return false;
         };
+        // Accepting rewrites the token — an unrelated highlight must not survive it.
+        self.textarea.clear_selection();
         let insert_text = row.insert_text.clone();
         let record_mru = snap.cursor_in_command;
         let mru_record = if record_mru {
@@ -1709,6 +1755,16 @@ impl PromptWidget {
             }
         }
 
+        // Esc/Tab: drop the highlight but decline the press so it still cancels / switches focus.
+        // Modified Esc has no structural consumer — it falls through to the
+        // textarea catch-all, which clears the highlight WITH a repaint.
+        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+            || (key.code == KeyCode::Esc && key.modifiers.is_empty())
+        {
+            self.textarea.clear_selection();
+            return PromptEvent::Ignored;
+        }
+
         // ── Ctrl-L / : on element → open line viewer ────────────────────
         // Ctrl-L when cursor is on or adjacent to a file ref element,
         // or ':' typed right at element boundary → open viewer.
@@ -1739,8 +1795,7 @@ impl PromptWidget {
         // Newline: Shift/Alt+Enter, or Apple Terminal bare Enter with a
         // newline modifier held (CoreGraphics rescue inside is_mod_enter).
         if crate::input::is_mod_enter(key) {
-            self.textarea.insert_str("\n");
-            self.update_file_search_context();
+            self.insert_replacing_selection("\n");
             return PromptEvent::Edited;
         }
 
@@ -1780,8 +1835,7 @@ impl PromptWidget {
                     crate::clipboard::log_paste_key_empty_host_clipboard("prompt_widget_inline");
                     return PromptEvent::Ignored;
                 }
-                self.textarea.insert_str(&text);
-                self.update_file_search_context();
+                self.insert_replacing_selection(&text);
                 return PromptEvent::Edited;
             }
             crate::clipboard::log_paste_key_empty_host_clipboard("prompt_widget_inline");
@@ -1832,24 +1886,31 @@ impl PromptWidget {
         }
 
         // Everything else: delegate to textarea.
-        // Track whether it actually changed anything.
+        // Selection is rendered state: selection-only changes must report Edited or no frame is drawn.
         let old_text = self.textarea.text().to_owned();
         let old_cursor = self.textarea.cursor();
-        let old_has_selection = self.textarea.selection_range().is_some();
+        let old_selection = self.textarea.selection_range();
         self.textarea.input(*key);
         let new_cursor = self.textarea.cursor();
-        let changed = self.textarea.text() != old_text || new_cursor != old_cursor;
+        let new_selection = self.textarea.selection_range();
+        let changed = self.textarea.text() != old_text
+            || new_cursor != old_cursor
+            || new_selection != old_selection;
         self.last_input_delta = crate::input_log::LastInputDelta {
             cursor_before: Some(old_cursor),
             cursor_after: Some(new_cursor),
             text_len_before: Some(old_text.len()),
             text_len_after: Some(self.textarea.text().len()),
-            had_selection_before: Some(old_has_selection),
-            had_selection_after: Some(self.textarea.selection_range().is_some()),
+            had_selection_before: Some(old_selection.is_some()),
+            had_selection_after: Some(new_selection.is_some()),
             textarea_changed: Some(changed),
         };
         if changed {
-            self.sync_images_with_textarea();
+            // Image chips only change with the text — skip the resync on
+            // selection/cursor-only changes (held Shift+arrow extends).
+            if self.textarea.text() != old_text {
+                self.sync_images_with_textarea();
+            }
             self.update_file_search_context();
             PromptEvent::Edited
         } else {
@@ -1870,7 +1931,7 @@ impl PromptWidget {
                     key_kind: format!("{:?}", key.kind),
                     cursor_pos: old_cursor,
                     text_len: old_text.len(),
-                    has_selection: old_has_selection,
+                    has_selection: old_selection.is_some(),
                 };
                 // Structured warn for the product telemetry pipeline.
                 tracing::warn!(
@@ -2009,6 +2070,9 @@ impl PromptWidget {
         let Some(ctx) = ctx else { return };
         let Some(res) = result else { return };
 
+        // Accepting rewrites the token — an unrelated highlight must not survive it.
+        self.textarea.clear_selection();
+
         // File results behave exactly like Tab (insert + trailing space).
         // "Drill down" only makes sense for directories — there is nothing
         // to nest into beneath a file — so for file selections Right and
@@ -2062,6 +2126,9 @@ impl PromptWidget {
 
         let Some(ctx) = ctx else { return };
         let Some(res) = result else { return };
+
+        // Accepting rewrites the token — an unrelated highlight must not survive it.
+        self.textarea.clear_selection();
 
         if ctx.is_dir_mode() && res.is_dir {
             // Descending into a selected directory while navigating (dir-mode):
@@ -2118,6 +2185,9 @@ impl PromptWidget {
 
         let Some(ctx) = ctx else { return };
         let Some(res) = result else { return };
+
+        // Accepting rewrites the token — an unrelated highlight must not survive it.
+        self.textarea.clear_selection();
 
         let path_str = res.path.to_string();
         let path = normalize_display_path(&path_str);
@@ -2180,7 +2250,7 @@ impl PromptWidget {
         // modifier state — if Shift/Option/Cmd is physically held, insert
         // a newline instead of submitting.
         if key.code == KeyCode::Enter && crate::input::is_apple_terminal_newline_modifier_held() {
-            self.textarea.insert_str("\n");
+            self.insert_replacing_selection("\n");
             return EnterOutcome::NewlineInserted;
         }
 
@@ -2428,6 +2498,16 @@ impl PromptWidget {
         self.images.push(img);
 
         Ok(())
+    }
+
+    /// Insert text replacing the selection; resyncs images (a selection can swallow chips).
+    pub(crate) fn insert_replacing_selection(&mut self, text: &str) {
+        let replaced_selection = self.textarea.selection_range().is_some();
+        self.textarea.insert_str_replacing_selection(text);
+        if replaced_selection {
+            self.sync_images_with_textarea();
+        }
+        self.update_file_search_context();
     }
 
     fn sync_images_with_textarea(&mut self) {
@@ -2780,6 +2860,45 @@ impl PromptWidget {
         );
     }
 
+    /// Adopt previously drained images by binding them to the `[Image #N]`
+    /// placeholders already present in the buffer, matched by display
+    /// number. The `/feedback` pane uses this to turn an inline command's
+    /// pasted attachments back into live, removable chips inside the
+    /// prefill text. Images without a matching placeholder are cleaned up:
+    /// nothing in the buffer references them, so they could never be
+    /// removed by the user nor drained for send.
+    pub fn adopt_images(&mut self, mut images: Vec<PastedImage>) {
+        if images.is_empty() {
+            return;
+        }
+        let text = self.textarea.text().to_owned();
+        let mut chips: Vec<crate::app::agent::ChipElement> = Vec::new();
+        let mut adopted: Vec<PastedImage> = Vec::new();
+        for m in chip_placeholder_regex().find_iter(&text) {
+            // The `:`-suffixed regex arm never parses (no closing bracket
+            // in the match), which is correct: only the canonical
+            // `[Image #N]` emitter form carries an exact chip range.
+            let Some(number) = parse_image_display_number(m.as_str()) else {
+                continue;
+            };
+            let Some(pos) = images.iter().position(|img| img.display_number == number) else {
+                continue;
+            };
+            chips.push(crate::app::agent::ChipElement {
+                range: m.range(),
+                kind: KIND_IMAGE,
+                display: Some(chip_line(format!("Image #{number}"))),
+            });
+            adopted.push(images.remove(pos));
+        }
+        crate::prompt_images::drain_and_cleanup(&mut images);
+        if adopted.is_empty() {
+            return;
+        }
+        self.restore_chip_elements(&chips);
+        self.set_images(adopted);
+    }
+
     /// Expose the underlying textarea for element access.
     pub fn textarea(&self) -> &xai_ratatui_textarea::TextArea {
         &self.textarea
@@ -3016,29 +3135,26 @@ impl PromptWidget {
                 }
             }
 
-            // Session title inlined in the divider (` title `, right-aligned
-            // ending 2 cells before ╮) in the shared chrome-caption style;
-            // the pad spaces blank the adjacent `─`.
-            if let Some(title) = style
+            // Caption inlined in the divider, right-aligned ending 2 cells before ╮.
+            // The pad spaces blank the adjacent `─`; corners plus 2-cell insets stay plain border.
+            let caption = style
                 .title
                 .as_deref()
                 .map(str::trim)
-                .filter(|t| !t.is_empty())
+                .filter(|t| !t.is_empty());
+            let max_w = area.width.saturating_sub(6);
+            if let Some(caption) = caption
+                && max_w >= 6
             {
-                // Corners plus 2-cell insets on both sides stay plain border.
-                let max_w = area.width.saturating_sub(6);
-                if max_w >= 6 {
-                    let label = format!(" {title} ");
-                    let trunc = crate::render::line_utils::truncate_str(&label, max_w as usize);
-                    let label_w = unicode_width::UnicodeWidthStr::width(trunc.as_str()) as u16;
-                    let x = area.x + area.width.saturating_sub(3 + label_w);
-                    buf.set_string(
-                        x,
-                        div_y,
-                        &trunc,
-                        Self::chrome_caption_style(bg, &theme, style.focused),
-                    );
-                }
+                let label = format!(" {caption} ");
+                let trunc = crate::render::line_utils::truncate_str(&label, max_w as usize);
+                let label_w = unicode_width::UnicodeWidthStr::width(trunc.as_str()) as u16;
+                buf.set_string(
+                    area.x + area.width.saturating_sub(3 + label_w),
+                    div_y,
+                    &trunc,
+                    Self::chrome_caption_style(bg, &theme, style.focused),
+                );
             }
         }
 

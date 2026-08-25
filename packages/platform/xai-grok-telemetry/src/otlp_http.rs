@@ -124,26 +124,25 @@ pub(crate) fn build_blocking_client_with_identity(
             // handled inside xai-grok-extra-ca) and the external stream's
             // per-call `OTEL_EXPORTER_OTLP_CERTIFICATE` files (fail-closed,
             // validated above).
-            let mut builder = reqwest::blocking::Client::builder().timeout(timeout);
-            // Pin rustls only when attaching a PEM client identity: this
-            // shared builder is also used by the internal firehose, and
-            // Identity::from_pem is a rustls PEM identity that native-tls
-            // rejects under Bazel feature unification ("incompatible TLS
-            // identity type"). Without an identity, leave the backend alone.
-            if identity_pem.is_some() {
-                builder = builder.use_rustls_tls();
-            }
-            let mut builder = xai_grok_extra_ca::with_extra_root_certificates_blocking(builder);
-            for cert in extra_roots {
-                builder = builder.add_root_certificate(cert);
-            }
-            if let Some(pem) = identity_pem {
-                let identity = reqwest::Identity::from_pem(&pem).map_err(|e| {
+            let identity = match identity_pem {
+                Some(pem) => Some(reqwest::Identity::from_pem(&pem).map_err(|e| {
                     format!("parsing OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE/KEY: {e}")
-                })?;
-                builder = builder.identity(identity);
-            }
-            builder.build().map(BlockingOtlpClient).map_err(|e| {
+                })?),
+                None => None,
+            };
+            // The rustls pin keeps Identity::from_pem (rustls PEM) working.
+            xai_grok_extra_ca::build_blocking_reqwest_client(|builder| {
+                let mut builder = builder.timeout(timeout);
+                for cert in &extra_roots {
+                    builder = builder.add_root_certificate(cert.clone());
+                }
+                if let Some(identity) = &identity {
+                    builder = builder.identity(identity.clone());
+                }
+                builder
+            })
+            .map(BlockingOtlpClient)
+            .map_err(|e| {
                 let mut detail = e.to_string();
                 let mut source = std::error::Error::source(&e);
                 while let Some(s) = source {
@@ -182,7 +181,7 @@ mod tests {
             &["/nonexistent/corp-ca.pem"],
         )
         .expect_err("missing CA bundle must fail construction");
-        assert!(err.contains("OTEL_EXPORTER_OTLP_CERTIFICATE"), "{err}");
+        assert!(err.contains("OTEL_EXPORTER_OTLP_CERTIFICATE"));
     }
 
     /// A readable but certificate-less bundle must also fail closed instead
@@ -197,7 +196,7 @@ mod tests {
             &[file.path().to_str().expect("utf-8 path")],
         )
         .expect_err("certificate-less bundle must fail construction");
-        assert!(err.contains("no certificates"), "{err}");
+        assert!(err.contains("no certificates"));
     }
 
     #[test]
@@ -211,10 +210,7 @@ mod tests {
             }),
         )
         .expect_err("missing client cert must fail construction");
-        assert!(
-            err.contains("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE"),
-            "{err}"
-        );
+        assert!(err.contains("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE"));
     }
 
     #[test]

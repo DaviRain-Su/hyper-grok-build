@@ -7,8 +7,10 @@ use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
 use crate::app::agent_view::{ActivePane, AgentView};
 use crate::app::app_view::{ActiveView, AppView};
+use crate::app::cancel_latency::{CancelOrigin, TurnEnd};
 use crate::scrollback::blocks::SessionEvent;
 use std::time::Instant;
+use xai_grok_telemetry::events::CancellationScope;
 
 /// Map `[ui].cancel_subagents_on_turn_cancel` / in-memory agent preference to
 /// `cancel_subagents` for the cancel wire payload. `None` means prompt.
@@ -82,7 +84,10 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             )];
         }
         return cancel_agent_turn(
-            agent, /* cancel_rewind_enabled */ false, /* cancel_subagents */ true,
+            agent,
+            /* cancel_rewind_enabled */ false,
+            /* cancel_subagents */ true,
+            CancelOrigin::UserGesture,
         );
     }
     // Focused running subagent with no child view (no overlay to cancel through): kill is
@@ -203,7 +208,11 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
         }
     };
 
-    do_cancel_turn(app, preferred_cancel_subagents.unwrap_or(true))
+    do_cancel_turn(
+        app,
+        preferred_cancel_subagents.unwrap_or(true),
+        CancelOrigin::UserGesture,
+    )
 }
 
 pub(super) fn dispatch_cancel_turn_choice(
@@ -248,11 +257,19 @@ pub(super) fn dispatch_cancel_turn_choice(
         CancelTurnChoice::StopRunning | CancelTurnChoice::ContinueToRun => {}
     }
 
-    effects.extend(do_cancel_turn(app, cancel_subagents));
+    effects.extend(do_cancel_turn(
+        app,
+        cancel_subagents,
+        CancelOrigin::UserGesture,
+    ));
     effects
 }
 
-pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<Effect> {
+pub(super) fn do_cancel_turn(
+    app: &mut AppView,
+    cancel_subagents: bool,
+    origin: CancelOrigin,
+) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -260,16 +277,17 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    cancel_agent_turn(agent, cancel_rewind_enabled, cancel_subagents)
+    cancel_agent_turn(agent, cancel_rewind_enabled, cancel_subagents, origin)
 }
 
 fn cancel_agent_turn(
     agent: &mut AgentView,
     cancel_rewind_enabled: bool,
     cancel_subagents: bool,
+    origin: CancelOrigin,
 ) -> Vec<Effect> {
     if agent.session.state.is_compact_running() {
-        agent.session.cancel_compact_command();
+        agent.cancel_and_arm(CancellationScope::Compaction, origin);
         agent.cancel_turn_view = None;
         agent.cancel_turn_buttons.clear();
         drain_permission_queue(agent);
@@ -284,7 +302,6 @@ fn cancel_agent_turn(
             /* rewind_prompt_id */ None,
         )];
     }
-    // Wake marker, not idle-only — same reason as `dispatch_cancel_turn`.
     if agent.running_wake_turn.is_some() {
         let Some(session_id) = agent.session.session_id.clone() else {
             return vec![];
@@ -368,7 +385,7 @@ fn cancel_agent_turn(
         agent.activity_started_at = None;
         agent.last_activity = None;
     } else {
-        agent.session.cancel_turn(&mut agent.scrollback);
+        agent.cancel_and_arm(CancellationScope::Turn, origin);
     }
     agent.cancel_turn_view = None;
     agent.cancel_turn_buttons.clear();
@@ -664,7 +681,7 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
             Some(pending.prompt_id.as_str()),
         );
 
-        agent.mark_turn_finished();
+        agent.mark_turn_finished(TurnEnd::Completed);
         agent.activity_started_at = None;
         agent.last_activity = None;
         drain_permission_queue(agent);

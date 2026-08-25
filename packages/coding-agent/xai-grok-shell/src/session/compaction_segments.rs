@@ -19,25 +19,27 @@ impl SessionActor {
     /// Persist the per-segment store (`Segments` only; no-op for `Summary`
     /// and `Transcript`). Queues a write on the persistence channel;
     /// storage assigns the index and renders the markdown.
+    ///
+    /// Returns `true` iff a `CompactionSegmentFile` was queued. Does not wait on disk.
     pub(crate) fn persist_compaction_segment(
         &self,
         simplified_messages: &[ConversationItem],
         summary: &str,
-    ) {
+    ) -> bool {
         let Some(detail) = self.compaction.compaction_mode.segment_detail() else {
-            return;
+            return false;
         };
         let cleaned_summary = format_compact_summary(summary);
         let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let _ = self
-            .notifications
+        self.notifications
             .persistence_tx
             .send(PersistenceMsg::CompactionSegment(CompactionSegmentFile {
                 items: simplified_messages.to_vec(),
                 summary: cleaned_summary,
                 detail,
                 timestamp,
-            }));
+            }))
+            .is_ok()
     }
     /// Pointer text appended to the summary — where pre-compaction history lives
     /// (`updates.jsonl` for `Transcript`, the `compaction/` store otherwise). No

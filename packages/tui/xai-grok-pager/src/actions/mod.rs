@@ -37,6 +37,8 @@ pub enum ActionId {
     // Prompt
     SendPrompt,
     InterjectPrompt,
+    /// Stash the composer draft; on an empty composer, pop the newest stash.
+    StashPrompt,
     /// Enable voice mode and start recording (`/voice`). Not a toggle — it
     /// never turns voice mode off; capture is controlled by [`Self::VoiceToggle`].
     EnableVoiceMode,

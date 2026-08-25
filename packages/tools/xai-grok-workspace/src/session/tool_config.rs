@@ -404,7 +404,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
         session_env: Arc<HashMap<String, String>>,
         backend: Arc<dyn xai_grok_tools::computer::types::TerminalBackend>,
     ) -> xai_grok_tools::registry::types::SessionContext {
-        use xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig;
+        use xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig;
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
         use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
         use xai_grok_tools::implementations::web_search::WebSearchConfig;
@@ -561,6 +561,7 @@ pub mod test_support {
     /// Test factory: builds a `SessionContext` rooted at a per-test temp dir.
     pub struct TestSessionContextFactory {
         pub temp: TempDir,
+        tool_state: bool,
     }
     impl Default for TestSessionContextFactory {
         fn default() -> Self {
@@ -571,6 +572,14 @@ pub mod test_support {
         pub fn new() -> Self {
             Self {
                 temp: TempDir::new().expect("create temp dir"),
+                tool_state: true,
+            }
+        }
+        /// Matches production, where `GROK_WORKSPACE_TOOL_STATE_ENABLED` is unset and the real factory returns an empty path.
+        pub fn without_tool_state() -> Self {
+            Self {
+                tool_state: false,
+                ..Self::new()
             }
         }
     }
@@ -598,7 +607,11 @@ pub mod test_support {
                 subagent: None,
                 parent_scheduler_handle: None,
                 skills: vec![],
-                state_path: session_root.join("tool_state.json"),
+                state_path: if self.tool_state {
+                    session_root.join("tool_state.json")
+                } else {
+                    PathBuf::new()
+                },
                 memory_backend: None,
                 web_search_config: Default::default(),
                 web_fetch_config: Default::default(),
@@ -1173,7 +1186,9 @@ mod tests {
             let counter = res.get_or_default::<State<WebCitationCounter>>();
             counter.counter = 123;
         }
-        ts_a.save_and_flush_persistence().await;
+        ts_a.save_and_flush_persistence()
+            .await
+            .expect("the test factory gives this session a state path");
         drop(ts_a);
         let (_eff, ts_b, _backend_b) = resolve_session_toolset(
             test_support::baseline_config(),

@@ -3,17 +3,23 @@ license = "Apache-2.0"
 name = "xai-grok-extra-ca"
 version = "0.1.0"
 edition.workspace = true
-description = "Opt-in extra TLS roots from GROK_EXTRA_CA_BUNDLE (validated DER cache + reqwest 0.12 adapters)"
+description = "TLS policy for the grok CLI: rustls backend pin, process crypto provider, shared root store, and opt-in GROK_EXTRA_CA_BUNDLE roots"
 
 [dependencies]
-reqwest = { workspace = true }
-# Explicit pin (not `workspace = true`): the workspace rustls pin enables
-# aws-lc-rs. This crate only needs RootCertStore + PEM parse, so stay
-# default-features = false with `std` (enables pki-types/std for PEM).
-rustls = { version = "0.23", default-features = false, features = ["std"] }
+# The adapters promise OS trust plus the Mozilla bundle, so an unreadable OS
+# store degrades rather than fails; both features must travel with this crate.
+reqwest = { workspace = true, features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
+# ensure_default_crypto_provider needs aws-lc-rs; unification would mask its absence.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+rustls-native-certs = { workspace = true }
 tracing = { workspace = true }
+webpki-roots = { workspace = true }
 
 [dev-dependencies]
+base64 = { workspace = true }
+rcgen = { workspace = true }
+# ring, so the preinstalled-provider test can install a non-aws-lc-rs default.
+rustls = { workspace = true, features = ["ring"] }
 tempfile = { workspace = true }
 
 [lints]

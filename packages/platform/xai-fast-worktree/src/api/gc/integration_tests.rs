@@ -719,6 +719,10 @@ fn gc_report_serde_round_trip() {
         not_judged: 0,
         unnamed: 2,
         names_collected: 7,
+        pin_gc_examined: 2,
+        pin_gc_pruned: 1,
+        pin_gc_deferred: 0,
+        pin_gc_kept: 1,
     };
     let json = serde_json::to_string(&report).unwrap();
     let deser: gc::GcReport = serde_json::from_str(&json).unwrap();
@@ -951,7 +955,7 @@ fn per_kind_age_expiry_reclaims_listed_kinds_and_keeps_the_rest() {
         records: Vec<(&'static str, WorktreeKind, i64)>,
         opts: gc::GcOptions,
         survivors: Vec<&'static str>,
-        expired_removed: usize,
+        expired_removed: u64,
     }
     let cases = vec![
         Case {

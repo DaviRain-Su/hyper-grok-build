@@ -2,14 +2,15 @@
 //! servers. Managed connectors exist only via the gateway catalog
 //! (`GET /v1/mcp/tools/list`), not as injected `grok_com_*` HTTP servers.
 //!
-//! Merge layers are applied in order; later `insert()` beats earlier
-//! `or_insert()`:
+//! Merge layers are applied in order, keyed by server NAME (two names sharing
+//! one URL are distinct servers); later `insert()` beats earlier `or_insert()`:
 //!   - config.toml    — seeds the map; `enabled = false` blocks lower layers
 //!   - Plugins        — `or_insert` (won't override config.toml)
 //!   - ~/.claude.json — `or_insert` (imported user/local MCP servers)
 //!   - `.mcp.json`    — `or_insert` (team baseline)
-//!   - Client         — `insert` (wins except keys rejected by a disabled
-//!                      vendor `mcps` kill switch; see `admit_client_mcp_servers`)
+//!   - Client         — `insert` (wins except servers rejected by a disabled
+//!                      vendor `mcps` kill switch, which matches by normalized
+//!                      URL; see `admit_client_mcp_servers`)
 //!
 //! The gateway catalog/call core lives in
 //! `xai_grok_shell_session_support::managed_mcp` and is re-exported here so
@@ -21,8 +22,10 @@ use std::collections::HashMap;
 
 use agent_client_protocol as acp;
 
-/// Dedup key for the merge map: normalized URL for Http/Sse, name for Stdio.
-fn mcp_server_key(s: &acp::McpServer) -> String {
+/// Vendor kill-switch attribution key: normalized URL for Http/Sse (a client
+/// re-forwards the same endpoint under any display name), name for Stdio.
+/// Only for [`admit_client_mcp_servers`]; merge/discovery maps key by name.
+fn mcp_vendor_block_key(s: &acp::McpServer) -> String {
     match s {
         acp::McpServer::Http(acp::McpServerHttp { url, .. })
         | acp::McpServer::Sse(acp::McpServerSse { url, .. }) => normalize_url(url),
@@ -40,6 +43,14 @@ pub(crate) fn mcp_server_name(s: &acp::McpServer) -> &str {
         // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
         _ => "",
     }
+}
+
+/// Merge/discovery map key: server NAME is the sole merge identity (two names
+/// sharing one URL are distinct servers). Every name-keyed map in this module
+/// must derive its key through this helper so merge and discovery keying
+/// cannot desynchronize.
+fn mcp_merge_key(s: &acp::McpServer) -> String {
+    mcp_server_name(s).to_string()
 }
 
 pub(crate) fn merge_managed_mcp_servers(
@@ -100,7 +111,7 @@ pub(crate) fn admit_client_mcp_servers(
         blocked.extend(
             crate::util::config::load_cursor_mcp_servers(cwd, &forced)
                 .iter()
-                .map(mcp_server_key),
+                .map(mcp_vendor_block_key),
         );
     }
     if !compat.claude.mcps {
@@ -109,7 +120,7 @@ pub(crate) fn admit_client_mcp_servers(
         blocked.extend(
             crate::util::config::load_claude_json_mcp_servers_for_attribution(cwd)
                 .iter()
-                .map(mcp_server_key),
+                .map(mcp_vendor_block_key),
         );
     }
     if blocked.is_empty() {
@@ -117,7 +128,7 @@ pub(crate) fn admit_client_mcp_servers(
     }
     client_mcp_servers
         .into_iter()
-        .filter(|s| !blocked.contains(&mcp_server_key(s)))
+        .filter(|s| !blocked.contains(&mcp_vendor_block_key(s)))
         .collect()
 }
 
@@ -130,26 +141,26 @@ pub(crate) fn merge_managed_mcp_servers_with_policy(
     let mut servers: HashMap<String, acp::McpServer> =
         merge_managed_mcp_servers_sourced(cwd, plugin_registry, compat)
             .into_iter()
-            .map(|(s, _source)| (mcp_server_key(&s), s))
+            .map(|(s, _source)| (mcp_merge_key(&s), s))
             .collect();
 
     // Re-admit at merge so a caller that forgot ingress sanitization cannot
     // spawn disabled-vendor client servers.
     for server in admit_client_mcp_servers(client_mcp_servers, cwd, compat) {
-        servers.insert(mcp_server_key(&server), server);
+        servers.insert(mcp_merge_key(&server), server);
     }
 
     let disabled = crate::util::config::disabled_mcp_server_names(cwd);
 
     let mut merged: Vec<acp::McpServer> = servers.into_values().collect();
-    // Deterministic order: this list is collected from a HashMap (random)
+    // Deterministic order: this list is collected from a HashMap (random
     // iteration order). Downstream equality checks (`mcp_servers_equal`, used
     // by both `update_configs` and the `update_configs_diff` short-circuit) are
     // order-sensitive, so an unsorted list makes an unchanged server set look
     // changed — spuriously cancelling/restarting MCP init on e.g. a hooks-only
-    // plugin reload. Sorting by the dedup key keeps reloads a true no-op when
-    // nothing changed.
-    merged.sort_by_key(mcp_server_key);
+    // plugin reload. Sorting by name (the unique merge key) keeps reloads a
+    // true no-op when nothing changed.
+    merged.sort_by(|a, b| mcp_server_name(a).cmp(mcp_server_name(b)));
     // Folder-trust gate: when `cwd`'s workspace is untrusted, drop its
     // repo-local (project-scoped) servers before they can be spawned. No-op for
     // a trusted/unrecorded workspace. Composes with the managed-deny allowlist
@@ -265,7 +276,7 @@ pub(crate) fn merge_managed_mcp_servers_sourced(
         crate::util::config::load_mcp_servers_toml_only(cwd)
             .into_iter()
             .map(|s| {
-                let key = mcp_server_key(&s);
+                let key = mcp_merge_key(&s);
                 (key, (s, config_source.clone()))
             })
             .collect();
@@ -276,8 +287,9 @@ pub(crate) fn merge_managed_mcp_servers_sourced(
     for (server, source) in
         non_toml_mcp_servers_with_source(cwd, plugin_registry, compat, &toml_claimed_names)
     {
-        let key = mcp_server_key(&server);
-        servers.entry(key).or_insert((server, source));
+        servers
+            .entry(mcp_merge_key(&server))
+            .or_insert((server, source));
     }
 
     servers.into_values().collect()
@@ -285,8 +297,8 @@ pub(crate) fn merge_managed_mcp_servers_sourced(
 
 /// Plugin / Claude / Cursor / `.mcp.json` servers in merge priority order.
 ///
-/// Callers insert with `entry(key).or_insert` so the first listed source wins a
-/// shared URL key. TOML is applied separately (last-wins for merge and for
+/// Callers insert with `entry(name).or_insert` so the first listed source wins
+/// a shared name. TOML is applied separately (last-wins for merge and for
 /// discovery force-enable).
 fn non_toml_mcp_servers_with_source(
     cwd: &std::path::Path,
@@ -389,8 +401,8 @@ pub(crate) struct McpDiscoveryInputs<'a> {
 /// Definitions that would exist if personal disable were cleared.
 ///
 /// Presence probe for list stubs (not a spawnable merge result). Shares the
-/// non-TOML walk ([`non_toml_mcp_servers_with_source`]), TOML last-wins URL
-/// keying, and folder-trust last with
+/// non-TOML walk ([`non_toml_mcp_servers_with_source`]), name keying (TOML
+/// wins a name, lower tiers `or_insert`), and folder-trust last with
 /// [`merge_managed_mcp_servers_with_policy`]. Does **not** include client
 /// forwarded servers. TOML `enabled = false` is force-enabled for stubs.
 /// Returns transports keyed by server name.
@@ -410,39 +422,26 @@ pub(crate) fn discover_mcp_definitions_ignoring_disable(
     let sub = &crate::config::expand_env_vars_in_string;
     let toml_claimed = crate::util::config::all_toml_mcp_server_names(cwd);
 
-    // TOML last-wins (matches merge HashMap collect). Lower tiers first-wins.
-    let mut by_key: HashMap<String, acp::McpServer> = HashMap::new();
+    // TOML wins its name (insert); lower tiers or_insert.
+    let mut by_name: HashMap<String, acp::McpServer> = HashMap::new();
     for (name, (config, _scope)) in load_mcp_server_configs_with_project(cwd) {
         let Some(transport) =
             materialize_mcp_config(&name, config, &preferences, sub, McpEnabledFilter::Ignore)
         else {
             continue;
         };
-        by_key.insert(mcp_server_key(&transport), transport);
+        by_name.insert(name, transport);
     }
     for (server, _source) in
         non_toml_mcp_servers_with_source(cwd, plugin_registry, compat, &toml_claimed)
     {
-        let key = mcp_server_key(&server);
-        by_key.entry(key).or_insert(server);
-    }
-
-    // Deterministic collapse: lowest sorted transport key wins a shared name.
-    let mut key_order: Vec<_> = by_key.keys().cloned().collect();
-    key_order.sort();
-    let mut by_name: HashMap<String, acp::McpServer> = HashMap::with_capacity(by_key.len());
-    for key in key_order {
-        let Some(transport) = by_key.remove(&key) else {
-            continue;
-        };
-        let name = mcp_server_name(&transport).to_string();
-        by_name.entry(name).or_insert(transport);
+        by_name.entry(mcp_merge_key(&server)).or_insert(server);
     }
 
     let servers: Vec<acp::McpServer> = by_name.into_values().collect();
     crate::agent::folder_trust::filter_untrusted_project_mcp(cwd, servers)
         .into_iter()
-        .map(|s| (mcp_server_name(&s).to_string(), s))
+        .map(|s| (mcp_merge_key(&s), s))
         .collect()
 }
 
@@ -975,6 +974,81 @@ enabled = false
         );
     }
 
+    /// Trusted git repo whose project config.toml declares two HTTP servers
+    /// sharing one URL, each with its own auth header (GB-5207 shape: one
+    /// ClickHouse endpoint, two orgs).
+    fn same_url_project_repo() -> tempfile::TempDir {
+        let cwd = empty_cwd();
+        std::fs::create_dir_all(cwd.path().join(".grok")).unwrap();
+        std::fs::write(
+            cwd.path().join(".grok").join("config.toml"),
+            r#"
+[mcp_servers.gb5207-org1]
+url = "https://dup-url.example.test/mcp"
+
+[mcp_servers.gb5207-org1.headers]
+Authorization = "Bearer org1-token"
+
+[mcp_servers.gb5207-org2]
+url = "https://dup-url.example.test/mcp"
+
+[mcp_servers.gb5207-org2.headers]
+Authorization = "Bearer org2-token"
+"#,
+        )
+        .unwrap();
+        git2::Repository::init(cwd.path()).unwrap();
+        crate::agent::folder_trust::record_for_test(cwd.path(), true);
+        cwd
+    }
+
+    /// Server NAME is the identity: two entries sharing one URL are distinct
+    /// servers, and each keeps its own transport config.
+    #[test]
+    fn same_url_different_names_both_survive_merge() {
+        let cwd = same_url_project_repo();
+        let compat = xai_grok_tools::types::compat::CompatConfig::default();
+        let merged = merge_managed_mcp_servers(vec![], cwd.path(), None, &compat);
+
+        let auth_header = |name: &str| -> &str {
+            let server = merged
+                .iter()
+                .find(|s| mcp_server_name(s) == name)
+                .unwrap_or_else(|| panic!("{name} must survive the merge"));
+            match server {
+                acp::McpServer::Http(acp::McpServerHttp { headers, .. }) => headers
+                    .iter()
+                    .find(|h| h.name == "Authorization")
+                    .unwrap_or_else(|| panic!("{name} must keep its Authorization header"))
+                    .value
+                    .as_str(),
+                other => panic!("expected Http server, got {other:?}"),
+            }
+        };
+        assert_eq!(auth_header("gb5207-org1"), "Bearer org1-token");
+        assert_eq!(auth_header("gb5207-org2"), "Bearer org2-token");
+    }
+
+    #[test]
+    fn same_url_different_names_both_sourced_from_toml() {
+        use xai_grok_tools::types::config_source::ConfigSource;
+
+        let cwd = same_url_project_repo();
+        let compat = xai_grok_tools::types::compat::CompatConfig::default();
+        let sourced = merge_managed_mcp_servers_sourced(cwd.path(), None, &compat);
+
+        for name in ["gb5207-org1", "gb5207-org2"] {
+            let (_, source) = sourced
+                .iter()
+                .find(|(s, _)| mcp_server_name(s) == name)
+                .unwrap_or_else(|| panic!("{name} must be in the sourced merge"));
+            assert!(
+                matches!(source, ConfigSource::ConfigToml { .. }),
+                "{name} must be attributed to config.toml, got {source:?}"
+            );
+        }
+    }
+
     /// End-to-end folder-trust gate through the public merge: an untrusted
     /// workspace's project `.mcp.json` server is dropped before spawn (a
     /// client-supplied server still survives), while a trusted workspace keeps
@@ -1056,7 +1130,7 @@ enabled = false
                     &["/home/user/.grok/plugins/team-tool/mcp-echo-server.py"]
                 );
             }
-            other => panic!("expected Stdio server, got {:?}", other),
+            _other => panic!("expected Stdio server"),
         }
     }
 
@@ -1102,7 +1176,7 @@ enabled = false
                 assert_eq!(name, "sentry");
                 assert_eq!(url, "https://mcp.sentry.dev/mcp");
             }
-            other => panic!("expected Http server, got {:?}", other),
+            _other => panic!("expected Http server"),
         }
     }
 

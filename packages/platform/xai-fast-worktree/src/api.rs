@@ -1,8 +1,4 @@
 //! Public API for fast worktree creation.
-//!
-//! This module provides a higher-level, explicit API (builder + enums) that makes
-//! behavior clear (what to copy, whether to copy ignored files, and how to finalize).
-//!
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,15 +31,11 @@ use tokio_util::sync::CancellationToken;
 use crate::copy::CopyStats;
 pub use crate::copy::DirtyFilesReport;
 use crate::copy::ParallelCopyConfig;
-
-// ============================================================================
-// BtrfsDelegate – delegate privileged btrfs ops to an external service
-// ============================================================================
+pub use crate::nfs::NfsWorktreeOpts;
 
 /// Result from a delegated btrfs snapshot creation.
 #[derive(Debug, Clone)]
 pub struct DelegateSnapshotResult {
-    /// Path to the actual btrfs snapshot.
     pub snapshot_path: PathBuf,
     /// Path where the worktree is accessible (bind-mounted from `snapshot_path`).
     pub worktree_path: PathBuf,
@@ -215,6 +207,10 @@ pub struct WorktreeReport {
     pub commit: String,
     pub unignored_copy: CopyReport,
     pub ignored_copy: Option<CopyReport>,
+    /// Dispatch arm that actually ran (`nfs` / `overlay` / `btrfs` / `copy` / `git` / `standalone`).
+    pub resolved_strategy: &'static str,
+    /// Arm-specific metadata persisted into worktrees.db.
+    pub strategy_metadata: Option<serde_json::Value>,
 }
 
 /// High-level builder API for creating fast git worktrees.
@@ -242,6 +238,7 @@ pub struct WorktreeBuilder {
     worktree_id: Option<String>,
     #[cfg(feature = "metadata")]
     metadata: Option<serde_json::Value>,
+    nfs: Option<NfsWorktreeOpts>,
 }
 
 impl std::fmt::Debug for WorktreeBuilder {
@@ -279,11 +276,10 @@ impl WorktreeBuilder {
             worktree_id: None,
             #[cfg(feature = "metadata")]
             metadata: None,
+            nfs: None,
         }
     }
 
-    /// Set a cancellation token that can be used to stop a copy operation in progress.
-    /// When the token is cancelled, the copy will stop as soon as possible.
     pub fn cancellation_token(mut self, token: CancellationToken) -> Self {
         self.cancellation_token = token;
         self
@@ -340,7 +336,6 @@ impl WorktreeBuilder {
         self
     }
 
-    /// Set the session ID associated with this worktree.
     #[cfg(feature = "metadata")]
     pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
@@ -354,7 +349,6 @@ impl WorktreeBuilder {
         self
     }
 
-    /// Set arbitrary metadata to store alongside the worktree record.
     #[cfg(feature = "metadata")]
     pub fn metadata(mut self, metadata: serde_json::Value) -> Self {
         self.metadata = Some(metadata);
@@ -375,7 +369,6 @@ impl WorktreeBuilder {
     /// modes when the source is on a BTRFS subvolume. This method is only
     /// needed to *force* or *disable* that auto-detection.
     pub fn btrfs_mode(self, mode: BtrfsMode) -> Self {
-        // BtrfsMode is now handled inside execute.rs based on CreationMode.
         // This method is kept for backward compatibility with the CLI.
         tracing::warn!(
             ?mode,
@@ -396,27 +389,53 @@ impl WorktreeBuilder {
         self
     }
 
+    /// Explicit grove worktree enablement (macOS NFS / Linux FUSE).
+    /// The library never reads pager config.
+    pub fn grove_worktree(mut self, opts: NfsWorktreeOpts) -> Self {
+        self.nfs = Some(opts);
+        self
+    }
+
+    /// Deprecated alias for [`Self::grove_worktree`].
+    pub fn nfs_worktree(self, opts: NfsWorktreeOpts) -> Self {
+        self.grove_worktree(opts)
+    }
+
     /// Create the worktree using the configured options.
     ///
     /// This is a **blocking** operation. Callers should use `spawn_blocking`
     /// when calling from async contexts.
     pub fn create(self) -> Result<WorktreeReport> {
-        // Clone source/git_ref/creation_mode for DB registration before the move
-        // into WorktreePlan. These are one-per-create, not a hot path.
+        // One canonical dest for the plan id, IPC idempotency key, and DB id.
+        let dest = crate::worktree::plan::canonicalize_for_id(&self.dest);
+        let worktree_id = {
+            #[cfg(feature = "metadata")]
+            {
+                self.worktree_id
+                    .unwrap_or_else(|| crate::worktree::plan::worktree_id_from_path(&dest))
+            }
+            #[cfg(not(feature = "metadata"))]
+            {
+                crate::worktree::plan::worktree_id_from_path(&dest)
+            }
+        };
+        if !crate::nfs::is_safe_worktree_id(&worktree_id) {
+            anyhow::bail!("invalid worktree id from dest: {worktree_id}");
+        }
+
         #[cfg(feature = "metadata")]
         let meta_fields = (
             self.worktree_kind,
             self.session_id,
-            self.worktree_id,
+            worktree_id.clone(),
             self.source.clone(),
-            self.creation_mode.as_db_str(),
             self.git_ref.clone(),
             self.metadata,
         );
 
         let plan = crate::worktree::WorktreePlan {
             source: self.source,
-            dest: self.dest,
+            dest,
             git_ref: self.git_ref,
             parallelism: self.parallelism,
             channel_buffer: self.channel_buffer,
@@ -426,23 +445,28 @@ impl WorktreeBuilder {
             creation_mode: self.creation_mode,
             cancellation_token: self.cancellation_token,
             btrfs_delegate: self.btrfs_delegate,
+            worktree_id,
+            nfs: self.nfs,
         };
 
         let result = crate::worktree::execute_plan(plan).map_err(annotate_disk_full)?;
 
         #[cfg(feature = "metadata")]
         {
-            let (kind, session_id, wt_id, source, creation_mode, git_ref, metadata) = meta_fields;
+            let (kind, session_id, wt_id, source, git_ref, mut metadata) = meta_fields;
             if let Some(kind) = kind {
+                if let Some(sm) = result.strategy_metadata.clone() {
+                    metadata = Some(merge_strategy_metadata(metadata, sm));
+                }
                 register_worktree(
                     &result.worktree_path,
                     &source,
                     kind,
-                    creation_mode,
+                    result.resolved_strategy,
                     &git_ref,
                     &result.commit,
                     session_id,
-                    wt_id,
+                    Some(wt_id),
                     metadata,
                 );
             }
@@ -456,6 +480,8 @@ impl WorktreeBuilder {
             commit: result.commit,
             unignored_copy,
             ignored_copy: result.ignored_stats.map(Into::into),
+            resolved_strategy: result.resolved_strategy,
+            strategy_metadata: result.strategy_metadata,
         })
     }
 
@@ -537,7 +563,7 @@ pub const ENOSPC_OS_MESSAGE: &str = "No space left on device";
 ///
 /// Worktree creation touches the disk in many places (reflink/copy of files
 /// and the git index, directory creation, `git worktree add`). When the volume
-/// fills up the underlying `std::io::Error` reports `ErrorKind::StorageFull` —
+/// fills up the underlying `std::io::Error` reports `ErrorKind::StorageFull`:
 /// std maps `ENOSPC` (Linux/macOS) and `ERROR_DISK_FULL` /
 /// `ERROR_HANDLE_DISK_FULL` (Windows) onto it, so this is correct on every
 /// platform. `git` subcommands instead surface the failure only as stderr text.
@@ -569,14 +595,29 @@ fn annotate_disk_full(err: anyhow::Error) -> anyhow::Error {
     }
 }
 
+#[cfg(feature = "metadata")]
+fn merge_strategy_metadata(
+    caller: Option<serde_json::Value>,
+    strategy: serde_json::Value,
+) -> serde_json::Value {
+    match (caller, strategy) {
+        (Some(serde_json::Value::Object(mut a)), serde_json::Value::Object(b)) => {
+            for (k, v) in b {
+                a.insert(k, v);
+            }
+            serde_json::Value::Object(a)
+        }
+        (Some(c), _) if c.is_object() => c,
+        (_, s) => s,
+    }
+}
+
 /// Result of removing a worktree.
 #[derive(Clone, Debug)]
 pub struct RemoveReport {
     /// Whether a btrfs subvolume delete was used (O(1)) vs git worktree remove (O(n)).
     pub used_btrfs_delete: bool,
-    /// Whether a bind mount was unmounted before deletion.
     pub unmounted_bind: bool,
-    /// Whether an overlay mount was unmounted before deletion.
     pub unmounted_overlay: bool,
 }
 
@@ -636,7 +677,20 @@ fn remove_worktree_from_disk(
     #[cfg(not(target_os = "linux"))]
     let _ = delegate;
 
-    // Try overlay removal first (Linux only) — unmount overlay + delete btrfs snapshot
+    // NFS: daemon-first verified unmount. Never `umount -f`, never rm -rf a live mount.
+    {
+        match crate::nfs::try_nfs_remove(worktree_path) {
+            Ok(Some(report)) => return Ok(report),
+            Ok(None) => {}
+            Err(e) => {
+                // Fail closed for any NFS arm Err (inconclusive mount table, live non-grove NFS,
+                // or post-marker teardown). Swallowing would let the caller rm -rf a dest that
+                // may still be mounted or only partially cleaned.
+                return Err(e);
+            }
+        }
+    }
+
     #[cfg(target_os = "linux")]
     {
         if let Some(report) = try_overlay_remove(worktree_path, delegate)? {
@@ -644,7 +698,6 @@ fn remove_worktree_from_disk(
         }
     }
 
-    // Try btrfs metadata-based removal (crash recovery)
     #[cfg(target_os = "linux")]
     {
         if let Some(report) = try_btrfs_remove_from_metadata(worktree_path, delegate)? {
@@ -652,7 +705,6 @@ fn remove_worktree_from_disk(
         }
     }
 
-    // Try btrfs fast path (Linux only)
     #[cfg(target_os = "linux")]
     {
         if let Some(report) = try_btrfs_remove(worktree_path, delegate)? {
@@ -660,19 +712,16 @@ fn remove_worktree_from_disk(
         }
     }
 
-    // Fast path: rm -rf the worktree directory, then deregister from .git/worktrees/.
-    // This is ~10x faster than `git worktree remove --force` on large repos.
     tracing::debug!(
         path = %worktree_path.display(),
         "removing worktree via rm -rf + deregister"
     );
 
-    // Read the worktree's .git file to find the registration dir BEFORE deleting.
-    // Linked worktrees have `.git` as a file containing `gitdir: /path/to/.git/worktrees/<name>`.
+    // Read the registration dir from the worktree's `.git` BEFORE deleting it.
     let registration_dir = read_worktree_gitdir(worktree_path);
 
     // symlink_metadata, not `exists()` (which follows the link): a worktree
-    // exposed as a symlink — including a now-dangling one — must be unlinked, not
+    // exposed as a symlink, including a now-dangling one, must be unlinked, not
     // skipped. (On Linux, symlinks are normally handled earlier in try_btrfs_remove.)
     match std::fs::symlink_metadata(worktree_path) {
         Ok(md) if md.file_type().is_symlink() => {
@@ -690,16 +739,17 @@ fn remove_worktree_from_disk(
         Err(_) => {} // nothing at the path
     }
 
-    // Deregister: remove the `.git/worktrees/<name>/` directory.
-    // This is what `git worktree remove` does after deleting the working tree.
     if let Some(reg_dir) = registration_dir
         && reg_dir.exists()
     {
-        // Defense in depth: this path is read from the worktree's own `.git`
-        // pointer, so only remove it when it actually looks like a git
-        // registration dir (`.git/worktrees/<name>`) — never an arbitrary
-        // directory a malformed or crafted pointer names.
-        if reg_dir.parent().and_then(|p| p.file_name()) == Some(std::ffi::OsStr::new("worktrees")) {
+        // The `.git` pointer is untrusted, so deregister only a `.git/worktrees/<name>`
+        // entry whose own `gitdir` backlink resolves back to this worktree. Neither
+        // condition alone is enough: shape rejects arbitrary dirs, backlink rejects siblings.
+        let is_registration_dir =
+            reg_dir.parent().and_then(|p| p.file_name()) == Some(std::ffi::OsStr::new("worktrees"));
+        let backlinks_here = crate::git::registration_worktree_path(&reg_dir)
+            == Some(crate::git::normalized_for_match(worktree_path));
+        if is_registration_dir && backlinks_here {
             tracing::debug!(
                 registration_dir = %reg_dir.display(),
                 "removing worktree registration from .git/worktrees/"
@@ -708,7 +758,7 @@ fn remove_worktree_from_disk(
         } else {
             tracing::warn!(
                 registration_dir = %reg_dir.display(),
-                "skipping registration cleanup: path is not a .git/worktrees/ entry"
+                "skipping registration cleanup: not a worktrees entry backlinking to this worktree"
             );
         }
     }
@@ -723,13 +773,9 @@ fn remove_worktree_from_disk(
 /// Report from cleaning up multiple worktrees.
 #[derive(Debug, Default)]
 pub struct CleanupReport {
-    /// Number of worktrees successfully removed.
     pub removed: u64,
-    /// Number of overlay mounts unmounted.
     pub overlays_unmounted: u64,
-    /// Number of btrfs subvolumes deleted.
     pub btrfs_deleted: u64,
-    /// Number of errors encountered (worktrees that couldn't be removed).
     pub errors: u64,
 }
 
@@ -764,13 +810,12 @@ pub fn cleanup_worktrees_in_with_delegate(
     for entry in entries.flatten() {
         let path = entry.path();
         // symlink_metadata so a symlink-exposed worktree (btrfs snapshot layout),
-        // including a now-dangling one, is handled — `is_dir()` follows the link
+        // including a now-dangling one, is handled: `is_dir()` follows the link
         // and returns false for a broken symlink, leaking it.
         let Ok(md) = path.symlink_metadata() else {
             continue;
         };
         if md.file_type().is_symlink() {
-            // remove_worktree handles the snapshot delete + symlink unlink.
             cleanup_single_worktree(&path, delegate.as_ref(), &mut report);
             continue;
         }
@@ -809,7 +854,6 @@ pub fn cleanup_worktrees_in_with_delegate(
     report
 }
 
-/// Remove a single worktree and update the report.
 fn cleanup_single_worktree(
     path: &std::path::Path,
     delegate: Option<&Arc<dyn BtrfsDelegate>>,
@@ -861,12 +905,10 @@ fn try_overlay_remove(
 ) -> Result<Option<RemoveReport>> {
     use crate::overlay;
 
-    // Method 1: Check live mountinfo
     if let Some(report) = overlay::try_remove_from_mountinfo(worktree_path, delegate)? {
         return Ok(Some(report));
     }
 
-    // Method 2: Check persisted metadata (crash recovery)
     if let Some(report) = overlay::try_remove_from_metadata(worktree_path, delegate)? {
         return Ok(Some(report));
     }
@@ -888,18 +930,16 @@ fn read_worktree_gitdir(worktree_path: &std::path::Path) -> Option<std::path::Pa
     let content = std::fs::read_to_string(&git_file).ok()?;
     let gitdir = content.trim().strip_prefix("gitdir: ")?;
     let path = std::path::Path::new(gitdir);
-    // Resolve relative paths against the worktree directory
     let resolved = if path.is_relative() {
         worktree_path.join(path)
     } else {
         path.to_path_buf()
     };
-    // Canonicalize to clean up any `..` components
     dunce::canonicalize(&resolved).ok().or(Some(resolved))
 }
 
 /// Delete `snapshot_path`, falling back to the delegate's `delete_snapshot`
-/// (keyed by `worktree_path`) when the direct btrfs delete fails — e.g. EPERM on
+/// (keyed by `worktree_path`) when the direct btrfs delete fails, e.g. EPERM on
 /// a rootless host (no `CAP_SYS_ADMIN`) where only a privileged helper can run
 /// `btrfs subvolume delete`.
 ///
@@ -949,7 +989,7 @@ fn try_btrfs_remove(
     use anyhow::Context;
 
     // Case 1: Symlink to a btrfs snapshot (created by the delegate path on
-    // rootless hosts). Symlinks cross mount namespaces — this is the
+    // rootless hosts). Symlinks cross mount namespaces; this is the
     // counterpart to the privileged helper's symlink creation.
     if worktree_path.is_symlink() {
         let link_target = match std::fs::read_link(worktree_path) {
@@ -995,7 +1035,7 @@ fn try_btrfs_remove(
                 "removing symlinked btrfs worktree"
             );
 
-            // Delete snapshot first — if this fails, the symlink still
+            // Delete snapshot first: if this fails, the symlink still
             // references it so cleanup can be retried.
             //
             // Known residual TOCTOU: validation `lstat`s/canonicalizes then we
@@ -1021,7 +1061,7 @@ fn try_btrfs_remove(
             }));
         }
 
-        // Symlink to non-btrfs target — remove symlink, fall through.
+        // Symlink to non-btrfs target: remove it and fall through.
         let _ = std::fs::remove_file(worktree_path);
     }
 
@@ -1047,7 +1087,7 @@ fn try_btrfs_remove(
 
     let mut unmounted_bind = false;
 
-    // Case 2: Legacy bind mount — unmount first, then delete snapshot.
+    // Case 2 (legacy bind mount): unmount first, then delete snapshot.
     if btrfs_info.bind_mount_source.is_some() {
         let mut umount_cmd = std::process::Command::new("umount");
         xai_tty_utils::detach_std_command(&mut umount_cmd);
@@ -1067,12 +1107,11 @@ fn try_btrfs_remove(
                 stderr = %stderr.trim(),
                 "umount failed, attempting direct snapshot deletion"
             );
-            // Don't return — proceed to delete the snapshot directly.
+            // Don't return; proceed to delete the snapshot directly.
             // The mount point may be stale after an unclean host restart.
         }
     }
 
-    // Delete the btrfs subvolume (the actual snapshot)
     let snapshot_path = btrfs_info
         .bind_mount_source
         .as_deref()
@@ -1186,7 +1225,7 @@ fn try_btrfs_remove_from_metadata_inner(
                 }
 
                 // Delete the snapshot BEFORE removing the worktree reference, so
-                // the link/dir still points at it if deletion fails (retriable) —
+                // the link/dir still points at it if deletion fails (retriable),
                 // consistent with `try_btrfs_remove` Case 1.
                 let mut deleted = false;
                 let mut refused = false;
@@ -1325,7 +1364,7 @@ fn cleanup_orphaned_btrfs_snapshots_inner(
 
                 // A live worktree is active either as a bind mount (appears in
                 // mountinfo) or as a symlink resolving to its snapshot (the
-                // current layout — `mount_target` is a symlink, never in
+                // current layout; `mount_target` is a symlink, never in
                 // mountinfo). Both must be treated as active, not orphaned.
                 let is_active = mount_entries
                     .iter()
@@ -1344,7 +1383,7 @@ fn cleanup_orphaned_btrfs_snapshots_inner(
                 // If the mount_target's parent dir is missing we cannot prove the snapshot
                 // is orphaned: this scanner runs before restore recreates worktree dirs, so a
                 // snapshot about to be re-exposed would be wrongly destroyed. Skipping at worst
-                // leaks a true orphan (reclaimed on a later cycle) — strictly safer than deleting.
+                // leaks a true orphan (reclaimed on a later cycle), strictly safer than deleting.
                 if let Some(parent) = meta.mount_target.parent()
                     && !parent.exists()
                 {
@@ -1377,8 +1416,6 @@ fn cleanup_orphaned_btrfs_snapshots_inner(
                     "cleaning up orphaned btrfs snapshot"
                 );
 
-                // Remove the worktree reference: a symlink is unlinked; a legacy
-                // bind-mount dir is unmounted then removed.
                 if meta.mount_target.is_symlink() {
                     let _ = std::fs::remove_file(&meta.mount_target);
                 } else {
@@ -1512,7 +1549,6 @@ impl BtrfsDelegate for RecordingDelegate {
 #[cfg(feature = "metadata")]
 pub mod gc;
 
-// GC behavior suite, co-located with the GC implementation under `gc/`.
 #[cfg(all(test, feature = "metadata"))]
 #[path = "api/gc/integration_tests.rs"]
 mod gc_integration_tests;
@@ -1610,7 +1646,6 @@ mod tests {
 
     #[test]
     fn test_btrfs_mode_variants() {
-        // Test that all variants can be created and compared
         assert_eq!(BtrfsMode::Auto, BtrfsMode::Auto);
         assert_eq!(BtrfsMode::Force, BtrfsMode::Force);
         assert_eq!(BtrfsMode::Disabled, BtrfsMode::Disabled);
@@ -1622,7 +1657,6 @@ mod tests {
 
     #[test]
     fn test_btrfs_mode_debug() {
-        // Test that Debug is implemented
         let auto = format!("{:?}", BtrfsMode::Auto);
         let force = format!("{:?}", BtrfsMode::Force);
         let disabled = format!("{:?}", BtrfsMode::Disabled);
@@ -1656,7 +1690,6 @@ mod tests {
 
     #[test]
     fn test_worktree_builder_chain() {
-        // Test that all builder methods can be chained
         let _builder = WorktreeBuilder::new("/source", "/dest")
             .git_ref("main")
             .parallelism(4)
@@ -1671,7 +1704,6 @@ mod tests {
 
     #[test]
     fn test_standalone_shorthand() {
-        // .standalone(true) should be equivalent to .creation_mode(Standalone)
         let _builder = WorktreeBuilder::new("/source", "/dest").standalone(true);
     }
 
@@ -1726,14 +1758,12 @@ mod tests {
 
         let tmp = tempfile::TempDir::new().unwrap();
 
-        // Create a source repo.
         let repo_path = tmp.path().join("repo");
         std::fs::create_dir(&repo_path).unwrap();
         init_git_repo(&repo_path);
         std::fs::write(repo_path.join("file.txt"), "content").unwrap();
         git_commit_all(&repo_path, "initial");
 
-        // Create two worktrees in a worktrees dir.
         let worktrees_dir = tmp.path().join("worktrees");
         std::fs::create_dir(&worktrees_dir).unwrap();
 
@@ -1746,7 +1776,6 @@ mod tests {
         assert!(wt1.exists());
         assert!(wt2.exists());
 
-        // Cleanup should remove both.
         let report = cleanup_worktrees_in(&worktrees_dir);
         assert_eq!(report.removed, 2);
         assert_eq!(report.errors, 0);
@@ -1761,14 +1790,12 @@ mod tests {
 
         let tmp = tempfile::TempDir::new().unwrap();
 
-        // Create a source repo.
         let repo_path = tmp.path().join("repo");
         std::fs::create_dir(&repo_path).unwrap();
         init_git_repo(&repo_path);
         std::fs::write(repo_path.join("file.txt"), "content").unwrap();
         git_commit_all(&repo_path, "initial");
 
-        // Create ~/.grok/worktrees/<repo>/<session>/ structure.
         let worktrees_dir = tmp.path().join("worktrees");
         let repo_group = worktrees_dir.join("myrepo");
         std::fs::create_dir_all(&repo_group).unwrap();
@@ -1777,7 +1804,6 @@ mod tests {
         WorktreeBuilder::new(&repo_path, &wt1).create().unwrap();
         assert!(wt1.exists());
 
-        // Cleanup should find the nested worktree.
         let report = cleanup_worktrees_in(&worktrees_dir);
         assert_eq!(report.removed, 1);
         assert_eq!(report.errors, 0);
@@ -1813,8 +1839,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_cleanup_worktrees_in_removes_nested_dangling_symlink() {
-        // Dangling symlink one level deeper (~/.grok/worktrees/<repo>/<session>):
-        // the nested branch must also unlink it rather than skip it.
         let tmp = tempfile::TempDir::new().unwrap();
         let worktrees_dir = tmp.path().join("worktrees");
         // A grouping dir with NO `.git`, so cleanup recurses into it.
@@ -1876,7 +1900,7 @@ mod tests {
 
     /// A plain (non-snapshot) linked worktree removed through the delegate-aware
     /// path must still deregister `.git/worktrees/<name>`, and the delegate must
-    /// be used only as a fallback — never invoked when the direct removal succeeds.
+    /// be used only as a fallback, never invoked when the direct removal succeeds.
     #[test]
     fn remove_with_delegate_deregisters_plain_worktree_without_calling_delegate() {
         xai_test_utils::require_git!();
@@ -1895,7 +1919,6 @@ mod tests {
         let wt = tmp.path().join("worktrees").join("wt1");
         WorktreeBuilder::new(&repo, &wt).create().unwrap();
 
-        // `.git` is a file pointing at `<repo>/.git/worktrees/<name>`.
         let registration_dir =
             read_worktree_gitdir(&wt).expect("linked worktree must have a gitdir pointer");
         assert!(
@@ -1925,24 +1948,79 @@ mod tests {
         );
     }
 
-    /// The registration cleanup removes a path read from the worktree's own
-    /// `.git` pointer, so a pointer whose parent is not `worktrees` (malformed or
-    /// crafted) must be skipped, never `remove_dir_all`'d.
     #[test]
-    fn a_gitdir_pointer_outside_worktrees_is_not_removed() {
+    fn sibling_registration_not_removed() {
+        xai_test_utils::require_git!();
+        use xai_test_utils::git::{git_commit_all, init_git_repo};
         #[cfg(feature = "metadata")]
         let _fx = crate::db::GrokHomeFixture::new();
 
         let tmp = tempfile::TempDir::new().unwrap();
-        let victim = tmp.path().join("precious");
-        std::fs::create_dir_all(&victim).unwrap();
-        std::fs::write(victim.join("keep.txt"), b"do not delete").unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("file.txt"), "content").unwrap();
+        git_commit_all(&repo, "initial");
 
-        // A worktree whose `.git` points at `victim`, which is not a
-        // `.git/worktrees/<name>` registration dir.
+        let victim_wt = tmp.path().join("worktrees").join("victim");
+        let attacker_wt = tmp.path().join("worktrees").join("attacker");
+        WorktreeBuilder::new(&repo, &victim_wt).create().unwrap();
+        WorktreeBuilder::new(&repo, &attacker_wt).create().unwrap();
+
+        let victim_reg = read_worktree_gitdir(&victim_wt).expect("victim has a registration");
+        assert!(
+            victim_reg.exists(),
+            "precondition: victim registration exists"
+        );
+        assert_eq!(
+            victim_reg.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new("worktrees")),
+            "precondition: the sibling registration's parent is `worktrees`"
+        );
+
+        // Point the attacker worktree's `.git` at the victim's registration.
+        std::fs::write(
+            attacker_wt.join(".git"),
+            format!("gitdir: {}\n", victim_reg.display()),
+        )
+        .unwrap();
+
+        remove_worktree(&attacker_wt).unwrap();
+
+        assert!(
+            !attacker_wt.exists(),
+            "the removed worktree is still deleted"
+        );
+        assert!(
+            victim_reg.exists(),
+            "a sibling registration must survive: its backlink resolves to the victim, not the removed worktree"
+        );
+        assert!(
+            victim_reg.join("gitdir").exists(),
+            "the sibling's refs and reflogs are left intact"
+        );
+    }
+
+    #[test]
+    fn non_registration_directory_not_removed() {
+        #[cfg(feature = "metadata")]
+        let _fx = crate::db::GrokHomeFixture::new();
+
+        let tmp = tempfile::TempDir::new().unwrap();
         let wt = tmp.path().join("wt");
         std::fs::create_dir_all(&wt).unwrap();
-        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", victim.display())).unwrap();
+
+        // Backlinks to `wt` but is not under `worktrees/`: passes backlink, fails shape.
+        let decoy = tmp.path().join("decoy");
+        std::fs::create_dir_all(&decoy).unwrap();
+        std::fs::write(
+            decoy.join("gitdir"),
+            format!("{}\n", wt.join(".git").display()),
+        )
+        .unwrap();
+        std::fs::write(decoy.join("keep.txt"), b"do not delete").unwrap();
+
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", decoy.display())).unwrap();
 
         remove_worktree(&wt).unwrap();
 
@@ -1951,8 +2029,8 @@ mod tests {
             "the worktree directory itself is still removed"
         );
         assert!(
-            victim.join("keep.txt").exists(),
-            "a pointer whose parent is not `worktrees` must not be removed"
+            decoy.join("keep.txt").exists(),
+            "a directory that is not a worktrees entry must not be removed"
         );
     }
 
@@ -2032,7 +2110,6 @@ mod tests {
         let worktrees_dir = mount.join("worktrees");
         std::fs::create_dir(&worktrees_dir).unwrap();
 
-        // `dest` is a symlink to a snapshot under <mount>/worktrees/, with metadata.
         let snapshot_path = worktrees_dir.join("snap-1");
         let dest = tmp.path().join("dest-worktree");
         std::os::unix::fs::symlink(&snapshot_path, &dest).unwrap();
@@ -2296,7 +2373,7 @@ mod tests {
         let meta_path = worktrees_dir.join("live-wt.btrfs-meta.json");
         std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
 
-        // No mount entry references the symlink — only the btrfs mount itself.
+        // No mount entry references the symlink, only the btrfs mount itself.
         let entries = vec![MountEntry {
             mount_id: 1,
             parent_id: 0,
@@ -2405,11 +2482,10 @@ mod tests {
         let worktrees_dir = tmp.path().join("worktrees");
         std::fs::create_dir(&worktrees_dir).unwrap();
 
-        // The on-disk snapshot dir (a plain dir here — no real btrfs subvolume,
+        // The on-disk snapshot dir (a plain dir here, no real btrfs subvolume,
         // so deletion is skipped, but the symlink + metadata must be cleaned up).
         let snapshot_path = worktrees_dir.join("snap-link");
 
-        // The worktree is exposed at `mount_target` via a symlink to the snapshot.
         let mount_target = tmp.path().join("worktree-symlink");
         std::os::unix::fs::symlink(&snapshot_path, &mount_target).unwrap();
         assert!(mount_target.is_symlink());
@@ -2443,7 +2519,6 @@ mod tests {
         let report = result.unwrap().expect("should find metadata match");
         // The symlink branch never unmounts a bind mount.
         assert!(!report.unmounted_bind);
-        // No leak: the symlink and the metadata file are both gone.
         assert!(
             mount_target.symlink_metadata().is_err(),
             "symlink worktree should be removed"
@@ -2490,7 +2565,6 @@ mod tests {
         let report = try_btrfs_remove_from_metadata_inner(&mount_target, &entries, None)
             .unwrap()
             .expect("should find metadata match");
-        // No leak: the directory and metadata are both gone.
         assert!(!mount_target.exists(), "dir worktree should be removed");
         assert!(!meta_path.exists(), "metadata should be cleaned up");
         let _ = report;

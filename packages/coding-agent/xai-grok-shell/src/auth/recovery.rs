@@ -357,8 +357,12 @@ impl UnauthorizedRecovery {
     async fn try_reload_from_disk(&self) -> Option<GrokAuth> {
         let _lock = self
             .auth_manager
-            .try_lock_auth_file_async(crate::auth::manager::AUTH_LOCK_TIMEOUT)
-            .await;
+            .try_lock_auth_file_async(
+                crate::auth::manager::AUTH_LOCK_TIMEOUT,
+                crate::auth::manager::lock::Heartbeat::Skip,
+            )
+            .await
+            .into_guard();
         if _lock.is_none() {
             tracing::warn!("auth recovery: proceeding without file lock");
         }

@@ -1,6 +1,34 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{EditCommand, WordStyle};
+use super::{EditCommand, Movement, WordStyle};
+
+/// Resolve a key event into a cursor [`Movement`]; `None` for non-movement keys.
+pub(crate) fn resolve_movement(event: &KeyEvent) -> Option<Movement> {
+    match event.code {
+        // Super matches by `contains` so a stray reported bit (META/HYPER) can't degrade the chord.
+        KeyCode::Left if event.modifiers.contains(KeyModifiers::SUPER) => {
+            return Some(Movement::VisualRowStart);
+        }
+        KeyCode::Right if event.modifiers.contains(KeyModifiers::SUPER) => {
+            return Some(Movement::VisualRowEnd);
+        }
+        KeyCode::Home => return Some(Movement::LogicalLineStart),
+        KeyCode::End => return Some(Movement::LogicalLineEnd),
+        KeyCode::Up => return Some(Movement::VisualRowUp),
+        KeyCode::Down => return Some(Movement::VisualRowDown),
+        KeyCode::Char('p') if event.modifiers == KeyModifiers::CONTROL => {
+            return Some(Movement::VisualRowUp);
+        }
+        KeyCode::Char('n') if event.modifiers == KeyModifiers::CONTROL => {
+            return Some(Movement::VisualRowDown);
+        }
+        _ => {}
+    }
+    // Directional (Navigation) commands are exactly the ones with a collapse edge.
+    let command = classify_key_event(event)?;
+    let edge = command.selection_collapse_edge()?;
+    Some(Movement::Command(command, edge))
+}
 
 pub fn classify_key_event(event: &KeyEvent) -> Option<EditCommand> {
     match event {

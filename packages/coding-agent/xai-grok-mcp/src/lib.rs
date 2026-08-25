@@ -30,9 +30,11 @@ pub use rmcp;
 
 pub mod acp_transport;
 pub mod credentials;
+pub mod elicitation;
 pub mod liveness;
 pub mod mcp_http_client;
 pub mod oauth;
 pub mod oauth_config;
+pub mod owned_clients;
 pub mod servers;
 pub mod wire;

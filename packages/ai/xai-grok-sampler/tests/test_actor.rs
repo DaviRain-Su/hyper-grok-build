@@ -1447,16 +1447,24 @@ async fn responses_doom_loop_signals_reach_completed_response() {
 
 /// Acceptance spec for the recovery rung: a confident signal
 /// (`tail_repetition:8@thinking` at the default threshold) is resampled once
-/// and the clean second response is accepted, on its own budget.
+/// and the clean second response is accepted on its own budget, even with
+/// transport retries disabled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_confident_doom_loop_signal_resamples_once() {
     let counter = Arc::new(AtomicU32::new(0));
     let counter_handler = Arc::clone(&counter);
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let bodies_handler = Arc::clone(&bodies);
     let app = Router::new().route(
         "/v1/responses",
-        post(move || {
+        post(move |body: String| {
             let counter = Arc::clone(&counter_handler);
+            let bodies = Arc::clone(&bodies_handler);
             async move {
+                bodies
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_str(&body).unwrap());
                 let attempt = counter.fetch_add(1, Ordering::SeqCst);
                 let events = if attempt == 0 {
                     sse::responses_api_doom_loop_terminal_only_events(
@@ -1481,11 +1489,9 @@ async fn responses_confident_doom_loop_signal_resamples_once() {
     );
     let server = MockServer::spawn(app).await;
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let handle = SamplerActor::spawn(
-        responses_config(server.base_url(), Some(DoomLoopRecoveryPolicy::default())),
-        RetryPolicy::default(),
-        event_tx,
-    );
+    let mut config = responses_config(server.base_url(), Some(DoomLoopRecoveryPolicy::default()));
+    config.max_retries = Some(0);
+    let handle = SamplerActor::spawn(config, RetryPolicy::default(), event_tx);
 
     let result = handle
         .submit_and_collect(RequestId::from("req-doom-resample"), user_request("hi"))
@@ -1498,6 +1504,76 @@ async fn responses_confident_doom_loop_signal_resamples_once() {
     assert!(
         response.doom_loop_signals.is_empty(),
         "the accepted response is the clean resample"
+    );
+    let bodies = bodies.lock().unwrap();
+    let retry_input = bodies[1]["input"].as_array().unwrap();
+    assert_eq!(retry_input.len(), 4);
+    assert_eq!(retry_input[1]["summary"][0]["text"], "loop loop loop");
+    assert_eq!(retry_input[2]["role"], "assistant");
+    assert_eq!(retry_input[2]["content"], "poisoned answer");
+    assert_eq!(retry_input[3]["role"], "user");
+    let reminder = retry_input[3]["content"]
+        .as_str()
+        .expect("the reminder is a text item");
+    assert!(
+        reminder.starts_with("<system_reminder>") && reminder.ends_with("</system_reminder>"),
+        "the retry closes with a synthetic system-reminder envelope: {reminder}"
+    );
+}
+
+/// A caller that opted into `retry_only_before_output` cannot retract text it
+/// already received, so a doomed turn that streamed output fails instead of
+/// resampling over the delivered prefix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_doom_loop_does_not_resample_after_output_when_retry_only_before_output() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let events = sse_events_to_axum(sse::responses_api_doom_loop_terminal_only_events(
+                    &["tail_repetition:8@thinking"],
+                    "loop loop loop",
+                    "poisoned answer",
+                    "test-model",
+                ));
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let retry_policy = RetryPolicy {
+        retry_only_before_output: true,
+        ..RetryPolicy::default()
+    };
+    let handle = SamplerActor::spawn(
+        responses_config(server.base_url(), Some(DoomLoopRecoveryPolicy::default())),
+        retry_policy,
+        event_tx,
+    );
+
+    let result = handle
+        .submit_and_collect(RequestId::from("req-doom-no-retract"), user_request("hi"))
+        .await;
+    server.shutdown();
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "no resample after output"
+    );
+    assert!(
+        matches!(
+            result,
+            Err(xai_grok_sampling_types::SamplingError::DoomLoopDetected { .. })
+        ),
+        "the doomed turn is surfaced rather than resampled: {result:?}"
     );
 }
 

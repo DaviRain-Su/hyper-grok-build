@@ -965,10 +965,7 @@ mod tests {
         let notification = make_notification("sess-abc", None);
         let id = resolve_event_id(&notification);
         // Must match {sessionId}-{counter} format, NOT a UUID
-        assert!(
-            id.starts_with("sess-abc-"),
-            "expected id to start with 'sess-abc-', got: {id}"
-        );
+        assert!(id.starts_with("sess-abc-"));
         let counter_part = id.strip_prefix("sess-abc-").unwrap();
         counter_part
             .parse::<u64>()
@@ -981,10 +978,7 @@ mod tests {
         let notification =
             make_notification("sess-xyz", Some(serde_json::json!({ "other": "value" })));
         let id = resolve_event_id(&notification);
-        assert!(
-            id.starts_with("sess-xyz-"),
-            "expected id to start with 'sess-xyz-', got: {id}"
-        );
+        assert!(id.starts_with("sess-xyz-"));
         let counter_part = id.strip_prefix("sess-xyz-").unwrap();
         counter_part
             .parse::<u64>()

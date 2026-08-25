@@ -40,6 +40,7 @@ pub enum PendingKind {
     Question,
     /// `x.ai/exit_plan_mode` plan approval.
     PlanApproval,
+    McpElicitation,
 }
 
 /// Whether a blocking plan-approval reverse-request is parked in `pending`.

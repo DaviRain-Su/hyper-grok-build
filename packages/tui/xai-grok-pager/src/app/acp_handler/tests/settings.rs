@@ -756,7 +756,9 @@
     }
 
     /// Explicit `null` recomputes with remote=None (unlike field omission):
-    /// with no TOML permission key the soft always-approve drops back to Ask.
+    /// with no TOML permission key the soft always-approve drops back to the
+    /// interactive default — auto with the gate on (ask when the gate is off,
+    /// covered by `permission_mode_soft_default_respects_pin_and_gate`).
     #[test]
     fn permission_mode_explicit_null_clears_soft_always_approve() {
         let mut app = make_app_with_agent("sess-null-pm");
@@ -767,12 +769,33 @@
 
         super::super::settings::apply_soft_default_permission_mode(&mut app, None, None);
         assert!(!app.default_yolo, "remote null must disarm a soft always-approve");
-        assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
+        assert_eq!(app.current_ui.permission_mode.as_deref(), Some("auto"));
         assert!(app.permission_mode_from_soft_default);
         assert!(
             app.pending_effects.is_empty(),
             "a soft default must never be persisted to disk"
         );
+    }
+
+    /// A failed config load is an explicit Ask, never the auto soft default —
+    /// same fail-safe as the launch resolver's `load_selected_permission_mode`.
+    /// The handler substitutes `broken_config_ask_fallback` on load failure.
+    #[test]
+    fn permission_mode_config_load_failure_re_arms_ask_not_auto() {
+        let mut app = make_app_with_agent("sess-broken-cfg");
+        app.auto_mode_gate = true;
+        app.permission_mode_from_soft_default = true;
+        app.current_ui.permission_mode = Some("always-approve".into());
+        app.default_yolo = true;
+
+        let fallback = super::super::settings::broken_config_ask_fallback();
+        super::super::settings::apply_soft_default_permission_mode(
+            &mut app,
+            fallback.get("ui"),
+            None,
+        );
+        assert!(!app.default_yolo);
+        assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
     }
 
     /// Policy pin and auto gate clamp a soft re-arm to Ask enforcement/display.

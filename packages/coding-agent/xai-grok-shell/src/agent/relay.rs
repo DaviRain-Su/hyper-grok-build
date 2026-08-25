@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_tungstenite::{
-    connect_async,
+    connect_async_tls_with_config,
     tungstenite::{Message, Utf8Bytes, client::IntoClientRequest},
 };
 use tokio_util::sync::CancellationToken;
@@ -32,9 +32,10 @@ const READ_LIVENESS_TIMEOUT_SECS: u64 = 4 * KEEPALIVE_INTERVAL_SECS;
 /// Upper bound on a single auth-recovery attempt — a backstop against an
 /// indefinitely wedged relay loop, NOT a bound on a healthy refresh. It must
 /// stay comfortably above the refresh path's own internal worst case so it
-/// only fires when something is truly stuck: `refresh_chain` waits up to 45s
-/// for `auth.json.lock` (`REFRESH_LOCK_TIMEOUT`) before IdP IO, which has its
-/// own timeouts (30s external refresher; 10–15s per OIDC request with short
+/// only fires when something is truly stuck: `refresh_chain` waits up to 25s
+/// for `auth.json.lock` (`REFRESH_LOCK_TIMEOUT`) before IdP IO — plus another
+/// 25s if the suspend-only revalidate re-acquires — and the IdP IO has its
+/// own timeouts (7s external refresher; 15s per OIDC request with short
 /// retries). When this fires the recovery future is dropped (the file lock
 /// releases on drop) and the loop falls through to reconnect backoff, which
 /// retries recovery on the next 401.
@@ -430,8 +431,10 @@ async fn connect_to_relay(
                     .map_err(|e| anyhow::Error::from(e).context("WebSocket handshake via proxy failed"))?;
                 Ok((ws, resp))
             } else {
-                // Direct path: no proxy needed.
-                connect_async(req)
+                // The default connector never sees the shared trust config.
+                let connector =
+                    tokio_tungstenite::Connector::Rustls(xai_grok_extra_ca::rustls_client_config());
+                connect_async_tls_with_config(req, None, false, Some(connector))
                     .await
                     .map_err(|e| anyhow::Error::from(e).context("WebSocket connection failed"))
             }

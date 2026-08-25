@@ -1555,22 +1555,27 @@ impl MvpAgent {
     }
     /// Fetch settings; on a `401` try one self-healing [`AuthManager::auth`]
     /// refresh and re-fetch if it yields a *different* token (recovers a 401
-    /// from a token that expired mid-fetch). The refresh is bounded by
-    /// `STARTUP_AUTH_REFRESH_TIMEOUT` so a wedged IdP can't hang the caller; on
-    /// timeout or error the original `Rejected` stands.
+    /// from a token that expired mid-fetch). The caller waits at most
+    /// `STARTUP_AUTH_REFRESH_TIMEOUT`, but the refresh is spawned and runs to
+    /// completion past the deadline — dropping it mid-exchange could abandon
+    /// an IdP response carrying the rotated refresh token. On timeout or
+    /// error the original `Rejected` stands.
     async fn fetch_settings_self_healing_401(
         &self,
         auth: &crate::auth::GrokAuth,
     ) -> crate::remote::SettingsFetch {
         let outcome = self.fetch_settings(auth).await;
-        if matches!(outcome, crate::remote::SettingsFetch::Rejected)
-            && let Ok(Ok(fresh)) = tokio::time::timeout(
+        if matches!(outcome, crate::remote::SettingsFetch::Rejected) {
+            let manager = self.auth_manager.clone();
+            let attempt = tokio::spawn(async move { manager.auth().await });
+            if let Ok(Ok(Ok(fresh))) = tokio::time::timeout(
                     crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-                    self.auth_manager.auth(),
+                    attempt,
                 )
                 .await && fresh.key != auth.key
-        {
-            return self.fetch_settings(&fresh).await;
+            {
+                return self.fetch_settings(&fresh).await;
+            }
         }
         outcome
     }
@@ -2223,8 +2228,8 @@ impl MvpAgent {
     /// Build deploy-service config. The tool talks directly to the deployer service.
     pub(super) fn prepare_app_builder_deployer_config(
         &self,
-    ) -> xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig {
-        use xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig;
+    ) -> xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig {
+        use xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig;
         AppBuilderDeployerConfig::Disabled
     }
     /// Build video generation config. Video tools call the xAI API directly.
@@ -2480,11 +2485,15 @@ impl MvpAgent {
             subagent_presentation: RefCell::new(
                 crate::agent::subagent::SubagentPresentation::new(),
             ),
+            subagent_sampling_semaphore: Arc::new(
+                tokio::sync::Semaphore::new(cfg.subagents_sampling_limit),
+            ),
             monitor_event_buffer: xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer::default(),
             bundle_sync_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             post_unblock_jwt_retry_in_flight: Arc::new(
                 std::sync::atomic::AtomicBool::new(false),
             ),
+            tier_recheck_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             workspace_ops: RefCell::new(None),
             #[cfg(all(feature = "local-workspace", unix))]
             local_workspace_supervisors: Rc::new(RefCell::new(HashMap::new())),
@@ -2520,6 +2529,8 @@ impl MvpAgent {
             auto_gc_spawn_count: std::cell::Cell::new(0),
             #[cfg(test)]
             post_auth_settings_spawn_count: std::cell::Cell::new(0),
+            #[cfg(test)]
+            tier_recheck_run_count: std::cell::Cell::new(0),
         };
         instance
             .auth_manager
@@ -2623,6 +2634,9 @@ impl MvpAgent {
                 continue;
             }
             if busy {
+                if let Some(handle) = self.resident_handle(&id) {
+                    handle.set_status_line_wanted(false);
+                }
                 self.set_session_live_state(&id, SessionLiveState::Working);
                 kept_resident += 1;
                 tracing::info!(
@@ -3293,7 +3307,7 @@ impl MvpAgent {
     }
     /// Resolve client version: prefer the value from the initialize request _meta,
     /// fall back to the agent's own version (VERSION_WITH_COMMIT set by the TUI launcher).
-    pub(super) fn client_version(&self) -> Option<String> {
+    pub(crate) fn client_version(&self) -> Option<String> {
         self.initialize_request
             .get()
             .and_then(|req| req.meta.as_ref())
@@ -3515,6 +3529,108 @@ impl MvpAgent {
             upload_method,
         })
     }
+    pub(crate) fn team_blocks_one_shot_trace_upload(&self) -> bool {
+        self.auth_manager
+            .current_or_expired()
+            .is_some_and(|auth| auth.team_name.is_some())
+    }
+    /// Whether `/feedback` may offer to turn trace upload on. An individual
+    /// coding-data opt-out still asks — the card is how opted-out users
+    /// switch sharing back on; ZDR has no self-serve way back, so it never
+    /// asks.
+    pub(crate) fn feedback_trace_offer(&self) -> bool {
+        if self.auth_manager.current_or_expired().is_some_and(|a| a.is_zdr_team()) {
+            return false;
+        }
+        if self.team_blocks_one_shot_trace_upload() {
+            return false;
+        }
+        let cfg = self.cfg.borrow();
+        if !cfg.is_feature_enabled(crate::agent::config::Feature::FeedbackTraceCard) {
+            return false;
+        }
+        if !Self::trace_upload_posture_allows_offer(&cfg) {
+            return false;
+        }
+        if cfg.is_trace_upload_enabled() {
+            return false;
+        }
+        if Self::has_custom_trace_destination(&cfg) {
+            return false;
+        }
+        cfg.endpoints.deployment_key.is_none()
+            && self.auth_manager.current_or_expired().is_some_and(|a| a.is_xai_auth())
+    }
+    /// Trace upload being off as *policy* — an MDM/requirements pin or a
+    /// telemetry-disabled posture — must suppress the card, not invite the
+    /// user to override it: the accepted consent persists at the config
+    /// tier, which those postures cannot outrank. Trace upload being off via
+    /// the remote `trace_upload_enabled` default is different: that is the
+    /// card's audience, and individual consent overriding a fleet default is
+    /// the feature (its own kill switch is `feedback_trace_card_enabled`).
+    fn trace_upload_posture_allows_offer(cfg: &crate::agent::config::Config) -> bool {
+        cfg.requirements.trace_upload.pinned() != Some(false)
+            && cfg.is_telemetry_enabled()
+    }
+    fn has_custom_trace_destination(cfg: &crate::agent::config::Config) -> bool {
+        cfg.endpoints.trace_upload_url.is_some()
+            || cfg.endpoints.trace_upload_bucket.is_some()
+            || cfg.endpoints.trace_upload_endpoint_url.is_some()
+    }
+    /// Upload method for a user-consented feedback trace archive. Blocks ZDR
+    /// and custom destinations; deliberately ignores the live `trace_upload`
+    /// flag and the cached coding-data opt-out — the consent just granted may
+    /// not have reached either cache yet. Fails closed on unknown privacy
+    /// state: with no credential (and no deployment key) the ZDR / team
+    /// predicates can't be evaluated, so nothing may leave the machine.
+    pub(crate) async fn one_shot_feedback_gcs_config(
+        &self,
+        gcs_prefix: String,
+    ) -> Option<crate::session::repo_changes::TraceExportConfig> {
+        let cached_auth = self.auth_manager.current_or_expired()?;
+        if cached_auth.is_zdr_team() {
+            return None;
+        }
+        if self.team_blocks_one_shot_trace_upload() {
+            return None;
+        }
+        {
+            let cfg = self.cfg.borrow();
+            if cfg.endpoints.deployment_key.is_some() {
+                return None;
+            }
+            if !Self::trace_upload_posture_allows_offer(&cfg) {
+                return None;
+            }
+            if Self::has_custom_trace_destination(&cfg) {
+                return None;
+            }
+        }
+        let auth_token = self
+            .auth_manager
+            .auth()
+            .await
+            .ok()
+            .filter(|auth| auth.is_xai_auth())
+            .map(|auth| auth.key);
+        let cfg = self.cfg.borrow();
+        let upload_method = cfg.endpoints.resolve_upload_method(auth_token)?;
+        if !matches!(
+            upload_method,
+            crate::session::repo_changes::UploadMethod::Proxy { .. }
+        ) {
+            return None;
+        }
+        Some(crate::session::repo_changes::TraceExportConfig {
+            bucket_url: None,
+            service_account_key: None,
+            prefix_dir: None,
+            gcs_prefix: Some(gcs_prefix),
+            absolute_paths: false,
+            archive_name_override: None,
+            upload_method,
+        })
+    }
     /// Allocate the next monotonic telemetry turn number for a session.
     ///
     /// Returns the current turn number and advances the counter. The counter is
@@ -3579,10 +3695,10 @@ impl MvpAgent {
                     upload_turn_messages(&ctx, capture, UploadWait::Confirm),
                     upload_harness_session_archive(&ctx, session_state),
                 );
-                    let upload_method = resolve_upload_method(&ctx);
+                    let upload_method = resolve_upload_method(&ctx.gcs_config);
                     write_upload_manifest(
                             &ctx,
-                            &build_manifest(&ctx.artifact_tracker, upload_method),
+                            &build_manifest(&ctx.artifact_tracker, upload_method, None),
                         )
                         .await;
                 },
@@ -3897,6 +4013,42 @@ impl MvpAgent {
             );
         }
         resolved
+    }
+    /// Whether the requesting client will draw a status row. Session `_meta`
+    /// first, for the same reason as [`Self::resolve_client_io_caps`]: `init`
+    /// holds whichever client started the process, and a leader multiplexes many.
+    pub(super) fn resolve_status_line_capability(
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+    ) -> bool {
+        meta.and_then(|m| m.get(xai_grok_status_line::CLIENT_STATUS_LINE_META))
+            .or_else(|| {
+                init
+                    .client_capabilities
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get(xai_grok_status_line::STATUS_LINE_CAPABILITY))
+            })
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+    /// Switch the row on for the resident actor an attach reuses and ask it to
+    /// fill it. The store precedes the request because the emitter re-reads the
+    /// capability when the wake lands.
+    pub(super) fn attach_status_line(
+        &self,
+        session_id: &acp::SessionId,
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+    ) {
+        let Some(handle) = self.resident_handle(session_id) else {
+            return;
+        };
+        let wanted = Self::resolve_status_line_capability(meta, init);
+        handle.set_status_line_wanted(wanted);
+        if wanted {
+            handle.request_status_snapshot();
+        }
     }
     /// Extract per-client terminal/fs capabilities from request `_meta`
     /// (injected by the leader). Falls back to the shared `init` OnceCell.
@@ -4435,6 +4587,15 @@ impl MvpAgent {
                 cfg.remote_settings.as_ref(),
             )
         };
+        let subagent_rate_limit_max_attempts = {
+            let models = self.models_manager.models();
+            let per_model = crate::agent::config::find_model_by_id(
+                    &models,
+                    &sampling_config.model,
+                )
+                .and_then(|entry| entry.info.subagent_rate_limit_max_attempts);
+            self.resolved_subagent_rate_limit_max_attempts(per_model)
+        };
         let model_max_retries = self
             .models_manager
             .models()
@@ -4621,6 +4782,11 @@ impl MvpAgent {
                 .as_ref()
                 .and_then(|m| m.get("x.ai/gitHeadChanged"))
                 .and_then(|v| v.as_bool());
+            let status_line_enabled = std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(
+                    Self::resolve_status_line_capability(session_meta, init),
+                ),
+            );
             let session_cwd = std::path::Path::new(&session_info.cwd);
             let fs_watch_caps = crate::session::fs_watch::FsWatchCapabilities::resolve(crate::session::fs_watch::CapabilityInputs {
                 client_notify: fs_notify_config.is_some(),
@@ -4666,6 +4832,7 @@ impl MvpAgent {
                     self.codebase_indexes.clone(),
                     client_code_nav_enabled,
                     fs_watch_caps,
+                    status_line_enabled,
                     feedback_proxy_url,
                     feedback_user_token,
                     feedback_alpha_test_key,
@@ -4695,6 +4862,7 @@ impl MvpAgent {
                     origin_client.as_ref().map(|o| o.product.clone()),
                     inference_idle_timeout_secs,
                     model_max_retries,
+                    subagent_rate_limit_max_attempts,
                     web_search_sampling_config,
                     web_fetch_config,
                     image_gen_config,
@@ -4759,6 +4927,8 @@ impl MvpAgent {
                     max_turns,
                     None,
                     is_chat_kind,
+                    None,
+                    None,
                 )
                 .await?
         };

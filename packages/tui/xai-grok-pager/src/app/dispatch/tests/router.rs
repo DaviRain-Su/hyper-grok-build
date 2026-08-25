@@ -100,12 +100,18 @@ fn external_prompt_editor_arms_typed_request_and_preserves_composer_modes() {
     }
 }
 #[test]
-fn external_prompt_editor_refuses_nonminimal_and_owned_input() {
+fn external_prompt_editor_arms_in_fullscreen_and_refuses_owned_input() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
     let _ = dispatch(Action::EditPromptExternal, &mut app);
-    assert!(app.pending_editor.is_none(), "full TUI must refuse");
+    assert!(
+        matches!(
+            app.pending_editor.take(),
+            Some(crate::app::external_editor::PendingEditorRequest::PromptDraft { .. })
+        ),
+        "full TUI arms the request without requiring prompt-pane focus"
+    );
     app.screen_mode = crate::app::ScreenMode::Minimal;
     app.agents.get_mut(&id).unwrap().active_pane = ActivePane::Scrollback;
     let _ = dispatch(Action::EditPromptExternal, &mut app);
@@ -114,7 +120,7 @@ fn external_prompt_editor_refuses_nonminimal_and_owned_input() {
             app.pending_editor,
             Some(crate::app::external_editor::PendingEditorRequest::PromptDraft { .. })
         ),
-        "minimal's logical composer remains authoritative after Tab/Vim focus"
+        "the composer stays the editing surface with scrollback focused"
     );
     app.pending_editor = None;
     app.agents.get_mut(&id).unwrap().cancel_turn_view =
@@ -284,6 +290,7 @@ fn deferred_paste_completion_after_refused_editor_does_not_implicitly_send_witho
                 target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
                     agent_id: id,
                     images_dir: None,
+                    from_feedback_pane: false,
                 },
                 source: crate::app::actions::ClipboardPasteSource::ClipboardKey {
                     text: crate::app::actions::ClipboardTextRead::Success(Some(
@@ -396,7 +403,14 @@ fn send_feedback_clears_active_ephemeral_tip() {
         &mut std::collections::HashMap::new(),
     );
     assert!(agent.ephemeral_tip.is_active());
-    let _ = dispatch(Action::SendFeedback("it broke".into()), &mut app);
+    let _ = dispatch(
+        Action::SendFeedback {
+            text: "it broke".into(),
+            images: Default::default(),
+            trace: Some(crate::app::actions::FeedbackTraceChoice::NoUpload),
+        },
+        &mut app,
+    );
     assert!(
         !app.agents.get(&id).unwrap().ephemeral_tip.is_active(),
         "feedback submit must clear the tip"
@@ -593,7 +607,7 @@ fn mark_turn_finished_clears_start_and_stamps_active() {
     let agent = app.agents.get_mut(&id).unwrap();
     agent.turn_started_at = Some(std::time::Instant::now());
     agent.last_active_at = None;
-    agent.mark_turn_finished();
+    agent.mark_turn_finished(crate::app::cancel_latency::TurnEnd::Completed);
     assert!(
         agent.turn_started_at.is_none(),
         "turn_started_at must be cleared"

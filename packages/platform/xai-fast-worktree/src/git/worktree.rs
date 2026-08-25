@@ -40,14 +40,11 @@ enum StaleWorktreeMatch<'a> {
 }
 
 /// Remove stale `.git/worktrees/<id>` registrations matching `match_rule`.
+/// Best-effort; returns the count removed.
 ///
-/// Deliberately not `git worktree prune`: prune deletes every registration
-/// whose worktree path is not visible from the current mount namespace (git
-/// applies no expiry protection to that case) and deletes `.git/worktrees`
-/// itself once emptied — under a container that does not mount the user's
-/// linked worktrees, that wiped them all. Best-effort: failures are logged,
-/// never returned. Returns the number of registrations removed (git suffixes
-/// ids on basename collisions, so an id may differ from the basename).
+/// Not `git worktree prune`: prune also drops registrations whose worktree is
+/// merely invisible in the current mount namespace, wiping live linked worktrees
+/// inside a container that does not mount them.
 fn remove_stale_worktree_registrations(
     source_repo: &Path,
     match_rule: StaleWorktreeMatch<'_>,
@@ -175,10 +172,22 @@ pub fn remove_stale_worktree_registrations_under(source_repo: &Path, prefix: &Pa
     remove_stale_worktree_registrations(source_repo, StaleWorktreeMatch::UnderPrefix(prefix))
 }
 
-/// Canonicalize the deepest existing ancestor and re-append the missing
-/// tail: git records the realpath at `worktree add` time, so a symlinked
-/// spelling must compare equal even after the path itself is deleted.
-fn normalized_for_match(path: &Path) -> PathBuf {
+/// Normalized worktree path a registration's `gitdir` backlink names, or `None`
+/// if missing or malformed. The backlink may be relative (`worktree.useRelativePaths`).
+pub(crate) fn registration_worktree_path(registration: &Path) -> Option<PathBuf> {
+    let backlink = std::fs::read_to_string(registration.join("gitdir")).ok()?;
+    let backlink_path = Path::new(backlink.trim());
+    let backlink_abs = if backlink_path.is_relative() {
+        registration.join(backlink_path)
+    } else {
+        backlink_path.to_path_buf()
+    };
+    Some(normalized_for_match(backlink_abs.parent()?))
+}
+
+/// Canonicalize the deepest existing ancestor and re-append the missing tail, so
+/// a symlinked spelling still compares equal after the path is deleted.
+pub(crate) fn normalized_for_match(path: &Path) -> PathBuf {
     let mut missing = Vec::new();
     let mut cursor = path;
     loop {

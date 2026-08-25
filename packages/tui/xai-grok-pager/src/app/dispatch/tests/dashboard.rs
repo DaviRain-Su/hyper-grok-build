@@ -885,6 +885,36 @@ fn dashboard_confirm_worktree_applies_pending_model_and_plan() {
     );
     assert_eq!(agent.plan_mode_pending, Some(true));
 }
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_confirm_worktree_carries_auto_permission_override() {
+    use crate::app::actions::PermissionModeKind;
+    use crate::views::dashboard::DashboardDispatchMode;
+    let mut app = test_app();
+    open_dashboard(&mut app);
+    app.cwd_has_git_ancestor = true;
+    if let Some(dashboard) = app.dashboard.as_mut() {
+        dashboard.pending_mode = DashboardDispatchMode::Auto;
+        dashboard.dispatch.set_text("do the thing");
+        dashboard.pending_worktree_prompt = Some(dashboard.dispatch.stash());
+        dashboard.pending_worktree_attach = true;
+    }
+    let effects = dispatch_dashboard_confirm_worktree(&mut app, Some("auto-wt".into()));
+    let agent_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::CreateWorktreeSession {
+                agent_id,
+                permission_mode_override: Some(PermissionModeKind::Auto),
+                ..
+            } => Some(*agent_id),
+            _ => None,
+        })
+        .expect("Auto must ride on the worktree create effect");
+    assert!(app.agents[&agent_id].session.is_auto());
+    assert_eq!(app.current_ui.permission_mode.as_deref(), Some("auto"));
+    assert!(!app.default_yolo);
+}
 /// Images pasted into the dispatch input survive a worktree dispatch:
 /// stashed when the dialog opens, replayed onto the worktree agent's queued
 /// prompt on confirm. Regression — the worktree branch dropped them while
@@ -1229,6 +1259,17 @@ fn apply_pending_dispatch_config_always_approve_blocked_by_policy_pin() {
     );
     apply_pending_dispatch_config(agent, None, DashboardDispatchMode::AlwaysApprove, None);
     assert!(agent.session.is_yolo());
+    assert!(!agent.session.is_auto());
+}
+#[test]
+fn apply_pending_dispatch_config_auto_sets_classifier_mode() {
+    use crate::views::dashboard::DashboardDispatchMode;
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.session.yolo_mode = true;
+    apply_pending_dispatch_config(agent, None, DashboardDispatchMode::Auto, None);
+    assert!(agent.session.is_auto());
+    assert!(!agent.session.is_yolo());
 }
 /// Dashboard per-agent toggle under the pin: refused, warning lands on
 /// the dashboard's OWN error slot (the user is looking at the
@@ -1892,8 +1933,8 @@ fn dashboard_slash_session_modals_toast_instead_of_noop() {
         }
     }
 }
-/// Shift+Tab (`DashboardCycleMode`) rotates Normal → Plan →
-/// Always-Approve → Normal.
+/// Shift+Tab (`DashboardCycleMode`) rotates Normal → Plan → Auto →
+/// Always-Approve → Normal when Auto is enabled.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_cycle_mode_rotates_through_modes() {
@@ -1912,6 +1953,11 @@ fn dashboard_cycle_mode_rotates_through_modes() {
     let _ = dispatch(Action::DashboardCycleMode, &mut app);
     assert_eq!(
         app.dashboard.as_ref().unwrap().pending_mode,
+        DashboardDispatchMode::Auto
+    );
+    let _ = dispatch(Action::DashboardCycleMode, &mut app);
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().pending_mode,
         DashboardDispatchMode::AlwaysApprove
     );
     let _ = dispatch(Action::DashboardCycleMode, &mut app);
@@ -1920,8 +1966,31 @@ fn dashboard_cycle_mode_rotates_through_modes() {
         DashboardDispatchMode::Normal
     );
 }
-/// Under the managed-policy pin the staged-mode cycle skips
-/// Always-Approve (Normal → Plan → Normal) and explains why.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_cycle_mode_skips_auto_when_gated_off() {
+    use crate::views::dashboard::DashboardDispatchMode;
+    let mut app = test_app();
+    app.auto_mode_gate = false;
+    open_dashboard(&mut app);
+    let _ = dispatch(Action::DashboardCycleMode, &mut app);
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().pending_mode,
+        DashboardDispatchMode::Plan
+    );
+    let _ = dispatch(Action::DashboardCycleMode, &mut app);
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().pending_mode,
+        DashboardDispatchMode::AlwaysApprove
+    );
+    let _ = dispatch(Action::DashboardCycleMode, &mut app);
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().pending_mode,
+        DashboardDispatchMode::Normal
+    );
+}
+/// Under the managed-policy pin the staged-mode cycle still visits Auto,
+/// then skips Always-Approve and explains why.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_cycle_mode_skips_always_approve_under_policy_pin() {
@@ -1933,6 +2002,11 @@ fn dashboard_cycle_mode_skips_always_approve_under_policy_pin() {
     assert_eq!(
         app.dashboard.as_ref().unwrap().pending_mode,
         DashboardDispatchMode::Plan
+    );
+    let _ = dispatch(Action::DashboardCycleMode, &mut app);
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().pending_mode,
+        DashboardDispatchMode::Auto
     );
     let _ = dispatch(Action::DashboardCycleMode, &mut app);
     let d = app.dashboard.as_ref().unwrap();
@@ -1948,7 +2022,7 @@ fn dashboard_cycle_mode_skips_always_approve_under_policy_pin() {
 }
 /// Opening the dashboard re-seeds BOTH staged dispatch fields: a model
 /// staged in a previous session is cleared and the mode is reset from
-/// `app.default_yolo`, so a fresh open never inherits stale staging.
+/// the app-wide permission mode, so a fresh open never inherits stale staging.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_open_reseeds_pending_model_and_mode() {
@@ -1974,7 +2048,27 @@ fn dashboard_open_reseeds_pending_model_and_mode() {
     assert_eq!(
         d.pending_mode,
         DashboardDispatchMode::Normal,
-        "re-open must reset the mode from default_yolo (off → Normal)",
+        "re-open must reset the mode from the app-wide permission mode",
+    );
+}
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_open_seeds_auto_from_app_permission_mode() {
+    use crate::views::dashboard::DashboardDispatchMode;
+    let mut app = test_app();
+    app.current_ui.permission_mode = Some("auto".into());
+    open_dashboard(&mut app);
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().pending_mode,
+        DashboardDispatchMode::Auto
+    );
+    app.active_view = ActiveView::Welcome;
+    app.auto_mode_gate = false;
+    open_dashboard(&mut app);
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().pending_mode,
+        DashboardDispatchMode::Normal,
+        "a gated-off Auto default must seed Normal"
     );
 }
 /// Peek status follows the LIVE turn activity while running: a turn that's
@@ -2064,11 +2158,93 @@ fn dashboard_dispatch_always_approve_sets_yolo() {
     if let Some(d) = app.dashboard.as_mut() {
         d.pending_mode = DashboardDispatchMode::AlwaysApprove;
     }
-    let _ = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
+    let effects = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
     let new_id = *app.agents.keys().next().unwrap();
     assert!(
         app.agents[&new_id].session.is_yolo(),
         "Always-Approve must spawn the agent in auto-approve"
+    );
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::CreateSession {
+            permission_mode_override: Some(crate::app::actions::PermissionModeKind::AlwaysApprove),
+            ..
+        }
+    )));
+    assert!(!app.default_yolo, "per-spawn mode must not change globals");
+}
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_dispatch_auto_sets_classifier_without_changing_globals() {
+    use crate::views::dashboard::DashboardDispatchMode;
+    let mut app = test_app();
+    app.current_ui.permission_mode = Some("ask".into());
+    open_dashboard(&mut app);
+    app.dashboard.as_mut().unwrap().pending_mode = DashboardDispatchMode::Auto;
+    let effects = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
+    let new_id = *app.agents.keys().next().unwrap();
+    assert!(app.agents[&new_id].session.is_auto());
+    assert!(!app.agents[&new_id].session.is_yolo());
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::CreateSession {
+            permission_mode_override: Some(crate::app::actions::PermissionModeKind::Auto),
+            ..
+        }
+    )));
+    assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
+    assert!(!app.default_yolo);
+}
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_dispatch_auto_attach_syncs_mirror_and_new_inherits_auto() {
+    use crate::views::dashboard::DashboardDispatchMode;
+    let mut app = test_app();
+    app.current_ui.permission_mode = Some("ask".into());
+    open_dashboard(&mut app);
+    app.dashboard.as_mut().unwrap().pending_mode = DashboardDispatchMode::Auto;
+    let _ = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), true);
+    assert_eq!(app.current_ui.permission_mode.as_deref(), Some("auto"));
+    let _ = dispatch_new_session_inner(&mut app, None);
+    assert!(
+        app.agents[&AgentId(1)].session.is_auto(),
+        "/new must inherit the active attached agent's Auto mirror"
+    );
+}
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_dispatch_stale_auto_degrades_when_gate_is_off() {
+    use crate::views::dashboard::DashboardDispatchMode;
+    let mut app = test_app();
+    open_dashboard(&mut app);
+    app.dashboard.as_mut().unwrap().pending_mode = DashboardDispatchMode::Auto;
+    app.auto_mode_gate = false;
+    let effects = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
+    let new_id = *app.agents.keys().next().unwrap();
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().pending_mode,
+        DashboardDispatchMode::Normal
+    );
+    assert!(!app.agents[&new_id].session.is_auto());
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::CreateSession {
+            permission_mode_override: Some(crate::app::actions::PermissionModeKind::Ask),
+            ..
+        }
+    )));
+}
+#[test]
+fn auto_gate_kill_switch_clears_staged_dashboard_auto() {
+    use crate::views::dashboard::DashboardDispatchMode;
+    let mut app = test_app();
+    open_dashboard(&mut app);
+    app.dashboard.as_mut().unwrap().pending_mode = DashboardDispatchMode::Auto;
+    app.auto_mode_gate = false;
+    downgrade_displayed_auto_if_gated(&mut app);
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().pending_mode,
+        DashboardDispatchMode::Normal
     );
 }
 /// Always-Approve staged but pinned off: plain-Send (stays on the
@@ -2212,6 +2388,26 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
         Some(xai_grok_tools::types::SessionMode::Plan),
     );
     assert_eq!(agent.plan_mode_pending, Some(true));
+}
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_new_agent_button_carries_auto_permission_override() {
+    use crate::app::actions::PermissionModeKind;
+    use crate::views::dashboard::DashboardDispatchMode;
+    let mut app = test_app();
+    open_dashboard(&mut app);
+    app.dashboard.as_mut().unwrap().pending_mode = DashboardDispatchMode::Auto;
+    let effects = dispatch(Action::DashboardCreateNewAgentWithDetail, &mut app);
+    let new_id = *app.agents.keys().next().unwrap();
+    assert!(app.agents[&new_id].session.is_auto());
+    assert_eq!(app.current_ui.permission_mode.as_deref(), Some("auto"));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::CreateSession {
+            permission_mode_override: Some(PermissionModeKind::Auto),
+            ..
+        }
+    )));
 }
 /// The deferred plan `SessionMode` is emitted (and cleared) once the
 /// session exists, mirroring the deferred model switch.
@@ -2701,7 +2897,7 @@ fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
             .subagent_sessions
             .get(&child_sid)
             .is_some_and(|i| !i.transcript.needs_replay()),
-        "dashboard attach must settle the child transcript state"
+        "dashboard attach must record the child transcript state"
     );
     crate::app::subagent::set_replay_grok_home_for_tests(None);
 }

@@ -13,7 +13,7 @@ A few worth knowing on day one:
 | `/btw` | Send Grok an aside *without* interrupting its current task |
 | `/rewind` (alias `/undo`) | Rewind the conversation to an earlier turn |
 | `/docs` | Full How-to Guides, in the TUI or on the web |
-| `/feedback` | Send feedback to the team, inline or in a pane |
+| `/feedback` | Send feedback to the team |
 
 Two of those deserve a second look:
 

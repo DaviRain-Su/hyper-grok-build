@@ -28,6 +28,7 @@ pub struct SubagentRole {
     pub description: String,
     /// Capability ceiling for agents using this role.
     /// One of: "read-only", "read-write", "execute", "all".
+    /// Not a model-facing spawn argument; `general-purpose` stays `all`.
     /// A per-spawn `capability_mode` can narrow this, but cannot widen it.
     #[serde(default)]
     pub default_capability_mode: Option<String>,

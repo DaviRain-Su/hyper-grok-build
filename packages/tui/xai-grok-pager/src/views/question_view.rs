@@ -90,7 +90,9 @@ pub enum QuestionFocus {
 ///
 /// Each variant carries the data the local handler needs to translate the
 /// submitted selection into an [`crate::app::actions::Action`].
-#[derive(Debug, Clone)]
+///
+/// Not `Clone`: `FeedbackTrace` owns its attachments' staged temp files.
+#[derive(Debug)]
 pub enum LocalQuestionKind {
     /// Modal opened by `/fork` to resolve the worktree question.
     /// On submit, the selected option index plus the carried directive
@@ -133,9 +135,31 @@ pub enum LocalQuestionKind {
         plan: Box<crate::diagnostics::FixPlan>,
     },
     DeleteCurrentSession,
-    /// Modal opened by bare `/feedback` (no inline text). Freeform-only; submit sends [`crate::app::actions::Action::SendFeedback`].
+    /// Freeform report modal opened by `/feedback`.
     Feedback,
+    /// Second stage of the `/feedback` card: trace consent. Carries the
+    /// committed report (text and drained image attachments) so Esc can
+    /// skip the question without dropping it.
+    FeedbackTrace {
+        report: String,
+        images: crate::views::prompt_widget::FeedbackImages,
+    },
 }
+
+/// Bare `/feedback` pane label (first paragraph of the question chrome).
+pub const FEEDBACK_QUESTION_LABEL: &str = "How can we improve Grok Build?";
+
+/// Trace-consent question shown after the report is submitted (wording from
+/// legal review — discloses retention/training scope, not just debugging).
+pub const FEEDBACK_TRACE_QUESTION_LABEL: &str = "Opt-in to provide your trace for debugging \
+     purposes. This will also provide SpaceXAI the ability to retain and train on coding data, \
+     e.g., prompts, traces, & metrics.";
+
+/// Option ids for the trace-consent question; the submit handler maps ids
+/// (never positions) back to a [`crate::app::actions::FeedbackTraceChoice`].
+pub const FEEDBACK_TRACE_OPTION_OPT_IN: &str = "always_upload";
+pub const FEEDBACK_TRACE_OPTION_OPT_OUT: &str = "no_upload";
+pub const FEEDBACK_TRACE_OPTION_NEVER_ASK: &str = "never_ask";
 
 // ── State ──────────────────────────────────────────────────────────────
 
@@ -213,6 +237,12 @@ pub struct QuestionViewState {
     /// locally-driven questions (e.g. credit-limit upsell) that only
     /// offer fixed options with no free-text fallback.
     pub no_freeform: bool,
+
+    /// Whether Enter on the report advances to the trace-consent question.
+    pub feedback_offer_trace: bool,
+    /// Opted-out account: the "Opt in" option also switches coding-data
+    /// sharing back on (and says so in its description).
+    pub feedback_offer_reenables_sharing: bool,
 }
 
 // ── Constructor & basic helpers ────────────────────────────────────────
@@ -282,6 +312,8 @@ impl QuestionViewState {
             opened_at: Instant::now(),
             opened_at_wall_ms: chrono::Utc::now().timestamp_millis(),
             no_freeform: false,
+            feedback_offer_trace: false,
+            feedback_offer_reenables_sharing: false,
         }
     }
 
@@ -827,9 +859,25 @@ impl QuestionViewState {
         option.preview.as_deref()
     }
 
-    /// The bare `/feedback` report pane. Having no options to navigate, it keeps input focus for its whole life and answers Esc by dismissing.
+    /// Either stage of the `/feedback` card (report or trace consent).
     pub fn is_feedback(&self) -> bool {
+        matches!(
+            self.local_kind,
+            Some(LocalQuestionKind::Feedback | LocalQuestionKind::FeedbackTrace { .. })
+        )
+    }
+
+    /// The freeform report stage of the `/feedback` card.
+    pub fn is_feedback_report(&self) -> bool {
         matches!(self.local_kind, Some(LocalQuestionKind::Feedback))
+    }
+
+    /// The trace-consent stage of the `/feedback` card.
+    pub fn is_feedback_trace(&self) -> bool {
+        matches!(
+            self.local_kind,
+            Some(LocalQuestionKind::FeedbackTrace { .. })
+        )
     }
 
     pub fn feedback_report(&self) -> String {
@@ -837,6 +885,68 @@ impl QuestionViewState {
             .first()
             .map(|s| s.trim().to_string())
             .unwrap_or_default()
+    }
+
+    /// Swap the report card for the trace-consent question, keeping the
+    /// stashed prompt. Built through the constructor so the per-question
+    /// vector-length invariant lives in exactly one place.
+    pub fn begin_feedback_trace_stage(
+        &mut self,
+        report: String,
+        images: Vec<crate::prompt_images::PastedImage>,
+    ) {
+        // "Opt in" is a persistent grant, so its description names what it
+        // turns on beyond this one upload.
+        let opt_in_description = if self.feedback_offer_reenables_sharing {
+            "Turns on trace upload for future sessions on this machine and switches coding \
+             data sharing back on for this account."
+        } else {
+            "Turns on trace upload for future sessions on this machine (change any time with \
+             [telemetry] trace_upload in config.toml)."
+        };
+        let question = Question {
+            question: FEEDBACK_TRACE_QUESTION_LABEL.to_string(),
+            options: vec![
+                QuestionOption {
+                    label: "Opt in".into(),
+                    description: opt_in_description.into(),
+                    preview: None,
+                    id: Some(FEEDBACK_TRACE_OPTION_OPT_IN.into()),
+                },
+                QuestionOption {
+                    label: "Opt out this time".into(),
+                    description: String::new(),
+                    preview: None,
+                    id: Some(FEEDBACK_TRACE_OPTION_OPT_OUT.into()),
+                },
+                QuestionOption {
+                    label: "Opt out and don't ask again".into(),
+                    description: String::new(),
+                    preview: None,
+                    id: Some(FEEDBACK_TRACE_OPTION_NEVER_ASK.into()),
+                },
+            ],
+            multi_select: Some(false),
+            id: None,
+        };
+        let mut next = QuestionViewState::new(
+            std::mem::take(&mut self.tool_call_id),
+            vec![question],
+            std::mem::take(&mut self.stashed_prompt),
+        );
+        next.selections = vec![QuestionSelection::Single(Some(0))];
+        next.no_freeform = true;
+        next.fullscreen = self.fullscreen;
+        // Card-open time spans both stages (pause accounting).
+        next.opened_at = self.opened_at;
+        next.opened_at_wall_ms = self.opened_at_wall_ms;
+        next.feedback_offer_trace = self.feedback_offer_trace;
+        next.feedback_offer_reenables_sharing = self.feedback_offer_reenables_sharing;
+        next.local_kind = Some(LocalQuestionKind::FeedbackTrace {
+            report,
+            images: images.into(),
+        });
+        *self = next;
     }
 
     /// Labels of the selected options for a given question.
@@ -2208,6 +2318,61 @@ mod tests {
                 "chrome accounting vs render drift at content_w={content_w}"
             );
         }
+    }
+
+    #[test]
+    fn begin_feedback_trace_stage_swaps_report_for_consent_options() {
+        let mut state = QuestionViewState::new(
+            "fb".into(),
+            vec![Question {
+                question: FEEDBACK_QUESTION_LABEL.into(),
+                options: vec![],
+                multi_select: Some(false),
+                id: None,
+            }],
+            StashedPrompt::default(),
+        )
+        .with_local_kind(LocalQuestionKind::Feedback);
+        state.per_question_freeform[0] = "clipboard is broken over ssh".into();
+
+        state.begin_feedback_trace_stage(state.feedback_report(), vec![]);
+
+        assert!(
+            state.is_feedback(),
+            "trace stage is still the feedback card"
+        );
+        assert!(state.is_feedback_trace());
+        assert!(!state.is_feedback_report());
+        assert_eq!(state.questions.len(), 1);
+        assert_eq!(state.questions[0].question, FEEDBACK_TRACE_QUESTION_LABEL);
+        assert_eq!(state.questions[0].options.len(), 3);
+        assert_eq!(
+            state.questions[0].options[2].label,
+            "Opt out and don't ask again"
+        );
+        assert_eq!(
+            state.questions[0]
+                .options
+                .iter()
+                .map(|o| o.id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(FEEDBACK_TRACE_OPTION_OPT_IN),
+                Some(FEEDBACK_TRACE_OPTION_OPT_OUT),
+                Some(FEEDBACK_TRACE_OPTION_NEVER_ASK),
+            ],
+            "consent maps from ids, so every option must carry one"
+        );
+        assert!(
+            matches!(state.selections[0], QuestionSelection::Single(Some(0))),
+            "turning trace upload on is the default"
+        );
+        assert!(state.no_freeform, "consent card has no free-text row");
+        assert_eq!(state.focus, QuestionFocus::Navigation);
+        let Some(LocalQuestionKind::FeedbackTrace { report, .. }) = &state.local_kind else {
+            panic!("local kind must carry the report");
+        };
+        assert_eq!(report, "clipboard is broken over ssh");
     }
 
     /// Helper: build a question with N options.

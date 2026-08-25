@@ -41,6 +41,15 @@ pub(crate) async fn apply(
     let required_agent_type =
         resolve_required_agent_type(Some(model.info().agent_type.as_str()), session_default);
     let previous_model_id = handle.model_id.0.clone();
+    let is_family_switch = {
+        let models = agent.models_manager.models();
+        let old_family = config::find_model_by_id(&models, &previous_model_id)
+            .and_then(|e| e.info.model_family.as_deref());
+        matches!(
+            (old_family, model.info().model_family.as_deref()),
+            (Some(a), Some(b)) if a != b
+        )
+    };
     let mut pending_rebuild_definition: Option<xai_grok_agent::AgentDefinition> = None;
     {
         let required = &required_agent_type;
@@ -196,6 +205,7 @@ pub(crate) async fn apply(
     let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
         sampling_config: model_sampling,
         use_concise,
+        is_family_switch,
         apply_prompt_override,
         skip_prompt_rewrite: did_rebuild || model_unchanged,
         auto_compact_threshold_percent: new_threshold,

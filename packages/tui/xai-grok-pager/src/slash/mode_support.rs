@@ -50,7 +50,7 @@ impl ModeSupport {
                  Run {switch} to switch this session."
             ),
             Remedy::UseInstead(instead) => {
-                format!("/{token} isn't available in {current} mode — {instead}.")
+                format!("/{token} isn't available in {current} mode: {instead}.")
             }
             Remedy::AlreadyInMode => format!("You're already in {current} mode."),
         })

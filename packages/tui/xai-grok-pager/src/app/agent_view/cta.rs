@@ -94,7 +94,7 @@ impl AgentView {
     /// Returns an Effect to dispatch; the match is recomputed when the
     /// debounce expires (see `TaskResult::PluginCtaDebounceExpired`).
     pub(crate) fn notify_plugin_cta_text_changed(&mut self) -> Option<super::actions::Effect> {
-        if !self.plugin_cta.official_source_present || self.plugin_cta.candidates.is_empty() {
+        if self.plugin_cta.source_url_or_path.is_none() || self.plugin_cta.candidates.is_empty() {
             return None;
         }
         self.plugin_cta.debounce_generation = self.plugin_cta.debounce_generation.wrapping_add(1);
@@ -176,8 +176,10 @@ impl AgentView {
             None => 0,
         };
         let key_hint_w = KEY_HINT.width() as u16;
+        // Against the label's own width, which the inset shortens by a column.
         let show_hint = connect_label.is_some()
-            && area.width > short_buttons_w + key_hint_w + CTA_HINT_MIN_LEFT;
+            && area.width.saturating_sub(crate::tips::render::HINT_INSET)
+                > short_buttons_w + key_hint_w + CTA_HINT_MIN_LEFT;
         let hint_w = if show_hint { key_hint_w } else { 0 };
         let right_w = short_buttons_w + hint_w;
         if area.height == 0 || area.width <= short_buttons_w {
@@ -196,12 +198,14 @@ impl AgentView {
         }
 
         let left = Line::from(left_spans);
+        // Budget from the inset width, or the label eats the gap before the buttons.
+        let text = crate::tips::render::hint_text_area(area);
         let left_budget = if right_w > 0 {
-            area.width - right_w - 1
+            text.width.saturating_sub(right_w + 1)
         } else {
-            area.width
+            text.width
         };
-        buf.set_line_safe(area.x, area.y, &left, left_budget);
+        buf.set_line_safe(text.x, text.y, &left, left_budget);
 
         let Some(connect_label) = connect_label else {
             self.plugin_cta.hit_connect.clear();
@@ -587,6 +591,11 @@ impl AgentView {
         let Some(session_id) = self.session.session_id.clone() else {
             return;
         };
+        // No install target: the CTA source vanished from the last catalog
+        // scan (reachable via Error/Retry), so an install can't be routed.
+        let Some(source_url_or_path) = self.plugin_cta.source_url_or_path.clone() else {
+            return;
+        };
         // Whether to probe for MCP servers after install. URL-sourced plugins
         // are not cloned at scan time, so their `has_mcp` is always false; treat
         // a remote URL as "may ship MCP" and probe anyway, otherwise the post-
@@ -609,8 +618,7 @@ impl AgentView {
             .push(super::actions::Effect::InstallPluginFromCta {
                 agent_id: self.session.id,
                 session_id,
-                source_url_or_path: xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL
-                    .to_string(),
+                source_url_or_path,
                 plugin_relative_path,
             });
     }
@@ -686,7 +694,8 @@ mod plugin_cta_notify_tests {
     #[test]
     fn notify_skips_debounce_when_no_candidates() {
         let mut agent = make_agent();
-        agent.plugin_cta.official_source_present = true;
+        agent.plugin_cta.source_url_or_path =
+            Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         agent.plugin_cta.candidates.clear();
         assert!(agent.notify_plugin_cta_text_changed().is_none());
         assert_eq!(agent.plugin_cta.debounce_generation, 0);
@@ -695,7 +704,7 @@ mod plugin_cta_notify_tests {
     #[test]
     fn notify_skips_debounce_when_source_absent() {
         let mut agent = make_agent();
-        agent.plugin_cta.official_source_present = false;
+        agent.plugin_cta.source_url_or_path = None;
         agent.plugin_cta.candidates = vec![cta_entry("figma")];
         assert!(agent.notify_plugin_cta_text_changed().is_none());
     }
@@ -703,7 +712,8 @@ mod plugin_cta_notify_tests {
     #[test]
     fn notify_emits_debounce_when_candidates_present() {
         let mut agent = make_agent();
-        agent.plugin_cta.official_source_present = true;
+        agent.plugin_cta.source_url_or_path =
+            Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         agent.plugin_cta.candidates = vec![cta_entry("figma")];
         let eff = agent.notify_plugin_cta_text_changed();
         assert!(matches!(
@@ -719,6 +729,8 @@ mod plugin_cta_notify_tests {
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.session.session_id = Some("sess-1".to_string().into());
+        agent.plugin_cta.source_url_or_path =
+            Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         agent.plugin_cta.phase = CtaPhase::Matched {
             plugin_relative_path: "plugins/figma".into(),
             name: "figma".into(),
@@ -753,10 +765,34 @@ mod plugin_cta_notify_tests {
     }
 
     #[test]
+    fn connect_uses_cta_source_url_when_set() {
+        use crate::app::actions::Effect;
+        use crate::app::agent_view::CtaPhase;
+        let mut agent = make_agent();
+        agent.session.session_id = Some("sess-1".to_string().into());
+        agent.plugin_cta.source_url_or_path = Some("/srv/spacex-marketplace".into());
+        agent.plugin_cta.phase = CtaPhase::Matched {
+            plugin_relative_path: "plugins/starlink".into(),
+            name: "starlink".into(),
+        };
+        agent.connect_matched_plugin();
+
+        assert_eq!(agent.pending_effects.len(), 1);
+        match &agent.pending_effects[0] {
+            Effect::InstallPluginFromCta {
+                source_url_or_path, ..
+            } => assert_eq!(source_url_or_path, "/srv/spacex-marketplace"),
+            other => panic!("expected InstallPluginFromCta, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn connect_retries_from_error() {
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.session.session_id = Some("sess-1".to_string().into());
+        agent.plugin_cta.source_url_or_path =
+            Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         agent.plugin_cta.phase = CtaPhase::Error {
             plugin_relative_path: "plugins/figma".into(),
             name: "figma".into(),
@@ -775,6 +811,8 @@ mod plugin_cta_notify_tests {
     fn connect_without_session_is_noop() {
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
+        agent.plugin_cta.source_url_or_path =
+            Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         agent.plugin_cta.phase = CtaPhase::Matched {
             plugin_relative_path: "plugins/figma".into(),
             name: "figma".into(),
@@ -785,10 +823,30 @@ mod plugin_cta_notify_tests {
     }
 
     #[test]
+    fn connect_without_source_is_noop() {
+        use crate::app::agent_view::CtaPhase;
+        let mut agent = make_agent();
+        agent.session.session_id = Some("sess-1".to_string().into());
+        // Reachable via Error/Retry after the CTA source vanished from a
+        // refresh scan; without an install target the click must do nothing.
+        agent.plugin_cta.source_url_or_path = None;
+        agent.plugin_cta.phase = CtaPhase::Error {
+            plugin_relative_path: "plugins/figma".into(),
+            name: "figma".into(),
+            message: "boom".into(),
+        };
+        agent.connect_matched_plugin();
+        assert!(matches!(agent.plugin_cta.phase, CtaPhase::Error { .. }));
+        assert!(agent.pending_effects.is_empty());
+    }
+
+    #[test]
     fn connect_captures_expects_mcp_and_resets_attempt() {
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.session.session_id = Some("sess-1".to_string().into());
+        agent.plugin_cta.source_url_or_path =
+            Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         let mut entry = cta_entry("figma");
         entry.has_mcp = true;
         agent.plugin_cta.candidates = vec![entry];
@@ -807,6 +865,8 @@ mod plugin_cta_notify_tests {
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.session.session_id = Some("sess-1".to_string().into());
+        agent.plugin_cta.source_url_or_path =
+            Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         // cta_entry defaults has_mcp = false (skills-only).
         agent.plugin_cta.candidates = vec![cta_entry("figma")];
         agent.plugin_cta.phase = CtaPhase::Matched {
@@ -822,6 +882,8 @@ mod plugin_cta_notify_tests {
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.session.session_id = Some("sess-1".to_string().into());
+        agent.plugin_cta.source_url_or_path =
+            Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         // URL-sourced plugins report has_mcp = false at scan time (not cloned
         // yet); a remote URL must still trigger the post-install MCP probe.
         let mut entry = cta_entry("figma");
@@ -1052,6 +1114,8 @@ mod plugin_cta_notify_tests {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let mut agent = make_agent();
         agent.session.session_id = Some("sess-1".to_string().into());
+        agent.plugin_cta.source_url_or_path =
+            Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         agent.plugin_cta.candidates = vec![cta_entry("figma")];
         agent.plugin_cta.phase = CtaPhase::Matched {
             plugin_relative_path: "plugins/figma".into(),

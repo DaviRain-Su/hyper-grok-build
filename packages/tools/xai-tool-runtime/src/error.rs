@@ -44,18 +44,20 @@ pub enum ToolErrorKind {
     /// `UsagePoolExhausted` (an explicit out-of-balance verdict) so the
     /// surface can show a "usage limit reached" message.
     UsageLimitReached,
-    /// The billing global rate limiter shed this request (transient
-    /// load shed). Distinct from `RateLimited` (per-user / per-message
-    /// quota) so the surface can render a billing-specific
+    /// A shared-capacity limiter shed this request (transient load
+    /// shed): the billing global rate limiter, or the sandbox fleet's
+    /// tenancy cap. Distinct from `RateLimited` (per-user / per-message
+    /// quota) so the surface can render a capacity-specific
     /// "try again later" with a retry hint; the `retry_after_secs`
     /// hint, when known, rides in `ToolError::details`. Named to match
     /// the chat surface's `global_rate_limit` typed error.
     GlobalRateLimit,
     /// The caller hit their per-user concurrency cap (too many media
-    /// generations already in flight). Transient — retry once one
-    /// finishes. Distinct from `GlobalRateLimit` (a shared-backend load
-    /// shed) so the surface can tailor a "too many in progress" message.
-    /// Named to match the chat surface's `concurrency_limit` typed error.
+    /// generations or sandboxes already in flight). Transient — retry
+    /// once one finishes. Distinct from `GlobalRateLimit` (a
+    /// shared-backend load shed) so the surface can tailor a "too many
+    /// in progress" message. Named to match the chat surface's
+    /// `concurrency_limit` typed error.
     ConcurrencyLimit,
     /// Upstream service unavailable.
     ServiceUnavailable,

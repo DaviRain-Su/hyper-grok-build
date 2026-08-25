@@ -199,7 +199,11 @@ impl OidcAuthProvider {
     async fn do_refresh(&self) -> Result<(), Box<dyn std::error::Error>> {
         let refresh_token = self.state.lock().refresh_token.clone();
         let issuer = self.issuer.trim_end_matches('/');
-        let client = reqwest::Client::new();
+        // A common-layer crate cannot use the codegen TLS policy crate; build
+        // fallibly so a broken OS certificate store surfaces as Err, not a panic.
+        #[allow(clippy::disallowed_methods)]
+        // common-layer crate; the grok TLS policy helper is out of reach
+        let client = reqwest::Client::builder().build()?;
 
         #[derive(serde::Deserialize)]
         struct Discovery {

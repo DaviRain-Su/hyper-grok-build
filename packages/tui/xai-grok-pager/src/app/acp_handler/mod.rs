@@ -100,10 +100,10 @@ use background::{
 };
 use follow_ups::handle_follow_ups;
 pub(crate) use interactions::handle_ask_user_question;
-use interactions::handle_exit_plan_mode;
+use interactions::{handle_exit_plan_mode, handle_mcp_elicit};
 use mcp::{
-    handle_mcp_init_progress, handle_mcp_server_status, handle_mcp_servers_updated,
-    handle_mcp_tools_changed, push_server_status_enabled,
+    handle_mcp_elicit_complete, handle_mcp_init_progress, handle_mcp_server_status,
+    handle_mcp_servers_updated, handle_mcp_tools_changed, push_server_status_enabled,
 };
 use settings::{
     handle_announcements_update, handle_models_update, handle_sessions_changed,
@@ -589,8 +589,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
 
                     let activity_label = {
                         let child_view = parent
-                            .subagent_views
-                            .get_mut(child_key)
+                            .child_view_for_live_update_mut(child_key)
                             .expect("find_session_match returned an existing subagent_views key");
                         if let Some(tokens) = meta.total_tokens {
                             confirm_context_used(child_view, tokens);
@@ -780,6 +779,7 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         "x.ai/mcp/server_status" if push_server_status_enabled() => {
             handle_mcp_server_status(notif, app)
         }
+        "x.ai/mcp/elicit_complete" => handle_mcp_elicit_complete(notif, app),
         "x.ai/mcp/servers_updated" => handle_mcp_servers_updated(notif, app),
         _ => false,
     }
@@ -872,6 +872,7 @@ fn handle_ext_method(ext: xai_acp_lib::AcpArgs<acp::ExtRequest>, app: &mut AppVi
     match ext.request.method.as_ref() {
         "x.ai/ask_user_question" => handle_ask_user_question(ext, app),
         "x.ai/exit_plan_mode" => handle_exit_plan_mode(ext, app),
+        "x.ai/mcp/elicit" => handle_mcp_elicit(ext, app),
         unknown => {
             tracing::warn!("Unknown ext_method: {unknown}");
             ext.response_tx

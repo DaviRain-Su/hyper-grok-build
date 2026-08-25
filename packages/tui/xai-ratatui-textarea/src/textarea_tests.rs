@@ -5834,7 +5834,9 @@ fn copy_on_selection_finalized_sets_provider() {
     ta.handle_mouse(mouse_drag(5, 0), area, state);
     ta.handle_mouse(mouse_up(5, 0), area, state);
 
-    // Now Ctrl-V should paste "hello" (from provider)
+    // Mouse-up copies to the provider; drop the highlight so Ctrl+V inserts
+    // instead of replacing the selection.
+    ta.clear_selection();
     ta.set_cursor(5);
     ta.input(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
     assert_eq!(ta.text(), "hellohello");
@@ -6230,4 +6232,551 @@ fn shift_number_trusts_terminal_character() {
     let mut t = TextArea::new();
     t.input(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::SHIFT));
     assert_eq!(t.text(), "/");
+}
+
+#[test]
+fn shift_arrow_extends_selection_by_grapheme() {
+    let mut t = ta_with("abc");
+    t.set_cursor(0);
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..1));
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..2));
+    // Reversing shrinks toward the sticky anchor.
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..1));
+}
+
+#[test]
+fn alt_shift_arrow_extends_selection_by_word() {
+    let mut t = ta_with("hello-world tail");
+    let hyphen = t.text().find('-').unwrap();
+    let space = t.text().find(' ').unwrap();
+
+    t.set_cursor(0);
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..hyphen));
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..hyphen + 1));
+
+    // From the far side: word-extend left keeps its own anchor.
+    t.clear_selection();
+    t.set_cursor(space);
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(hyphen + 1..space));
+}
+
+#[test]
+fn super_shift_arrow_extends_selection_to_line_edges() {
+    let mut t = ta_with("hello world");
+    let mid = t.text().find(' ').unwrap();
+    t.set_cursor(mid);
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(mid..t.text().len()));
+    // Extending to the other edge crosses the anchor.
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..mid));
+}
+
+#[test]
+fn shift_extension_anchor_sticky_across_granularities() {
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0.."alpha ".len()));
+}
+
+/// `"alpha beta"` with `"alpha"` selected via Alt+Shift+Right from 0.
+fn ta_with_word_selected() -> TextArea {
+    let mut t = ta_with("alpha beta");
+    t.set_cursor(0);
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..5));
+    t
+}
+
+#[test]
+fn keyboard_selection_feeds_existing_selection_actions() {
+    // Backspace deletes it, like a mouse selection would.
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    assert_eq!(t.text(), " beta");
+
+    // Typing replaces it.
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert_eq!(t.text(), "x beta");
+
+    // A plain arrow collapses it to the corresponding edge.
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(t.selection_range(), None);
+    assert_eq!(t.cursor(), 0);
+}
+
+#[test]
+fn shift_up_down_extends_selection_by_line() {
+    let mut t = ta_with("one\ntwo\nthree");
+    let two = t.text().find("two").unwrap();
+    t.set_cursor(two);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    assert_eq!(
+        t.selection_range(),
+        Some(two..t.text().find("three").unwrap())
+    );
+    // Reversing crosses the anchor into the first line.
+    t.input(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+    t.input(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..two));
+}
+
+/// A stray bit alongside SUPER must not degrade the chord to a plain arrow.
+#[test]
+fn super_chords_tolerate_extra_modifier_bits() {
+    let mut t = ta_with("hello world");
+    let mid = t.text().find(' ').unwrap();
+    t.set_cursor(mid);
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::SUPER | KeyModifiers::META,
+    ));
+    assert_eq!(t.cursor(), 0);
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::SUPER | KeyModifiers::META,
+    ));
+    assert_eq!(t.cursor(), t.text().len());
+}
+
+#[test]
+fn plain_up_down_collapse_selection_then_move_a_line() {
+    let mut t = ta_with("one\ntwo\nthree");
+    let two = t.text().find("two").unwrap();
+    let three = t.text().find("three").unwrap();
+    t.set_cursor(two);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(two..three));
+
+    // Down: collapse to the end edge, then one line further.
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(t.selection_range(), None);
+    assert!(t.cursor() > three, "moved a line past the end edge");
+
+    // Up: collapse to the start edge, then one line up.
+    t.set_cursor(two);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    t.input(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(t.selection_range(), None);
+    assert!(t.cursor() < two, "moved a line above the start edge");
+}
+
+#[test]
+fn cmd_c_copies_selection_and_keeps_it() {
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
+    assert_eq!(t.take_clipboard().as_deref(), Some("alpha"));
+    assert_eq!(
+        t.selection_range(),
+        Some(0..5),
+        "highlight survives the copy"
+    );
+    assert_eq!(t.text(), "alpha beta");
+}
+
+#[test]
+fn cmd_x_cuts_selection() {
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SUPER));
+    assert_eq!(t.take_clipboard().as_deref(), Some("alpha"));
+    assert_eq!(t.text(), " beta");
+    assert_eq!(t.selection_range(), None);
+}
+
+#[test]
+fn cmd_c_without_selection_is_inert() {
+    let mut t = ta_with("alpha beta");
+    t.set_cursor(3);
+    t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
+    assert_eq!(t.take_clipboard(), None);
+    assert_eq!(t.text(), "alpha beta");
+    assert_eq!(t.cursor(), 3);
+}
+
+/// Copy over a chip-spanning highlight yields the chip's raw text.
+#[test]
+fn cmd_c_copies_chip_raw_text() {
+    let mut t = TextArea::new();
+    t.insert_str("ab");
+    t.insert_element("element_text", ElementKind(0), None);
+    t.insert_str("cd");
+    t.set_selection(0, t.text().len());
+    t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
+    assert_eq!(t.take_clipboard().as_deref(), Some("abelement_textcd"));
+    assert!(t.selection_range().is_some());
+}
+
+/// Word moves over a highlight collapse to the edge FIRST, then move a word.
+#[test]
+fn word_move_collapses_leftward_selection_first() {
+    let mut t = ta_with("abc abc abc");
+    t.set_cursor(4);
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..4));
+
+    // Right edge (4), then one word right → end of the second word.
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+    assert_eq!(t.cursor(), 7);
+    assert_eq!(t.selection_range(), None);
+
+    t.set_cursor(4);
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    // Left edge (0), then one word left → stays at 0.
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+    assert_eq!(t.cursor(), 0);
+    assert_eq!(t.selection_range(), None);
+}
+
+#[test]
+fn word_move_collapses_rightward_selection_first() {
+    let mut t = ta_with("abc abc abc");
+    t.set_cursor(4);
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(4..7));
+
+    // Left edge (4), then one word left → 0 — NOT word-left from the
+    // head at 7 (which would land back on 4).
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+    assert_eq!(t.cursor(), 0);
+
+    t.set_cursor(4);
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    // Right edge (7), then one word right → end of the third word.
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+    assert_eq!(t.cursor(), 11);
+}
+
+#[test]
+fn super_arrow_collapses_multiline_selection_first() {
+    let mut t = ta_with("one two\nthree four");
+    let two = t.text().find("two").unwrap();
+    t.set_cursor(two);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    let range = t.selection_range().expect("selection spans lines");
+    assert!(t.text()[range].contains('\n'));
+
+    // Cmd+Left: line start of the START edge's line, not the head's.
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER));
+    assert_eq!(t.cursor(), 0);
+    assert_eq!(t.selection_range(), None);
+}
+
+#[test]
+fn ctrl_f_collapses_like_plain_arrow() {
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    assert_eq!(t.cursor(), 5, "collapse to the end edge, no extra move");
+    assert_eq!(t.selection_range(), None);
+}
+
+/// Plain arrows over a leftward selection collapse to the edges, no extra move.
+#[test]
+fn plain_arrows_collapse_leftward_selection_to_edges() {
+    let mut t = ta_with("hello world");
+    let start = "hello ".len();
+    t.set_cursor(start + 2);
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..start + 2));
+
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(t.cursor(), start + 2, "Right collapses to the anchor");
+    assert_eq!(t.selection_range(), None);
+
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    ));
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(t.cursor(), 0, "Left collapses to the head");
+    assert_eq!(t.selection_range(), None);
+    assert_eq!(t.text(), "hello world", "collapse never edits");
+}
+
+/// Shift+arrows extend a mouse selection from the HEAD, not the parked cursor.
+#[test]
+fn double_click_then_shift_arrows_extend_from_the_head() {
+    let mut t = ta_with("hello world");
+    let area = Rect::new(0, 0, 40, 5);
+    let state = TextAreaState::default();
+    t.handle_mouse(mouse_down(2, 0), area, state);
+    t.handle_mouse(mouse_down(2, 0), area, state);
+    assert_eq!(t.selection_range(), Some(0..5));
+    assert_eq!(t.cursor(), 4, "cursor on last char, one before the head");
+
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..6), "extends past the head");
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..5), "shrinks back to the head");
+}
+
+/// Vertical extends after a triple-click move from the head, not the click position.
+#[test]
+fn triple_click_then_shift_vertical_extends_from_the_head() {
+    let mut t = ta_with("one\ntwo\nthree");
+    let area = Rect::new(0, 0, 40, 5);
+    let state = TextAreaState::default();
+    // Triple-click "two" (row 1) → selects "two\n" (4..8), cursor at 5.
+    for _ in 0..3 {
+        t.handle_mouse(mouse_down(1, 1), area, state);
+    }
+    assert_eq!(t.selection_range(), Some(4..8));
+    assert_eq!(t.cursor(), 5, "cursor stays at the click position");
+
+    // Down from the head (start of "three") reaches the buffer end.
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(4..t.text().len()));
+
+    // And Up from a fresh triple-click returns the head to the anchor,
+    // emptying the selection (browser semantics).
+    for _ in 0..3 {
+        t.handle_mouse(mouse_down(1, 1), area, state);
+    }
+    t.input(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), None);
+}
+
+/// Shift+Home/End extend like every text field.
+#[test]
+fn shift_home_end_extend_selection() {
+    let mut t = ta_with("hello world");
+    let mid = t.text().find(' ').unwrap();
+    t.set_cursor(mid);
+    t.input(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(mid..t.text().len()));
+    // Crossing the anchor to the row start.
+    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..mid));
+}
+
+/// Home/End with a selection collapse to the edge first, like Cmd+Left/Right.
+#[test]
+fn home_end_collapse_to_selection_edge_before_moving() {
+    let mut t = ta_with("one\ntwo\nthree");
+    let w = t.text().find('w').unwrap();
+    t.set_cursor(w);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    let head = t.selection_range().unwrap().end;
+    assert!(head > w);
+
+    t.input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    assert_eq!(t.selection_range(), None);
+    assert_eq!(t.cursor(), t.text().len(), "end of the END edge's line");
+
+    t.set_cursor(w);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    assert_eq!(t.cursor(), w - 1, "start of the START edge's line");
+}
+
+/// Kill chords over a highlight delete just the selection and stash it for yank.
+#[test]
+fn kill_chords_delete_only_the_selection_and_stash_for_yank() {
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    assert_eq!(t.text(), " beta", "Ctrl+K deletes the selection only");
+    t.input(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(t.text(), "alpha beta", "yank restores what was killed");
+
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    assert_eq!(t.text(), " beta", "Ctrl+W deletes the selection only");
+}
+
+/// Yank over a highlight replaces it as one undo step.
+#[test]
+fn ctrl_y_yank_replaces_selection() {
+    let mut t = ta_with("alpha beta");
+    t.set_cursor(5);
+    t.input(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    assert_eq!(t.text(), "alpha", "Ctrl+K stashed \" beta\"");
+    t.set_cursor(5);
+    t.set_selection(0, 5);
+    t.input(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(t.text(), " beta", "yank replaced the selection");
+    assert_eq!(t.selection_range(), None);
+    t.undo();
+    assert_eq!(t.text(), "alpha", "replace is a single undo step");
+}
+
+/// Internal-clipboard paste (Ctrl+V) over a highlight replaces it.
+#[test]
+fn ctrl_v_paste_replaces_selection() {
+    let mut t = ta_with("hello world");
+    t.set_clipboard_text("X".to_owned());
+    t.set_cursor(t.text().len());
+    t.set_selection(6, t.text().len());
+    t.input(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+    assert_eq!(t.text(), "hello X");
+    assert_eq!(t.selection_range(), None);
+}
+
+/// Shift-extended emacs line chords (Cocoa supports these).
+#[test]
+fn ctrl_shift_a_e_extend_to_logical_line_edges() {
+    let mut t = ta_with("hello world");
+    let mid = t.text().find(' ').unwrap();
+    t.set_cursor(mid);
+    t.input(KeyEvent::new(
+        KeyCode::Char('e'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(mid..t.text().len()));
+    t.input(KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..mid));
+}
+
+/// Windows Win32 input reports shifted letters uppercase (`Char('E')` +
+/// CTRL|SHIFT); the intercept folds case so emacs extends work there.
+#[test]
+fn ctrl_shift_uppercase_letter_extends_like_lowercase() {
+    let mut t = ta_with("hello world");
+    let mid = t.text().find(' ').unwrap();
+    t.set_cursor(mid);
+    t.input(KeyEvent::new(
+        KeyCode::Char('E'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(mid..t.text().len()));
+    // Plain typed capitals are untouched: Shift+X still inserts 'X'.
+    let mut t = ta_with("");
+    t.input(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+    assert_eq!(t.text(), "X");
+}
+
+/// Ctrl+P/N are movement rows in the shared table.
+#[test]
+fn ctrl_p_n_move_by_visual_row() {
+    let mut t = ta_with("one\ntwo");
+    t.set_cursor(0);
+    t.input(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+    assert_eq!(t.cursor(), t.text().find("two").unwrap());
+    t.input(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    assert_eq!(t.cursor(), 0);
+}
+
+/// Extending over a chip hops it atomically.
+#[test]
+fn shift_right_extends_across_a_chip_atomically() {
+    let mut t = TextArea::new();
+    t.insert_str("ab");
+    t.insert_element("element_text", ElementKind(0), None);
+    t.insert_str("cd");
+    t.set_cursor(2);
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    assert_eq!(t.selected_text().as_deref(), Some("element_text"));
+}
+
+/// The collapse path shares the Super arms' stray-bit tolerance.
+#[test]
+fn super_chords_with_stray_bits_collapse_to_edge_then_move() {
+    let mut t = ta_with("hello world");
+    t.set_cursor(8);
+    t.set_selection(3, 8);
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::SUPER | KeyModifiers::META,
+    ));
+    assert_eq!(t.selection_range(), None);
+    assert_eq!(t.cursor(), 0, "line start from the START edge");
+}
+
+/// Vertical extends at the buffer edges degrade to extend-to-0/len.
+#[test]
+fn shift_vertical_at_buffer_edges_extends_to_bounds() {
+    let mut t = ta_with("one\ntwo");
+    t.set_cursor(1);
+    t.input(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..1));
+
+    let last = t.text().len() - 1;
+    t.clear_selection();
+    t.set_cursor(last);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(last..t.text().len()));
+}
+
+/// A plain vertical collapse keeps the sticky column from the extend,
+/// so the caret continues down the column the user was tracking.
+#[test]
+fn plain_down_after_extend_keeps_preferred_col() {
+    let mut t = ta_with("longline\nab\nlongline");
+    t.set_cursor(6);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let third_line = t.text().rfind('\n').unwrap() + 1;
+    assert_eq!(t.selection_range(), None);
+    assert_eq!(
+        t.cursor(),
+        third_line + 6,
+        "column 6 restored past the 2-char line"
+    );
+}
+
+/// `preferred_col` survives a vertical extend through a short line.
+#[test]
+fn shift_down_zigzag_keeps_preferred_col() {
+    let mut t = ta_with("longline\nab\nlongline");
+    t.set_cursor(6);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    let third_line = t.text().rfind('\n').unwrap() + 1;
+    assert_eq!(
+        t.selection_range(),
+        Some(6..third_line + 6),
+        "column 6 restored after passing the 2-char line"
+    );
+}
+
+/// Cmd+C on a zero-width selection copies nothing and drops the stale selection.
+#[test]
+fn cmd_c_on_zero_width_selection_clears_it() {
+    let mut t = ta_with("hello");
+    t.set_selection(3, 3);
+    t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
+    assert!(t.selection.is_none());
+    assert_eq!(t.take_clipboard(), None);
 }

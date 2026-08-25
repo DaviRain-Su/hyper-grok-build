@@ -67,14 +67,9 @@ pub(crate) fn recap_instruction(tag: &str) -> String {
 /// Prepare the conversation snapshot for a recap / turn-summary request
 /// (same request shape, different instruction).
 ///
-/// 1. Optionally strips reasoning/thinking blocks (`strip_reasoning`). This is
-///    only needed on the Anthropic Messages backend, which rejects thinking
-///    blocks sent without a top-level `thinking` config. Every other backend
-///    (grok/SGLang via ChatCompletions/Responses) keeps reasoning VERBATIM so
-///    the conversation prefix is byte-identical to the last turn and the
-///    provider's prefix KV cache stays warm — which is the whole reason we
-///    append the instruction after the prefix. Mirrors compaction's
-///    `summary_strips_reasoning`.
+/// 1. Optionally strips reasoning/thinking blocks (`strip_reasoning`).
+///    Cache-aligned side-calls pass `false` so the conversation prefix remains
+///    byte-identical to the parent turn.
 /// 2. Truncates a trailing incomplete assistant/tool-result run — a recap can
 ///    fire mid-turn, and the Anthropic Messages API rejects `tool_use` ids without a
 ///    matching `tool_result`.

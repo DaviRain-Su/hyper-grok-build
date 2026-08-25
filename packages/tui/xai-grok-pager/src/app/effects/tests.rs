@@ -130,7 +130,7 @@ fn format_acp_error_formats_http_500_dump() {
         );
     assert_eq!(
             format_acp_error(&err, false),
-            "Server error (500) \u{2014} Something went wrong on our side. Wait a minute and send again."
+            "Server error (500): Something went wrong on our side. Wait a minute and send again."
         );
 }
 #[test]
@@ -2225,6 +2225,19 @@ fn to_meta_emits_auto_mode_when_enabled() {
             "yoloMode must be explicitly false, not omitted (absent key falls \
              back to the shell's connect-time default / leader injection)"
         );
+}
+#[test]
+fn create_permission_override_replaces_global_permission_seeds() {
+    let flags = SessionFlags {
+        yolo_mode: true,
+        auto_mode: false,
+        ..Default::default()
+    };
+    let mut meta = flags.to_meta();
+    apply_permission_mode_override(&mut meta, Some(PermissionModeKind::Auto));
+    let meta = meta.expect("permission metadata");
+    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(meta["autoMode"], true);
 }
 /// yoloMode must ride the meta explicitly for BOTH polarities — absent
 /// key ≠ off (see the emit-site comment in `to_meta`). Pins the

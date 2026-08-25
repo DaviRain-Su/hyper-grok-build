@@ -409,7 +409,7 @@ pub struct AgentArgs {
     #[arg(long = "agent-profile", value_name = "PATH")]
     pub agent_profile: Option<PathBuf>,
     /// Load a plugin from this directory for this process only (repeatable).
-    /// Highest-priority plugin scope; always trusted — hooks and MCP servers
+    /// Highest-priority plugin scope; always trusted: hooks and MCP servers
     /// activate without a prompt. Used by the Agent SDKs to inject
     /// per-connection plugins.
     #[arg(long = "plugin-dir", value_name = "DIR", value_hint = ValueHint::DirPath)]
@@ -515,7 +515,7 @@ pub struct LeaderArgs {
     pub no_exit_on_disconnect: bool,
     /// Defer the grok.com relay WebSocket until the first headless IPC client
     /// registers. Without this flag the leader connects the relay eagerly at
-    /// startup — required for bare leaders (headless remote env / systemd) that
+    /// startup, required for bare leaders (headless remote env / systemd) that
     /// receive remote prompts *through* the relay. Passed by leaders auto-spawned
     /// from interactive clients (TUI/IDE), which only need the relay if a
     /// headless client appears.
@@ -717,7 +717,7 @@ pub struct PagerArgs {
     /// Use a specific session UUID for a **new** conversation (must be a valid
     /// UUID and must not already exist under the target session directory).
     /// With `--resume`/`--continue`, only valid together with `--fork-session`
-    /// (names the forked session). Does not resume existing sessions — use
+    /// (names the forked session). Does not resume existing sessions, use
     /// `--resume` / `--continue` instead.
     #[arg(short = 's', long = "session-id", value_name = "SESSION_ID")]
     pub session_id: Option<String>,
@@ -884,12 +884,12 @@ pub struct PagerArgs {
     /// Experimental: scrollback-native rendering. Finalized blocks are printed
     /// into the terminal's native scrollback (use the terminal's own scroll /
     /// selection); a small pinned region holds the prompt + running turn.
-    /// Session-scoped only — does not write config. To default plain `grok` to
+    /// Session-scoped only, does not write config. To default plain `grok` to
     /// minimal, set `[ui] screen_mode = "minimal"` in ~/.grok/config.toml.
     #[arg(long = "minimal")]
     pub minimal: bool,
     /// Open in the standard fullscreen TUI for this session, overriding a
-    /// config `[ui] screen_mode = "minimal"` preference. Session-scoped only —
+    /// config `[ui] screen_mode = "minimal"` preference. Session-scoped only,
     /// does not write config. Fullscreen-vs-inline still follows the alt-screen
     /// policy (--no-alt-screen, [terminal] alt_screen, terminal auto-detection).
     #[arg(long = "fullscreen", conflicts_with = "minimal")]

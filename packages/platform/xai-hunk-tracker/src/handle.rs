@@ -60,6 +60,26 @@ impl HunkTrackerHandle {
         });
     }
 
+    /// Re-root the actor after a session cwd remount.
+    ///
+    /// Waits until in-memory hunk keys have been rewritten so a later
+    /// `record_agent_write` under the new cwd cannot be overwritten by
+    /// the remount rekey.
+    pub async fn set_working_dir(&self, working_dir: PathBuf) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(HunkTrackerCommand::SetWorkingDir {
+                working_dir,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return;
+        }
+        let _ = reply_rx.await;
+    }
+
     /// Notify of file change from fs_notify.
     pub fn handle_file_change(&self, path: PathBuf) {
         let _ = self

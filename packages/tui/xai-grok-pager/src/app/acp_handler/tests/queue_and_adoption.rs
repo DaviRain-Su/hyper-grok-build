@@ -2424,7 +2424,7 @@
         match last_session_event(&agent.scrollback) {
             Some(SessionEvent::TurnFailed { error, .. }) => {
                 assert_eq!(
-                    error, "Request failed \u{2014} boom. Try sending again.",
+                    error, "Request failed: boom. Try sending again.",
                     "agentResult must propagate into the formatted marker"
                 )
             }

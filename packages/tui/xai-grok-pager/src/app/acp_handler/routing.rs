@@ -97,6 +97,10 @@ pub(super) fn resolve_target_view<'a>(
     &'a mut crate::scrollback::state::ScrollbackState,
 )> {
     if matches!(matched, SessionMatch::Child(_)) {
+        // Precedence-exempt from the hydrate funnel: a `TaskBackgrounded` /
+        // `TaskCompleted` block for a resumed child always follows the funneled
+        // tool_call that spawned the task, so the child is never still
+        // prompt-only + NeedsReplay here.
         let child_view = agent.subagent_views.get_mut(child_sid)?;
         Some((&mut child_view.session, &mut child_view.scrollback))
     } else {

@@ -4,7 +4,6 @@
 //! action arm. Split out of `dispatch.rs` verbatim (pure code motion).
 
 use super::ctx::{NO_SESSION_NOTICE, active_agent_session_id, with_active_agent};
-use super::interject::record_interject_prompt_history;
 use crate::acp::meta::user_prompt_meta;
 use crate::app::actions::Effect;
 use crate::app::agent::{AgentCommand, AgentId};
@@ -211,6 +210,80 @@ impl QueueDrain {
             page_flip_entry: None,
         }
     }
+}
+
+/// Release a locally-queued prompt into a running turn that is parked on a
+/// sendable wait (subagent / task output).
+///
+/// The local drip-feed queue otherwise holds every queued prompt until the
+/// turn ends, so a message sent while waiting never reaches the shell.
+/// `/btw` is an ext-method and does not produce an ACP session batch, so
+/// this has to run on the send path itself (and when the /btw answer lands),
+/// not only after the next session update.
+///
+/// Only a parked wait counts. Live watchers (`/loop`, background commands)
+/// survive idle thinking turns, and a foreground tool is not a wait, so
+/// treating either as busy would interject a follow-up the user meant to
+/// queue. Goes out as `x.ai/interject`, never send-now (cancel semantics).
+///
+/// Releases the **last** queued plain prompt (the one this send just
+/// pushed), not the front. An earlier follow-up queued while thinking
+/// must stay queued. Only a row whose wire payload is its display text
+/// is released.
+///
+/// `agent_id` targets that session. `None` uses the focused agent.
+pub(crate) fn maybe_release_queued_prompt_into_turn(
+    app: &mut AppView,
+    agent_id: Option<AgentId>,
+) -> Vec<Effect> {
+    use crate::app::agent::QueueEntryKind;
+
+    let id = match agent_id {
+        Some(id) => id,
+        None => match app.active_view {
+            ActiveView::Agent(id) => id,
+            _ => return Vec::new(),
+        },
+    };
+    let Some(agent) = app.agents.get(&id) else {
+        return Vec::new();
+    };
+    if !agent.session.state.is_turn_running() || agent.session.session_id.is_none() {
+        return Vec::new();
+    }
+    // Mid-outage: the interject effect has no requeue path, so a row released
+    // into a dead channel is simply lost. Leave it queued.
+    if app.reconnect_pending {
+        return Vec::new();
+    }
+    if !agent.is_parked_on_sendable_wait() {
+        return Vec::new();
+    }
+    if matches!(agent.prompt_mode, PromptMode::EditingQueued { .. })
+        || !agent
+            .session
+            .pending_prompts
+            .back()
+            .is_some_and(|p| matches!(p.kind, QueueEntryKind::Prompt) && p.wire_matches_display())
+    {
+        return Vec::new();
+    }
+
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return Vec::new();
+    };
+    let Some(queued) = agent.session.pending_prompts.pop_back() else {
+        return Vec::new();
+    };
+    crate::unified_log::info(
+        "prompt.release_into_turn",
+        agent.session.session_id.as_ref().map(|s| s.0.as_ref()),
+        Some(serde_json::json!({
+            "remaining_in_queue": agent.session.pending_prompts.len(),
+            "prompt_len": queued.text.len(),
+        })),
+    );
+    super::interject::dispatch_interject_on(app, id, queued.text, queued.images)
 }
 
 pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
@@ -1066,9 +1139,9 @@ pub(super) fn dispatch_queue_interject_shared(
     match active_agent_session_id(app) {
         Some(session_id) => {
             with_active_agent(app, |agent| {
-                // Edited override is user-typed text — keep it Ctrl+R recallable.
+                // Edited override is user-typed text; keep it Ctrl+R recallable.
                 if let Some(text) = &new_text {
-                    record_interject_prompt_history(agent, text);
+                    agent.record_prompt_in_history(text);
                 }
                 agent.note_self_originated_prompt(&id);
                 arm_send_now_and_paint(agent, &id, new_text.as_deref());
@@ -1376,7 +1449,7 @@ mod tests {
 
         assert!(
             matches!(effects.as_slice(), [Effect::SendBtw { .. }]),
-            "expected the command to run, got {effects:?}"
+            "expected the command to run"
         );
         assert_eq!(app.agents[&id].session.queue_len(), 0);
     }
@@ -1425,7 +1498,7 @@ mod tests {
                 effects.as_slice(),
                 [Effect::SendBtw { .. }, Effect::SendPrompt { text, .. }] if text == "behind"
             ),
-            "expected the command then the next row's turn, got {effects:?}"
+            "expected the command then the next row's turn"
         );
         assert_eq!(app.agents[&id].session.queue_len(), 0);
     }
@@ -1444,7 +1517,7 @@ mod tests {
 
         let effects = run_edited_queued_command(&mut app, local_id, None, "/compact");
 
-        assert!(effects.is_empty(), "no turn starts mid-turn: {effects:?}");
+        assert!(effects.is_empty(), "no turn starts mid-turn");
         let rows: Vec<(&str, QueueEntryKind)> = app.agents[&id]
             .session
             .pending_prompts
@@ -1535,7 +1608,7 @@ mod tests {
                 effects.as_slice(),
                 [Effect::SendPrompt { text, .. }] if text == "what is the default"
             ),
-            "expected the kept row to drain, got {effects:?}"
+            "expected the kept row to drain"
         );
     }
 
@@ -1596,7 +1669,7 @@ mod tests {
 
         assert!(
             matches!(effects.as_slice(), [Effect::SendBtw { .. }]),
-            "expected the command to run, got {effects:?}"
+            "expected the command to run"
         );
         assert_eq!(app.agents[&id].session.queue_len(), 1);
     }
@@ -2769,8 +2842,7 @@ mod tests {
         assert_eq!(effects.len(), 1);
         assert!(
             matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "p3-edited"),
-            "should send the edited prompt, got: {:?}",
-            effects[0]
+            "should send the edited prompt"
         );
         // p4 should still be in queue.
         assert_eq!(app.agents[&id].session.queue_len(), 1);
@@ -2829,7 +2901,7 @@ mod tests {
         assert_eq!(
             effects.len(),
             1,
-            "queued prompt must drain once reconnect clears, got: {effects:?}"
+            "queued prompt must drain once reconnect clears"
         );
         assert!(matches!(&effects[0], Effect::SendPrompt { .. }));
         assert!(app.agents[&id].session.state.is_turn_running());
@@ -3210,8 +3282,8 @@ mod tests {
         );
         assert!(agent.held_queue_top_sendable());
         assert_eq!(
-            format!(" · {} queued — Enter to send now", agent.held_queue_count()),
-            " · 1 queued — Enter to send now"
+            format!(" · {} queued, Enter to send now", agent.held_queue_count()),
+            " · 1 queued, Enter to send now"
         );
 
         agent
@@ -3232,8 +3304,8 @@ mod tests {
         assert_eq!(pane_len, 2);
         assert_eq!(agent.held_queue_count(), pane_len);
         assert_eq!(
-            format!(" · {} queued — Enter to send now", agent.held_queue_count()),
-            " · 2 queued — Enter to send now"
+            format!(" · {} queued, Enter to send now", agent.held_queue_count()),
+            " · 2 queued, Enter to send now"
         );
     }
 

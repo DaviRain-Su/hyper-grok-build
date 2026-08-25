@@ -343,6 +343,11 @@ fn baseline_env_from_parent(
         ("DISABLE_FEEDBACK_COMMAND", "1"),
         ("GROK_DISABLE_AUTOUPDATER", "1"),
         ("GROK_PROMPT_SUGGESTIONS", "false"),
+        // The sandbox's empty home is exactly the "no mode configured" state
+        // that soft-defaults interactive launches into auto. Pin the gate off
+        // for deterministic ask-mode behavior; auto-mode tests re-enable it
+        // via `set_env` (later overrides win).
+        ("GROK_AUTO_PERMISSION_MODE", "0"),
         // Post-turn summary side-calls would add unscripted requests to the
         // mock server and break exact wire-traffic assertions.
         ("GROK_TURN_SUMMARY", "0"),

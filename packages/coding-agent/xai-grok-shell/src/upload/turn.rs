@@ -182,7 +182,7 @@ pub(crate) async fn complete_prompt_trace(
     use super::manifest::{
         build_manifest, resolve_upload_method, skip_artifact, write_upload_manifest,
     };
-    let upload_method = resolve_upload_method(&ctx);
+    let upload_method = resolve_upload_method(&ctx.gcs_config);
     let method_str = upload_method.as_str();
     xai_grok_telemetry::session_ctx::log_session_event(
         crate::agent::session_metrics::TraceUploadAttempted {
@@ -221,7 +221,7 @@ pub(crate) async fn complete_prompt_trace(
         UploadWait::Confirm => 0,
         UploadWait::Defer { deadline } => super::trace::flush_upload_queue(&ctx, deadline).await,
     };
-    let manifest = build_manifest(&ctx.artifact_tracker, upload_method);
+    let manifest = build_manifest(&ctx.artifact_tracker, upload_method, None);
     let flush_timed_out = flush_remaining > 0 || matches!(upload_outcome, UploadOutcome::Deferred);
     let worker_drops = match wait {
         UploadWait::Confirm => 0,

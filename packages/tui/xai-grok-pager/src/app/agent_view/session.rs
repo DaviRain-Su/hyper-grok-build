@@ -9,6 +9,7 @@ use super::{
 };
 use crate::app::agent::AgentSession;
 use crate::app::app_view::InputOutcome;
+use crate::app::cancel_latency::{CancelLatency, CancelOrigin, TurnEnd};
 use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::text_selection::ResolvedSelectionModel;
 use crate::views::prompt_widget::PromptWidget;
@@ -19,6 +20,7 @@ use crate::views::todo_pane::TodoPane;
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
+use xai_grok_telemetry::events::{CancellationCompleted, CancellationScope};
 impl AgentView {
     /// Live mutation of the turn-summary display field. Always bumps
     /// [`Self::last_turn_summary_gen`] so a concurrent disk hydrate that
@@ -149,12 +151,16 @@ impl AgentView {
             bash_turn: false,
             cron_task_id: None,
             stashed_prompt: None,
+            prompt_stash: None,
+            draft_consumed: false,
             credit_limit_stashed_prompt: None,
             reauth_stashed_prompt: None,
             active_modal: None,
             modal_buttons: Vec::new(),
             modal_hovered_key: None,
             context_state: None,
+            status_context: None,
+            last_status_line_size: None,
             chat_kind: false,
             conversation_entry: false,
             app_chat_mode: false,
@@ -300,6 +306,9 @@ impl AgentView {
             hit_sb_copy: Default::default(),
             hit_sb_view: Default::default(),
             question_view: None,
+            elicitation_view: None,
+            pending_elicitation: None,
+            elicit_hits: Vec::new(),
             hit_question_scrollbar: Default::default(),
             hovered_question_item: None,
             question_scrollbar_dragging: false,
@@ -370,6 +379,7 @@ impl AgentView {
             deferred_send: None,
             pending_turn_end_reconcile: None,
             pending_cancel_resend: None,
+            cancel_latency: None,
             expect_send_now_cancel: None,
             front_message_committed: true,
             optimistic_queue_ids: std::collections::HashSet::new(),
@@ -408,22 +418,48 @@ impl AgentView {
         child_view.mark_as_subagent_view();
         self.subagent_views.insert(child_sid, child_view);
     }
-    /// Clear the turn-timing fields and stamp `last_active_at` to "now".
-    ///
-    /// Call this from every site that ends a turn (success, failure,
-    /// cancellation, reconnect cleanup). Centralised so the fields cannot
-    /// drift apart at the ~10 termination call sites across `dispatch.rs`
-    /// and `event_loop.rs`. The wall anchor is cleared so a later turn that
-    /// reuses a prompt id (stash-and-resubmit after `/login`) can never
-    /// wall-max against a previous attempt's anchor in
-    /// [`honest_turn_elapsed`].
-    pub fn mark_turn_finished(&mut self) {
+    /// Called at every turn-termination site; clears the wall anchor so a turn
+    /// that reuses a prompt id cannot wall-max against a prior attempt.
+    pub(crate) fn mark_turn_finished(&mut self, end: TurnEnd) {
+        let now = Instant::now();
         self.turn_started_at = None;
         self.turn_paused_duration = std::time::Duration::ZERO;
         self.turn_paused_wall = std::time::Duration::ZERO;
         self.turn_start_ms = None;
         self.turn_start_ms_prompt = None;
-        self.last_active_at = Some(Instant::now());
+        self.last_active_at = Some(now);
+        if let Some(event) = self.settle_cancel(end, now) {
+            xai_grok_telemetry::session_ctx::log_event(event);
+        }
+    }
+    /// Cancel the running work and arm its latency anchor in one place, so the
+    /// action and the `CancellationScope` it measures cannot drift apart.
+    pub(crate) fn cancel_and_arm(&mut self, scope: CancellationScope, origin: CancelOrigin) {
+        let now = Instant::now();
+        match scope {
+            CancellationScope::Turn => self.session.cancel_turn(&mut self.scrollback),
+            CancellationScope::Compaction => self.session.cancel_compact_command(),
+        }
+        if origin == CancelOrigin::UserGesture && !self.is_subagent_view {
+            self.cancel_latency
+                .get_or_insert_with(|| CancelLatency::new(now, scope));
+        }
+    }
+    /// Settle a pending user-cancel anchor into a `CancellationCompleted`.
+    /// The anchor is consumed on both ends, so emission is once-by-construction.
+    pub(crate) fn settle_cancel(
+        &mut self,
+        end: TurnEnd,
+        now: Instant,
+    ) -> Option<CancellationCompleted> {
+        let pending = self.cancel_latency.take();
+        match end {
+            TurnEnd::Completed => pending.map(|p| CancellationCompleted {
+                latency_ms: now.saturating_duration_since(p.requested_at).as_millis() as u64,
+                scope: p.scope,
+            }),
+            TurnEnd::Aborted => None,
+        }
     }
     /// Absorb a closing/replaced question view's open span into the turn's
     /// pause totals, on both clocks — a close site that updated only the
@@ -456,11 +492,8 @@ impl AgentView {
                 .late_replay_until
                 .is_some_and(|deadline| std::time::Instant::now() < deadline)
     }
-    /// Enter a `session/load` replay window: flip `loading_replay` on and reset
-    /// every field coupled to that transition together, so no site can drift
-    /// (e.g. reset one coupled field but miss another). Called at every
-    /// replay-window entry: the fresh/restore load ctor paths and the
-    /// reconnect/fork reuse paths.
+    /// Enter a `session/load` replay window: the fields coupled to that
+    /// transition (incl. `cancel_latency`) reset together so no site drifts.
     pub(crate) fn begin_replay_window(&mut self) {
         self.clear_minimal_btw_lifecycle();
         self.session.loading_replay = true;
@@ -470,6 +503,7 @@ impl AgentView {
         self.running_wake_turn = None;
         self.finished_wake_prompts.clear();
         self.pending_cancel_resend = None;
+        self.cancel_latency = None;
         self.pending_stop_hooks = None;
         self.clear_send_now_expectation();
         self.front_message_committed = true;
@@ -530,7 +564,7 @@ impl AgentView {
                 "session reload superseded without finalize; restoring previous stash first"
             );
             if self.apply_reload_outcome(prev, false) {
-                crate::memory_release::release_retained_memory_with("reload-supersede");
+                crate::memory_release::release_retained_memory("reload-supersede");
             }
         }
         while self.scrollback.in_batch() {
@@ -600,6 +634,7 @@ impl AgentView {
         }
         self.front_message_committed = false;
         self.pending_cancel_resend = None;
+        self.cancel_latency = None;
         self.session.start_turn(&mut self.scrollback);
     }
     /// Adopt the in-flight turn another client is driving, conveyed by the
@@ -626,7 +661,7 @@ impl AgentView {
         if let Some(reload) = self.session_reload.take()
             && self.apply_reload_outcome(reload, false)
         {
-            crate::memory_release::release_retained_memory_with("reload-abort");
+            crate::memory_release::release_retained_memory("reload-abort");
         }
     }
     /// Finalize the reload window opened for `generation`.
@@ -638,7 +673,7 @@ impl AgentView {
         match self.session_reload.take() {
             Some(reload) if reload.generation == generation => {
                 if self.apply_reload_outcome(reload, success) {
-                    crate::memory_release::release_retained_memory_with("reload-finalize");
+                    crate::memory_release::release_retained_memory("reload-finalize");
                 }
                 true
             }
@@ -868,7 +903,7 @@ impl AgentView {
         if let Some(id) = self.pending_recap_entry.take() {
             self.scrollback.remove_entry(id);
         }
-        self.mark_turn_finished();
+        self.mark_turn_finished(TurnEnd::Aborted);
         self.activity_started_at = None;
         self.last_activity = None;
         self.reset_follow_ups_for_reload();

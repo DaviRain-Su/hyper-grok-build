@@ -389,6 +389,7 @@ impl ScrollbackState {
     pub fn scroll_up(&mut self, rows: u16) {
         self.scroll_offset = self.scroll_offset.saturating_sub(rows as usize);
         self.follow_mode = false;
+        self.maybe_release_pin_reserve();
         self.bump_generation();
     }
 
@@ -527,6 +528,7 @@ impl ScrollbackState {
     pub fn goto_top(&mut self) {
         self.scroll_offset = 0;
         self.follow_mode = false;
+        self.maybe_release_pin_reserve();
         let range = self.visible_entry_range();
         if !range.is_empty() {
             // Find first selectable entry
@@ -538,16 +540,15 @@ impl ScrollbackState {
 
     /// Go to bottom.
     pub fn goto_bottom(&mut self) {
-        // Set scroll to bottom - fills screen with content, last entry at very bottom
+        self.release_pin_reserve();
         let max_offset = self
             .total_height
             .saturating_sub(self.viewport_height as usize);
         self.scroll_offset = max_offset;
         self.follow_mode = true;
-        // An explicit bottom gesture means "track the tail": drop any armed
-        // page-flip pin, or the preserve branch of `follow_scroll_to_bottom`
-        // keeps holding the offset computed above — from possibly-ESTIMATED
-        // heights — leaving End/PageDown stuck above (or wedged past) the
+        // Also drop follow-preserve, or its branch in `follow_scroll_to_bottom`
+        // keeps holding the offset computed above (from possibly estimated
+        // heights), leaving End / PageDown stuck above or wedged past the
         // measured bottom.
         self.follow_preserve_scroll = false;
 
@@ -571,8 +572,6 @@ impl ScrollbackState {
     /// Enable follow mode and scroll to bottom.
     pub fn enable_follow_mode(&mut self) {
         self.follow_mode = true;
-        // Explicit bottom gesture: drop any armed page-flip pin (see
-        // `goto_bottom`).
         self.follow_preserve_scroll = false;
         self.goto_bottom();
     }
@@ -608,7 +607,13 @@ impl ScrollbackState {
     pub fn follow_new_turn(&mut self, prompt_idx: Option<usize>, page_flip: bool) {
         if page_flip {
             if let Some(idx) = prompt_idx {
+                // Measurement runs release checks, so suppress release until the settled pose
+                // is captured after scrolling.
+                self.arm_pin_reserve();
                 self.scroll_to_entry_top(idx);
+                self.pin_reserve_target = Some(self.scroll_offset);
+                self.pin_reserve_prompt_id = self.entries.get_index(idx).map(|(id, _)| *id);
+                self.compute_total_height_from_cache();
             }
             self.enable_follow_with_preserve();
         } else if prompt_idx.is_none() {
@@ -874,6 +879,26 @@ impl ScrollbackState {
         compute_sticky_layout(self.scroll_offset, self.viewport_height, &relative_prompts)
     }
 
+    /// Scroll offset that puts `entry_y` (relative to the visible range's top) at the
+    /// content-area top, below any sticky header. The header height depends on the scroll
+    /// position, so iterate to a fixed point; it shrinks monotonically as we scroll up, so
+    /// three passes converge. Shared by `entry_top_scroll_offset` and the pin reserve's
+    /// `pin_reserve_prompt_scroll_target`, so the convergence math lives in one place.
+    pub(super) fn sticky_adjusted_entry_top(
+        &self,
+        cache: &LayoutCache,
+        visible_range: &Range<usize>,
+        entry_y: usize,
+    ) -> usize {
+        let relative_prompts = self.build_relative_prompt_descriptors(cache, visible_range);
+        let mut scroll = entry_y;
+        for _ in 0..3 {
+            let sticky = compute_sticky_layout(scroll, self.viewport_height, &relative_prompts);
+            scroll = entry_y.saturating_sub(sticky.header_screen_rows() as usize);
+        }
+        scroll
+    }
+
     /// Find scroll position that puts entry_y at top of content area.
     ///
     /// Uses relative prompt descriptors and iterates to find stable position
@@ -943,22 +968,11 @@ impl ScrollbackState {
         let base_y = cache.virtual_y[visible_range.start];
         let entry_y = cache.virtual_y[entry_idx] - base_y;
 
-        // Account for sticky header: the content area starts at
-        // scroll_offset + header_height, so we need:
-        //   entry_y = scroll_offset + header_height
-        //   scroll_offset = entry_y - header_height
-        //
-        // But header_height depends on scroll_offset (sticky headers collapse
-        // as you scroll). Iterate to convergence (2 passes suffice).
-        let relative_prompts = self.build_relative_prompt_descriptors(cache, &visible_range);
-        let mut scroll = entry_y;
-        for _ in 0..3 {
-            let sticky = compute_sticky_layout(scroll, self.viewport_height, &relative_prompts);
-            let header = sticky.header_screen_rows();
-            scroll = entry_y.saturating_sub(header as usize);
-        }
-
-        Some(scroll)
+        // Account for the sticky header: the content area starts at
+        // scroll_offset + header_height, so scroll_offset = entry_y - header,
+        // and header depends on scroll_offset (sticky headers collapse as you
+        // scroll), so the shared helper iterates to a fixed point.
+        Some(self.sticky_adjusted_entry_top(cache, &visible_range, entry_y))
     }
 
     pub fn scroll_to_entry_center(&mut self, entry_idx: usize) {
@@ -1189,24 +1203,26 @@ impl ScrollbackState {
         // No explicit invalidation needed — any user interaction (scroll,
         // fold, turn nav) sets follow_mode=false, making this unreachable.
         if self.follow_preserve_scroll {
-            let max_offset = self.max_scroll_offset();
-            if max_offset > self.scroll_offset {
-                // Content overflowed past the viewport. Start following.
+            // Overflow is measured against the unpadded transcript. The pad
+            // makes max_offset == the pin pose, so comparing to the padded max
+            // would look like overflow on every frame and eat the pin.
+            let unpadded_total = self.total_height.saturating_sub(self.pin_reserve_pad);
+            let unpadded_max = unpadded_total.saturating_sub(self.viewport_height as usize);
+            if unpadded_max > self.scroll_offset && !self.pin_reserve_after_turn {
                 self.follow_preserve_scroll = false;
-                self.scroll_offset = max_offset;
-            } else if self.scroll_offset >= self.total_height {
+                self.release_pin_reserve();
+                self.scroll_offset = self.max_scroll_offset();
+            } else if self.scroll_offset >= unpadded_total {
                 // Content SHRANK under the pin (e.g. a tall running tool
-                // demoted to a collapsed background task), stranding the
-                // pinned offset past the END of the transcript: the paint
-                // window contains no content, appended rows land ABOVE the
-                // window top, and max_offset may never grow past the stale
-                // pin — the live transcript freezes until a
-                // geometry-perturbing keypress. A legit page-flip pin always
-                // sits on the pinned entry's own top row (scroll_offset <
-                // total_height), so it is never clamped here; this pin's
-                // referent is gone — consume it and re-pin to the bottom.
+                // demoted to a collapsed background task), stranding the pinned
+                // offset past the transcript end where the live tail would
+                // freeze in empty rows. Drop the reserve fully so max_offset
+                // becomes the real tail.
                 self.follow_preserve_scroll = false;
-                self.scroll_offset = max_offset;
+                self.clear_pin_reserve();
+                self.total_height = unpadded_total;
+                self.pin_reserve_pad = 0;
+                self.scroll_offset = self.max_scroll_offset();
             }
             // Otherwise: all new content still fits below the prompt. Stay put.
         } else {
@@ -1619,38 +1635,69 @@ mod tests {
         h.assert_at_bottom("should be at bottom after overflow");
     }
 
-    /// Regression (v0.2.89 live-transcript freeze): the page-flip pin holds
-    /// an interjected prompt at the viewport top while the tall running tool
-    /// ABOVE it demotes to a collapsed background task — a many-row height
-    /// SHRINK via `mark_height_dirty` that strands `scroll_offset` past the
-    /// end of the transcript. Pins that the re-clamp in
-    /// `follow_scroll_to_bottom` consumes the wedged pin and appended rows
-    /// paint without a keypress.
+    #[test]
+    fn page_flip_overflow_releases_reserve_before_finish_shrink() {
+        let mut h = ScrollTestHarness::new(80, 10);
+        h.push_prompt("old");
+        h.push_agent("old response");
+        h.send_prompt("new question");
+
+        let tall_id = h.state.push_block(tall_agent_block());
+        let tall_idx = h.state.len() - 1;
+        h.frame();
+        assert!(!h.is_preserve(), "overflow consumes preserve");
+        assert!(
+            !h.state.is_pin_reserve_active(),
+            "overflow releases reserve"
+        );
+        let live_tail = h.state.scroll_offset;
+
+        {
+            let entry = h.state.entry_mut(tall_idx).expect("response entry");
+            entry.block = stub_block("short");
+            entry.invalidate_cache();
+        }
+        h.state.mark_height_dirty(tall_id);
+        h.frame();
+
+        assert!(
+            h.state.scroll_offset < live_tail,
+            "collapsed content moves the real tail up"
+        );
+        assert!(
+            !h.state.is_pin_reserve_active(),
+            "finish shrink cannot recreate the reserve"
+        );
+        h.assert_at_bottom("finish shrink remains at the real tail");
+    }
+
+    /// A height shrink above a pinned interjection must re-clamp the offset so
+    /// later rows remain paintable without input.
     #[test]
     fn page_flip_pin_reclamps_after_shrink_past_end() {
         let mut h = ScrollTestHarness::new(80, 10);
         for i in 0..20 {
             h.push_agent(&format!("history {i}"));
         }
-        // The long-running tool the turn is blocked on (tall, like a
-        // streaming Execute block with accumulated output).
         let tall_id = h.state.push_block(tall_agent_block());
         let tall_idx = h.state.len() - 1;
         h.frame();
-        // The interjected follow-up: dispatch pins it to the viewport top.
         h.send_prompt("interjected follow-up");
 
         let pin = h.state.scroll_offset;
         assert!(h.is_preserve(), "setup: preserve pin armed");
-        assert!(
-            pin > h.max_offset() && pin < h.state.total_height,
-            "setup: page-flip pin above max_offset ({pin} > {}) but on real content ({pin} < {})",
+        assert_eq!(
+            pin,
             h.max_offset(),
+            "setup: pin pose is the padded bottom ({pin} == {})",
+            h.max_offset(),
+        );
+        assert!(
+            pin < h.state.total_height,
+            "setup: pin sits on real content ({pin} < {})",
             h.state.total_height,
         );
 
-        // Demotion, exactly like the acp_handler does it: swap the Execute
-        // block in place for a short collapsed one and mark the height dirty.
         {
             let entry = h.state.entry_mut(tall_idx).unwrap();
             entry.block = stub_block("task started");
@@ -1670,8 +1717,6 @@ mod tests {
             "the wedged pin's referent is gone — it must be consumed"
         );
 
-        // Rows appended after the demotion must paint live, without any
-        // keypress: the paint window has to include them.
         h.push_agent("task completed");
         h.push_agent("final answer");
         let last_idx = h.state.len() - 1;
@@ -1685,10 +1730,8 @@ mod tests {
         );
     }
 
-    /// End-style gestures (`goto_bottom` / `enable_follow_mode`) express
-    /// "track the tail" and must drop an armed page-flip pin — left armed,
-    /// the preserve branch keeps holding a stale estimated-height offset
-    /// instead of re-pinning to the measured bottom (see `goto_bottom`).
+    /// Explicit bottom-follow gestures must release the page-flip pin before
+    /// resolving the measured tail.
     #[test]
     fn bottom_gestures_clear_preserve_pin() {
         let mut h = ScrollTestHarness::new(80, 10);

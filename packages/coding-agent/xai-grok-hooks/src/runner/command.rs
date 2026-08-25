@@ -11,13 +11,14 @@
     )
 )]
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
 use xai_grok_tools::util::ProcessGroup;
 
-use crate::config::HookSpec;
+use crate::config::{HookSpec, RUNNER_ALWAYS_SET_ENV};
 use crate::event::HookEventEnvelope;
 use crate::result::{HookDecision, StopHookOutcome};
 
@@ -132,7 +133,9 @@ pub async fn run_command_hook(
         }
         #[cfg(not(unix))]
         {
-            let inv = xai_grok_config::shell::shell_command_argv(&command_str);
+            // PowerShell `$VAR` is not `$env:VAR`.
+            let command_str = rewrite_hook_command_for_windows_shell(&command_str, &spec.extra_env);
+            let inv = xai_grok_config::shell::shell_command_argv(command_str.as_ref());
             let mut c = tokio::process::Command::new(&inv.program);
             c.args(&inv.args).envs(inv.env);
             c
@@ -169,6 +172,19 @@ pub async fn run_command_hook(
     // See the `runner_injected_vars_override_extra_env_at_spawn`
     // regression test in `tests/integration.rs` and the rustdoc on
     // `HookSpec::extra_env`.
+    // Git Bash: `C:/...` so unquoted `$VAR` does not treat `\` as an escape.
+    #[cfg(not(unix))]
+    let env_root = {
+        use xai_grok_config::shell::{WindowsShell, detect_windows_shell};
+        if is_shell_command && matches!(detect_windows_shell(), WindowsShell::GitBash(_)) {
+            Cow::Owned(ctx.workspace_root.replace('\\', "/"))
+        } else {
+            Cow::Borrowed(ctx.workspace_root)
+        }
+    };
+    #[cfg(unix)]
+    let env_root = Cow::Borrowed(ctx.workspace_root);
+
     #[allow(clippy::disallowed_methods)] // enrolled in the session scope below
     let mut child = match cmd
         .stdin(std::process::Stdio::piped())
@@ -181,11 +197,11 @@ pub async fn run_command_hook(
         .env("GROK_HOOK_EVENT", envelope.hook_event_name.to_string())
         .env("GROK_HOOK_NAME", &spec.name)
         .env("GROK_SESSION_ID", ctx.session_id)
-        .env("GROK_WORKSPACE_ROOT", ctx.workspace_root)
+        .env("GROK_WORKSPACE_ROOT", env_root.as_ref())
         // Compatibility alias for external hooks that read this env name.
         // Same value as `GROK_WORKSPACE_ROOT`; native `.grok` hooks should use
         // `GROK_WORKSPACE_ROOT`.
-        .env("CLAUDE_PROJECT_DIR", ctx.workspace_root)
+        .env("CLAUDE_PROJECT_DIR", env_root.as_ref())
         .kill_on_drop(true)
         .spawn()
     {
@@ -315,24 +331,171 @@ pub async fn run_command_hook(
     }
 }
 
-/// Env vars the runner sets unconditionally on every spawned hook.
-///
-/// Used by:
-///
-/// * [`find_unresolved_env_vars`] to avoid flagging vars that *are* set
-///   by the runner itself,
-/// * [`crate::config::parse_hook_file`] and the plugin adapter to strip
-///   user-supplied attempts to override these keys via the JSON `env`
-///   map (those attempts would be silently ignored by the spawn-time
-///   precedence ordering anyway, but stripping them at load time gives
-///   users a clear "ignored, reserved key" warning).
-pub(crate) const RUNNER_ALWAYS_SET_ENV: &[&str] = &[
-    "GROK_HOOK_EVENT",
-    "GROK_HOOK_NAME",
-    "GROK_SESSION_ID",
-    "GROK_WORKSPACE_ROOT",
-    "CLAUDE_PROJECT_DIR",
-];
+#[cfg(any(test, not(unix)))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PsQuote {
+    Bare,
+    Single,
+    Double,
+}
+
+#[cfg(any(test, not(unix)))]
+fn rewrite_posix_env_refs_for_powershell<'a>(
+    command: &'a str,
+    extra_env: &std::collections::HashMap<String, String>,
+) -> Cow<'a, str> {
+    let mut out: Option<String> = None;
+    let mut cursor = 0;
+    let mut first_rewrite_at: Option<usize> = None;
+    for r in crate::env_expand::iter_env_var_references(command) {
+        if r.start < cursor {
+            continue;
+        }
+        if r.name.is_empty() || r.has_modifier {
+            continue;
+        }
+        if !RUNNER_ALWAYS_SET_ENV.contains(&r.name) && !extra_env.contains_key(r.name) {
+            continue;
+        }
+        let (quote, escaped) = powershell_ctx_at(command, r.start);
+        if quote == PsQuote::Single || escaped {
+            continue;
+        }
+        let buf = out.get_or_insert_with(|| String::with_capacity(command.len() + 24));
+        if quote == PsQuote::Bare {
+            let token_end = command[r.start..]
+                .find(|c: char| {
+                    c.is_whitespace()
+                        || matches!(c, ';' | '|' | '&' | '<' | '>' | '(' | ')' | '[' | ']' | ',')
+                })
+                .map_or(command.len(), |i| r.start + i);
+            buf.push_str(&command[cursor..r.start]);
+            buf.push('"');
+            rewrite_ps_env_refs_in_span(buf, &command[r.start..token_end], extra_env);
+            buf.push('"');
+            cursor = token_end;
+        } else {
+            buf.push_str(&command[cursor..r.start]);
+            push_ps_env_ref(buf, r.braced, r.name);
+            cursor = r.end;
+        }
+        if first_rewrite_at.is_none() {
+            first_rewrite_at = Some(r.start);
+        }
+    }
+    match out {
+        None => Cow::Borrowed(command),
+        Some(mut buf) => {
+            buf.push_str(&command[cursor..]);
+            if first_rewrite_at.is_some_and(|at| {
+                let pad = command.len() - command.trim_start().len();
+                at == pad || (command.as_bytes().get(pad) == Some(&b'"') && at == pad + 1)
+            }) && !buf.starts_with("& ")
+            {
+                buf.insert_str(0, "& ");
+            }
+            Cow::Owned(buf)
+        }
+    }
+}
+
+#[cfg(any(test, not(unix)))]
+fn rewrite_ps_env_refs_in_span(
+    buf: &mut String,
+    span: &str,
+    extra_env: &std::collections::HashMap<String, String>,
+) {
+    let mut cur = 0;
+    for r in crate::env_expand::iter_env_var_references(span) {
+        if r.name.is_empty() || r.has_modifier {
+            continue;
+        }
+        if !RUNNER_ALWAYS_SET_ENV.contains(&r.name) && !extra_env.contains_key(r.name) {
+            continue;
+        }
+        buf.push_str(&span[cur..r.start]);
+        push_ps_env_ref(buf, r.braced, r.name);
+        cur = r.end;
+    }
+    buf.push_str(&span[cur..]);
+}
+
+#[cfg(any(test, not(unix)))]
+fn push_ps_env_ref(buf: &mut String, braced: bool, name: &str) {
+    if braced {
+        buf.push_str("${env:");
+        buf.push_str(name);
+        buf.push('}');
+    } else {
+        buf.push_str("$env:");
+        buf.push_str(name);
+    }
+}
+
+#[cfg(any(test, not(unix)))]
+fn powershell_ctx_at(command: &str, at: usize) -> (PsQuote, bool) {
+    let bytes = command.as_bytes();
+    let mut i = 0;
+    let mut quote = PsQuote::Bare;
+    while i < at {
+        let c = bytes[i];
+        match quote {
+            PsQuote::Single => {
+                if c == b'\'' {
+                    quote = PsQuote::Bare;
+                }
+                i += 1;
+            }
+            PsQuote::Double => {
+                if c == b'`' {
+                    i = i.saturating_add(2);
+                } else if c == b'"' {
+                    quote = PsQuote::Bare;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            }
+            PsQuote::Bare => {
+                if c == b'`' {
+                    i = i.saturating_add(2);
+                } else if c == b'\'' {
+                    quote = PsQuote::Single;
+                    i += 1;
+                } else if c == b'"' {
+                    quote = PsQuote::Double;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    let escaped = quote != PsQuote::Single && at > 0 && bytes[at - 1] == b'`';
+    (quote, escaped)
+}
+
+#[cfg(not(unix))]
+fn rewrite_hook_command_for_windows_shell<'a>(
+    command: &'a str,
+    extra_env: &std::collections::HashMap<String, String>,
+) -> Cow<'a, str> {
+    use xai_grok_config::shell::{WindowsShell, detect_windows_shell};
+    match detect_windows_shell() {
+        WindowsShell::Pwsh | WindowsShell::PowerShell => {
+            rewrite_posix_env_refs_for_powershell(command, extra_env)
+        }
+        WindowsShell::GitBash(_) => Cow::Borrowed(command),
+        WindowsShell::Cmd => {
+            if command.contains('$') {
+                tracing::warn!(
+                    "hook command uses $VAR but the Windows shell is cmd, which expands %VAR%"
+                );
+            }
+            Cow::Borrowed(command)
+        }
+    }
+}
 
 /// Parse `command_str` for `${VAR}` and `$VAR` references and return the
 /// names that aren't resolvable from any of:
@@ -1419,6 +1582,57 @@ mod tests {
             "hook should see CLAUDE_PROJECT_DIR set to the workspace root, got {:?}",
             result
         );
+    }
+
+    #[test]
+    fn powershell_rewrite_cases() {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("PLUGIN_ROOT".to_string(), "/unused".to_string());
+        let cases = [
+            (
+                r#"powershell -File "$CLAUDE_PROJECT_DIR/.claude/hooks/foo.ps1" ${PLUGIN_ROOT}"#,
+                r#"powershell -File "$env:CLAUDE_PROJECT_DIR/.claude/hooks/foo.ps1" "${env:PLUGIN_ROOT}""#,
+            ),
+            (
+                r#"$UNKNOWN ${CLAUDE_PROJECT_DIR:-.}/x bash -c '$CLAUDE_PROJECT_DIR/x.sh' `$CLAUDE_PROJECT_DIR"#,
+                r#"$UNKNOWN ${CLAUDE_PROJECT_DIR:-.}/x bash -c '$CLAUDE_PROJECT_DIR/x.sh' `$CLAUDE_PROJECT_DIR"#,
+            ),
+            (
+                "$CLAUDE_PROJECT_DIR/.claude/hooks/foo.ps1",
+                r#"& "$env:CLAUDE_PROJECT_DIR/.claude/hooks/foo.ps1""#,
+            ),
+            (
+                "$CLAUDE_PROJECT_DIR/.claude/hooks/foo.ps1; echo done",
+                r#"& "$env:CLAUDE_PROJECT_DIR/.claude/hooks/foo.ps1"; echo done"#,
+            ),
+            (
+                r#""$CLAUDE_PROJECT_DIR/.claude/hooks/foo.ps1""#,
+                r#"& "$env:CLAUDE_PROJECT_DIR/.claude/hooks/foo.ps1""#,
+            ),
+            (
+                r#"powershell -File $CLAUDE_PROJECT_DIR/.claude/hooks/foo.ps1"#,
+                r#"powershell -File "$env:CLAUDE_PROJECT_DIR/.claude/hooks/foo.ps1""#,
+            ),
+            (
+                "$CLAUDE_PROJECT_DIR/$GROK_HOOK_NAME.ps1",
+                r#"& "$env:CLAUDE_PROJECT_DIR/$env:GROK_HOOK_NAME.ps1""#,
+            ),
+            (
+                "Join-Path ($CLAUDE_PROJECT_DIR) hooks",
+                r#"Join-Path ("$env:CLAUDE_PROJECT_DIR") hooks"#,
+            ),
+            (
+                r#"Write-Host "don't skip $CLAUDE_PROJECT_DIR""#,
+                r#"Write-Host "don't skip $env:CLAUDE_PROJECT_DIR""#,
+            ),
+        ];
+        for (input, want) in cases {
+            assert_eq!(
+                rewrite_posix_env_refs_for_powershell(input, &extra).as_ref(),
+                want,
+                "{input}"
+            );
+        }
     }
 
     /// `extra_env` seeds what's "set" so the test does not depend on the

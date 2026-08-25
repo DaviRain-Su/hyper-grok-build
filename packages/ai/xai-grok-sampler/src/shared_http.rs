@@ -1,32 +1,21 @@
-//! Process-wide shared `reqwest::Client`s for sampling requests.
+//! Process-wide shared `reqwest::Client`s for sampling.
 //!
-//! Sharing one client across all `SamplingClient` instances is safe because
-//! the builders below take no config-derived input: auth, extra headers, base
-//! URL, and User-Agent are all applied per-request in `SamplingClient::post`.
-//! Stale-connection exposure is bounded by HTTP/2 keepalive pings (15s
-//! interval, 5s timeout, while idle), the 90s idle-pool eviction, and the
-//! first-retry HTTP/1.1 rebuild escape hatch (that client never pools, so
-//! every use opens a fresh connection).
+//! Safe to share because the builders take no config-derived input: auth,
+//! extra headers, base URL, and User-Agent are applied per-request in
+//! `SamplingClient::post`. Stale connections are bounded by h2 keepalive
+//! (15s ping / 5s timeout while idle), 90s idle-pool eviction, and the
+//! pool-less HTTP/1.1 first-retry rebuild; connections whose per-session
+//! runtime died are discarded by hyper's checkout ready-check, with the
+//! retry loop covering the rest.
 //!
-//! Wire-level behavior (connection reuse, header isolation, pool-less http1
-//! fallback, kill switch) is pinned by the `shared_http_wire` and
-//! `shared_http_kill_switch` integration binaries, which own their process
-//! environment. Extra roots: `GROK_EXTRA_CA_BUNDLE` via `xai_grok_extra_ca`.
-//!
-//! Redirect policy: limited **HTTPS same-origin** hops only. Cross-origin and
-//! HTTPS→HTTP redirects stop so product/session `x-grok-*` headers never
-//! follow to a third party (reqwest does not strip custom headers on
-//! cross-origin redirects).
+//! Wire behavior is pinned by the `shared_http_wire` and
+//! `shared_http_kill_switch` binaries. Extra roots: `GROK_EXTRA_CA_BUNDLE`.
 
 use std::sync::OnceLock;
 use std::time::Duration;
 
 static SHARED_H2: OnceLock<reqwest::Client> = OnceLock::new();
 static SHARED_HTTP1: OnceLock<reqwest::Client> = OnceLock::new();
-
-/// Max same-origin HTTPS redirect hops (initial request not counted the same
-/// way as reqwest's limited policy; we bound `previous().len()`).
-const MAX_SAME_ORIGIN_REDIRECTS: usize = 10;
 
 /// Kill switch: `GROK_SAMPLER_SHARED_CLIENT=0` (or `false`, any case)
 /// restores the old behavior of building a fresh `reqwest::Client` per
@@ -76,61 +65,6 @@ pub(crate) fn client_http1() -> Result<reqwest::Client, reqwest::Error> {
     shared(&SHARED_HTTP1, build_http_client_http1, sharing_disabled())
 }
 
-/// Pure redirect decision for unit tests (no network).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RedirectDecision {
-    Follow,
-    Stop,
-    TooManyRedirects,
-}
-
-/// Decide whether to follow a redirect hop.
-///
-/// Rules:
-/// - More than [`MAX_SAME_ORIGIN_REDIRECTS`] previous URLs → too many.
-/// - Next scheme must be `https` (blocks HTTP and HTTPS→HTTP).
-/// - Next origin must match previous hop's origin (scheme+host+effective port).
-pub(crate) fn decide_same_origin_https_redirect(
-    previous: &[reqwest::Url],
-    next: &reqwest::Url,
-) -> RedirectDecision {
-    // `previous` includes the initial request URL as the first entry.
-    if previous.len() > MAX_SAME_ORIGIN_REDIRECTS {
-        return RedirectDecision::TooManyRedirects;
-    }
-    if next.scheme() != "https" {
-        return RedirectDecision::Stop;
-    }
-    let Some(prev) = previous.last() else {
-        return RedirectDecision::Stop;
-    };
-    if !urls_same_origin(prev, next) {
-        return RedirectDecision::Stop;
-    }
-    RedirectDecision::Follow
-}
-
-/// Follow redirects only when the next hop is HTTPS and same-origin as the
-/// previous URL in the chain. Cross-origin and downgrade (HTTPS→HTTP) stop.
-///
-/// Public for unit tests of the policy decision without network I/O.
-pub(crate) fn same_origin_https_redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
-        match decide_same_origin_https_redirect(attempt.previous(), attempt.url()) {
-            RedirectDecision::Follow => attempt.follow(),
-            RedirectDecision::Stop => attempt.stop(),
-            RedirectDecision::TooManyRedirects => attempt.error("too many redirects"),
-        }
-    })
-}
-
-/// Scheme + host + effective port equality (reqwest `Url` origin components).
-pub(crate) fn urls_same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
-    a.scheme() == b.scheme()
-        && a.host_str() == b.host_str()
-        && a.port_or_known_default() == b.port_or_known_default()
-}
-
 /// Build a `reqwest::Client` for sampling with HTTP/2 + connection pooling.
 /// Env knobs are read once, when the shared client is first built.
 fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
@@ -147,19 +81,16 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
 
-    xai_grok_extra_ca::with_extra_root_certificates(
-        reqwest::Client::builder()
+    xai_grok_extra_ca::build_reqwest_client(|builder| {
+        builder
             .pool_max_idle_per_host(pool_max_idle)
             .pool_idle_timeout(Duration::from_secs(pool_idle_timeout_secs))
             .connect_timeout(Duration::from_secs(connect_timeout_secs))
             .tcp_nodelay(true)
-            .redirect(same_origin_https_redirect_policy())
-            // HTTP/2 keep-alive: ping every 15s, timeout after 5s.
             .http2_keep_alive_interval(Duration::from_secs(15))
             .http2_keep_alive_timeout(Duration::from_secs(5))
-            .http2_keep_alive_while_idle(true),
-    )
-    .build()
+            .http2_keep_alive_while_idle(true)
+    })
 }
 
 /// Build a `reqwest::Client` constrained to HTTP/1.1 with pooling disabled.
@@ -170,27 +101,23 @@ fn build_http_client_http1() -> Result<reqwest::Client, reqwest::Error> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
 
-    xai_grok_extra_ca::with_extra_root_certificates(
-        reqwest::Client::builder()
+    xai_grok_extra_ca::build_reqwest_client(|builder| {
+        builder
+            .http1_only()
             .pool_max_idle_per_host(0)
             .pool_idle_timeout(Duration::from_secs(0))
             .connect_timeout(Duration::from_secs(connect_timeout_secs))
             .tcp_nodelay(true)
-            .redirect(same_origin_https_redirect_policy())
-            .http1_only(),
-    )
-    .build()
+    })
 }
 
+#[allow(clippy::disallowed_methods)] // test clients hit localhost mocks
 #[cfg(test)]
 mod tests {
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{
-        MAX_SAME_ORIGIN_REDIRECTS, RedirectDecision, decide_same_origin_https_redirect,
-        same_origin_https_redirect_policy, shared, urls_same_origin,
-    };
+    use super::shared;
 
     static BUILD_CALLS: AtomicUsize = AtomicUsize::new(0);
 
@@ -225,112 +152,5 @@ mod tests {
             CELL.get().is_none(),
             "disabled mode must never touch the cell"
         );
-    }
-
-    #[test]
-    fn same_origin_helper_matches_host_port_scheme() {
-        let a = reqwest::Url::parse("https://api.x.ai/v1/a").unwrap();
-        let b = reqwest::Url::parse("https://api.x.ai/v1/b").unwrap();
-        let c = reqwest::Url::parse("https://evil.example/v1").unwrap();
-        let d = reqwest::Url::parse("http://api.x.ai/v1/a").unwrap();
-        let e = reqwest::Url::parse("https://api.x.ai:443/v1/a").unwrap();
-        let f = reqwest::Url::parse("https://api.x.ai:8443/v1/a").unwrap();
-        assert!(urls_same_origin(&a, &b));
-        // Default HTTPS port 443 is equivalent to omitted port.
-        assert!(urls_same_origin(&a, &e));
-        assert!(!urls_same_origin(&a, &c));
-        assert!(!urls_same_origin(&a, &d));
-        assert!(!urls_same_origin(&a, &f));
-    }
-
-    #[test]
-    fn decide_redirect_https_same_origin_follows() {
-        let prev = reqwest::Url::parse("https://api.x.ai/v1/chat").unwrap();
-        let next = reqwest::Url::parse("https://api.x.ai/v1/chat/completions").unwrap();
-        assert_eq!(
-            decide_same_origin_https_redirect(std::slice::from_ref(&prev), &next),
-            RedirectDecision::Follow
-        );
-    }
-
-    #[test]
-    fn decide_redirect_stops_http_and_downgrade() {
-        let prev = reqwest::Url::parse("https://api.x.ai/v1").unwrap();
-        let http_next = reqwest::Url::parse("http://api.x.ai/v1/x").unwrap();
-        assert_eq!(
-            decide_same_origin_https_redirect(std::slice::from_ref(&prev), &http_next),
-            RedirectDecision::Stop
-        );
-        let prev_http = reqwest::Url::parse("http://api.x.ai/v1").unwrap();
-        let https_next = reqwest::Url::parse("https://api.x.ai/v1/x").unwrap();
-        // Previous is HTTP: same-origin check still requires next https + matching
-        // origin (scheme differs → stop).
-        assert_eq!(
-            decide_same_origin_https_redirect(std::slice::from_ref(&prev_http), &https_next),
-            RedirectDecision::Stop
-        );
-    }
-
-    #[test]
-    fn decide_redirect_stops_cross_origin_host_and_port() {
-        let prev = reqwest::Url::parse("https://api.x.ai/v1").unwrap();
-        let other_host = reqwest::Url::parse("https://evil.example/v1").unwrap();
-        assert_eq!(
-            decide_same_origin_https_redirect(std::slice::from_ref(&prev), &other_host),
-            RedirectDecision::Stop
-        );
-        let other_port = reqwest::Url::parse("https://api.x.ai:8443/v1").unwrap();
-        assert_eq!(
-            decide_same_origin_https_redirect(std::slice::from_ref(&prev), &other_port),
-            RedirectDecision::Stop
-        );
-    }
-
-    #[test]
-    fn decide_redirect_hop_boundary() {
-        let base = reqwest::Url::parse("https://api.x.ai/v1").unwrap();
-        let next = reqwest::Url::parse("https://api.x.ai/v1/x").unwrap();
-        // `previous.len() > MAX` → too many (initial URL is first entry).
-        let chain: Vec<_> = (0..=MAX_SAME_ORIGIN_REDIRECTS)
-            .map(|i| reqwest::Url::parse(&format!("https://api.x.ai/v1/{i}")).unwrap())
-            .collect();
-        assert_eq!(
-            decide_same_origin_https_redirect(&chain, &next),
-            RedirectDecision::TooManyRedirects
-        );
-        // Exactly MAX previous entries still allowed.
-        let ok_chain: Vec<_> = (0..MAX_SAME_ORIGIN_REDIRECTS)
-            .map(|i| reqwest::Url::parse(&format!("https://api.x.ai/v1/{i}")).unwrap())
-            .collect();
-        assert_eq!(
-            decide_same_origin_https_redirect(&ok_chain, &next),
-            RedirectDecision::Follow
-        );
-        let _ = base;
-    }
-
-    #[test]
-    fn decide_redirect_empty_previous_stops() {
-        let next = reqwest::Url::parse("https://api.x.ai/v1").unwrap();
-        assert_eq!(
-            decide_same_origin_https_redirect(&[], &next),
-            RedirectDecision::Stop
-        );
-    }
-
-    #[test]
-    fn redirect_policy_is_constructible() {
-        // Smoke: custom policy builds without panic (H2 and H1 builders).
-        let _ = same_origin_https_redirect_policy();
-        let client = reqwest::Client::builder()
-            .redirect(same_origin_https_redirect_policy())
-            .build()
-            .unwrap();
-        let _ = reqwest::Client::builder()
-            .http1_only()
-            .redirect(same_origin_https_redirect_policy())
-            .build()
-            .unwrap();
-        let _ = client;
     }
 }

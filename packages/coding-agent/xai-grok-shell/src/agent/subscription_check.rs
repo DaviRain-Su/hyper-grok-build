@@ -12,7 +12,7 @@
 //! module).
 use crate::auth::AuthManager;
 use crate::auth::UserInfo;
-use crate::auth::manager::RefreshReason;
+use crate::auth::manager::{BEST_EFFORT_REFRESH_TIMEOUT, BoundedRefresh, RefreshReason};
 use crate::auth::token_type::TokenType;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +28,19 @@ fn is_qualifying_tier(tier: &str) -> bool {
 /// Successful subscription check result: a confirmed qualifying tier.
 pub(crate) struct UnblockResult {
     pub(crate) new_tier: String,
+    /// The proxy-canonical `userId` from the `/user` response that confirmed
+    /// the tier — resolved with the live bearer, so it names the same account
+    /// the check started with. The caller's identity guard accepts it
+    /// alongside the started user_id: the mint below spawns a `/user`
+    /// enrichment that can rewrite a seeded/stale user_id to this canonical
+    /// value mid-check, and that normalization is not an account switch.
+    pub(crate) canonical_user_id: String,
+    /// True when the best-effort refresh below hit its bounded deadline with
+    /// the exchange still in flight (spawn-don't-drop). The caller must not
+    /// force a second mint then — it would only queue behind the detached
+    /// exchange for up to another full budget, holding the gate lift past the
+    /// documented single budget while the subscription is already confirmed.
+    pub(crate) refresh_deadline_hit: bool,
 }
 /// Fetch `/user?include=subscription` and return the parsed `UserInfo`.
 async fn fetch_user_info(
@@ -119,26 +132,51 @@ pub(crate) async fn single_check(
             "new_tier": new_tier,
         })),
     );
-    if let Err(e) = auth_manager
-        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+    let refresh_deadline_hit = match auth_manager
+        .refresh_chain_bounded_outcome(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            BEST_EFFORT_REFRESH_TIMEOUT,
+        )
         .await
     {
-        xai_grok_telemetry::unified_log::warn(
-            "paywall_check_error",
-            None,
-            Some(serde_json::json!({
-                "user_id": user_id,
-                "kind": "refresh_failed",
-                "detail": e.to_string(),
-            })),
-        );
-    }
+        BoundedRefresh::Resolved(result) => {
+            if let Err(e) = *result {
+                xai_grok_telemetry::unified_log::warn(
+                    "paywall_check_error",
+                    None,
+                    Some(serde_json::json!({
+                        "user_id": user_id,
+                        "kind": "refresh_failed",
+                        "detail": e.to_string(),
+                    })),
+                );
+            }
+            false
+        }
+        BoundedRefresh::DeadlineElapsed => {
+            xai_grok_telemetry::unified_log::warn(
+                "paywall_check_error",
+                None,
+                Some(serde_json::json!({
+                    "user_id": user_id,
+                    "kind": "refresh_deadline",
+                    "detail": "bounded refresh deadline elapsed; mint continues in background",
+                })),
+            );
+            true
+        }
+    };
     xai_grok_telemetry::unified_log::info(
         "paywall_check_unblocked",
         None,
         Some(serde_json::json!({ "user_id": user_id, "new_tier": new_tier })),
     );
-    Some(UnblockResult { new_tier })
+    Some(UnblockResult {
+        new_tier,
+        canonical_user_id: user_info.user_id,
+        refresh_deadline_hit,
+    })
 }
 #[cfg(test)]
 mod tests {

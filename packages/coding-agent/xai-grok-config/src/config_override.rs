@@ -85,6 +85,11 @@ pub const PATCH_STRIP_KEYS: &[&str] = &[
     "model_providers",
 ];
 
+/// Stripped like [`PATCH_STRIP_KEYS`]: these carry a command the client would
+/// execute. The whole table goes, so a new key in it needs no second edit.
+pub const PATCH_STRIP_PATHS: &[PatchPath] =
+    &[&["ui", "status_line"], &["ui", "notifications", "hooks"]];
+
 /// Additionally stripped from campaign and remote patches: those patches cannot set auth policy tables (`preferred_method`, `force_login_team_uuid`, `disable_api_key_auth`), while trusted version_overrides may.
 pub const CAMPAIGN_STRIP_KEYS: &[&str] = &[
     "version_overrides",
@@ -168,7 +173,8 @@ fn retain_allowed_paths(table: &mut toml::Table, paths: &[&[&str]], top_level: b
 }
 
 /// Deep-merge each patch in iteration order (later wins on a leaf), stripping
-/// `strip_keys` (top level) first.
+/// `strip_keys` (top level) and [`PATCH_STRIP_PATHS`] first. The caller picks
+/// the key list; the paths go from every patch, whoever sent it.
 ///
 /// A patch is another input to the same merge as the disk layers, so it gets the same pre-merge
 /// normalization ([`crate::loader::normalize_config_layer`]). Otherwise a patch that flips
@@ -183,9 +189,30 @@ pub fn apply_patches(
         for key in strip_keys {
             patch.remove(*key);
         }
+        for path in PATCH_STRIP_PATHS {
+            strip_path(&mut patch, path);
+        }
         let mut patch = toml::Value::Table(patch);
         crate::loader::normalize_config_layer(&mut patch);
         deep_merge_toml(config, &patch);
+    }
+}
+
+fn strip_path(patch: &mut toml::Table, path: PatchPath) {
+    let Some((key, rest)) = path.split_first() else {
+        return;
+    };
+    if rest.is_empty() {
+        patch.remove(*key);
+        return;
+    }
+    match patch.get_mut(*key) {
+        Some(toml::Value::Table(nested)) => strip_path(nested, rest),
+        // A non-table ancestor would clobber everything beneath it on merge.
+        Some(_) => {
+            patch.remove(*key);
+        }
+        None => {}
     }
 }
 
@@ -284,7 +311,77 @@ mod tests {
     }
 
     #[test]
-    fn apply_patches_strips_requested_keys() {
+    fn apply_patches_strips_a_remote_status_line_command() {
+        let mut cfg = toml::Value::Table(table("[ui]\ntheme = \"kanagawa\"\n"));
+        let patch = table(
+            "[ui]\ntheme = \"other\"\n[ui.status_line]\ntype = \"command\"\ncommand = \"curl evil\"\n",
+        );
+        apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
+        assert!(cfg["ui"].get("status_line").is_none(), "{cfg:?}");
+        assert_eq!(cfg["ui"]["theme"].as_str(), Some("other"), "siblings apply");
+
+        // An ancestor replaced by a scalar cannot smuggle it through either.
+        let mut cfg = toml::Value::Table(table("[ui]\ntheme = \"kanagawa\"\n"));
+        let mut patch = toml::Table::new();
+        patch.insert("ui".into(), toml::Value::String("oops".into()));
+        apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
+        assert_eq!(cfg["ui"]["theme"].as_str(), Some("kanagawa"));
+    }
+
+    #[test]
+    fn stripping_a_path_takes_that_key_and_nothing_around_it() {
+        // A key that merely starts with the stripped one must survive.
+        let mut cfg = toml::Value::Table(table("[ui]\n"));
+        let patch = table("[ui]\nstatus_line_extra = \"keep\"\n");
+        apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
+        assert_eq!(cfg["ui"]["status_line_extra"].as_str(), Some("keep"));
+
+        // The stripped path as a scalar rather than a table.
+        let mut cfg = toml::Value::Table(table("[ui]\ntheme = \"kanagawa\"\n"));
+        let patch = table("[ui]\nstatus_line = \"builtin\"\n");
+        apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
+        assert!(cfg["ui"].get("status_line").is_none(), "{cfg:?}");
+
+        // A patch that never mentions the ancestor is left alone.
+        let mut cfg = toml::Value::Table(table("[ui]\ntheme = \"kanagawa\"\n"));
+        let patch = table("[models]\ndefault = \"new\"\n");
+        apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
+        assert_eq!(cfg["models"]["default"].as_str(), Some("new"));
+        assert_eq!(cfg["ui"]["theme"].as_str(), Some("kanagawa"));
+    }
+
+    #[test]
+    fn apply_patches_strips_a_remote_notification_hook() {
+        let mut cfg = toml::Value::Table(table("[ui.notifications]\nenabled = true\n"));
+        let patch = table(
+            "[ui.notifications]\nenabled = false\n[[ui.notifications.hooks]]\ncommand = \"curl evil\"\n",
+        );
+        apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
+        assert!(
+            cfg["ui"]["notifications"].get("hooks").is_none(),
+            "an array of tables is stripped like any other leaf: {cfg:?}"
+        );
+        assert_eq!(
+            cfg["ui"]["notifications"]["enabled"].as_bool(),
+            Some(false),
+            "siblings still apply"
+        );
+    }
+
+    #[test]
+    fn a_later_patch_layer_cannot_reinstate_a_stripped_path() {
+        let mut cfg = toml::Value::Table(table("[ui]\n"));
+        let first = table("[ui.status_line]\ncommand = \"curl evil\"\n");
+        let second = table("[ui.status_line]\ncommand = \"curl worse\"\n");
+        apply_patches(&mut cfg, [first, second], PATCH_STRIP_KEYS);
+        assert!(
+            cfg["ui"].get("status_line").is_none(),
+            "no layer may set an executable command: {cfg:?}"
+        );
+    }
+
+    #[test]
+    fn apply_patches_strips_the_top_level_keys() {
         let mut cfg = toml::Value::Table(table("[models]\ndefault = \"old\"\n"));
         let patch = table("[models]\ndefault = \"new\"\n");
         apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);

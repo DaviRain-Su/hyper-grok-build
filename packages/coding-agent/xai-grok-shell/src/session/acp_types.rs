@@ -107,6 +107,9 @@ pub struct ClientFeedbackInput {
     #[serde(default)]
     pub feedback_text: Option<String>,
 
+    #[serde(default)]
+    pub images: Vec<prod_mc_cli_chat_proxy_types::feedback_types::FeedbackImage>,
+
     /// Feedback categories (e.g., ["accuracy", "speed", "helpfulness"])
     #[serde(default)]
     pub feedback_categories: Vec<String>,
@@ -169,8 +172,10 @@ impl ClientFeedbackInput {
     /// - `user_id`: Will be extracted from auth token by the backend
     ///
     /// Rating values are clamped to valid ranges based on rating_type.
-    pub(crate) fn to_submission(
-        &self,
+    /// `&mut self`: drains `images` into the submission instead of cloning
+    /// megabytes of base64; the input is not read for images afterwards.
+    pub(crate) fn take_submission(
+        &mut self,
         model_id: Option<String>,
         resolved_model_id: Option<String>,
         model_fingerprint: Option<String>,
@@ -205,6 +210,7 @@ impl ClientFeedbackInput {
             content,
         );
         s.turn_number = turn_number;
+        s.images = std::mem::take(&mut self.images);
         s.feedback_categories = self.feedback_categories.clone();
         s.model_id = model_id;
         s.resolved_model_id = resolved_model_id;
@@ -418,6 +424,16 @@ impl TokenUsageCategory {
             label: "Skills".to_string(),
             tokens: xai_token_estimation::estimate_tokens(text),
             detail: Some(count_detail(skill_count as u64, "skill")),
+        }
+    }
+
+    /// Row for the workflow listing. `text` is the canonical model-facing
+    /// catalog render.
+    pub fn workflows_listing(text: &str, workflow_count: usize) -> Self {
+        Self {
+            label: "Workflows".to_string(),
+            tokens: xai_token_estimation::estimate_tokens(text),
+            detail: Some(count_detail(workflow_count as u64, "workflow")),
         }
     }
 
@@ -662,7 +678,7 @@ mod tests {
 
     /// Verify that the JSON payload Desktop sends (with `client_type: "desktop"`)
     /// deserializes correctly into `ClientFeedbackInput` and round-trips through
-    /// `to_submission()` preserving `ClientType::Desktop`.
+    /// `take_submission()` preserving `ClientType::Desktop`.
     #[test]
     fn desktop_client_type_deserializes_and_round_trips() {
         let json = r#"{
@@ -674,14 +690,14 @@ mod tests {
             "feedback_categories": ["accuracy"]
         }"#;
 
-        let input: ClientFeedbackInput = serde_json::from_str(json).unwrap();
+        let mut input: ClientFeedbackInput = serde_json::from_str(json).unwrap();
         assert_eq!(
             input.client_type,
             prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Desktop
         );
         assert_eq!(input.session_id, "sess-1");
 
-        let submission = input.to_submission(Some("grok-3".into()), None, None, Some(5));
+        let submission = input.take_submission(Some("grok-3".into()), None, None, Some(5));
         assert_eq!(
             submission.client_type,
             prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Desktop

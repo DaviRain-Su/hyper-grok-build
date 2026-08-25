@@ -39,8 +39,13 @@ fn now_ts() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn push_entry(lvl: LogLevel, msg: &str, sid: Option<&str>, ctx: Option<serde_json::Value>) {
-    let entry = ClientLogEntry {
+fn make_entry(
+    lvl: LogLevel,
+    msg: &str,
+    sid: Option<&str>,
+    ctx: Option<serde_json::Value>,
+) -> ClientLogEntry {
+    ClientLogEntry {
         ts: now_ts(),
         pid: Some(std::process::id()),
         ver: Some(xai_grok_version::VERSION.to_owned()),
@@ -48,7 +53,23 @@ fn push_entry(lvl: LogLevel, msg: &str, sid: Option<&str>, ctx: Option<serde_jso
         sid: sid.map(Into::into),
         msg: msg.into(),
         ctx,
-    };
+    }
+}
+
+/// Write an info entry straight to `unified.jsonl`, bypassing the ACP
+/// forwarder. The forwarder only gets a sender after a successful connect
+/// and a flush on a failed startup destroys buffered entries — so pre-connect
+/// facts that must survive a failed startup go through here, with the same
+/// pager source and pid stamping as forwarded entries.
+pub fn write_direct_info(msg: &str, ctx: Option<serde_json::Value>) {
+    xai_grok_telemetry::unified_log::ingest_client_entries(
+        LogSource::GrokPager,
+        &[make_entry(LogLevel::Info, msg, None, ctx)],
+    );
+}
+
+fn push_entry(lvl: LogLevel, msg: &str, sid: Option<&str>, ctx: Option<serde_json::Value>) {
+    let entry = make_entry(lvl, msg, sid, ctx);
     if let Ok(mut buf) = BUFFER.lock() {
         buf.push(entry);
         // Auto-flush when we have a reasonable batch, but only if the ACP

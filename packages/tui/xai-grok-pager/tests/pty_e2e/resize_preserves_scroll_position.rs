@@ -83,9 +83,13 @@ fn scroll_anchor_response() -> String {
     let mut paragraphs: Vec<String> = Vec::new();
     paragraphs.push(TOP_SENTINEL.to_string());
 
-    // ~220-char paragraphs of short words: wrap to 2 rows at 120 cols, 3 rows at
-    // 80 cols (the height gain that the stale scroll_offset turns into a jump).
-    let wrapping = "wrap ".repeat(44);
+    // ~220-char unbreakable paragraphs: wrap to 2 display rows at 120 cols and
+    // 3 at 80 cols (the height gain a stale scroll_offset turns into a jump).
+    // No spaces — the mock emits one SSE event per space-separated token, and
+    // `"wrap ".repeat(44)` × 10 paragraphs (~440 events) routinely exceeds the
+    // setup wait under 4-way PTY parallelism (visible as TOP_OF_RESPONSE_AAA
+    // still on screen when BOTTOM_OF_RESPONSE_QQQ never arrives).
+    let wrapping = "W".repeat(220);
     for _ in 0..WRAP_LINES_ABOVE {
         paragraphs.push(wrapping.clone());
     }
@@ -204,7 +208,7 @@ async fn resize_preserves_scroll_position() {
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit prompt");
     harness
-        .wait_for_text(BOTTOM_SENTINEL, Duration::from_secs(60))
+        .wait_for_text(BOTTOM_SENTINEL, Duration::from_secs(120))
         .unwrap_or_else(|_| {
             panic!(
                 "setup: response never finished streaming (no {BOTTOM_SENTINEL:?})\nscreen:\n{}",

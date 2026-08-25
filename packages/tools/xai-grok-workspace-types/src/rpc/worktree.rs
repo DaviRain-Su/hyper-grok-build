@@ -89,6 +89,10 @@ pub struct CreateWorktreeRequest {
     /// When absent, an automatic `YYYY-MM-DD-<uuid>` label is generated.
     #[serde(default)]
     pub label: Option<String>,
+    /// When `Some(true)`, enable the grove worktree arm on the builder.
+    /// Absent/false → copy. `nfsWorktree` / `nfs_worktree` are deserialize aliases.
+    #[serde(default, alias = "nfsWorktree", alias = "nfs_worktree")]
+    pub grove_worktree: Option<bool>,
 }
 impl WorkspaceRpc for CreateWorktreeRequest {
     const METHOD: &'static str = "workspace.create_worktree";
@@ -200,6 +204,8 @@ pub struct CreateWorktreeFromWorktreeRequestWire {
     pub worktree_type: Option<WorktreeType>,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default, alias = "nfsWorktree", alias = "nfs_worktree")]
+    pub grove_worktree: Option<bool>,
 }
 /// `workspace.worktree_create_from_worktree_sync` — synchronous worktree fork.
 ///
@@ -327,6 +333,39 @@ impl WorkspaceRpc for WorktreeDbStatsReq {
     const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = Value;
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeDetachReq {
+    pub id_or_path: String,
+    #[serde(default)]
+    pub allow_copy: bool,
+}
+impl WorkspaceRpc for WorktreeDetachReq {
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
+    const METHOD: &'static str = "workspace.worktree_detach";
+    type Response = Value;
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeSalvageReq {
+    pub id_or_path: String,
+    pub out: String,
+}
+impl WorkspaceRpc for WorktreeSalvageReq {
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
+    const METHOD: &'static str = "workspace.worktree_salvage";
+    type Response = Value;
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeCleanArtifactsReq {
+    pub id_or_path: String,
+}
+impl WorkspaceRpc for WorktreeCleanArtifactsReq {
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
+    const METHOD: &'static str = "workspace.worktree_clean_artifacts";
+    type Response = Value;
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +402,7 @@ mod tests {
                 git_ref: None,
                 worktree_type: None,
                 label: None,
+                grove_worktree: None,
             },
         };
         let json = serde_json::to_value(&req).unwrap();
@@ -384,6 +424,7 @@ mod tests {
             ignored_skip_patterns: vec![],
             worktree_type: None,
             label: None,
+            grove_worktree: None,
         });
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["sessionId"], "s1");

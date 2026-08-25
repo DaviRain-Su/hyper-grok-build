@@ -24,8 +24,11 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 }
 
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl Mixpanel {
     /// Create a new Mixpanel client with the given project token.
+    #[allow(clippy::disallowed_methods)] // transport-neutral crate; the grok CLI injects a policy client via with_client
     pub fn new(token: impl Into<String>) -> Self {
         Self {
             token: token.into(),
@@ -74,6 +77,7 @@ impl Mixpanel {
 
         self.client
             .post("https://api.mixpanel.com/track")
+            .timeout(REQUEST_TIMEOUT)
             .form(&[("data", &encoded)])
             .send()
             .await?;
@@ -105,6 +109,7 @@ impl Mixpanel {
 
         self.client
             .post("https://api.mixpanel.com/engage")
+            .timeout(REQUEST_TIMEOUT)
             .form(&[("data", &encoded)])
             .send()
             .await?;

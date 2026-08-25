@@ -778,7 +778,7 @@ mod scroll_granularity_tests {
         assert_eq!(
             agent.scrollback.scroll_info().0,
             before,
-            "wheel must not leak through the /workflows modal"
+            "wheel must not leak through the /workflow runs modal"
         );
         agent.show_workflows = false;
         agent.show_goal_detail = true;

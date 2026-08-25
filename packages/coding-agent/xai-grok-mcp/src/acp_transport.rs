@@ -11,7 +11,8 @@
 //! Half-duplex (v1 limitation): the bridge carries ONLY client→server requests and
 //! their responses. Server→client traffic is NOT bridged — neither notifications
 //! (`notifications/*`) nor server-initiated requests such as
-//! `sampling/createMessage`, `roots/list`, or elicitation are delivered. Tools that
+//! `sampling/createMessage` or `roots/list` are delivered (elicitation is not
+//! advertised on this transport, so compliant servers never send it). Tools that
 //! depend on those features will not work over this transport yet. The duplex
 //! plumbing below exists to decouple slow tool calls (one task per request), not to
 //! deliver a second message direction.

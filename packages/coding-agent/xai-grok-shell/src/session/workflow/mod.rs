@@ -1,4 +1,5 @@
 pub(crate) mod host_service;
+pub(crate) mod listing;
 pub(crate) mod manager;
 pub(crate) mod notify;
 pub(crate) mod registry;
@@ -16,6 +17,18 @@ mod builtin_tests {
             assert_eq!(
                 meta.name, builtin.name,
                 "registry key must equal meta.name for '{}'",
+                builtin.name
+            );
+            assert!(
+                meta.when_to_use
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty()),
+                "builtin '{}' needs meta.when_to_use",
+                builtin.name
+            );
+            assert!(
+                !builtin.path.is_empty(),
+                "builtin '{}' needs a listing path",
                 builtin.name
             );
         }

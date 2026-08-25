@@ -37,6 +37,7 @@ pub struct XaiProtoBuilder {
     gen_pbjson: bool,
     pbjson_ignore_unknown_fields: bool,
     pbjson_preserve_proto_field_names: bool,
+    pbjson_exclude: Vec<String>,
     honor_debug_redact: bool,
 }
 
@@ -84,6 +85,21 @@ impl XaiProtoBuilder {
     /// camelCase documents.
     pub fn pbjson_preserve_proto_field_names(mut self) -> Self {
         self.pbjson_preserve_proto_field_names = true;
+        self
+    }
+
+    /// Skip pbjson serde generation for these fully-qualified proto type
+    /// prefixes (e.g. `.model_config.RateLimit`). Use when a type is
+    /// `extern_path`'d into another crate that already provides its pbjson serde
+    /// impls, but the enclosing package's serde is still generated here —
+    /// otherwise pbjson would emit an orphan `impl Serialize for <foreign type>`.
+    /// Matching is segment-based, so `.pkg.Foo` does not match `.pkg.FooBar`.
+    pub fn pbjson_exclude<S: Into<String>>(
+        mut self,
+        prefixes: impl IntoIterator<Item = S>,
+    ) -> Self {
+        self.pbjson_exclude
+            .extend(prefixes.into_iter().map(Into::into));
         self
     }
 
@@ -246,6 +262,7 @@ impl XaiProtoBuilder {
             file_descriptor_set_path,
             pbjson_ignore_unknown_fields,
             pbjson_preserve_proto_field_names,
+            pbjson_exclude,
             honor_debug_redact,
         } = self;
         let mut config = prost_build::Config::new();
@@ -341,6 +358,9 @@ impl XaiProtoBuilder {
             if pbjson_preserve_proto_field_names {
                 builder.preserve_proto_field_names();
             }
+            if !pbjson_exclude.is_empty() {
+                builder.exclude(pbjson_exclude);
+            }
             builder
                 .build(&["."])
                 .context("Failed to build descriptor set")?;
@@ -361,6 +381,7 @@ pub fn configure() -> XaiProtoBuilder {
         gen_pbjson: false,
         pbjson_ignore_unknown_fields: false,
         pbjson_preserve_proto_field_names: false,
+        pbjson_exclude: Vec::new(),
         file_descriptor_set_path: None,
         honor_debug_redact: false,
     }

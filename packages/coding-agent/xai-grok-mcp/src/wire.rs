@@ -25,3 +25,15 @@ pub const MCP_SERVERS: &str = "x.ai/mcp/servers";
 /// `initialize` `_meta` capability flag advertising in-process SDK MCP support
 /// (enables the SDK's `transport="acp"`): `x.ai/mcp/sdk`.
 pub const MCP_SDK: &str = "x.ai/mcp/sdk";
+
+/// Reverse elicitation method (agent -> client): `x.ai/mcp/elicit`.
+///
+/// The agent forwards an MCP server's `elicitation/create` request to the client,
+/// which renders the HITL popup and returns accept/decline/cancel.
+pub const MCP_ELICIT: &str = "x.ai/mcp/elicit";
+
+/// Elicitation-complete notification (agent -> client): `x.ai/mcp/elicit_complete`.
+///
+/// Forwards a server's `notifications/elicitation/complete` so the client can
+/// dismiss the popup for the given `elicitationId`.
+pub const MCP_ELICIT_COMPLETE: &str = "x.ai/mcp/elicit_complete";

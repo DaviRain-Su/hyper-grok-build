@@ -1,6 +1,7 @@
 let meta = #{
     name: "deep-research",
     description: "Research a query with bounded parallelism, cross-check the evidence, and write a cited report",
+    when_to_use: "Compare, investigate, or research a question that needs sourced claims. /deep-research, research this, write a cited report.",
     phases: [
         #{ title: "Plan", detail: "Choose a small set of independent research questions" },
         #{ title: "Research", detail: "Collect structured claims, evidence, and sources in parallel" },

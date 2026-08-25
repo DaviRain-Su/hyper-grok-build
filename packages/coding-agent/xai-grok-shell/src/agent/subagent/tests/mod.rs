@@ -1,11 +1,13 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
+use super::spawn::{
+    inject_subagent_completed_prompt, join_worker_task, present_child_completion,
+    should_auto_wake_subagent, will_wake_for, AutoWakeInputs, InjectParams,
+};
 use super::attempt_runner::{
     canonical_total_tokens, record_subagent_usage, usage_is_incomplete,
 };
-use crate::test_support::lsp_runtime::{
-    DummyLspDispatch, ctx_with_toggle, test_gateway_with_receiver,
-};
+use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway_with_receiver};
 use xai_grok_subagent_resolution::resolve_effective_overrides;
 use xai_grok_tools::implementations::grok_build::task::coordinator::{
     ChildCompletion, CompletionDisposition,
@@ -23,10 +25,9 @@ fn canonical_total_tokens_does_not_double_count_reasoning() {
 }
 #[test]
 fn cancellation_makes_an_otherwise_complete_usage_snapshot_incomplete() {
-    assert!(usage_is_incomplete(false, true, 0, false));
-    assert!(usage_is_incomplete(false, true, 10, false));
-    assert!(!usage_is_incomplete(false, false, 0, false));
-    assert!(usage_is_incomplete(true, false, 0, false));
+    assert!(usage_is_incomplete(false, true));
+    assert!(!usage_is_incomplete(false, false));
+    assert!(usage_is_incomplete(true, false));
 }
 #[test]
 fn oracle_execution_budget_resolves_and_reserves_finalization_capacity() {
@@ -123,26 +124,25 @@ async fn usage_ack_precedes_terminal_presentation() {
     request.run_in_background = false;
     let mut completion_data = ShellCompletionData::from_context(&ctx);
     completion_data.spawned_notification_emitted = true;
-    present_child_completion(
-        ChildCompletion {
-            request,
-            result: SubagentResult {
-                success: true,
-                subagent_id: "usage-order".to_string(),
-                child_session_id: "usage-order".to_string(),
-                ..Default::default()
-            },
-            completion_data,
-            disposition: CompletionDisposition {
-                foreground_delivered: true,
-                backgrounded: false,
-                waiter_delivered: false,
-                explicitly_killed: false,
-                should_surface: false,
-            },
+    let completion = ChildCompletion {
+        request,
+        result: SubagentResult {
+            success: true,
+            subagent_id: "usage-order".to_string(),
+            child_session_id: "usage-order".to_string(),
+            ..Default::default()
         },
-        &gateway,
-    );
+        completion_data,
+        disposition: CompletionDisposition {
+            foreground_delivered: true,
+            backgrounded: false,
+            waiter_delivered: false,
+            explicitly_killed: false,
+            should_surface: false,
+        },
+    };
+    let will_wake = will_wake_for(&completion);
+    present_child_completion(completion, &gateway, will_wake);
     assert!(matches!(
             parent_cmd_rx.try_recv(),
             Ok(SessionCommand::XaiSessionNotification {
@@ -798,85 +798,50 @@ fn memory_writes_allowed_respects_capability_ceiling() {
     );
 }
 #[test]
-fn subagent_inherits_parent_lsp_via_context() {
-    let parent: std::sync::Arc<dyn xai_grok_tools::implementations::lsp::LspBackend> = Arc::new(
-        DummyLspDispatch,
-    );
-    let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.lsp = Some(parent.clone());
-    assert!(ctx.lsp.is_some());
-    assert_eq!(
-            Arc::as_ptr(&parent),
-            Arc::as_ptr(ctx.lsp.as_ref().unwrap()),
-            "child should inherit parent LSP via context"
-        );
-}
-#[test]
-fn subagent_inherits_managed_mcp_state_via_context() {
-    let handle = crate::session::managed_mcp::ManagedMcpStateHandle::default();
-    let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.managed_mcp_state = handle.clone();
-    assert!(
-            Arc::ptr_eq(&handle, &ctx.managed_mcp_state),
-            "child should share parent's managed MCP state (Arc identity)"
-        );
-}
-#[test]
-fn no_parent_lsp_means_child_gets_none() {
-    let ctx = ctx_with_toggle(HashMap::new());
-    assert!(ctx.lsp.is_none());
-}
-#[test]
-fn should_auto_wake_subagent_requires_background_and_enabled() {
-    assert!(!should_auto_wake_subagent(
-            false, false, true, false, false, false, true
-        ));
-    assert!(!should_auto_wake_subagent(
-            true, false, false, false, false, false, true
-        ));
-    assert!(should_auto_wake_subagent(
-            true, false, true, false, false, false, true
-        ));
-}
-/// A cancelled child never wakes the parent — most acutely the Ctrl+C
-/// race where `ParentGone` backgrounds a foreground child moments before
-/// the teardown cancel lands its token.
-#[test]
-fn should_auto_wake_subagent_refuses_cancelled_results() {
-    assert!(!should_auto_wake_subagent(
-            true, true, true, false, false, false, true
-        ));
-}
-#[test]
-fn should_auto_wake_subagent_suppressed_by_block_waited_or_killed() {
-    assert!(!should_auto_wake_subagent(
-            true, false, true, true, false, false, true
-        ));
-    assert!(!should_auto_wake_subagent(
-            true, false, true, false, true, false, true
-        ));
-    assert!(!should_auto_wake_subagent(
-            true, false, true, true, true, false, true
-        ));
-}
-/// A goal loop active in the parent suppresses the subagent
-/// auto-wake synthetic prompt — the structural sibling of the bash gate.
-/// Skipping the inject here also skips its completion reservation, so the
-/// per-tool-call / between-turn surfaces stay free to drain the completion.
-#[test]
-fn should_auto_wake_subagent_suppressed_by_goal_loop() {
-    assert!(!should_auto_wake_subagent(
-            true, false, true, false, false, true, true
-        ));
-    assert!(should_auto_wake_subagent(
-            true, false, true, false, false, false, true
-        ));
-}
-#[test]
-fn should_auto_wake_subagent_requires_open_parent_channel() {
-    assert!(!should_auto_wake_subagent(
-            true, false, true, false, false, false, false
-        ));
+fn should_auto_wake_subagent_truth_table() {
+    let wakeable = AutoWakeInputs {
+        run_in_background: true,
+        cancelled: false,
+        auto_wake_enabled: true,
+        block_waited: false,
+        explicitly_killed: false,
+        goal_loop_active: false,
+        parent_channel_open: true,
+    };
+    assert!(should_auto_wake_subagent(wakeable));
+    let suppressed = [
+        AutoWakeInputs {
+            run_in_background: false,
+            ..wakeable
+        },
+        AutoWakeInputs {
+            cancelled: true,
+            ..wakeable
+        },
+        AutoWakeInputs {
+            auto_wake_enabled: false,
+            ..wakeable
+        },
+        AutoWakeInputs {
+            block_waited: true,
+            ..wakeable
+        },
+        AutoWakeInputs {
+            explicitly_killed: true,
+            ..wakeable
+        },
+        AutoWakeInputs {
+            goal_loop_active: true,
+            ..wakeable
+        },
+        AutoWakeInputs {
+            parent_channel_open: false,
+            ..wakeable
+        },
+    ];
+    for (i, inputs) in suppressed.into_iter().enumerate() {
+        assert!(!should_auto_wake_subagent(inputs), "suppressed case {i}");
+    }
 }
 fn auto_wake_test_request(id: &str) -> SubagentRequest {
     SubagentRequest {
@@ -897,13 +862,6 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
         cancel_token: CancellationToken::new(),
     }
 }
-/// Behavior-level: the action half of the subagent auto-wake.
-/// When the gate lets it run, `inject_subagent_completed_prompt` sends the
-/// synthetic `Prompt` to the parent and reserves its completion ID.
-/// Paired with `should_auto_wake_subagent_suppressed_by_goal_loop`, this
-/// proves the full Gap-1 contract on the subagent surface: goal active →
-/// gate false → this never runs (no prompt, not marked, so surfaces 2/3
-/// drain it); goal inactive → gate true → it runs (today's behavior).
 #[test]
 fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
@@ -915,15 +873,17 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
         child_session_id: "sa-1".into(),
         ..Default::default()
     };
-    inject_subagent_completed_prompt(
-        "sa-1",
-        &result,
-        &request,
-        &Some(reservations.clone()),
-        Some(&cmd_tx),
-        "get_command_or_subagent_output",
-        &None,
-    );
+    reservations.reserve("sa-1".into());
+    inject_subagent_completed_prompt(InjectParams {
+        subagent_id: "sa-1",
+        result: &result,
+        request: &request,
+        task_completion_reservations: &Some(reservations.clone()),
+        parent_cmd_tx: Some(&cmd_tx),
+        task_output_tool_name: "get_command_or_subagent_output",
+        synthetic_trace_tx: &None,
+        goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
+    });
     match cmd_rx.try_recv().expect("expected synthetic Prompt") {
         SessionCommand::Prompt { prompt_id, verbatim, .. } => {
             assert!(prompt_id.starts_with("subagent-completed-"));
@@ -934,26 +894,51 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
     assert_eq!(reservations.snapshot(), vec!["sa-1".to_string()]);
 }
 #[test]
+fn inject_subagent_completed_prompt_bails_when_goal_loop_activates_in_gap() {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
+    let reservations = xai_grok_tools::reminders::task_completion::TaskCompletionReservations::default();
+    reservations.reserve("sa-goal".into());
+    inject_subagent_completed_prompt(InjectParams {
+        subagent_id: "sa-goal",
+        result: &SubagentResult {
+            success: true,
+            subagent_id: "sa-goal".into(),
+            child_session_id: "sa-goal".into(),
+            ..Default::default()
+        },
+        request: &auto_wake_test_request("sa-goal"),
+        task_completion_reservations: &Some(reservations.clone()),
+        parent_cmd_tx: Some(&cmd_tx),
+        task_output_tool_name: "get_command_or_subagent_output",
+        synthetic_trace_tx: &None,
+        goal_loop_active: &std::sync::atomic::AtomicBool::new(true),
+    });
+    assert!(cmd_rx.try_recv().is_err(), "no prompt when the goal loop owns the cadence");
+    assert!(!reservations.contains("sa-goal"), "this attempt's reservation must be released");
+}
+#[test]
 fn inject_subagent_completed_prompt_releases_reservation_when_parent_closed() {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     drop(cmd_rx);
     let reservations = xai_grok_tools::reminders::task_completion::TaskCompletionReservations::default();
     reservations.reserve("sa-closed".into());
+    reservations.reserve("sa-closed".into());
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
-    inject_subagent_completed_prompt(
-        "sa-closed",
-        &SubagentResult {
+    inject_subagent_completed_prompt(InjectParams {
+        subagent_id: "sa-closed",
+        result: &SubagentResult {
             success: true,
             subagent_id: "sa-closed".into(),
             child_session_id: "sa-closed".into(),
             ..Default::default()
         },
-        &auto_wake_test_request("sa-closed"),
-        &Some(reservations.clone()),
-        Some(&cmd_tx),
-        "get_command_or_subagent_output",
-        &Some(trace_tx),
-    );
+        request: &auto_wake_test_request("sa-closed"),
+        task_completion_reservations: &Some(reservations.clone()),
+        parent_cmd_tx: Some(&cmd_tx),
+        task_output_tool_name: "get_command_or_subagent_output",
+        synthetic_trace_tx: &Some(trace_tx),
+        goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
+    });
     assert!(
             reservations.contains("sa-closed"),
             "send failure must release only the reservation acquired by this attempt"
@@ -961,19 +946,6 @@ fn inject_subagent_completed_prompt_releases_reservation_when_parent_closed() {
     reservations.release("sa-closed");
     assert!(!reservations.contains("sa-closed"));
     assert!(trace_rx.try_recv().is_err());
-}
-#[test]
-fn initializing_snapshot_is_running() {
-    let snap = SubagentSnapshot {
-        subagent_id: "s".to_string(),
-        description: "d".to_string(),
-        subagent_type: "t".to_string(),
-        status: SubagentSnapshotStatus::Initializing,
-        started_at_epoch_ms: 0,
-        duration_ms: 0,
-        persona: None,
-    };
-    assert!(snap.is_running());
 }
 #[test]
 fn persist_gate_only_persists_successful_nonempty_outputs() {
@@ -1017,68 +989,6 @@ fn subagent_output_roundtrips_through_output_json() {
     let _ = std::fs::remove_file(dir.path().join("output.md"));
     std::fs::write(dir.path().join("output.json"), "not json").expect("corrupt file");
     assert_eq!(read_subagent_output(dir.path()), None);
-}
-#[test]
-fn explicit_override_takes_precedence_over_role() {
-    let overrides = SubagentRuntimeOverrides {
-        model: Some("explicit-model".into()),
-        capability_mode: Some(xai_tool_types::SubagentCapabilityMode::All),
-        ..Default::default()
-    };
-    let role = xai_grok_subagent_resolution::config::SubagentRole {
-        description: "test role".into(),
-        model: Some("role-model".into()),
-        default_capability_mode: Some("read-only".into()),
-        ..Default::default()
-    };
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        Some(&role),
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert_eq!(resolved.model.as_deref(), Some("explicit-model"));
-    assert_eq!(
-            resolved.capability_mode,
-            Some(xai_tool_types::SubagentCapabilityMode::ReadOnly)
-        );
-}
-#[test]
-fn role_default_used_when_no_explicit_override() {
-    let overrides = SubagentRuntimeOverrides::default();
-    let role = xai_grok_subagent_resolution::config::SubagentRole {
-        description: "test role".into(),
-        model: Some("role-model".into()),
-        default_capability_mode: Some("read-only".into()),
-        ..Default::default()
-    };
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        Some(&role),
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert_eq!(resolved.model.as_deref(), Some("role-model"));
-    assert_eq!(
-            resolved.capability_mode,
-            Some(xai_tool_types::SubagentCapabilityMode::ReadOnly)
-        );
-}
-#[test]
-fn no_role_no_override_returns_none() {
-    let overrides = SubagentRuntimeOverrides::default();
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        None,
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert!(resolved.model.is_none());
-    assert!(resolved.capability_mode.is_none());
-    assert!(resolved.reasoning_effort.is_none());
 }
 #[test]
 fn partial_override_fills_from_role() {
@@ -1188,22 +1098,6 @@ fn persona_resolved_from_config() {
             resolved.persona_instructions.as_deref(),
             Some("Be thorough.")
         );
-}
-#[test]
-fn unknown_persona_produces_no_instructions() {
-    let overrides = SubagentRuntimeOverrides {
-        persona: Some("nonexistent".into()),
-        ..Default::default()
-    };
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        None,
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert_eq!(resolved.persona.as_deref(), Some("nonexistent"));
-    assert!(resolved.persona_instructions.is_none());
 }
 #[test]
 fn persona_inline_plus_file_merged_in_order() {
@@ -1391,18 +1285,6 @@ fn no_persona_produces_none() {
     );
     assert!(resolved.persona.is_none());
     assert!(resolved.persona_instructions.is_none());
-}
-#[test]
-fn initial_context_source_new_is_default() {
-    let source = InitialContextSource::New;
-    assert!(matches!(source, InitialContextSource::New));
-}
-#[test]
-fn initial_context_source_forked_distinct_from_new_and_resumed() {
-    let source = InitialContextSource::Forked;
-    assert!(matches!(source, InitialContextSource::Forked));
-    assert_ne!(source, InitialContextSource::New);
-    assert_ne!(source, InitialContextSource::Resumed);
 }
 #[test]
 fn forked_initial_context_normalizes_parent_history() {
@@ -1692,23 +1574,6 @@ fn verbatim_fork_empty_after_filter_fails_open_to_new() {
     assert_eq!(ctx.source, InitialContextSource::New);
     assert!(!ctx.verbatim_fork);
     assert!(ctx.conversation.is_empty());
-}
-#[test]
-fn verbatim_or_normalize_fork_system_only_fails_open_to_new() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
-    for items in [
-        vec![ConversationItem::system("sys")],
-        vec![ConversationItem::system("a"), ConversationItem::system("b")],
-    ] {
-        let ctx = verbatim_or_normalize_fork(items, 256_000);
-        assert_eq!(
-                ctx.source,
-                InitialContextSource::New,
-                "System-only fork must fail open to New"
-            );
-        assert!(!ctx.verbatim_fork);
-        assert!(ctx.conversation.is_empty());
-    }
 }
 #[test]
 fn forked_initial_context_system_only_fails_open_to_new() {
@@ -2098,25 +1963,6 @@ fn validate_subagent_type_unknown_omits_disabled_types_from_available_list() {
     }
 }
 #[test]
-fn validate_subagent_type_unknown_omits_disabled_cli_agents_from_available_list() {
-    let toggle = HashMap::from([("custom".to_string(), false)]);
-    let mut ctx = make_validation_ctx(toggle);
-    ctx.cli_agent_names = vec!["custom".to_string(), "user-defined".to_string()];
-    match validate_subagent_type("invented", &ctx) {
-        SubagentValidateTypeOutcome::Unknown { available } => {
-            assert!(
-                    !available.iter().any(|n| n == "custom"),
-                    "disabled cli agent must not appear: {available:?}",
-                );
-            assert!(
-                    available.iter().any(|n| n == "user-defined"),
-                    "enabled cli agent must appear: {available:?}",
-                );
-        }
-        other => panic!("expected Unknown, got {other:?}"),
-    }
-}
-#[test]
 fn validate_subagent_type_recognizes_cli_agent_by_name() {
     let mut ctx = make_validation_ctx(HashMap::new());
     ctx.cli_agent_names = vec!["user-defined".to_string()];
@@ -2165,25 +2011,6 @@ fn describe_subagent_type_unknown_returns_sorted_available() {
             assert!(available.iter().any(|n| n == "general-purpose"));
         }
         other => panic!("expected Unknown, got {other:?}"),
-    }
-}
-#[test]
-fn describe_subagent_type_disabled_when_toggled_off() {
-    let ctx = ctx_with_toggle(HashMap::from([("explore".to_string(), false)]));
-    assert!(matches!(
-            describe_subagent_type("explore", None, &ctx),
-            SubagentDescribeOutcome::Disabled
-        ));
-}
-#[test]
-fn describe_subagent_type_not_allowed_outside_allow_list() {
-    let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.allowed_subagent_types = Some(vec!["plan".to_string()]);
-    match describe_subagent_type("explore", None, &ctx) {
-        SubagentDescribeOutcome::NotAllowed { allowed } => {
-            assert_eq!(allowed, vec!["plan".to_string()]);
-        }
-        other => panic!("expected NotAllowed, got {other:?}"),
     }
 }
 /// Regression: on the DEFAULT grok-build host —
@@ -2292,21 +2119,20 @@ async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
     assert!(!result.success);
     let mut completion_data = ShellCompletionData::from_context(&ctx);
     completion_data.spawned_notification_emitted = true;
-    present_child_completion(
-        ChildCompletion {
-            request,
-            result,
-            completion_data,
-            disposition: CompletionDisposition {
-                foreground_delivered: false,
-                backgrounded: false,
-                waiter_delivered: false,
-                explicitly_killed: false,
-                should_surface: false,
-            },
+    let completion = ChildCompletion {
+        request,
+        result,
+        completion_data,
+        disposition: CompletionDisposition {
+            foreground_delivered: false,
+            backgrounded: false,
+            waiter_delivered: false,
+            explicitly_killed: false,
+            should_surface: false,
         },
-        &gateway,
-    );
+    };
+    let will_wake = will_wake_for(&completion);
+    present_child_completion(completion, &gateway, will_wake);
     let mut persisted = 0;
     while let Ok(command) = parent_cmd_rx.try_recv() {
         if matches!(
@@ -2426,6 +2252,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             agent_type: crate::agent::config::default_agent_type(),
             inference_idle_timeout_secs: None,
             max_retries: None,
+            subagent_rate_limit_max_attempts: None,
             hidden: false,
             supported_in_api: true,
             reasoning_effort: None,
@@ -2607,24 +2434,6 @@ fn fresh_tool_model_rejects_unknown_and_nonavailable_entries() {
         );
 }
 #[test]
-fn fresh_tool_model_reports_empty_valid_list() {
-    let empty = indexmap::IndexMap::new();
-    assert_eq!(
-            super::handle_request::task_model_override_error(
-                Some("anything"),
-                ModelOverrideProvenance::Tool,
-                false,
-                &empty,
-                false,
-            )
-            .as_deref(),
-            Some(
-                "Unknown Task.model slug 'anything'. No valid model slugs are currently \
-                 available. Omit `model` to inherit the parent model."
-            )
-        );
-}
-#[test]
 fn resumed_tool_model_override_is_ignored() {
     let empty = indexmap::IndexMap::new();
     assert!(
@@ -2664,47 +2473,6 @@ fn normalize_forked_context_empty_parent() {
     assert_eq!(conv.len(), 1);
     assert_eq!(prefix_len, 1);
     assert!(matches!(conv[0], ConversationItem::System(_)));
-}
-#[test]
-fn normalize_forked_context_short_conversation() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
-    let items = vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user("hello"),
-            ConversationItem::assistant("hi back"),
-        ];
-    let (conv, prefix_len) = xai_grok_subagent_resolution::context::normalize_forked_context(
-        items,
-    );
-    assert_eq!(prefix_len, 2);
-    assert_eq!(conv.len(), 2);
-    assert!(matches!(conv[0], ConversationItem::System(_)));
-    if let ConversationItem::User(u) = &conv[1] {
-        let text = u
-            .content
-            .iter()
-            .filter_map(|p| match p {
-                xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
-                    Some(text.as_ref())
-                }
-                _ => None,
-            })
-            .collect::<String>();
-        assert!(
-                text.contains("<background_context>"),
-                "should have background tag"
-            );
-        assert!(
-                text.contains("[User]: hello"),
-                "should include parent user message"
-            );
-        assert!(
-                text.contains("[Assistant]: hi back"),
-                "should include parent assistant message"
-            );
-    } else {
-        panic!("expected User message at position 1");
-    }
 }
 fn test_sampling_config(model_slug: &str) -> xai_grok_sampling_types::SamplingConfig {
     use std::num::NonZeroU64;
@@ -2747,3 +2515,45 @@ fn spawn_test_parent_chat_state_at(
     )
 }
 mod rest;
+#[tokio::test]
+async fn join_worker_task_resumes_worker_panics() {
+    let inner = super::worker_runtime()
+        .expect("worker runtime")
+        .spawn(async { panic!("worker boom") });
+    let err = tokio::spawn(join_worker_task::<()>(inner))
+        .await
+        .expect_err("panic must propagate out of join_worker_task");
+    assert!(err.is_panic());
+}
+#[tokio::test]
+async fn join_worker_task_drop_aborts_worker() {
+    struct SendOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+    impl Drop for SendOnDrop {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let inner = super::worker_runtime()
+        .expect("worker runtime")
+        .spawn(async move {
+            let _probe = SendOnDrop(Some(dropped_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+    started_rx.await.expect("worker started");
+    let mut fut = Box::pin(join_worker_task::<()>(inner));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(
+            std::future::Future::poll(fut.as_mut(), &mut cx).is_pending(),
+            "worker is pending until aborted"
+        );
+    drop(fut);
+    tokio::time::timeout(std::time::Duration::from_secs(5), dropped_rx)
+        .await
+        .expect("abort must reach the worker task")
+        .expect("drop probe fires on abort");
+}

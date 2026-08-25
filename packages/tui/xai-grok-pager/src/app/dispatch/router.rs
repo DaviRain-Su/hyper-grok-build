@@ -244,6 +244,14 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             super::dispatch_initial_prompt(app, prompt)
         }
         Action::RelaunchInScreenMode { minimal } => {
+            if !crate::app::screen_mode_relaunch::exec_switch_forced() {
+                app.pending_screen_mode_switch = Some(if minimal {
+                    crate::app::ScreenMode::Minimal
+                } else {
+                    crate::app::ScreenMode::Fullscreen
+                });
+                return vec![];
+            }
             if let Some(session_id) = app.active_session_id().map(str::to_owned) {
                 app.relaunch = Some(crate::app::app_view::ScreenModeRelaunch {
                     minimal,
@@ -718,7 +726,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowDebugStatus => {
             let on = |b: bool| if b { "on" } else { "off" };
             let msg = format!(
-                "debug toggles: scroll {} \u{00b7} fps {} \u{00b7} log {} \u{2014} toggle with /debug <scroll|fps|log>",
+                "debug toggles: scroll {} \u{00b7} fps {} \u{00b7} log {}. Toggle with /debug <scroll|fps|log>",
                 on(app.scroll_debug_hud.enabled()),
                 on(app.fps_hud.enabled()),
                 on(app.scroll_state.scroll_log_active()),
@@ -844,13 +852,13 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             let Some(agent) = app.agents.get_mut(&id) else {
                 return vec![];
             };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
             if let Some(ref mut modal) = agent.extensions_modal {
                 modal.skills_data = crate::views::extensions_modal::TabDataState::Loading;
                 modal.workflows_data = crate::views::extensions_modal::TabDataState::Loading;
             }
-            let Some(session_id) = agent.session.session_id.clone() else {
-                return vec![];
-            };
             vec![
                 Effect::FetchSkillsList {
                     agent_id: id,
@@ -1144,8 +1152,14 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowPlan => dispatch_show_plan(app),
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),
-        Action::OpenFeedbackPane => dispatch_open_feedback_pane(app),
-        Action::SendFeedback(text) => dispatch_send_feedback(app, text),
+        Action::OpenFeedbackPane { prefill, images } => {
+            dispatch_open_feedback_pane(app, prefill, images)
+        }
+        Action::SendFeedback {
+            text,
+            images,
+            trace,
+        } => dispatch_send_feedback(app, text, images, trace),
         Action::EnterRememberMode => dispatch_enter_remember_mode(app),
         Action::SendRememberNote(text) => dispatch_send_remember_note(app, text),
         Action::SaveRememberNoteFromModal => dispatch_save_remember_note_from_modal(app),
@@ -1484,12 +1498,13 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::DashboardDelete => dispatch_dashboard_delete(app),
         Action::DashboardCycleMode => {
             let policy_block = app.yolo_policy_block;
+            let auto_mode_gate = app.auto_mode_gate;
             if let Some(d) = app.dashboard.as_mut() {
-                d.pending_mode = d.pending_mode.cycle();
+                d.pending_mode = d.pending_mode.cycle(auto_mode_gate);
                 if d.pending_mode == crate::views::dashboard::DashboardDispatchMode::AlwaysApprove
                     && let Some(warning) = policy_block
                 {
-                    d.pending_mode = d.pending_mode.cycle();
+                    d.pending_mode = d.pending_mode.cycle(auto_mode_gate);
                     d.set_error_toast(warning);
                 }
             }
@@ -1611,9 +1626,29 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::JumpPickerSelect(turn_idx) => dispatch_jump_picker_select(app, turn_idx),
         Action::JumpDismiss => dispatch_jump_dismiss(app),
     };
+    restore_stash_where_the_draft_was_consumed(app);
     app.reconcile_foreign_resume_launch();
     sync_sleep_inhibitor(app);
     effects
+}
+/// Drains the agent and its focused subagent: the paste drain reports on the parent while `with_active_agent` would pick the child,
+/// and a stranded flag restores on a later dispatch.
+fn restore_stash_where_the_draft_was_consumed(app: &mut AppView) {
+    let ActiveView::Agent(id) = app.active_view else {
+        return;
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return;
+    };
+    if let Some(child_sid) = agent.active_subagent.clone()
+        && let Some(child) = agent.subagent_views.get_mut(&child_sid)
+        && child.take_draft_consumed()
+    {
+        child.auto_restore_stash_after_send();
+    }
+    if agent.take_draft_consumed() {
+        agent.auto_restore_stash_after_send();
+    }
 }
 pub(super) fn dispatch_action_result(
     app: &mut AppView,

@@ -1139,6 +1139,7 @@ async fn fetch_bundle_propagates_legacy_error_after_fallback() {
 /// Regression: reqwest .header() appends — duplicate
 /// or overlapping headers cause Cloudflare to reject the request.
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::disallowed_methods)]
 async fn auth_headers_do_not_collide_with_json() {
     let client =
         BackendClient::with_base_url("http://localhost").with_auth_manager(test_auth_manager());

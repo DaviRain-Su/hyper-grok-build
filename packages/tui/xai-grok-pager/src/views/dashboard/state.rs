@@ -16,7 +16,7 @@ use crate::app::agent::AgentId;
 use crate::app::app_view::InputOutcome;
 use crate::input::line_editor::{LineEditOutcome, LineEditor};
 use crate::key;
-use crate::views::prompt_widget::PromptWidget;
+use crate::views::prompt_widget::{PromptEvent, PromptWidget};
 use xai_grok_shell::session::persistence::MAX_TITLE_SCALARS as MAX_RENAME_SCALARS;
 
 const PROMPT_MULTI_CLICK_MS: u128 = 300;
@@ -734,21 +734,24 @@ pub struct DashboardState {
 }
 
 /// Mode staged for the next agent the dashboard spawns. Mirrors the agent
-/// view's Shift+Tab cycle (Normal → Plan → Always-Approve → Normal).
+/// view's Shift+Tab cycle (Normal → Plan → Auto → Always-Approve → Normal
+/// when Auto is enabled).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DashboardDispatchMode {
     #[default]
     Normal,
     Plan,
+    Auto,
     AlwaysApprove,
 }
 
 impl DashboardDispatchMode {
     /// Advance to the next mode in the Shift+Tab rotation.
-    pub fn cycle(self) -> Self {
+    pub fn cycle(self, auto_mode_gate: bool) -> Self {
         match self {
             Self::Normal => Self::Plan,
-            Self::Plan => Self::AlwaysApprove,
+            Self::Plan if auto_mode_gate => Self::Auto,
+            Self::Plan | Self::Auto => Self::AlwaysApprove,
             Self::AlwaysApprove => Self::Normal,
         }
     }
@@ -2050,10 +2053,7 @@ impl DashboardState {
     /// rooted at the peeked agent's cwd. All reply-composing paths route
     /// through here so the lazy retarget lands before a freshly typed
     /// `@` kicks off the directory walk on a stale root.
-    fn peek_reply_handle_key(
-        &mut self,
-        key: &KeyEvent,
-    ) -> crate::views::prompt_widget::PromptEvent {
+    fn peek_reply_handle_key(&mut self, key: &KeyEvent) -> PromptEvent {
         self.ensure_peek_reply_cwd();
         self.peek_reply.handle_key(key)
     }
@@ -2323,12 +2323,12 @@ impl DashboardState {
         } else {
             self.dispatch.handle_paste(text)
         };
-        if !peek && matches!(event, crate::views::prompt_widget::PromptEvent::Edited) {
+        if !peek && matches!(event, PromptEvent::Edited) {
             self.dispatch.refresh_slash(&self.models);
         }
         let completion = match event {
-            crate::views::prompt_widget::PromptEvent::Edited => ClipboardTextInsertion::Inserted,
-            crate::views::prompt_widget::PromptEvent::Ignored => ClipboardTextInsertion::Failed,
+            PromptEvent::Edited => ClipboardTextInsertion::Inserted,
+            PromptEvent::Ignored => ClipboardTextInsertion::Failed,
         };
         (InputOutcome::Changed, completion)
     }
@@ -2512,7 +2512,7 @@ impl DashboardState {
         let mut attachment = match image {
             ProbedAttachment::Image(pasted) => {
                 if peek_in_question {
-                    self.set_error_toast("Pasted image discarded — reply switched to a question");
+                    self.set_error_toast("Pasted image discarded: reply switched to a question");
                     ClipboardPasteCompletion::Dropped
                 } else {
                     let (_, completion) = if peek {
@@ -2537,7 +2537,7 @@ impl DashboardState {
             if file_urls.as_deref().is_some_and(|urls| {
                 !crate::prompt_images::try_read_images_from_paste(urls).is_empty()
             }) {
-                self.set_error_toast("Pasted image discarded — reply switched to a question");
+                self.set_error_toast("Pasted image discarded: reply switched to a question");
             }
             attachment = ClipboardPasteCompletion::Dropped;
         }
@@ -2613,12 +2613,12 @@ impl DashboardState {
                 });
             } else if !same_row {
                 // Never reply to a row the user is no longer peeking.
-                self.set_error_toast("Reply canceled — peek panel changed");
+                self.set_error_toast("Reply canceled: peek panel changed");
             } else {
                 // A question now owns the panel (Enter answers it there, and the
                 // reply dispatch would silently queue a prompt + wipe the draft
                 // behind the dialog) — drop the stash; the draft stays put.
-                self.set_error_toast("Reply canceled — answer the question first");
+                self.set_error_toast("Reply canceled: answer the question first");
             }
         }
         actions
@@ -2682,10 +2682,10 @@ impl DashboardState {
         // below (so e.g. Ctrl+X stop still fires with the dropdown up).
         if self.peek_reply.file_search_visible() {
             match self.peek_reply_handle_key(key) {
-                crate::views::prompt_widget::PromptEvent::Edited => {
+                PromptEvent::Edited => {
                     return Some(InputOutcome::Changed);
                 }
-                crate::views::prompt_widget::PromptEvent::Ignored => {}
+                PromptEvent::Ignored => {}
             }
         }
 
@@ -2914,12 +2914,7 @@ impl DashboardState {
             // the selected one. Delegated to the reply widget so the
             // feedback field gets the same editing surface (selection,
             // word ops, chips) as the main reply line.
-            if on_reject
-                && matches!(
-                    self.peek_reply_handle_key(key),
-                    crate::views::prompt_widget::PromptEvent::Edited
-                )
-            {
+            if on_reject && matches!(self.peek_reply_handle_key(key), PromptEvent::Edited) {
                 return Some(InputOutcome::Changed);
             }
             // Modal while the question picker is up: consume any other key so
@@ -3022,8 +3017,8 @@ impl DashboardState {
             // dispatch input below; app-global shortcuts still fire off
             // the `Unchanged` bubble-up.
             return Some(match self.peek_reply_handle_key(key) {
-                crate::views::prompt_widget::PromptEvent::Edited => InputOutcome::Changed,
-                crate::views::prompt_widget::PromptEvent::Ignored => InputOutcome::Unchanged,
+                PromptEvent::Edited => InputOutcome::Changed,
+                PromptEvent::Ignored => InputOutcome::Unchanged,
             });
         }
 
@@ -3232,11 +3227,11 @@ impl DashboardState {
         // handlers, mirroring `agent_view::handle_prompt_key`.
         if self.dispatch.file_search_visible() {
             match self.dispatch.handle_key(key) {
-                crate::views::prompt_widget::PromptEvent::Edited => {
+                PromptEvent::Edited => {
                     self.dispatch.refresh_slash(&self.models);
                     return InputOutcome::Changed;
                 }
-                crate::views::prompt_widget::PromptEvent::Ignored => {
+                PromptEvent::Ignored => {
                     // Not a picker key — fall through to normal handling.
                 }
             }
@@ -3641,7 +3636,9 @@ impl DashboardState {
 
         // Forward to the prompt widget (single-line).
         let old = self.dispatch.text().to_string();
+        let had_highlight = self.dispatch.textarea.selection_range().is_some();
         let event = self.dispatch.handle_key(key);
+        let dropped_highlight = had_highlight && self.dispatch.textarea.selection_range().is_none();
         let new = self.dispatch.text().to_string();
         if old != new {
             // Live-update the filter as the user types ONLY in search
@@ -3674,7 +3671,7 @@ impl DashboardState {
                 self.manual_scroll_active = false;
             }
             InputOutcome::Changed
-        } else if event == crate::views::prompt_widget::PromptEvent::Edited {
+        } else if event == PromptEvent::Edited || dropped_highlight {
             InputOutcome::Changed
         } else {
             InputOutcome::Unchanged
@@ -4577,6 +4574,7 @@ fn dashboard_action_for_id(
         // flag a missing case when a new Dashboard* action is added.
         ActionId::SendPrompt
         | ActionId::InterjectPrompt
+        | ActionId::StashPrompt
         | ActionId::ScrollUp
         | ActionId::ScrollDown
         | ActionId::PageUp

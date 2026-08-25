@@ -46,7 +46,7 @@ steps:
   - action: type_text
     text: "/tra"
   - action: wait_for_text
-    text: "View the full conversation transcript"
+    text: "View the conversation transcript"
     timeout_ms: 10000
   - action: screenshot
     name: slash-menu

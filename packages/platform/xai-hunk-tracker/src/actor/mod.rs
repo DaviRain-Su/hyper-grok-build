@@ -23,9 +23,10 @@ pub use mutations::{REFRESH_SCAN_LOG_PREFIX, REFRESH_SKIP_LOG_PREFIX};
 mod tests;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::commands::HunkTrackerCommand;
 use crate::events::HunkEvent;
@@ -359,6 +360,13 @@ impl HunkTrackerActor {
             HunkTrackerCommand::SetMode { mode } => {
                 self.set_mode(mode).await;
             }
+            HunkTrackerCommand::SetWorkingDir { working_dir, reply } => {
+                self.rekey_paths_for_working_dir(&working_dir);
+                self.working_dir = working_dir;
+                self.git_repo_state = GitRepoState::Unknown;
+                self.repo_sync_state = RepoSyncState::default();
+                let _ = reply.send(());
+            }
             HunkTrackerCommand::HunkAction {
                 hunk_id,
                 action,
@@ -512,6 +520,68 @@ impl HunkTrackerActor {
             }
         }
         true
+    }
+
+    /// Remount rebases in-memory hunk keys onto the new guest root so
+    /// accept/reject still target the live tree instead of the pre-virt cwd.
+    fn rekey_paths_for_working_dir(&mut self, new_cwd: &Path) {
+        if new_cwd == self.working_dir {
+            return;
+        }
+        let old = self.working_dir.clone();
+        let rewrite = |path: PathBuf| {
+            // Virt remount always moves into a subdirectory of `old`. Paths
+            // already under the new guest root must not be re-prefixed.
+            if path.starts_with(new_cwd) {
+                return path;
+            }
+            crate::types::rewrite_single_path(&path, &old, &old, new_cwd).unwrap_or(path)
+        };
+        let rekey_state = |mut state: FileHunkState, new_path: &Path| {
+            state.hunks = state
+                .hunks
+                .into_iter()
+                .map(|hunk| {
+                    let mut owned = (*hunk).clone();
+                    owned.path = new_path.to_path_buf();
+                    Arc::new(owned)
+                })
+                .collect();
+            state
+        };
+        // Insert already-guest keys first so a collision with a rewritten
+        // `/workspace/foo` keeps the `/workspace/<conv>/foo` baseline.
+        let pairs: Vec<_> = self.file_states.drain().collect();
+        let (already, rewritten): (Vec<_>, Vec<_>) = pairs
+            .into_iter()
+            .partition(|(path, _)| path.starts_with(new_cwd));
+        let mut next = HashMap::new();
+        for (path, state) in already {
+            let new_path = rewrite(path);
+            next.insert(new_path.clone(), rekey_state(state, &new_path));
+        }
+        for (path, state) in rewritten {
+            let new_path = rewrite(path);
+            let state = rekey_state(state, &new_path);
+            match next.entry(new_path.clone()) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(state);
+                }
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    warn!(
+                        path = %new_path.display(),
+                        "hunk rekey collision; merging remounted file state"
+                    );
+                    let dest = o.get_mut();
+                    dest.hunks.extend(state.hunks);
+                    dest.is_agent_file |= state.is_agent_file;
+                    dest.baseline_accepted |= state.baseline_accepted;
+                }
+            }
+        }
+        self.file_states = next;
+        self.git_dirty_cache = self.git_dirty_cache.drain().map(rewrite).collect();
+        self.git_staged_cache = self.git_staged_cache.drain().map(rewrite).collect();
     }
 
     /// Snapshot one file's state (full FileContentState incl. Binary/TooLarge).

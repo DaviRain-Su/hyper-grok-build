@@ -38,6 +38,10 @@ pub struct AuthMeta {
     /// (e.g. "SuperGrok Heavy", "X Premium", "Free"). From CCP `/settings`.
     #[serde(default)]
     pub subscription_tier: Option<String>,
+    /// Whether `/feedback` may offer a one-shot trace upload; carried on auth
+    /// meta so it refreshes with auth changes.
+    #[serde(default)]
+    pub feedback_trace_offer: bool,
 }
 
 impl Default for AuthMeta {
@@ -53,6 +57,7 @@ impl Default for AuthMeta {
             show_resolved_model: None,
             gate: None,
             subscription_tier: None,
+            feedback_trace_offer: false,
         }
     }
 }

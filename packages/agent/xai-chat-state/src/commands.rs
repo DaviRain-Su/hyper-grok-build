@@ -85,6 +85,12 @@ pub enum ChatStateCommand {
     /// Record a tool result.
     PushToolResult { item: ConversationItem },
 
+    /// Persist model output already included in the provider's usage total.
+    PushModelOutput { item: ConversationItem },
+
+    /// Persist model output whose provider response omitted usage.
+    PushUnreportedModelOutput { item: ConversationItem },
+
     /// Record accumulated token usage from a streaming response.
     RecordTokenUsage { total_tokens: u64 },
 
@@ -406,6 +412,12 @@ mod tests {
         };
         let _ = ChatStateCommand::PushToolResult {
             item: ConversationItem::tool_result("call-1", "result"),
+        };
+        let _ = ChatStateCommand::PushModelOutput {
+            item: ConversationItem::assistant("model output"),
+        };
+        let _ = ChatStateCommand::PushUnreportedModelOutput {
+            item: ConversationItem::assistant("unreported output"),
         };
         let _ = ChatStateCommand::RecordTokenUsage { total_tokens: 100 };
         let _ = ChatStateCommand::IncrementPromptIndex;

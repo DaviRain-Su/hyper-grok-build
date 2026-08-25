@@ -1064,7 +1064,7 @@ pub(super) fn validate_string(
             }
             // Reject if the model catalog hasn't loaded yet.
             if available_models.is_empty() {
-                return Some("Model catalog still loading — try again".to_string());
+                return Some("Model catalog still loading, try again".to_string());
             }
             let matched = available_models
                 .iter()

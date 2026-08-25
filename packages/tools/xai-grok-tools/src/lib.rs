@@ -23,6 +23,7 @@ pub mod computer;
 pub mod gitignore;
 pub mod implementations;
 pub mod internal_urls;
+pub mod mcp_elicitation;
 pub mod media_gen_limits;
 pub mod normalization;
 pub mod notification;

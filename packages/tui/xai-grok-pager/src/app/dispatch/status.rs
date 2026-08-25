@@ -134,7 +134,7 @@ pub(super) fn dispatch_show_session_info(app: &mut AppView) -> Vec<Effect> {
         agent_id: id,
         session_id,
         show_resolved_model: app.show_resolved_model,
-        nonce: 0,
+        nonce: Default::default(),
     }]
 }
 
@@ -180,6 +180,22 @@ fn is_current_coding_data_write(app: &AppView, seq: u64, agent_id: AgentId) -> b
     false
 }
 
+/// Take the parked /feedback trace upload iff it waits on exactly this
+/// write generation.
+fn take_pending_feedback_trace_upload(
+    app: &mut AppView,
+    seq: u64,
+) -> Option<crate::app::app_view::PendingFeedbackTraceUpload> {
+    if app
+        .feedback_trace_upload_pending
+        .as_ref()
+        .is_some_and(|p| p.seq == seq)
+    {
+        return app.feedback_trace_upload_pending.take();
+    }
+    None
+}
+
 fn log_coding_data_consent_selected(
     source: xai_grok_telemetry::events::CodingDataConsentSource,
     opted_in: bool,
@@ -194,6 +210,19 @@ fn log_coding_data_consent_selected(
     });
 }
 
+/// What [`set_coding_data_sharing_tracked`] did, so callers sequencing work
+/// on the write (e.g. a parked /feedback trace upload) can branch on a typed
+/// outcome instead of pattern-matching the effect list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SharingWriteOutcome {
+    /// A guard refused the change (ZDR / non-admin team member).
+    Refused,
+    /// The preference already matched; nothing to write.
+    AlreadySet,
+    /// A write was dispatched under this `coding_data_write_seq` generation.
+    Claimed(u64),
+}
+
 /// Set coding-data-sharing preference. SHELL-owned, auth-metadata-backed
 /// (persists via ACP ext-request, NOT `~/.grok/config.toml`).
 pub(super) fn set_coding_data_sharing(
@@ -201,10 +230,18 @@ pub(super) fn set_coding_data_sharing(
     opted_in: bool,
     source: xai_grok_telemetry::events::CodingDataConsentSource,
 ) -> Vec<Effect> {
+    set_coding_data_sharing_tracked(app, opted_in, source).0
+}
+
+pub(super) fn set_coding_data_sharing_tracked(
+    app: &mut AppView,
+    opted_in: bool,
+    source: xai_grok_telemetry::events::CodingDataConsentSource,
+) -> (Vec<Effect>, SharingWriteOutcome) {
     // ── Guard 1: Enterprise ZDR ──────────────────────────────────────
     if app.is_zdr {
         app.show_toast("\u{2717} Cannot change: Zero Data Retention enabled");
-        return vec![];
+        return (vec![], SharingWriteOutcome::Refused);
     }
     // ── Guard 2: Non-admin team member ───────────────────────────────
     if app.team_name.is_some() {
@@ -214,7 +251,7 @@ pub(super) fn set_coding_data_sharing(
             .is_some_and(|r| r.eq_ignore_ascii_case("admin"));
         if !is_admin {
             app.show_toast("\u{2717} Data sharing is controlled by your team admin");
-            return vec![];
+            return (vec![], SharingWriteOutcome::Refused);
         }
     }
     let agent_id = coding_data_sharing_agent_id(app);
@@ -228,7 +265,7 @@ pub(super) fn set_coding_data_sharing(
         effects.extend(ack_privacy_banner(app));
     }
     if prev == opted_in {
-        return effects;
+        return (effects, SharingWriteOutcome::AlreadySet);
     }
 
     if opted_in {
@@ -247,13 +284,14 @@ pub(super) fn set_coding_data_sharing(
         "setting changed",
     );
 
+    let seq = next_coding_data_write_seq(app);
     effects.push(Effect::SetCodingDataSharing {
         agent_id,
         opted_in,
         rollback_to_opted_in: prev,
-        seq: next_coding_data_write_seq(app),
+        seq,
     });
-    effects
+    (effects, SharingWriteOutcome::Claimed(seq))
 }
 
 /// Scrub an untrusted error string for toast display. Substitutes a
@@ -292,7 +330,7 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
     vec![Effect::ShowContextInfo {
         agent_id: id,
         session_id,
-        nonce: 0,
+        nonce: Default::default(),
     }]
 }
 
@@ -315,7 +353,7 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
         Some(session_id) => vec![Effect::FetchSessionUsage {
             agent_id: id,
             session_id,
-            nonce: 0,
+            nonce: Default::default(),
         }],
         None => {
             if let Some(agent) = app.agents.get_mut(&id) {
@@ -398,7 +436,7 @@ pub(super) fn append_consumer_billing_surface(app: &mut AppView, agent_id: Agent
     vec![Effect::FetchBilling {
         agent_id,
         silent: false,
-        nonce: 0,
+        nonce: Default::default(),
     }]
 }
 
@@ -422,7 +460,7 @@ pub(crate) fn commit_minimal_update_notice(app: &mut AppView, latest_version: &s
         && let Some(agent) = app.agents.get_mut(&id)
     {
         agent.scrollback.push_block(RenderBlock::system(format!(
-            "Update available: v{latest_version} — restart to apply."
+            "Update available: v{latest_version}. Restart to apply."
         )));
     }
 }
@@ -474,7 +512,7 @@ pub(super) fn dispatch_open_gboom(app: &mut AppView) -> Vec<Effect> {
     };
     if detect_graphics_protocol() == GraphicsProtocol::None {
         agent.show_toast(
-            "No demons here \u{2014} GBOOM needs a graphics-capable terminal \
+            "No demons here: GBOOM needs a graphics-capable terminal \
              (kitty, Ghostty, WezTerm, iTerm2)",
         );
         return vec![];
@@ -513,7 +551,16 @@ pub(super) fn handle_coding_data_sharing_updated(
     opted_in: bool,
     seq: u64,
 ) -> Vec<Effect> {
+    // Taken even for superseded replies: uploading on stale consent would be
+    // wrong.
+    let parked_upload = take_pending_feedback_trace_upload(app, seq);
     if !is_current_coding_data_write(app, seq, agent_id) {
+        // A dropped parked upload persisted nothing, so undo the in-session
+        // latch (same as the failure path): "nothing happened" must always
+        // leave the card offerable again.
+        if parked_upload.is_some() {
+            app.feedback_trace_choice_latched = false;
+        }
         return vec![];
     }
     // Re-anchor mirror to server-confirmed value (defense-in-depth against
@@ -536,6 +583,22 @@ pub(super) fn handle_coding_data_sharing_updated(
             effects.extend(ack_privacy_banner(app));
         }
     }
+    // The opt-in landed: release the parked upload and the deferred consent
+    // persist.
+    if let Some(pending) = parked_upload {
+        if opted_in {
+            effects.push(Effect::UploadFeedbackTrace {
+                agent_id: pending.agent_id,
+                session_id: pending.session_id,
+            });
+            effects.push(super::notes::persist_trace_upload_consent());
+        } else {
+            // The write round-tripped but the server-confirmed state is
+            // still opted out: nothing uploaded or persisted, so undo the
+            // latch like the failure path does.
+            app.feedback_trace_choice_latched = false;
+        }
+    }
     effects
 }
 
@@ -546,6 +609,12 @@ pub(super) fn handle_coding_data_sharing_failed(
     rollback_to_opted_in: bool,
     seq: u64,
 ) -> Vec<Effect> {
+    // The opt-in never landed: drop the parked upload (the storage proxy
+    // would still refuse it) and undo the in-session latch — nothing was
+    // persisted, so a later /feedback may offer the card again.
+    if take_pending_feedback_trace_upload(app, seq).is_some() {
+        app.feedback_trace_choice_latched = false;
+    }
     // A superseded failure must not revert: `rollback_to_opted_in` predates
     // the newer write, so applying it would undo a change the user made
     // after this one was sent. It must not toast either — nothing the user

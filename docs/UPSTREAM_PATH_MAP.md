@@ -67,6 +67,8 @@ Use this table (or `scripts/upstream-path-rewrite.py`) when merging upstream pat
 | `crates/codegen/xai-grok-shell` | `packages/coding-agent/xai-grok-shell` | `coding-agent` |
 | `crates/codegen/xai-grok-shell-base` | `packages/coding-agent/xai-grok-shell-base` | `coding-agent` |
 | `crates/codegen/xai-grok-shell-session-support` | `packages/coding-agent/xai-grok-shell-session-support` | `coding-agent` |
+| `crates/codegen/xai-grok-shell-terminal` | `packages/coding-agent/xai-grok-shell-terminal` | `coding-agent` |
+| `crates/codegen/xai-grok-status-line` | `packages/tui/xai-grok-status-line` | `tui` |
 | `crates/codegen/xai-grok-subagent-resolution` | `packages/agent/xai-grok-subagent-resolution` | `agent` |
 | `crates/codegen/xai-grok-telemetry` | `packages/platform/xai-grok-telemetry` | `platform` |
 | `crates/codegen/xai-grok-test-support` | `packages/platform/xai-grok-test-support` | `platform` |

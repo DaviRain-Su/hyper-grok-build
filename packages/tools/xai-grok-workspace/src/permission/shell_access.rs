@@ -298,25 +298,50 @@ pub(crate) fn command_words_write_paths(words: &[String]) -> Vec<String> {
 /// `git --output`, `cp`/`mv` dest, `tee`/`truncate`, in-place `sed`/`rustfmt`,
 /// `uniq` output, ...). No safe-sink filtering — the caller decides.
 pub(crate) fn command_write_paths_in_tree(root: Node<'_>, src: &str) -> Vec<String> {
-    let mut out = Vec::new();
+    let split = command_write_paths_split(root, src);
+    let mut out = split.redirect_paths;
+    out.extend(split.word_paths);
+    out
+}
 
+/// [`command_write_paths_in_tree`] split by provenance: redirect targets
+/// (`> f`, `>> f` — invisible to allow-rule word matching) vs command-word
+/// operands (`touch f`, `sed -i` — part of the words a rule matches). The
+/// distinction decides whether a narrow allow rule can vouch for the write.
+pub(crate) struct WritePathsSplit {
+    pub(crate) redirect_paths: Vec<String>,
+    /// A write redirect had no extractable target (`> $OUT`, `> "$(…)"`).
+    /// Fail-closed signal: the write exists but nothing can vouch for it.
+    pub(crate) unextracted_write_redirect: bool,
+    pub(crate) word_paths: Vec<String>,
+}
+
+pub(crate) fn command_write_paths_split(root: Node<'_>, src: &str) -> WritePathsSplit {
     // Output redirects (`> f`, `>> f`); fd-dups/heredocs are already skipped.
-    for redirect in shell_redirect_targets(root, src) {
-        if matches!(redirect.mode, ShellFileMode::Write)
-            && let Some(path) = redirect.path
-        {
-            out.push(path);
+    let mut redirect_paths = Vec::new();
+    let mut unextracted_write_redirect = false;
+    for r in shell_redirect_targets(root, src) {
+        if matches!(r.mode, ShellFileMode::Write) {
+            match r.path {
+                Some(path) => redirect_paths.push(path),
+                None => unextracted_write_redirect = true,
+            }
         }
     }
     // Per-command writers, after peeling env/timeout/... wrappers.
+    let mut word_paths = Vec::new();
     for invocation in shell_command_invocations(root, src) {
         let words = InvocationSlice {
             words: &invocation.words,
         }
         .literal_words();
-        out.extend(command_words_write_paths(&words));
+        word_paths.extend(command_words_write_paths(&words));
     }
-    out
+    WritePathsSplit {
+        redirect_paths,
+        unextracted_write_redirect,
+        word_paths,
+    }
 }
 
 /// Safe write sinks that do not touch a real file. Exact match.

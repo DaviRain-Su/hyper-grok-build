@@ -436,6 +436,51 @@ fn source_from_agent_def(def: &AgentDefinition) -> ConfigSource {
 
 // ── Plugin-aware variants ─────────────────────────────────────────────
 
+/// One plugin-provided agent, addressable by its qualified `plugin:agent` name.
+#[derive(Debug)]
+pub struct PluginAgent {
+    /// Qualified `plugin-name:agent-name` used to spawn (and toggle) the agent.
+    pub qualified_name: String,
+    /// Owning plugin's scope mapped to the agent scope model (project or user).
+    pub scope: AgentScope,
+    /// Parsed definition (`plugin_name` is set; `name` stays unqualified).
+    pub definition: AgentDefinition,
+}
+
+/// Enumerate all agents provided by enabled plugins.
+///
+/// Loads every `*.md` in each enabled plugin's agent dirs. Untrusted plugins
+/// are parsed frontmatter-only (see [`load_plugin_agent_definition`]).
+pub fn plugin_agents(registry: &crate::plugins::PluginRegistry) -> Vec<PluginAgent> {
+    let mut agents = Vec::new();
+    for plugin in registry.enabled_plugins() {
+        for agent_dir in &plugin.agent_dirs {
+            let Ok(entries) = std::fs::read_dir(agent_dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let Some(def) = load_plugin_agent_definition(plugin, &path) else {
+                    continue;
+                };
+                let scope = match plugin.scope {
+                    crate::plugins::PluginScope::Project => AgentScope::Project,
+                    _ => AgentScope::User,
+                };
+                agents.push(PluginAgent {
+                    qualified_name: format!("{}:{}", plugin.name, def.name),
+                    scope,
+                    definition: def,
+                });
+            }
+        }
+    }
+    agents
+}
+
 /// Build the complete list of enabled subagents, including plugin agents.
 pub fn all_subagents_with_plugins(
     cwd: &Path,
@@ -464,51 +509,28 @@ fn all_subagents_with_plugins_and_home(
 
     // Append plugin agents under qualified names
     if let Some(registry) = plugins {
-        for plugin in registry.enabled_plugins() {
-            for agent_dir in &plugin.agent_dirs {
-                if !agent_dir.is_dir() {
-                    continue;
-                }
-                let agent_entries = match std::fs::read_dir(agent_dir) {
-                    Ok(entries) => entries,
-                    Err(_) => continue,
-                };
-                for entry in agent_entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                        continue;
-                    }
-                    let Some(def) = load_plugin_agent_definition(plugin, &path) else {
-                        continue;
-                    };
-
-                    let qualified_name = format!("{}:{}", plugin.name, def.name);
-
-                    // Skip if a native entry already has this qualified name
-                    if entries.iter().any(|e| e.name == qualified_name) {
-                        continue;
-                    }
-
-                    // Map plugin scope to agent scope
-                    let agent_scope = match plugin.scope {
-                        crate::plugins::PluginScope::Project => AgentScope::Project,
-                        crate::plugins::PluginScope::User => AgentScope::User,
-                        _ => AgentScope::User,
-                    };
-
-                    let config_source = ConfigSource::Plugin {
-                        plugin_name: plugin.name.clone(),
-                        path: path.clone(),
-                    };
-                    entries.push(SubagentEntry {
-                        name: qualified_name,
-                        description: def.description,
-                        source: SubagentSource::UserDefined { scope: agent_scope },
-                        shadows_builtin: None,
-                        config_source,
-                    });
-                }
+        for agent in plugin_agents(registry) {
+            // Skip if a native entry already has this qualified name
+            if entries.iter().any(|e| e.name == agent.qualified_name) {
+                continue;
             }
+
+            // Toggles key on the qualified name (same name the list shows).
+            if !toggle.get(&agent.qualified_name).copied().unwrap_or(true) {
+                continue;
+            }
+
+            let config_source = ConfigSource::Plugin {
+                plugin_name: agent.definition.plugin_name.clone().unwrap_or_default(),
+                path: agent.definition.source_path.clone().unwrap_or_default(),
+            };
+            entries.push(SubagentEntry {
+                name: agent.qualified_name,
+                description: agent.definition.description,
+                source: SubagentSource::UserDefined { scope: agent.scope },
+                shadows_builtin: None,
+                config_source,
+            });
         }
     }
 
@@ -876,18 +898,7 @@ mod tests {
                 name: plugin_name.to_string(),
                 version: Some("1.0.0".to_string()),
                 description: Some(format!("Plugin {plugin_name}")),
-                author: None,
-                homepage: None,
-                repository: None,
-                license: None,
-                keywords: vec![],
-                skills: None,
-                commands: None,
-                agents: None,
-                hooks: None,
-                mcp_servers: None,
-                lsp_servers: None,
-                runtime: None,
+                ..Default::default()
             },
             id: PluginId::new(scope, &root, plugin_name),
             root: root.clone(),
@@ -1595,6 +1606,44 @@ mod tests {
             SubagentSource::UserDefined {
                 scope: AgentScope::User
             }
+        );
+        assert!(entries.iter().any(|e| e.name == "plugin-one:reviewer"));
+    }
+
+    #[test]
+    fn test_plugin_agents_filtered_by_qualified_toggle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("workspace");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&home).unwrap();
+
+        let plugin_root = tempfile::tempdir().unwrap();
+        let plugin_agents = plugin_root.path().join("agents");
+        fs::create_dir_all(&plugin_agents).unwrap();
+        write_agent_file(&plugin_agents, "reviewer.md", "reviewer", "Plugin reviewer");
+
+        let registry = make_plugin_registry("plugin-one", PluginScope::User, vec![plugin_agents]);
+
+        let toggle = HashMap::from([("plugin-one:reviewer".to_string(), false)]);
+        let entries = all_subagents_with_plugins_and_home(
+            &cwd,
+            &toggle,
+            Some(&registry),
+            Some(&home),
+            Some(&home.join(".grok")),
+        );
+        assert!(
+            !entries.iter().any(|e| e.name == "plugin-one:reviewer"),
+            "toggled-off plugin agent must not be callable"
+        );
+
+        let entries = all_subagents_with_plugins_and_home(
+            &cwd,
+            &HashMap::new(),
+            Some(&registry),
+            Some(&home),
+            Some(&home.join(".grok")),
         );
         assert!(entries.iter().any(|e| e.name == "plugin-one:reviewer"));
     }

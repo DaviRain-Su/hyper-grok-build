@@ -20,8 +20,8 @@ use crate::computer::local::cgroup::{
 };
 use crate::computer::task_log;
 use crate::computer::types::{
-    BackgroundHandle, ComputerError, KillOutcome, KillSource, TaskSnapshot, TerminalBackend,
-    TerminalRunRequest, TerminalRunResult,
+    BackgroundHandle, BackgroundedForeground, ComputerError, KillOutcome, KillSource, TaskSnapshot,
+    TerminalBackend, TerminalRunRequest, TerminalRunResult,
 };
 use crate::notification::types::{BashNotificationBase, BashOutputChunk, ToolNotificationHandle};
 use crate::util::truncate::FRONT_BACK_TRUNCATION_MARKER;
@@ -141,6 +141,13 @@ enum TerminalCommand {
     BackgroundForeground {
         tool_call_id: String,
         reply: oneshot::Sender<bool>,
+    },
+
+    /// Move ALL running foreground commands to background, optionally scoped to an owner session.
+    /// Used on a mid-turn redirect so in-flight commands are kept alive instead of SIGKILLed.
+    BackgroundForegroundCommands {
+        owner_session_id: Option<String>,
+        reply: oneshot::Sender<Vec<BackgroundedForeground>>,
     },
 
     /// Wait for a background task to finish, with optional timeout.
@@ -1001,6 +1008,14 @@ impl LocalTerminalActor {
             } => {
                 let found = self.handle_background_foreground(&tool_call_id);
                 let _ = reply.send(found);
+            }
+            TerminalCommand::BackgroundForegroundCommands {
+                owner_session_id,
+                reply,
+            } => {
+                let backgrounded =
+                    self.background_all_foreground_commands(owner_session_id.as_deref());
+                let _ = reply.send(backgrounded);
             }
             TerminalCommand::KillForegroundCommandsByOwner { owner_session_id } => {
                 self.kill_foreground_commands_by_owner(&owner_session_id)
@@ -1959,6 +1974,69 @@ impl LocalTerminalActor {
         self.transition_to_background(&internal_id, BackgroundReason::UserSignal)
     }
 
+    /// The non-lethal twin of [`Self::kill_foreground_commands`]: on a mid-turn redirect a running command is kept alive, not SIGKILLed.
+    fn background_all_foreground_commands(
+        &mut self,
+        owner_session_id: Option<&str>,
+    ) -> Vec<BackgroundedForeground> {
+        // Collect internal ids first: `transition_to_background` re-keys the map, so we cannot hold an iterator across the mutation.
+        let targets: Vec<(String, BackgroundedForeground)> = self
+            .processes
+            .iter()
+            .filter(|(_, p)| {
+                !p.bg_status.is_backgrounded()
+                    && !p.lifecycle.has_exited()
+                    && owner_session_id
+                        .is_none_or(|owner| p.owner_session_id.as_deref() == Some(owner))
+            })
+            .map(|(id, p)| {
+                (
+                    id.clone(),
+                    BackgroundedForeground {
+                        tool_call_id: p.tool_call_id.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        let mut backgrounded = Vec::with_capacity(targets.len());
+        for (internal_id, info) in targets {
+            if self.transition_to_background(&internal_id, BackgroundReason::UserSignal) {
+                // The transition above re-keys the map, so the process now sits under its tool call id.
+                if let Some(process) = self.processes.get(&info.tool_call_id) {
+                    Self::announce_backgrounded_command(process);
+                }
+                backgrounded.push(info);
+            }
+        }
+        backgrounded
+    }
+
+    /// Normally the bash tool tells the client itself when its command moves to the background, but its turn was stopped, so it usually never runs again.
+    /// If it does still run, the client hears about the command twice, which is better than never seeing it at all.
+    fn announce_backgrounded_command(process: &ProcessState) {
+        process.notification_handle.send_backgrounded(
+            crate::notification::BashExecutionBackgrounded {
+                base: crate::notification::BashNotificationBase {
+                    tool_call_id: process.tool_call_id.clone(),
+                    command: process
+                        .display_command
+                        .clone()
+                        .unwrap_or_else(|| process.command.clone()),
+                    // The shell drops these three before the wire, so copying the whole buffer here would be wasted work.
+                    output: Vec::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                    cwd: std::path::PathBuf::from(&process.cwd),
+                },
+                output_file: process.output_file.clone(),
+                task_id: process.tool_call_id.clone(),
+                monitor_description: None,
+                description: process.description.clone().filter(|d| !d.trim().is_empty()),
+            },
+        );
+    }
+
     /// Kill all non-backgrounded (foreground) processes and notify their waiters.
     /// Backgrounded processes are left untouched. The actor stays alive for reuse.
     ///
@@ -2677,6 +2755,25 @@ impl TerminalBackend for LocalTerminalBackend {
             return false;
         }
         reply_rx.await.unwrap_or(false)
+    }
+
+    async fn background_foreground_commands(
+        &self,
+        owner_session_id: Option<&str>,
+    ) -> Vec<BackgroundedForeground> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(TerminalCommand::BackgroundForegroundCommands {
+                owner_session_id: owner_session_id.map(str::to_string),
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        reply_rx.await.unwrap_or_default()
     }
 }
 
@@ -3623,6 +3720,81 @@ mod tests {
             matches!(outcome, KillOutcome::Killed | KillOutcome::AlreadyExited),
             "kill after auto-bg should succeed: {outcome:?}"
         );
+        let _ = tokio::fs::remove_file(&output_file).await;
+    }
+
+    // A mid-turn redirect backgrounds a running foreground command instead of killing it, and the blocking `run` returns a "backgrounded" signal.
+    #[tokio::test]
+    async fn test_background_foreground_commands_keeps_process_alive() {
+        let backend = std::sync::Arc::new(LocalTerminalBackend::new());
+
+        let output_file =
+            std::env::temp_dir().join(format!("terminal-test-bg-all-{}.out", std::process::id()));
+        let tool_call_id = "test-bg-all";
+
+        let request = TerminalRunRequest {
+            command: "sleep 60".to_string(),
+            working_directory: PathBuf::from("/tmp"),
+            env: HashMap::new(),
+            timeout: Duration::from_secs(60),
+            output_byte_limit: 10000,
+            output_file: output_file.clone(),
+            notification_handle: ToolNotificationHandle::noop(),
+            tool_call_id: tool_call_id.to_string(),
+            display_command: None,
+            // Not auto-backgroundable: this must be backgrounded on demand, not by a timeout, and must never be killed.
+            auto_background_on_timeout: false,
+            foreground_block_budget: None,
+            kind: TaskKind::Bash,
+            owner_session_id: None,
+            description: None,
+        };
+
+        // Run the foreground command on a task; `run` blocks until the command is backgrounded (or finishes).
+        let run_backend = backend.clone();
+        let run = tokio::spawn(async move { run_backend.run(request).await });
+
+        // Give the process time to spawn and register as a foreground process.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let backgrounded = backend.background_foreground_commands(None).await;
+
+        assert_eq!(
+            backgrounded.len(),
+            1,
+            "the running command was backgrounded"
+        );
+        assert_eq!(backgrounded[0].tool_call_id, tool_call_id);
+
+        // The blocking run returns a backgrounded (not killed/cancelled) result.
+        let result = run.await.unwrap().unwrap();
+        assert_eq!(
+            result.signal.as_deref(),
+            Some("backgrounded"),
+            "run must return a backgrounded signal, got {:?}",
+            result.signal
+        );
+
+        // The process is still alive and queryable under its tool_call_id.
+        let snapshot = backend
+            .get_task(tool_call_id)
+            .await
+            .expect("backgrounded task should be queryable by tool_call_id");
+        assert!(
+            !snapshot.completed,
+            "the backgrounded process must still be running, not killed"
+        );
+
+        // A second call is a no-op (nothing left in the foreground).
+        assert!(
+            backend
+                .background_foreground_commands(None)
+                .await
+                .is_empty(),
+            "no foreground commands remain after backgrounding"
+        );
+
+        let _ = backend.kill_task(tool_call_id).await;
         let _ = tokio::fs::remove_file(&output_file).await;
     }
 

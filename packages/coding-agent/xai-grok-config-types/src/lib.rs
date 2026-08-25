@@ -560,6 +560,8 @@ pub struct RemoteSettings {
     /// Fallback when no per-model `inference_idle_timeout_secs` is set in config.toml.
     #[serde(default)]
     pub inference_idle_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub subagent_rate_limit_max_attempts: Option<u32>,
     /// Global default MCP startup-handshake timeout (seconds); lowest-precedence
     /// fallback (per-server config, env, and requirements/managed override it).
     #[serde(default)]
@@ -731,6 +733,9 @@ pub struct RemoteSettings {
     /// by `telemetry_enabled`.
     #[serde(default)]
     pub feedback_enabled: Option<bool>,
+    /// Gradual rollout of the `/feedback` trace-consent card.
+    #[serde(default)]
+    pub feedback_trace_card_enabled: Option<bool>,
     /// Two-pass (prefire) compaction. When approaching the auto-compact
     /// threshold the shell speculatively summarizes the history prefix in the
     /// background (pass 1 → NOTE₁); at compaction it summarizes NOTE₁ + the
@@ -851,6 +856,10 @@ pub struct RemoteSettings {
     /// `[cli] worktree_type` is set in config.toml.
     #[serde(default)]
     pub worktree_type: Option<String>,
+    /// Grove-projected worktree strategy (`true` = grove-fuse/grove-nfs, `false` = copy).
+    /// `Some(false)` is the remote kill switch. `nfs_worktree` is a deserialize alias.
+    #[serde(default, alias = "nfs_worktree")]
+    pub grove_worktree: Option<bool>,
     /// Server-recommended default for `restore_code` in worktree resume.
     /// Applied only when the client omits `restoreCode`.
     #[serde(default)]
@@ -926,7 +935,7 @@ pub struct RemoteSettings {
     pub privacy_banner_reshow_days: Option<u64>,
     /// remote settings tier of the `remember_tool_approvals` gate (whether per-tool
     /// "Always allow …" prompt options are shown). Lowest precedence; typically
-    /// targeted per-org. Default `false`.
+    /// targeted per-org. Default `true`; `Some(false)` is a kill-switch.
     #[serde(default)]
     pub remember_tool_approvals: Option<bool>,
     /// remote settings tier of the crash-handler install gate. Lowest precedence in
@@ -1029,6 +1038,8 @@ pub struct RemoteSettings {
     pub subagents_max_depth: Option<u32>,
     #[serde(default)]
     pub subagents_max_concurrent: Option<u32>,
+    #[serde(default)]
+    pub subagents_sampling_limit: Option<u32>,
     /// `"queue"` or `"fail"`.
     #[serde(default)]
     pub subagents_limit_behavior: Option<String>,
@@ -1076,6 +1087,8 @@ pub struct RemoteSettings {
     /// `Some(true)` enables it; `None`/`Some(false)` (the default) keep it off.
     #[serde(default)]
     pub workspace_command_enabled: Option<bool>,
+    #[serde(default)]
+    pub workspace_dashboard_enabled: Option<bool>,
     /// Soft default for `keep_text_selection` (`"flash"` / `"hold"` / `"word_select"`), from
     /// `grok_build_settings.keep_text_selection_default`. Applied only when the user has set no
     /// local text-selection preference; an explicit local `keep_text_selection` always wins. An
@@ -1931,6 +1944,17 @@ mod tests {
         let json = r#"{}"#;
         let s: RemoteSettings = serde_json::from_str(json).unwrap();
         assert_eq!(s.workspace_command_enabled, None);
+    }
+    #[test]
+    fn remote_settings_workspace_dashboard_enabled_parses_all_states() {
+        let on: RemoteSettings =
+            serde_json::from_str(r#"{"workspace_dashboard_enabled": true}"#).unwrap();
+        assert_eq!(on.workspace_dashboard_enabled, Some(true));
+        let off: RemoteSettings =
+            serde_json::from_str(r#"{"workspace_dashboard_enabled": false}"#).unwrap();
+        assert_eq!(off.workspace_dashboard_enabled, Some(false));
+        let absent: RemoteSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.workspace_dashboard_enabled, None);
     }
     #[test]
     fn remote_settings_keep_text_selection_default_round_trips() {

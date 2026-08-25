@@ -405,6 +405,12 @@ impl PtyHarness {
         self.screen.contains(text)
     }
 
+    /// Active terminal modes the child has enabled (bracketed paste, mouse
+    /// reporting, alt screen, …), as tracked by the virtual terminal.
+    pub fn terminal_modes(&self) -> ptyctl::term::TerminalModes {
+        self.screen.terminal().terminal_modes()
+    }
+
     /// Pump PTY output until `condition` becomes true or `timeout` expires.
     ///
     /// The condition is checked before the first pump and after each output

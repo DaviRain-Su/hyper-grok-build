@@ -62,14 +62,11 @@ async fn minimal_flush_left_no_hpad() {
         .inject_keys(b"/tra")
         .expect("type slash command prefix");
     harness
-        .wait_for_text(
-            "View the full conversation transcript",
-            Duration::from_secs(10),
-        )
+        .wait_for_text("View the conversation transcript", Duration::from_secs(10))
         .expect("slash dropdown opens");
     assert_flush_left_live_rows(
         &harness.screen_contents(),
-        &["View the full conversation transcript"],
+        &["View the conversation transcript"],
         "slash dropdown",
     );
     // Close the dropdown / clear the prompt so quit isn't intercepted.

@@ -1,7 +1,4 @@
 //! Git operations used by fast worktree creation.
-//!
-//! This module isolates git-specific functionality (worktree creation, status, index refresh)
-//! from filesystem copy logic and orchestration.
 
 pub(crate) mod checkout;
 pub(crate) mod dirs;
@@ -34,5 +31,7 @@ pub(crate) use safety::Safety;
 #[cfg(test)]
 pub(crate) use safety::safe_to_delete_worktree;
 pub(crate) use status::get_modified_files;
-pub(crate) use worktree::worktree_add_no_checkout;
+pub(crate) use worktree::{
+    normalized_for_match, registration_worktree_path, worktree_add_no_checkout,
+};
 pub use worktree::{remove_stale_worktree_registration, remove_stale_worktree_registrations_under};

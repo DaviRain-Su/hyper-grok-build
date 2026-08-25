@@ -34,7 +34,7 @@ pub use keyboard::{
 };
 pub use kitty_keyboard::{
     kitty_event_types_withheld, kitty_flags_pushed, kitty_releases_reported,
-    negotiated_kitty_flags, set_pushed_kitty_flags, take_kitty_flags_pushed,
+    negotiated_kitty_flags, pushed_kitty_flags, set_pushed_kitty_flags, take_kitty_flags_pushed,
 };
 pub use term_version::{TermVersion, TermVersionSource};
 

@@ -13,6 +13,7 @@ pub mod path_suggestions;
 pub(crate) mod query_tools;
 pub mod remap;
 pub mod serde_base64;
+pub(crate) mod shared_http;
 pub mod shell_env_policy;
 pub mod spawn;
 pub mod truncate;

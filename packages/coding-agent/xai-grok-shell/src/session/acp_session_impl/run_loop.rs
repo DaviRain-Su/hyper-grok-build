@@ -204,6 +204,18 @@ async fn shutdown_workflows(session: &SessionActor) {
         Err(_) => tracing::warn!("workflow shutdown persistence flush timed out"),
     }
 }
+async fn log_session_ended(session: &SessionActor) {
+    let model_id = session.current_model_id().await;
+    if let Some(signals) = session.signals_handle().snapshot().await {
+        xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::SessionEnded {
+            duration_secs: session.session_start.elapsed().as_secs(),
+            turn_count: signals.turn_count as u64,
+            tool_call_count: signals.tool_call_count as u64,
+            compaction_count: signals.compaction_count as u64,
+            model_id,
+        });
+    }
+}
 pub(super) async fn run_session(
     session: Arc<SessionActor>,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
@@ -273,6 +285,9 @@ pub(super) async fn run_session(
         let s = session.clone();
         tokio::task::spawn_local(async move { s.maybe_notify_git_branch().await });
     }
+    tokio::task::spawn_local(super::status_line::run_status_emitter(Arc::downgrade(
+        &session,
+    )));
     let liveness_watchers_enabled = {
         let user_cfg = crate::config::load_effective_config().ok();
         let requirements = crate::agent::config::read_requirements_toml();
@@ -282,7 +297,25 @@ pub(super) async fn run_session(
             None,
         )
     };
-    if !session.startup_hints.is_subagent && liveness_watchers_enabled {
+    let _elicitation_coordinator = if !session.startup_hints.is_subagent {
+        let elicit_inbox = xai_grok_mcp::elicitation::ElicitationInbox::new();
+        {
+            let mut mcp_state = session.mcp_state.lock().await;
+            mcp_state.set_elicitation_tx(Some(elicit_inbox.clone()));
+        }
+        Some(
+            crate::session::mcp_elicitation::spawn_elicitation_coordinator(
+                elicit_inbox,
+                session.notifications.gateway.clone(),
+                session.session_info.id.clone(),
+                session.pending_interactions.clone(),
+                std::rc::Rc::clone(&session.attach_non_interactive),
+            ),
+        )
+    } else {
+        None
+    };
+    if !session.startup_hints.is_subagent {
         let (event_tx, event_rx) =
             tokio::sync::mpsc::unbounded_channel::<xai_grok_mcp::servers::McpClientEvent>();
         {
@@ -294,21 +327,25 @@ pub(super) async fn run_session(
         let dispatcher_gateway = session.notifications.gateway.clone();
         let dispatcher_mcp_state = Arc::clone(&session.mcp_state);
         let shutdown_state = crate::session::mcp_dispatcher::new_shutdown_state();
-        let auto_restart_enabled = {
-            let user_cfg = crate::config::load_effective_config().ok();
-            let requirements = crate::agent::config::read_requirements_toml();
-            crate::util::config::resolve_mcp_auto_restart(
-                requirements.as_ref(),
-                user_cfg.as_ref(),
-                None,
-            )
-        };
         let restart_actions: Option<std::rc::Rc<dyn crate::session::mcp_restart::RestartActions>> =
-            if auto_restart_enabled {
-                Some(std::rc::Rc::new(SessionRestartActions::new(
-                    session.clone(),
-                    Arc::clone(&shutdown_state),
-                )))
+            if liveness_watchers_enabled {
+                let auto_restart_enabled = {
+                    let user_cfg = crate::config::load_effective_config().ok();
+                    let requirements = crate::agent::config::read_requirements_toml();
+                    crate::util::config::resolve_mcp_auto_restart(
+                        requirements.as_ref(),
+                        user_cfg.as_ref(),
+                        None,
+                    )
+                };
+                if auto_restart_enabled {
+                    Some(std::rc::Rc::new(SessionRestartActions::new(
+                        session.clone(),
+                        Arc::clone(&shutdown_state),
+                    )))
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -496,20 +533,7 @@ pub(super) async fn run_session(
                         if let Some(notification) = replay_buffer.flush() {
                             session.emit_buffered(notification).await;
                         }
-                        {
-                            let model_id = session.current_model_id().await;
-                            if let Some(signals) = session.signals_handle().snapshot().await {
-                                xai_grok_telemetry::session_ctx::log_event(
-                                    xai_grok_telemetry::events::SessionEnded {
-                                        duration_secs: session.session_start.elapsed().as_secs(),
-                                        turn_count: signals.turn_count as u64,
-                                        tool_call_count: signals.tool_call_count as u64,
-                                        compaction_count: signals.compaction_count as u64,
-                                        model_id,
-                                    },
-                                );
-                            }
-                        }
+                        log_session_ended(&session).await;
                         shutdown_workflows(&session).await;
                         turn_end_queue.drain().await;
                         finish_session_exit_feedback(&session).await;
@@ -527,6 +551,9 @@ pub(super) async fn run_session(
                         }
                         SessionCommand::ReplaceSystemPrompt { system_prompt } => {
                             session.handle_replace_system_prompt(system_prompt).await;
+                        }
+                        SessionCommand::EmitStatusSnapshot => {
+                            session.emit_status_snapshot_detached();
                         }
                         SessionCommand::RestorePlanApproval => {
                             // Resume re-park: spawn the approval
@@ -655,8 +682,8 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
+                        SessionCommand::SetSessionModel { sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
+                            let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
@@ -2216,6 +2243,7 @@ pub(super) async fn run_session(
                             session
                                 .run_session_end_memory_pipeline("session summary saved")
                                 .await;
+                            log_session_ended(&session).await;
                             turn_end_queue.drain().await;
                             finish_session_exit_feedback(&session).await;
                             return;

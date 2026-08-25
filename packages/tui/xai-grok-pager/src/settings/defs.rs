@@ -444,7 +444,7 @@ const HUNK_TRACKER_MODE_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "agent_only",
         display: "Agent only",
-        description: "Track only files the agent edits (default).",
+        description: "Track only files the agent edits.",
     },
     EnumChoice {
         canonical: "all_dirty",
@@ -454,7 +454,7 @@ const HUNK_TRACKER_MODE_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "off",
         display: "Off",
-        description: "Disable hunk tracking entirely. Also disables LOC tracking.",
+        description: "Disable hunk tracking entirely (default). Also disables LOC tracking.",
     },
 ];
 
@@ -1116,7 +1116,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "whitelist",
             ],
             kind: SettingKind::Bool {
-                default: ui_default.remember_tool_approvals.unwrap_or(false),
+                // Resolver-shared const, so the modal shows the effective
+                // default when the user layer is unset.
+                default: xai_grok_shell::util::config::DEFAULT_REMEMBER_TOOL_APPROVALS,
             },
             restart_required: true,
             hidden_in_minimal: false,
@@ -1639,7 +1641,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "hunk", "tracker", "tracking", "diff", "changes", "git", "loc", "off", "disable",
             ],
             kind: SettingKind::Enum {
-                default: "agent_only",
+                default: "off",
                 choices: HUNK_TRACKER_MODE_CHOICES,
                 supports_preview: false,
             },

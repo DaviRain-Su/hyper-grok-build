@@ -631,8 +631,9 @@ fn rendered_verb_group_header_aggregates_hook_outcomes_and_keeps_compact_members
         ),
         "collapsed header must show every hidden hook outcome: {header_row:?}"
     );
+    // A collapsed group has no rail, so the diamond at the content column carries the error colour.
     assert_eq!(
-        buf[(0, 0)].fg,
+        buf[(HorizontalLayout::ACCENT + 2, 0)].fg,
         Theme::current().accent_error,
         "failed hook marks the group header as errored"
     );
@@ -857,7 +858,7 @@ fn rendered_verb_group_singleton_folds_tool_and_trailing_thoughts() {
 
 /// A subagent lifecycle row folds into the verb group: the collapsed
 /// header renders the aggregated label, and expanding the group reveals
-/// the subagent's own row with its live ` — activity` suffix intact.
+/// the subagent's own row with its live ` · activity` suffix intact.
 #[test]
 fn rendered_verb_group_folds_subagent_row_and_expansion_keeps_activity() {
     use crate::scrollback::ScrollbackState;
@@ -938,7 +939,7 @@ fn rendered_verb_group_folds_subagent_row_and_expansion_keeps_activity() {
     assert!(
         member_rows
             .iter()
-            .any(|r| r.contains("Subagent") && r.contains("\u{2014} Thinking")),
+            .any(|r| r.contains("Subagent") && r.contains("\u{00b7} Thinking")),
         "expanded member row must keep the activity suffix: {member_rows:?}"
     );
 }

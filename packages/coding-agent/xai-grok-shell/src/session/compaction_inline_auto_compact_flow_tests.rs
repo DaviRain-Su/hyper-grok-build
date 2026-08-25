@@ -73,6 +73,7 @@ async fn create_test_actor(
     );
     chat_state_handle.record_token_usage(total_tokens);
     SessionActor {
+        status_wake: Default::default(),
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         session_info: SessionInfo {
             id: acp::SessionId::new("test-auto-compact"),
@@ -96,7 +97,7 @@ async fn create_test_actor(
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
         mcp_strategy: std::cell::Cell::new(McpInitStrategy::Blocking),
         delivery_tools: std::cell::RefCell::new(Vec::new()),
-        attach_non_interactive: std::cell::Cell::new(false),
+        attach_non_interactive: std::rc::Rc::new(std::cell::Cell::new(false)),
         chat_state_handle,
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
@@ -153,6 +154,7 @@ async fn create_test_actor(
         session_start: std::time::Instant::now(),
         inference_idle_timeout: std::time::Duration::from_secs(300),
         max_retries: 3,
+        rate_limit_waits: crate::session::acp_session::RateLimitWaitConfig::default(),
         max_turns: None,
         pending_interjections: InterjectionBuffer::new(),
         pending_skill_reminders: Mutex::new(Vec::new()),
@@ -169,6 +171,7 @@ async fn create_test_actor(
         agent: std::cell::RefCell::new(test_agent_default().await),
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         git_head_enabled: false,
+        status_line_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         models_manager: Default::default(),
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
@@ -265,6 +268,7 @@ async fn create_test_actor(
         turn_stream_drained: parking_lot::Mutex::new(None),
         pending_image_strip: parking_lot::Mutex::new(None),
         sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+        sampling_gate: None,
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
@@ -718,6 +722,89 @@ async fn spawn_status_body_server(status: u16, body: &'static str) -> String {
     });
     format!("http://{addr}")
 }
+fn switch_target_config(model: &str, base_url: String) -> xai_grok_sampler::SamplerConfig {
+    xai_grok_sampler::SamplerConfig {
+        api_key: Some("test-key".to_string()),
+        base_url,
+        model: model.to_string(),
+        context_window: 256_000,
+        api_backend: crate::sampling::ApiBackend::Responses,
+        ..Default::default()
+    }
+}
+/// Family switch → compact with the new model over the lossy view: the
+/// request must contain nothing but plain `{role, content}` text messages.
+#[tokio::test(flavor = "current_thread")]
+async fn family_switch_compacts_lossy_with_new_model() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let actor =
+                Arc::new(create_test_actor(10_000, 200_000, 85, gateway_tx, persistence_tx).await);
+            actor.chat_state_handle.replace_conversation(vec![
+                ConversationItem::system("sys"),
+                ConversationItem::user("hello"),
+                ConversationItem::Reasoning(xai_grok_sampling_types::rs::ReasoningItem {
+                    id: "tco_res-uuid_call-uuid-0".to_string(),
+                    summary: vec![],
+                    content: None,
+                    encrypted_content: Some("tco_SEALEDCIPHERTEXT".to_string()),
+                    status: None,
+                }),
+                ConversationItem::assistant_tool_calls(vec![xai_grok_sampling_types::ToolCall {
+                    id: std::sync::Arc::<str>::from("call_xai_minted_id"),
+                    name: "run_terminal_command".to_string(),
+                    arguments: std::sync::Arc::<str>::from(r#"{"command":"ls"}"#),
+                }]),
+                ConversationItem::ToolResult(xai_grok_sampling_types::ToolResultItem {
+                    tool_call_id: "call_xai_minted_id".to_string(),
+                    content: std::sync::Arc::<str>::from("file listing"),
+                    images: Vec::new(),
+                }),
+                ConversationItem::assistant("done"),
+            ]);
+            let server = xai_grok_test_support::MockInferenceServer::start()
+                .await
+                .expect("mock inference server");
+            actor
+                .handle_set_session_model(
+                    switch_target_config("new-model", server.url()),
+                    false,
+                    true,
+                    false,
+                    true,
+                    85,
+                )
+                .await
+                .expect("compact failure is log-only; the switch must succeed");
+            let requests = server.requests();
+            assert!(
+                !requests.is_empty(),
+                "family switch must fire a compaction sample"
+            );
+            let body = requests[0].body.as_ref().unwrap();
+            assert_eq!(
+                body["model"], "new-model",
+                "summarizer must be the NEW model"
+            );
+            for message in body["input"].as_array().unwrap() {
+                let keys: Vec<&String> = message.as_object().unwrap().keys().collect();
+                assert!(
+                    keys.iter()
+                        .all(|k| *k == "type" || *k == "role" || *k == "content"),
+                    "lossy view must send plain text messages, got keys {keys:?} in {message}"
+                );
+                assert_eq!(message["type"], "message", "non-message item: {message}");
+                assert!(
+                    message["content"].is_string(),
+                    "non-text content in {message}"
+                );
+            }
+        })
+        .await;
+}
 /// 401 auto-compact: SUPPRESS_AUTH + reauthable RetryState (abort for /login).
 #[tokio::test(flavor = "current_thread")]
 async fn e2e_auto_compact_401_suppresses_auth_and_surfaces_reauth() {
@@ -743,11 +830,14 @@ async fn e2e_auto_compact_401_suppresses_auth_and_surfaces_reauth() {
                 ConversationItem::user("compact me"),
             ]);
             let err = actor
-                .run_compact_only(AutoCompactTriggerInfo {
-                    tokens_used: 180_000,
-                    context_window: 200_000,
-                    percentage: 90,
-                })
+                .run_compact_only(
+                    AutoCompactTriggerInfo {
+                        tokens_used: 180_000,
+                        context_window: 200_000,
+                        percentage: 90,
+                    },
+                    false,
+                )
                 .await
                 .expect_err("401 mock must fail auto-compact");
             assert!(
@@ -1000,11 +1090,14 @@ async fn bare_manual_compact_failure_does_not_suppress_auto() {
                 "manual /compact (even without args) must never set auto-compact suppression"
             );
             let result = actor
-                .run_compact_only(AutoCompactTriggerInfo {
-                    tokens_used: 180_000,
-                    context_window: 200_000,
-                    percentage: 90,
-                })
+                .run_compact_only(
+                    AutoCompactTriggerInfo {
+                        tokens_used: 180_000,
+                        context_window: 200_000,
+                        percentage: 90,
+                    },
+                    false,
+                )
                 .await;
             assert!(result.is_err(), "mock 400 must fail the compaction");
             assert_ne!(

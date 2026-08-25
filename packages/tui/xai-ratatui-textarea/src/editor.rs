@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthStr as _;
 mod keys;
 
 pub use keys::classify_key_event;
+pub(crate) use keys::resolve_movement;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WordStyle {
@@ -40,7 +41,68 @@ pub(crate) enum EditCommandCategory {
     Kill,
 }
 
+/// Which selection edge a movement collapses to before moving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HorizontalEdge {
+    Start,
+    End,
+}
+
+/// A cursor movement: one vocabulary behind plain move, Shift-extend, and collapse.
+/// `Command` carries its collapse edge from construction, so every movement is
+/// directional by type (no fallible extraction later).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Movement {
+    Command(EditCommand, HorizontalEdge),
+    VisualRowUp,
+    VisualRowDown,
+    VisualRowStart,
+    VisualRowEnd,
+    /// Home: logical line start, no already-at-BOL chain (unlike Ctrl+A).
+    LogicalLineStart,
+    /// End: logical line end, no already-at-EOL chain (unlike Ctrl+E).
+    LogicalLineEnd,
+}
+
+impl Movement {
+    /// The selection edge this movement collapses an active selection to.
+    pub(crate) fn collapse_edge(self) -> HorizontalEdge {
+        match self {
+            Self::Command(_, edge) => edge,
+            Self::VisualRowUp | Self::VisualRowStart | Self::LogicalLineStart => {
+                HorizontalEdge::Start
+            }
+            Self::VisualRowDown | Self::VisualRowEnd | Self::LogicalLineEnd => HorizontalEdge::End,
+        }
+    }
+
+    /// Grapheme moves stop at the collapse edge; every other movement continues from it.
+    pub(crate) fn stops_at_collapse_edge(self) -> bool {
+        matches!(
+            self,
+            Self::Command(
+                EditCommand::MoveGraphemeLeft | EditCommand::MoveGraphemeRight,
+                _
+            )
+        )
+    }
+}
+
 impl EditCommand {
+    /// The selection edge this command collapses an active selection to;
+    /// `None` for non-directional commands (inserts, deletes, kills).
+    pub(crate) fn selection_collapse_edge(self) -> Option<HorizontalEdge> {
+        match self {
+            Self::MoveGraphemeLeft | Self::MoveWordLeft(_) | Self::MoveLogicalLineStart => {
+                Some(HorizontalEdge::Start)
+            }
+            Self::MoveGraphemeRight | Self::MoveWordRight(_) | Self::MoveLogicalLineEnd => {
+                Some(HorizontalEdge::End)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn category(self) -> EditCommandCategory {
         match self {
             Self::Insert(_) => EditCommandCategory::Insert,

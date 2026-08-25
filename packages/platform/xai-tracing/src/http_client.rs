@@ -19,10 +19,12 @@ pub fn traced_client(client: reqwest::Client) -> TracedHttpClient {
     ClientBuilder::new(client).with(TracingMiddleware).build()
 }
 
+#[allow(clippy::disallowed_methods)] // generic helper; grok CLI callers pass a policy-built client to traced_client
 pub fn traced_client_new() -> TracedHttpClient {
     traced_client(reqwest::Client::new())
 }
 
+#[allow(clippy::disallowed_methods)] // generic middleware helper; callers supply a policy-built client
 pub fn traced_client_from_builder(
     builder: reqwest::ClientBuilder,
 ) -> Result<TracedHttpClient, reqwest::Error> {

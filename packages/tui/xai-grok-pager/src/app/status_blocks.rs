@@ -425,8 +425,8 @@ mod tests {
             .insert("grok-4".into(), model_row(50, 5, None));
         let text = session_usage_block_text(&usage);
         assert!(text.contains("By model:"), "{text}");
-        assert!(text.contains("grok-build — 100 in / 10 out"), "{text}");
-        assert!(text.contains("grok-4 — 50 in / 5 out"), "{text}");
+        assert!(text.contains("grok-build: 100 in / 10 out"), "{text}");
+        assert!(text.contains("grok-4: 50 in / 5 out"), "{text}");
     }
 
     #[test]

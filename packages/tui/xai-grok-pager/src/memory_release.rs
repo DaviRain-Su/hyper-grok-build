@@ -1,53 +1,15 @@
 //! Allocator memory-release seam.
 //!
-//! Resuming a large session parses the whole `updates.jsonl` and stages the
-//! replay in memory — a multi-hundred-MB transient for big sessions. The
-//! allocations are freed once replay completes, but with jemalloc the freed
-//! pages stay attached to the process (macOS additionally counts `MADV_FREE`d
-//! pages in RSS until real memory pressure), so an idle, just-resumed TUI
-//! looks like it is "using" several times its live heap.
+//! jemalloc keeps freed pages attached to the process, so the multi-hundred-MB
+//! transients a large session stages linger after they drop. The pager library
+//! cannot reference jemalloc, so the composition-root binary installs an
+//! arena-purge hook here via an IoC seam and the library calls
+//! [`release_retained_memory`] after heavy transient drops to return the
+//! pages to the OS. Absent a hook (tests, non-jemalloc builds) everything is
+//! inert.
 //!
-//! The pager library cannot reference jemalloc (the allocator choice belongs
-//! to the composition-root binary — see `xai-grok-pager-bin/src/main.rs`), so
-//! the binary installs a release hook here at startup, mirroring the
-//! `minimal_hook` IoC seam. The hook purges retained arena pages
-//! (`arena.<ALL>.purge`); calling it right after heavy transients drop returns
-//! that memory to the OS instead of letting it linger for the process
-//! lifetime.
-//!
-//! Absent a hook (tests, alternate binaries, non-jemalloc builds) everything
-//! here is inert.
-//!
-//! ## Covered memory cliffs
-//!
-//! [`release_retained_memory`] is invoked after every known multi-MB drop:
-//!
-//! - session-load replay completion (`dispatch/session/load.rs`) — the parsed
-//!   `updates.jsonl` staging transient (100s of MB for long sessions)
-//! - reconnect-reload window finalize/abort/supersede
-//!   (`agent_view/session.rs`) — gated on `apply_reload_outcome` reporting a
-//!   heavy drop: the stashed pre-reload `ScrollbackState` (full-replay
-//!   success) or the discarded staging (failure). The common cursor-resolve
-//!   outcome reuses the stash and does NOT purge.
-//! - subagent transcript replay (`app/subagent.rs`,
-//!   `replay_inherited_updates`) — covers both producers (eager live-spawn
-//!   and resume-deferred first open), gated on a non-empty replay
-//! - subagent eviction (`app/subagent.rs`, `evict_finished_child_view`;
-//!   finish-time and fullscreen-close/switch): the finished child's retained
-//!   scrollback, tracker, todo/workflow state, and media-byte cache; deferred
-//!   to the post-flush gap from both producers
-//! - closing an agent tab (`dispatch/session/modal.rs`) — the whole
-//!   `AgentView` incl. scrollback, render caches, and child views
-//! - video teardown — the pre-extracted frame set (~50–300 MB per video):
-//!   viewer close (`media.rs`, synchronous — input path), inline stop /
-//!   scroll-off / replacement (`media.rs`, `render.rs`, `app_view.rs` —
-//!   [`request_release_after_draw`], the purge runs post-frame-flush)
-//! - image viewer close (`media.rs`) — the decoded overlay image
-//! - rewind truncation (`dispatch/rewind.rs`) — the removed transcript tail
-//!
-//! Every purge is edge-triggered by a rare lifecycle/user event and gated on
-//! an actual drop, never per frame; draw/tick-path cliffs defer the purge to
-//! the post-flush gap so it cannot stall the frame being painted.
+//! Purges are edge-triggered on an actual drop, never per frame; draw/tick-path
+//! cliffs defer to the post-flush gap so a purge never stalls the frame.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -60,25 +22,18 @@ pub fn install_release_hook(hook: fn()) {
     let _ = RELEASE_HOOK.set(hook);
 }
 
-/// Ask the allocator to return freed-but-retained pages to the OS.
-///
-/// Cheap enough to call after any known memory cliff (see the module docs for
-/// the covered sites). No-op when no hook is installed.
+/// Ask the allocator to return freed-but-retained pages to the OS, tagging the
+/// purge with `reason` for the memory trace (`memory_trace` module) so per-site
+/// purge frequency, duration, and released footprint are analyzable offline.
+/// Use a short stable kebab-case tag (e.g. `"session-load-replay"`). No-op when
+/// no hook is installed.
 ///
 /// Call this directly from dispatch/input paths (the stall lands between
 /// interactions). From draw/tick paths use [`request_release_after_draw`]
-/// instead: when a purge has real work to do (a ~50–300 MB frame set just
-/// dropped) the synchronous madvise would land inside the very frame the
-/// user is waiting for.
-pub fn release_retained_memory() {
-    release_retained_memory_with("unattributed");
-}
-
-/// [`release_retained_memory`] with memory-cliff attribution: `reason` tags
-/// the purge event in the memory trace (`memory_trace` module) so per-site
-/// purge frequency, duration, and released footprint are analyzable offline.
-/// Use a short stable kebab-case tag (e.g. `"session-load-replay"`).
-pub fn release_retained_memory_with(reason: &'static str) {
+/// instead: when a purge has real work to do (a ~50-300 MB frame set just
+/// dropped) the synchronous madvise would land inside the very frame the user
+/// is waiting for.
+pub(crate) fn release_retained_memory(reason: &'static str) {
     let hook = RELEASE_HOOK.get();
     // Skip gauge sampling entirely when tracing is off (`GROK_MEMTRACE=0`
     // or no sink): a disabled trace must add zero syscalls to purges.
@@ -108,22 +63,19 @@ pub fn release_retained_memory_with(reason: &'static str) {
 /// flag must not silently drop a request if that ever changes.
 static RELEASE_AFTER_DRAW: AtomicBool = AtomicBool::new(false);
 
-/// Memory-cliff tag for the pending deferred request. Coalescing requests
-/// keep the LAST writer's reason — precise enough for trace attribution
-/// (coalesced requests within one frame are the same user gesture).
+/// Memory-cliff tag for the pending deferred request. Coalescing requests keep
+/// the last writer's reason, precise enough for trace attribution (coalesced
+/// requests within one frame are the same user gesture). Every request writes a
+/// real tag before setting the flag below; the `"post-draw"` default only
+/// surfaces if a drain ever races a set without one.
 static DEFER_REASON: Mutex<&'static str> = Mutex::new("post-draw");
 
-/// Request [`release_retained_memory`] to run right after the current frame
-/// flushes (drained by [`run_deferred_release`] at the end of
-/// `AppView::draw`). For memory cliffs hit *inside* the draw/tick path —
-/// e.g. inline video stopped because it scrolled off screen.
-pub fn request_release_after_draw() {
-    request_release_after_draw_with("post-draw");
-}
-
-/// [`request_release_after_draw`] with memory-cliff attribution for the
-/// trace (see [`release_retained_memory_with`]).
-pub fn request_release_after_draw_with(reason: &'static str) {
+/// Request a purge to run right after the current frame flushes (drained by
+/// [`run_deferred_release`] at the end of `AppView::draw`), tagging it with
+/// `reason` for the trace (see [`release_retained_memory`]). For memory
+/// cliffs hit *inside* the draw/tick path, e.g. inline video stopped because it
+/// scrolled off screen.
+pub(crate) fn request_release_after_draw(reason: &'static str) {
     if let Ok(mut r) = DEFER_REASON.lock() {
         *r = reason;
     }
@@ -133,10 +85,15 @@ pub fn request_release_after_draw_with(reason: &'static str) {
 /// Drain a pending [`request_release_after_draw`], if any. Called once at
 /// the end of `AppView::draw`, after the terminal buffer flush, so the purge
 /// cost lands in the idle gap between frames instead of inside one.
-pub fn run_deferred_release() {
+pub(crate) fn run_deferred_release() {
     if RELEASE_AFTER_DRAW.swap(false, Ordering::Relaxed) {
-        let reason = DEFER_REASON.lock().map(|r| *r).unwrap_or("post-draw");
-        release_retained_memory_with(reason);
+        // Recover the stored reason even if the lock was poisoned; a request
+        // always writes a real tag before setting the flag.
+        let reason = match DEFER_REASON.lock() {
+            Ok(r) => *r,
+            Err(poison) => *poison.into_inner(),
+        };
+        release_retained_memory(reason);
     }
 }
 
@@ -172,55 +129,5 @@ pub(crate) mod test_support {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn release_invokes_installed_hook_per_call() {
-        // The hook slot is a global OnceLock shared with sibling tests, but
-        // the counter is thread-local, so deltas on THIS thread are exact.
-        test_support::install_counting_hook();
-        let before = test_support::calls();
-        release_retained_memory();
-        release_retained_memory();
-        assert_eq!(
-            test_support::calls(),
-            before + 2,
-            "each release must invoke the installed hook exactly once"
-        );
-    }
-
-    /// The deferred request coalesces into exactly one release at the next
-    /// drain, and a drain without a request is inert. Serialized: the request
-    /// flag is process-wide.
-    #[test]
-    #[serial_test::serial(MEMORY_RELEASE_DEFER)]
-    fn deferred_request_coalesces_and_drains_once() {
-        test_support::install_counting_hook();
-        run_deferred_release(); // drain any stale request
-
-        let before = test_support::calls();
-        run_deferred_release();
-        assert_eq!(
-            test_support::calls(),
-            before,
-            "drain without request is inert"
-        );
-
-        request_release_after_draw();
-        request_release_after_draw(); // coalesces
-        assert_eq!(
-            test_support::calls(),
-            before,
-            "requesting must not purge synchronously"
-        );
-        run_deferred_release();
-        assert_eq!(test_support::calls(), before + 1, "one drain, one purge");
-        run_deferred_release();
-        assert_eq!(
-            test_support::calls(),
-            before + 1,
-            "flag cleared by the drain"
-        );
-    }
-}
+#[path = "memory_release_tests.rs"]
+mod tests;

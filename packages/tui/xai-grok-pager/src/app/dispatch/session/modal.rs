@@ -19,7 +19,7 @@ pub(in crate::app::dispatch) fn remove_agent_and_cleanup(app: &mut AppView, agen
     }
     if removed.is_some() {
         drop(removed);
-        crate::memory_release::release_retained_memory_with("agent-close");
+        crate::memory_release::release_retained_memory("agent-close");
     }
 }
 /// Close (drop from this pager's in-memory list) the given agent.

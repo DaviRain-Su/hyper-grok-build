@@ -133,7 +133,7 @@ pub enum PathOrInline {
 ///
 /// Forward-compatible: unknown fields are silently ignored via
 /// `#[serde(deny_unknown_fields)]` NOT being set.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginManifest {
     /// User-facing plugin namespace (kebab-case).  Required.

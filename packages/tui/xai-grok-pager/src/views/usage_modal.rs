@@ -178,7 +178,7 @@ impl UsageInfoModalState {
             session_usage_text: None,
             billing_loading: false,
             billing_error: None,
-            fetch_nonce: 0,
+            fetch_nonce: Default::default(),
             session_fields: None,
             copy_hits: Vec::new(),
             hovered_copy_line: None,

@@ -21,11 +21,25 @@ use xai_grok_shell::sampling::{
 use xai_grok_test_support::sse::{
     responses_api_doom_loop_check_events, responses_api_doom_loop_terminal_only_events,
     responses_api_reasoning_and_text_events, responses_api_reasoning_only_events,
-    responses_api_with_doom_loop_frame,
+    responses_api_reasoning_then_tool_call_events, responses_api_with_doom_loop_frame,
+    responses_api_with_doom_loop_frame_after_text, with_doom_loop_frame_before_completed,
+    with_doom_loop_frame_before_type, with_terminal_output_items,
 };
 use xai_grok_test_support::{MockInferenceServer, MockModelEntry, ScriptedResponse};
 
 const MODEL: &str = "test-model";
+
+/// The retry closes with a synthetic user-role reminder. The wording is
+/// prompt copy, not a contract — only the role and the envelope are asserted.
+#[track_caller]
+fn assert_recovery_reminder(item: &serde_json::Value) {
+    assert_eq!(item["role"], "user", "the reminder is user-role");
+    let text = item["content"].as_str().expect("the reminder is text");
+    assert!(
+        text.starts_with("<system_reminder>") && text.ends_with("</system_reminder>"),
+        "the reminder rides a system-reminder envelope: {text}"
+    );
+}
 
 fn doom_loop_client(base_url: &str) -> Client {
     let mut config = test_sampler_config(base_url, ApiBackend::Responses, &[]);
@@ -287,12 +301,11 @@ async fn disabled_policy_leaves_terminal_field_unparsed() {
 // ---------------------------------------------------------------------------
 
 /// A confident signal (`tail_repetition:8@thinking` is confident under
-/// default `max_threshold` 64) on a completed turn is resampled once: two requests,
-/// the clean second script is the accepted response, and the resample
-/// request body is identical to the first — the poisoned turn's output never
-/// enters the conversation.
+/// default `max_threshold` 64) on a completed turn is resampled once: the
+/// clean second script is accepted after receiving the complete failed turn
+/// followed by the user-role recovery reminder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn confident_signal_resamples_once_and_discards_poisoned_turn() {
+async fn confident_signal_retries_with_failed_turn_and_reminder() {
     let server = MockInferenceServer::start().await.unwrap();
     server.enqueue_response(
         "/v1/responses",
@@ -325,10 +338,18 @@ async fn confident_signal_resamples_once_and_discards_poisoned_turn() {
         "the accepted response is the clean resample, not the poisoned turn"
     );
     let bodies = server.request_bodies();
+    let retry_input = bodies[1]["input"].as_array().expect("input array");
     assert_eq!(
-        bodies[0]["input"], bodies[1]["input"],
-        "the resample re-sends the same prefix; poisoned output never enters it"
+        retry_input.len(),
+        4,
+        "original user + failed turn + reminder"
     );
+    assert_eq!(retry_input[1]["type"], "reasoning");
+    assert_eq!(retry_input[1]["id"], "reasoning_item_1");
+    assert_eq!(retry_input[1]["summary"][0]["text"], "loop loop loop");
+    assert_eq!(retry_input[2]["role"], "assistant");
+    assert_eq!(retry_input[2]["content"], "poisoned answer");
+    assert_recovery_reminder(&retry_input[3]);
 }
 
 /// Budget exhaustion: with `max_retries` 2, three consecutively doomed turns
@@ -337,13 +358,13 @@ async fn confident_signal_resamples_once_and_discards_poisoned_turn() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn budget_exhaustion_accepts_last_doomed_response() {
     let server = MockInferenceServer::start().await.unwrap();
-    for _ in 0..3 {
+    for attempt in 1..=3 {
         server.enqueue_response(
             "/v1/responses",
             ScriptedResponse::sse(responses_api_doom_loop_terminal_only_events(
                 &["tail_repetition:8@thinking"],
-                "loop loop loop",
-                "still looping answer",
+                &format!("loop reasoning {attempt}"),
+                &format!("looping answer {attempt}"),
                 MODEL,
             )),
         );
@@ -360,11 +381,27 @@ async fn budget_exhaustion_accepts_last_doomed_response() {
         3,
         "initial attempt + max_retries (2) resamples"
     );
-    assert_eq!(response.assistant_text(), "still looping answer");
+    assert_eq!(response.assistant_text(), "looping answer 3");
     assert!(
         !response.doom_loop_signals.is_empty(),
         "the accepted doomed response keeps its signals (warn-only fallback)"
     );
+
+    let bodies = server.request_bodies();
+    let second = bodies[1]["input"].as_array().expect("second input");
+    assert_eq!(second.len(), 4);
+    assert_eq!(second[1]["summary"][0]["text"], "loop reasoning 1");
+    assert_eq!(second[2]["content"], "looping answer 1");
+    assert_recovery_reminder(&second[3]);
+
+    let third = bodies[2]["input"].as_array().expect("third input");
+    assert_eq!(third.len(), 7);
+    assert_eq!(third[1]["summary"][0]["text"], "loop reasoning 1");
+    assert_eq!(third[2]["content"], "looping answer 1");
+    assert_recovery_reminder(&third[3]);
+    assert_eq!(third[4]["summary"][0]["text"], "loop reasoning 2");
+    assert_eq!(third[5]["content"], "looping answer 2");
+    assert_recovery_reminder(&third[6]);
 }
 
 /// Non-confident signals never resample: threshold above `max_threshold`,
@@ -441,7 +478,7 @@ async fn mid_stream_signal_aborts_and_resamples() {
     let server = MockInferenceServer::start().await.unwrap();
     server.enqueue_response(
         "/v1/responses",
-        ScriptedResponse::sse(responses_api_with_doom_loop_frame(
+        ScriptedResponse::sse(responses_api_with_doom_loop_frame_after_text(
             confident_frame,
             "loop loop loop",
             "poisoned answer",
@@ -465,6 +502,243 @@ async fn mid_stream_signal_aborts_and_resamples() {
 
     assert_eq!(responses_request_count(&server), 2);
     assert_eq!(response.assistant_text(), "clean answer");
+    let bodies = server.request_bodies();
+    let retry_input = bodies[1]["input"].as_array().expect("input array");
+    assert_eq!(
+        retry_input.len(),
+        4,
+        "original user + failed turn + reminder"
+    );
+    assert_eq!(retry_input[1]["type"], "reasoning");
+    assert_eq!(retry_input[1]["id"], "reasoning_item_1");
+    assert_eq!(retry_input[1]["content"][0]["text"], "loop loop loop ");
+    assert_eq!(retry_input[2]["role"], "assistant");
+    assert_eq!(retry_input[2]["content"], "poisoned answer ");
+    assert_recovery_reminder(&retry_input[3]);
+}
+
+/// A doomed turn that called a tool is dropped whole: Responses reasoning
+/// items are bound to the function call that follows them, so replaying the
+/// reasoning without the call would send an orphaned item the API rejects.
+/// The retry therefore carries the reminder alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doomed_tool_call_turn_retries_with_the_reminder_alone() {
+    let confident_frame = r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:8@thinking"]}}"#;
+    let server = MockInferenceServer::start().await.unwrap();
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::sse(with_doom_loop_frame_before_completed(
+            responses_api_reasoning_then_tool_call_events(
+                "loop loop loop",
+                "call-1",
+                "read_file",
+                r#"{"path":"a.txt"}"#,
+                MODEL,
+            ),
+            confident_frame,
+        )),
+    );
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::sse(responses_api_reasoning_and_text_events(
+            "fresh thought",
+            "clean answer",
+            MODEL,
+        )),
+    );
+    let handle = spawn_actor(&server.url(), true);
+
+    let (response, _metrics) = handle
+        .submit_and_collect(RequestId::from("doom-tool-call"), user_request("hello"))
+        .await
+        .expect("recovery accepts the clean resample");
+
+    assert_eq!(responses_request_count(&server), 2);
+    assert_eq!(response.assistant_text(), "clean answer");
+    let bodies = server.request_bodies();
+    let retry_input = bodies[1]["input"].as_array().expect("input array");
+    assert_eq!(
+        retry_input.len(),
+        2,
+        "original user + reminder, with no orphaned reasoning: {retry_input:?}"
+    );
+    assert_recovery_reminder(&retry_input[1]);
+}
+
+/// The terminal `output` list is what the retry replays, through the real
+/// stream: a doomed reasoning item is resent under its own id with its
+/// `encrypted_content` intact, not as a synthetic plaintext copy rebuilt from
+/// the streamed deltas (which here say something different on purpose).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doomed_turn_replays_the_terminal_reasoning_item_verbatim() {
+    let server = MockInferenceServer::start().await.unwrap();
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::sse(with_terminal_output_items(
+            responses_api_doom_loop_terminal_only_events(
+                &["tail_repetition:8@thinking"],
+                "streamed approximation",
+                "poisoned answer",
+                MODEL,
+            ),
+            vec![
+                serde_json::json!({
+                    "type": "reasoning",
+                    "id": "reasoning_authoritative",
+                    "summary": [{ "type": "summary_text", "text": "the real thought" }],
+                    "encrypted_content": "cipher-blob",
+                    "status": "completed"
+                }),
+                serde_json::json!({
+                    "type": "message",
+                    "id": "msg_test",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{ "type": "output_text", "text": "poisoned answer", "annotations": [] }]
+                }),
+            ],
+        )),
+    );
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::sse(responses_api_reasoning_and_text_events(
+            "fresh thought",
+            "clean answer",
+            MODEL,
+        )),
+    );
+    let handle = spawn_actor(&server.url(), true);
+
+    let (response, _metrics) = handle
+        .submit_and_collect(RequestId::from("doom-encrypted"), user_request("hello"))
+        .await
+        .expect("recovery accepts the clean resample");
+
+    assert_eq!(responses_request_count(&server), 2);
+    assert_eq!(response.assistant_text(), "clean answer");
+    let bodies = server.request_bodies();
+    let retry_input = bodies[1]["input"].as_array().expect("input array");
+    assert_eq!(retry_input[1]["type"], "reasoning");
+    assert_eq!(
+        retry_input[1]["id"], "reasoning_authoritative",
+        "the wire's own item id survives the replay"
+    );
+    assert_eq!(
+        retry_input[1]["encrypted_content"], "cipher-blob",
+        "the opaque reasoning state is replayed, not dropped for a plaintext copy"
+    );
+    assert_eq!(retry_input[1]["summary"][0]["text"], "the real thought");
+    assert_eq!(retry_input[2]["role"], "assistant");
+    assert_eq!(retry_input[2]["content"], "poisoned answer");
+    assert_recovery_reminder(&retry_input[3]);
+}
+
+/// The tool-call veto reads the raw terminal items, so an MCP turn — which
+/// the conversation form drops entirely — is dropped whole rather than
+/// replayed without its call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doomed_mcp_turn_retries_with_the_reminder_alone() {
+    let server = MockInferenceServer::start().await.unwrap();
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::sse(with_terminal_output_items(
+            responses_api_doom_loop_terminal_only_events(
+                &["tail_repetition:8@thinking"],
+                "loop loop loop",
+                "poisoned answer",
+                MODEL,
+            ),
+            vec![
+                serde_json::json!({
+                    "type": "reasoning",
+                    "id": "reasoning_item_1",
+                    "summary": [{ "type": "summary_text", "text": "loop loop loop" }],
+                    "status": "completed"
+                }),
+                serde_json::json!({
+                    "type": "mcp_call",
+                    "id": "mcp-1",
+                    "name": "search",
+                    "server_label": "docs",
+                    "arguments": "{}"
+                }),
+            ],
+        )),
+    );
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::sse(responses_api_reasoning_and_text_events(
+            "fresh thought",
+            "clean answer",
+            MODEL,
+        )),
+    );
+    let handle = spawn_actor(&server.url(), true);
+
+    let (response, _metrics) = handle
+        .submit_and_collect(RequestId::from("doom-mcp"), user_request("hello"))
+        .await
+        .expect("recovery accepts the clean resample");
+
+    assert_eq!(responses_request_count(&server), 2);
+    assert_eq!(response.assistant_text(), "clean answer");
+    let bodies = server.request_bodies();
+    let retry_input = bodies[1]["input"].as_array().expect("input array");
+    assert_eq!(
+        retry_input.len(),
+        2,
+        "original user + reminder, with no reasoning orphaned from its MCP call: {retry_input:?}"
+    );
+    assert_recovery_reminder(&retry_input[1]);
+}
+
+/// The abort itself must not lose the tool-call veto: a confident signal that
+/// lands on a tool frame drops the stream before the main event handling
+/// runs, so the frame is the only notice that a call was in flight. The retry
+/// carries the reminder alone rather than reasoning orphaned from its call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mid_stream_abort_on_a_tool_frame_still_vetoes_the_replay() {
+    let confident_frame = r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:8@thinking"]}}"#;
+    let server = MockInferenceServer::start().await.unwrap();
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::sse(with_doom_loop_frame_before_type(
+            responses_api_reasoning_then_tool_call_events(
+                "loop loop loop",
+                "call-1",
+                "read_file",
+                r#"{"path":"a.txt"}"#,
+                MODEL,
+            ),
+            confident_frame,
+            "response.function_call_arguments.delta",
+        )),
+    );
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::sse(responses_api_reasoning_and_text_events(
+            "fresh thought",
+            "clean answer",
+            MODEL,
+        )),
+    );
+    let handle = spawn_actor(&server.url(), true);
+
+    let (response, _metrics) = handle
+        .submit_and_collect(RequestId::from("doom-abort-tool"), user_request("hello"))
+        .await
+        .expect("recovery accepts the clean resample");
+
+    assert_eq!(responses_request_count(&server), 2);
+    assert_eq!(response.assistant_text(), "clean answer");
+    let bodies = server.request_bodies();
+    let retry_input = bodies[1]["input"].as_array().expect("input array");
+    assert_eq!(
+        retry_input.len(),
+        2,
+        "original user + reminder, with no reasoning orphaned from the in-flight call: {retry_input:?}"
+    );
+    assert_recovery_reminder(&retry_input[1]);
 }
 
 /// The doom-loop budget and the existing empty-response retry class coexist,

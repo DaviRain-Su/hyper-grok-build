@@ -121,6 +121,10 @@ pub struct PreviewArgs {
     pub allow_public: bool,
     /// → proxy `--workspace-server-port`.
     pub workspace_server_port: Option<u16>,
+    /// → proxy `--discovery-refresh-ms` (candidate-scan cadence). `None` omits
+    /// the flag — a proxy binary predating it rejects the unknown flag and
+    /// would crash-loop — so the env stays unset until the proxy release rolls.
+    pub discovery_refresh_ms: Option<u64>,
     /// `current_dir` for the spawned child. Not forwarded as an arg.
     pub workspace_dir: PathBuf,
 }
@@ -157,6 +161,10 @@ impl PreviewArgs {
         if let Some(port) = self.workspace_server_port {
             argv.push("--workspace-server-port".to_owned());
             argv.push(port.to_string());
+        }
+        if let Some(refresh_ms) = self.discovery_refresh_ms {
+            argv.push("--discovery-refresh-ms".to_owned());
+            argv.push(refresh_ms.to_string());
         }
         argv
     }
@@ -575,6 +583,7 @@ async fn scrape_activity_loop(
     let url = activity_url(control_port);
     // A fixed loopback control endpoint never redirects, so a 3xx is anomalous —
     // don't follow it; it classifies as `BadResponse`.
+    #[allow(clippy::disallowed_methods)] // localhost preview server; TLS policy N/A
     let client = match reqwest::Client::builder()
         .timeout(PREVIEW_ACTIVITY_SCRAPE_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
@@ -684,6 +693,7 @@ async fn scrape_metrics_loop(
         return;
     }
     let url = metrics_url(control_port);
+    #[allow(clippy::disallowed_methods)] // localhost preview server; TLS policy N/A
     let client = match reqwest::Client::builder()
         .timeout(PREVIEW_ACTIVITY_SCRAPE_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
@@ -816,6 +826,7 @@ mod tests {
             auth_redirect: Some("https://grok.com/preview-auth".to_owned()),
             allow_public: true,
             workspace_server_port: Some(8470),
+            discovery_refresh_ms: Some(250),
             workspace_dir: PathBuf::from("/workspace"),
         }
     }
@@ -839,6 +850,8 @@ mod tests {
                 "--allow-public",
                 "--workspace-server-port",
                 "8470",
+                "--discovery-refresh-ms",
+                "250",
             ],
         );
     }
@@ -854,11 +867,13 @@ mod tests {
             auth_redirect: None,
             allow_public: false,
             workspace_server_port: None,
+            discovery_refresh_ms: None,
             workspace_dir: PathBuf::from("/workspace"),
         };
         assert!(
             cfg.to_argv().is_empty(),
-            "absent options + false allow_public ⇒ the proxy uses its own defaults"
+            "absent options + false allow_public ⇒ the proxy uses its own \
+             defaults; --discovery-refresh-ms in particular must be omitted"
         );
     }
 
@@ -1321,6 +1336,7 @@ mod tests {
     }
 
     fn scrape_client() -> reqwest::Client {
+        #[allow(clippy::disallowed_methods)] // localhost preview server; TLS policy N/A
         reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
             .redirect(reqwest::redirect::Policy::none())
@@ -1447,6 +1463,7 @@ mod tests {
     #[tokio::test]
     async fn scrape_activity_treats_a_hung_endpoint_as_absent() {
         let port = serve_accept_then_hang().await;
+        #[allow(clippy::disallowed_methods)] // localhost preview server; TLS policy N/A
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(150))
             .redirect(reqwest::redirect::Policy::none())

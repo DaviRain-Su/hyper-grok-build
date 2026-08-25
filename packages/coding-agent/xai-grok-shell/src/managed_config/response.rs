@@ -34,6 +34,14 @@ pub enum ManagedConfigError {
     #[error("Can't reach the server. Check your network connection and try again.\n  ({0})")]
     Network(String),
     #[error(
+        "Can't verify the server's security certificate. This usually means your organization's root certificates aren't installed. Install them, then try again.\n  ({0})"
+    )]
+    CertificateUntrusted(String),
+    #[error(
+        "The server's security certificate is invalid (for example expired or issued for a different hostname), so it can't be trusted. Installing a root certificate won't fix this; contact the server administrator.\n  ({0})"
+    )]
+    CertificateInvalid(String),
+    #[error(
         "The connection to the server was interrupted or timed out before completing. This is usually temporary; please try again.\n  ({0})"
     )]
     ConnectionInterrupted(String),

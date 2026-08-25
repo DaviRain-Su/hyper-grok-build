@@ -496,7 +496,12 @@ fn is_scheduled_task_inject_prompt(json: &serde_json::Value) -> bool {
 fn is_interaction_request(json: &serde_json::Value) -> bool {
     matches!(
         method_of(json),
-        Some("session/request_permission" | "x.ai/ask_user_question" | "x.ai/exit_plan_mode")
+        Some(
+            "session/request_permission"
+                | "x.ai/ask_user_question"
+                | "x.ai/exit_plan_mode"
+                | "x.ai/mcp/elicit",
+        )
     )
 }
 /// Extract the `tool_call_id` an interaction reverse-request carries, so the
@@ -683,6 +688,10 @@ fn inject_session_request_context(
         && !has_model
         && client_type.is_empty()
         && !capabilities.code_nav_enabled
+        && !capabilities.terminal
+        && !capabilities.fs_read
+        && !capabilities.fs_write
+        && !capabilities.status_line
     {
         return false;
     }
@@ -750,6 +759,10 @@ fn inject_session_request_context(
             meta_obj.insert(
                 "clientFsWrite".to_string(),
                 serde_json::json!(capabilities.fs_write),
+            );
+            meta_obj.insert(
+                xai_grok_status_line::CLIENT_STATUS_LINE_META.to_string(),
+                serde_json::json!(capabilities.status_line),
             );
         }
     }

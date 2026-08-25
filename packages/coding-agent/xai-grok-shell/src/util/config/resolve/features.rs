@@ -58,6 +58,10 @@ pub fn resolve_remote_fetch_enabled() -> bool {
 
 pub const REMOTE_FETCH_CONFIG_PATH: &str = "features.remote_fetch";
 
+/// Keys whose dedicated resolver walks managed before user `config.toml`.
+/// The effective merge lets the user file win for every other key.
+pub const MANAGED_WINS_OVER_USER: &[&str] = &[REMOTE_FETCH_CONFIG_PATH];
+
 fn remote_fetch_value(v: &TomlValue) -> Option<bool> {
     v.get("features")?.get("remote_fetch")?.as_bool()
 }

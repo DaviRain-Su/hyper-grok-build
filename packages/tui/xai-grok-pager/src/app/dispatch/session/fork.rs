@@ -6,6 +6,7 @@ use crate::app::actions::Effect;
 use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState};
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
+use crate::app::cancel_latency::TurnEnd;
 use crate::app::dispatch::ctx::{SwitchCause, switch_to_agent};
 use crate::app::dispatch::modes::inherit_auto_mode;
 use crate::app::dispatch::prompt::supersede_open_reload_window;
@@ -252,6 +253,7 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             git_ref: None,
             // Fork resumes the parent session, which carries its own model.
             model_id: None,
+            permission_mode_override: None,
             preferred_session_id: None,
             chat_kind: parent_chat_kind,
         }]
@@ -343,7 +345,7 @@ pub(in crate::app::dispatch) fn build_child_fork_marker(
 ) -> String {
     let header = if let Some(cmd) = switch_hint {
         format!(
-            "Session {session_id} (forked from {parent_sid}) \u{2014} use {cmd} to switch between sessions",
+            "Session {session_id} (forked from {parent_sid}), use {cmd} to switch between sessions",
         )
     } else {
         format!("Session {session_id} (forked from {parent_sid})")
@@ -421,7 +423,7 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         supersede_open_reload_window(agent, agent_id, "WorktreeForked");
         agent.session.finish_command();
-        agent.mark_turn_finished();
+        agent.mark_turn_finished(TurnEnd::Aborted);
         agent.bind_session_id(session_id);
         agent.scrollback.begin_batch();
         agent.begin_replay_window();
@@ -499,7 +501,7 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         supersede_open_reload_window(agent, agent_id, "ForkSessionReady");
         agent.session.finish_command();
-        agent.mark_turn_finished();
+        agent.mark_turn_finished(TurnEnd::Aborted);
         agent.bind_session_id(new_session_id);
         agent.scrollback.begin_batch();
         agent.begin_replay_window();
@@ -532,7 +534,7 @@ pub(in crate::app::dispatch) fn handle_fork_session_failed(
         agent.pending_extensions_fetch = false;
         agent.session.finish_command();
         let elapsed = agent.turn_elapsed();
-        agent.mark_turn_finished();
+        agent.mark_turn_finished(TurnEnd::Aborted);
         agent.pending_first_prompt = None;
         agent.pending_fork_banner = None;
         agent

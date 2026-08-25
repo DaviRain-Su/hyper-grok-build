@@ -272,6 +272,36 @@ async fn kill_background_task(toolset: &FinalizedToolset, task_id: &str) -> Kill
         KillOutcome::NotFound => KillTaskOutcome::NotFound,
     }
 }
+/// Delete a scheduled (loop) task via the session toolset's scheduler actor.
+/// `Ok(false)` strictly means no such task; scheduler refusals propagate as errors so a client never treats a still-firing task as gone.
+async fn delete_scheduled_task(
+    toolset: &FinalizedToolset,
+    task_id: &str,
+) -> Result<bool, WorkspaceError> {
+    let scheduler = {
+        let res = toolset.resources.lock().await;
+        res.get::<SchedulerHandle>().cloned()
+    };
+    let Some(handle) = scheduler else {
+        return Ok(false);
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if handle
+        .0
+        .send(SchedulerCommand::Delete {
+            id: task_id.to_owned(),
+            reply: reply_tx,
+        })
+        .is_err()
+    {
+        return Err(WorkspaceError::HubError("scheduler actor stopped".into()));
+    }
+    match reply_rx.await {
+        Ok(Ok(deleted)) => Ok(deleted),
+        Ok(Err(e)) => Err(WorkspaceError::HubError(e.to_string())),
+        Err(_) => Err(WorkspaceError::HubError("scheduler actor stopped".into())),
+    }
+}
 /// Incomplete backgrounded terminal tasks + live scheduled tasks (client tray rebuild).
 async fn tasks_snapshot(toolset: &FinalizedToolset) -> TasksSnapshotResponse {
     let (terminal, scheduler) = {
@@ -392,11 +422,11 @@ impl WorkspaceRpcHandler {
         use xai_grok_workspace_types::rpc::search::FuzzyStatusReq;
         use xai_grok_workspace_types::rpc::skills::DiscoverPluginsReq;
         use xai_grok_workspace_types::rpc::workspace::{
-            ConfigureMcpReq, DropSessionReq, InstallPluginReq, KillTaskReq, KillTaskResponse,
-            ListBackgroundTasksReq, ListBackgroundTasksResponse, ListTodosReq, ListTodosResponse,
-            LoadEnvrcReq, LoadPermissionsReq, LoadProjectConfigReq, RefreshPluginsReq,
-            ResolveFileReferencesReq, TasksSnapshotReq, ToolDefinitionsReq, UpdateToolConfigReq,
-            WorkspaceInfo,
+            ConfigureMcpReq, DeleteScheduledTaskReq, DeleteScheduledTaskResponse, DropSessionReq,
+            InstallPluginReq, KillTaskReq, KillTaskResponse, ListBackgroundTasksReq,
+            ListBackgroundTasksResponse, ListTodosReq, ListTodosResponse, LoadEnvrcReq,
+            LoadPermissionsReq, LoadProjectConfigReq, RefreshPluginsReq, ResolveFileReferencesReq,
+            TasksSnapshotReq, ToolDefinitionsReq, UpdateToolConfigReq, WorkspaceInfo,
         };
         use xai_grok_workspace_types::rpc::worktree::WorktreeCreateSyncReq;
         tracing::debug!(method, "workspace rpc dispatch");
@@ -503,6 +533,26 @@ impl WorkspaceRpcHandler {
                 let toolset = session.toolset();
                 let outcome = kill_background_task(toolset.as_ref(), &task_id).await;
                 serde_json::to_value(KillTaskResponse { task_id, outcome })
+                    .map_err(|e| WorkspaceError::HubError(e.to_string()))
+            }
+            <DeleteScheduledTaskReq as WorkspaceRpc>::METHOD => {
+                note_mutation::<DeleteScheduledTaskReq>(&self.workspace);
+                let session_id = params
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| WorkspaceError::HubError("missing session_id".into()))?;
+                let task_id = params
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| WorkspaceError::HubError("missing task_id".into()))?
+                    .to_owned();
+                let session = self
+                    .workspace
+                    .session(session_id)
+                    .ok_or_else(|| WorkspaceError::SessionNotFound(session_id.into()))?;
+                let toolset = session.toolset();
+                let deleted = delete_scheduled_task(toolset.as_ref(), &task_id).await?;
+                serde_json::to_value(DeleteScheduledTaskResponse { task_id, deleted })
                     .map_err(|e| WorkspaceError::HubError(e.to_string()))
             }
             <ListTodosReq as WorkspaceRpc>::METHOD => {
@@ -919,6 +969,15 @@ impl WorkspaceRpcHandler {
             <WorktreeShowReq as WorkspaceRpc>::METHOD => {
                 dispatch_op::<WorktreeShowReq>(params, &self.workspace, None).await
             }
+            <WorktreeDetachReq as WorkspaceRpc>::METHOD => {
+                dispatch_op::<WorktreeDetachReq>(params, &self.workspace, None).await
+            }
+            <WorktreeSalvageReq as WorkspaceRpc>::METHOD => {
+                dispatch_op::<WorktreeSalvageReq>(params, &self.workspace, None).await
+            }
+            <WorktreeCleanArtifactsReq as WorkspaceRpc>::METHOD => {
+                dispatch_op::<WorktreeCleanArtifactsReq>(params, &self.workspace, None).await
+            }
             <WorktreeGcReq as WorkspaceRpc>::METHOD => {
                 dispatch_op::<WorktreeGcReq>(params, &self.workspace, None).await
             }
@@ -1199,9 +1258,10 @@ impl ToolServerHandler for WorkspaceRpcHandler {
         let sid = params.session_id.as_str();
         self.workspace.teardown_session_mcp(sid).await;
         self.workspace.on_session_ended(sid);
-        let (became_empty, start_drain) = {
+        let (became_empty, start_drain, removed) = {
             let mut sessions = self.workspace.shared.sessions.write();
-            if let Some(session) = sessions.remove(sid) {
+            let removed = sessions.remove(sid);
+            if let Some(session) = &removed {
                 session.abort_system_notify_producers();
                 session.shutdown_terminal_backend();
                 session.shutdown_browser_service();
@@ -1213,8 +1273,11 @@ impl ToolServerHandler for WorkspaceRpcHandler {
             if start {
                 self.workspace.activity_tracker().set_draining();
             }
-            (empty, start)
+            (empty, start, removed)
         };
+        if let Some(session) = removed {
+            self.workspace.invoke_unbind_hook(&session);
+        }
         if !start_drain {
             if became_empty {
                 tracing::info!(

@@ -232,7 +232,7 @@ fn session_created_banner_advertises_resume_in_minimal_mode() {
         .find(|t| t.contains("switch between sessions"))
         .unwrap_or_else(|| panic!("expected a session-switch banner, got: {texts:?}"));
     assert!(
-        banner.contains("Session new-session-123 \u{2014} use /resume to switch between sessions"),
+        banner.contains("Session new-session-123, use /resume to switch between sessions"),
         "minimal mode must advertise /resume: {banner}"
     );
     assert!(
@@ -3767,6 +3767,7 @@ mod welcome_workspace_mode {
                 label: None,
                 git_ref: None,
                 model_id: None,
+                permission_mode_override: None,
                 preferred_session_id: None,
                 chat_kind: false,
             }],
@@ -3780,6 +3781,7 @@ mod welcome_workspace_mode {
                     label: None,
                     git_ref: None,
                     model_id: None,
+                    permission_mode_override: None,
                     preferred_session_id: None,
                     chat_kind: false,
                 }],

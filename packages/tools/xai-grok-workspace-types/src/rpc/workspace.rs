@@ -274,6 +274,26 @@ impl WorkspaceRpc for KillTaskReq {
     type Response = KillTaskResponse;
 }
 
+/// Response of `workspace.delete_scheduled_task`. `deleted` is false when the task id was not found (already removed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteScheduledTaskResponse {
+    pub task_id: String,
+    pub deleted: bool,
+}
+
+/// `workspace.delete_scheduled_task`: delete a scheduled (loop) task by id. Caller supplies the hub-bound session id (same as `tasks_snapshot`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeleteScheduledTaskReq {
+    pub session_id: String,
+    pub task_id: String,
+}
+
+impl WorkspaceRpc for DeleteScheduledTaskReq {
+    const METHOD: &'static str = "workspace.delete_scheduled_task";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
+    type Response = DeleteScheduledTaskResponse;
+}
+
 /// One TODO list item (slim DTO over `xai_grok_tools`'s `TodoState`). `status`
 /// is the snake_case tag: `pending` | `in_progress` | `completed` | `cancelled`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

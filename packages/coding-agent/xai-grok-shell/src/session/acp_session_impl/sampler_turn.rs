@@ -1118,6 +1118,7 @@ impl SessionActor {
         crate::hypercore_host::ShellHyperHost::under_grok_home(cfg, xai_grok_config::grok_home())
     }
 
+    /// Refresh auth and push a fresh `SamplerConfig` before each turn.
     pub(crate) async fn prepare_sampler_for_turn(&self) {
         self.refresh_token_if_expired().await;
         let mut sampler_config = self.reconstruct_full_config().await;
@@ -1206,6 +1207,7 @@ impl SessionActor {
     pub(crate) async fn handle_sampling_failure(
         self: &Arc<Self>,
         error: xai_grok_sampler::SamplingErrorInfo,
+        rate_limit_waits: u32,
     ) -> Result<SamplerFailureRecovery, acp::Error> {
         use xai_grok_sampler::SamplingErrorKind;
         if self.tool_context.task_output_token_budget.is_some() {
@@ -1254,7 +1256,7 @@ impl SessionActor {
                     context_window: cw,
                     percentage,
                 };
-                if let Err(e) = self.run_compact_only(trigger_info).await {
+                if let Err(e) = self.run_compact_only(trigger_info, false).await {
                     if Self::is_auth_compact_error(&e) {
                         return Err(self.surface_compact_auth_failure(e).await);
                     }
@@ -1287,7 +1289,7 @@ impl SessionActor {
             self.log_terminal_failure("rate_limited", error.status_code, &detailed_message);
             self.send_xai_notification(XaiSessionUpdate::RetryState(
                 crate::extensions::notification::RetryState::Exhausted {
-                    attempts: 0,
+                    attempts: rate_limit_waits,
                     reason: detailed_message.clone(),
                     is_rate_limited: true,
                 },
@@ -1871,35 +1873,62 @@ impl SessionActor {
             )),
         )
     }
-    /// Drive a single turn through the sampler-based path.
-    ///
-    /// Calls `prepare_sampler_for_turn` first (auth refresh + config
-    /// push), then submits via `SamplerHandle::submit_and_collect` and
-    /// returns:
-    /// * `Ok(SamplerTurnOutcome::Response(_))` - model responded.
-    /// * `Ok(SamplerTurnOutcome::CompactAndResubmit)` - compaction
-    ///    ran, the outer turn loop should `continue`.
-    /// * `Ok(SamplerTurnOutcome::RefreshAuthAndResubmit)` - auth 401
-    ///    recovery succeeded, credentials refreshed, retry once.
-    /// * `Err(acp::Error)` - terminal failure already reported via
-    ///    `send_xai_notification(RetryState::Failed)`.
+    /// Drive one turn through the sampler, pacing a subagent's 429s via `budget`.
     pub(crate) async fn run_turn_via_sampler(
         self: &Arc<Self>,
         request: ConversationRequest,
+        budget: &mut RateLimitWaitBudget,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
         self.prepare_sampler_for_turn().await;
-        let stream_drained_rx = {
+        if !budget.can_wait() {
+            return match self.submit_turn_request(request).await {
+                Ok(outcome) => Ok(outcome),
+                Err(info) => self.recover_from_sampling_failure(info, budget).await,
+            };
+        }
+        loop {
+            match self.submit_turn_request(request.clone()).await {
+                Ok(outcome) => {
+                    budget.record_submission_accepted();
+                    return Ok(outcome);
+                }
+                Err(info) => {
+                    let decision = budget.decide(&info);
+                    let RateLimitWaitDecision::Wait { attempt, backoff } = decision else {
+                        self.log_rate_limit_budget_spent(decision, &info);
+                        return self.recover_from_sampling_failure(info, budget).await;
+                    };
+                    self.notify_rate_limit_wait(attempt, budget, backoff).await;
+                    sleep(backoff).await;
+                    self.prepare_sampler_for_turn().await;
+                }
+            }
+        }
+    }
+    async fn submit_turn_request(
+        self: &Arc<Self>,
+        request: ConversationRequest,
+    ) -> Result<SamplerTurnOutcome, xai_grok_sampler::SamplingErrorInfo> {
+        struct DrainBarrier<'a>(&'a parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>);
+        impl Drop for DrainBarrier<'_> {
+            fn drop(&mut self) {
+                self.0.lock().take();
+            }
+        }
+        let (_barrier, stream_drained_rx) = {
             let (tx, rx) = tokio::sync::oneshot::channel();
             *self.turn_stream_drained.lock() = Some(tx);
-            rx
+            (DrainBarrier(&self.turn_stream_drained), rx)
         };
         let request_id = xai_grok_sampler::RequestId::random();
         let request_id_str = request_id.as_str().to_string();
-        match self
-            .sampler_handle
-            .submit_and_collect(request_id, request)
-            .await
-        {
+        let submit_outcome = {
+            let _permit = acquire_subagent_sampling_permit(&self.sampling_gate).await;
+            self.sampler_handle
+                .submit_and_collect(request_id, request)
+                .await
+        };
+        match submit_outcome {
             Ok((response, metrics)) => {
                 let span = tracing::Span::current();
                 span.record("request_id", request_id_str.as_str());
@@ -1913,7 +1942,6 @@ impl SessionActor {
                     .await
                     .is_err()
                 {
-                    self.turn_stream_drained.lock().take();
                     tracing::warn!(
                         "stream-drain barrier timed out; proceeding to emit tool \
                          calls (eventId ordering may be imperfect this turn)"
@@ -1924,19 +1952,85 @@ impl SessionActor {
                     Box::new(metrics),
                 ))
             }
-            Err(rich_err) => {
-                self.turn_stream_drained.lock().take();
-                let info = xai_grok_sampler::SamplingErrorInfo::from(&rich_err);
-                match self.handle_sampling_failure(info).await? {
-                    SamplerFailureRecovery::CompactAndResubmit => {
-                        Ok(SamplerTurnOutcome::CompactAndResubmit)
-                    }
-                    SamplerFailureRecovery::RefreshAuthAndResubmit { credential, store } => {
-                        Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store })
-                    }
-                }
+            Err(rich_err) => Err(xai_grok_sampler::SamplingErrorInfo::from(&rich_err)),
+        }
+    }
+    async fn recover_from_sampling_failure(
+        self: &Arc<Self>,
+        info: xai_grok_sampler::SamplingErrorInfo,
+        budget: &RateLimitWaitBudget,
+    ) -> Result<SamplerTurnOutcome, acp::Error> {
+        match self
+            .handle_sampling_failure(info, budget.attempts_used())
+            .await?
+        {
+            SamplerFailureRecovery::CompactAndResubmit => {
+                Ok(SamplerTurnOutcome::CompactAndResubmit)
+            }
+            SamplerFailureRecovery::RefreshAuthAndResubmit { credential, store } => {
+                Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store })
             }
         }
+    }
+    /// Mirror the auth-retry path's `RetryState::Retrying` marker so the paced
+    /// wait is observable to the client.
+    async fn notify_rate_limit_wait(
+        &self,
+        attempt: u32,
+        budget: &RateLimitWaitBudget,
+        backoff: Duration,
+    ) {
+        tracing::debug!(
+            attempt,
+            delay_ms = backoff.as_millis() as u64,
+            "subagent turn rate limited; waiting for sampling capacity"
+        );
+        xai_grok_telemetry::unified_log::info(
+            "shell.turn.subagent_rate_limit_backoff",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "attempt": attempt,
+                "max_attempts": budget.max_attempts(),
+                "delay_ms": backoff.as_millis() as u64,
+            })),
+        );
+        let announced = Duration::from_secs(backoff.as_secs_f64().round().max(1.0) as u64);
+        self.send_xai_notification(XaiSessionUpdate::RetryState(
+            crate::extensions::notification::RetryState::Retrying {
+                attempt,
+                max_retries: budget.max_attempts(),
+                reason: format!(
+                    "Too many requests in flight; waiting {} before trying again",
+                    human_duration(announced)
+                ),
+            },
+        ))
+        .await;
+    }
+    fn log_rate_limit_budget_spent(
+        &self,
+        decision: RateLimitWaitDecision,
+        error: &xai_grok_sampler::SamplingErrorInfo,
+    ) {
+        let RateLimitWaitDecision::BudgetSpent { attempts, limit } = decision else {
+            return;
+        };
+        tracing::warn!(
+            attempts,
+            cause = limit.as_str(),
+            retry_after_secs = ?error.retry_after_secs,
+            "subagent stopped waiting out rate limits; failing the turn"
+        );
+        xai_grok_telemetry::unified_log::warn(
+            "shell.turn.subagent_rate_limit_exhausted",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "attempts": attempts,
+                "cause": limit.as_str(),
+                "retry_after_secs": error.retry_after_secs,
+                "status_code": error.status_code,
+            })),
+        );
     }
     /// Proactively refresh the auth token if near expiry.
     ///
@@ -2149,7 +2243,28 @@ impl SessionActor {
             });
         }
     }
-    pub(super) async fn record_assistant_response(&self, assistant_item: ConversationItem) {
+    /// Persist one response's items without re-estimating model output when
+    /// provider usage already includes it.
+    pub(super) async fn record_response_items(
+        &self,
+        items: Vec<ConversationItem>,
+        usage_reported: bool,
+    ) {
+        for item in items {
+            match item {
+                ConversationItem::Assistant(_) => {
+                    self.record_assistant_response(item, usage_reported).await;
+                }
+                _ if usage_reported => self.chat_state_handle.push_model_output(item),
+                _ => self.chat_state_handle.push_tool_result(item),
+            }
+        }
+    }
+    pub(super) async fn record_assistant_response(
+        &self,
+        assistant_item: ConversationItem,
+        usage_reported: bool,
+    ) {
         self.signals_handle().record_assistant_message();
         if let ConversationItem::Assistant(ref a) = assistant_item {
             tracing::info!(model_id = ?a.model_id, "DEBUG record_assistant_response model_id");
@@ -2159,8 +2274,13 @@ impl SessionActor {
         {
             tracing::info!("Assistant requested tool call: {}", first_call.id);
         }
-        self.chat_state_handle
-            .push_assistant_response(assistant_item);
+        if usage_reported {
+            self.chat_state_handle
+                .push_assistant_response(assistant_item);
+        } else {
+            self.chat_state_handle
+                .push_unreported_model_output(assistant_item);
+        }
     }
 }
 /// Per-tool precedence: a non-empty `over` wins, else the non-empty `seed`.
@@ -2171,6 +2291,16 @@ fn prefer_non_empty<T>(
 ) -> Option<T> {
     over.filter(|o| !is_empty(o))
         .or_else(|| seed.filter(|s| !is_empty(s)))
+}
+/// Acquire the turn-sampling permit for this session, or `None` when the gate is
+/// `None` (ungated). A subagent's excess turns queue on `acquire_owned`; the permit
+/// releases on drop. The semaphore is never closed, so `.ok()` fails open to ungated
+/// for this turn.
+async fn acquire_subagent_sampling_permit(
+    gate: &Option<Arc<tokio::sync::Semaphore>>,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    let semaphore = gate.as_ref()?;
+    semaphore.clone().acquire_owned().await.ok()
 }
 /// The cutoff a subagent inherits: a non-empty per-turn `base` wins per tool, else the `seed`.
 fn resolve_configured_cutoff(
@@ -2190,109 +2320,5 @@ fn resolve_configured_cutoff(
     }
 }
 #[cfg(test)]
-mod classifier_request_bound_tests {
-    use super::{CLASSIFIER_REQUEST_TOKEN_RESERVE, classifier_request_fits_context};
-    #[test]
-    fn enforces_reserved_threshold_with_saturating_arithmetic() {
-        let window = 12_000 + CLASSIFIER_REQUEST_TOKEN_RESERVE;
-        for (input, context_window, expected) in [
-            (12_000, window, true),
-            (12_001, window, false),
-            (u64::MAX, u64::MAX, false),
-        ] {
-            assert_eq!(
-                classifier_request_fits_context(input, context_window),
-                expected
-            );
-        }
-    }
-}
-#[cfg(test)]
-mod configured_cutoff_tests {
-    use xai_grok_sampling_types::{
-        SearchDateBound, ToolOverrides, WebSearchOptions, XSearchOptions,
-    };
-    fn x_cut(to: &str) -> XSearchOptions {
-        XSearchOptions {
-            date_bound: Some(SearchDateBound::new(None, Some(to.into())).unwrap()),
-        }
-    }
-    #[test]
-    fn seed_only_is_inherited_without_a_per_turn_update() {
-        let seed = ToolOverrides {
-            x_search: Some(x_cut("2020-01-01")),
-            web_search: None,
-        };
-        assert_eq!(
-            super::resolve_configured_cutoff(Some(seed.clone()), None),
-            seed
-        );
-    }
-    #[test]
-    fn non_empty_base_wins_per_tool_and_empty_reverts_to_seed() {
-        let seed = ToolOverrides {
-            x_search: Some(x_cut("2020-01-01")),
-            web_search: Some(WebSearchOptions {
-                allowed_domains: Some(vec!["x.com".into()]),
-                excluded_domains: None,
-            }),
-        };
-        let base = ToolOverrides {
-            x_search: Some(x_cut("2019-06-01")),
-            web_search: Some(WebSearchOptions {
-                allowed_domains: Some(vec![]),
-                excluded_domains: None,
-            }),
-        };
-        let got = super::resolve_configured_cutoff(Some(seed.clone()), Some(&base));
-        assert_eq!(got.x_search, Some(x_cut("2019-06-01")));
-        assert_eq!(got.web_search, seed.web_search);
-    }
-    /// The contamination invariant: `resolve_configured_cutoff` (inheritance) must resolve the same
-    /// bound the wire/echo path (`apply_tool_overrides`) does for the same seed and per-turn base.
-    /// Two independent precedence implementations, so drift on the inherited boundary fails CI.
-    #[test]
-    fn inherited_cutoff_agrees_with_the_wire_echo() {
-        use xai_grok_sampling_types::{HostedTool, apply_tool_overrides};
-        let web = WebSearchOptions {
-            allowed_domains: Some(vec!["x.com".into()]),
-            excluded_domains: None,
-        };
-        let cases = [
-            (
-                Some(ToolOverrides {
-                    x_search: Some(x_cut("2020-01-01")),
-                    web_search: None,
-                }),
-                None,
-            ),
-            (
-                Some(ToolOverrides {
-                    x_search: Some(x_cut("2020-01-01")),
-                    web_search: Some(web.clone()),
-                }),
-                Some(ToolOverrides {
-                    x_search: Some(x_cut("2019-06-01")),
-                    web_search: None,
-                }),
-            ),
-            (
-                None,
-                Some(ToolOverrides {
-                    x_search: Some(x_cut("2018-01-01")),
-                    web_search: Some(web.clone()),
-                }),
-            ),
-        ];
-        for (seed, base) in cases {
-            let mut tools = vec![
-                HostedTool::WebSearch { options: None },
-                HostedTool::XSearch { options: None },
-            ];
-            apply_tool_overrides(&mut tools, seed.as_ref());
-            let wire_echo = apply_tool_overrides(&mut tools, base.as_ref());
-            let inherited = super::resolve_configured_cutoff(seed.clone(), base.as_ref());
-            assert_eq!(wire_echo, inherited, "seed={seed:?} base={base:?}");
-        }
-    }
-}
+#[path = "sampler_turn_tests.rs"]
+mod tests;

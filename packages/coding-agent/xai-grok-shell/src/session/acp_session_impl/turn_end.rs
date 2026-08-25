@@ -135,6 +135,11 @@ impl SessionActor {
                 .gateway
                 .forward_fire_and_forget(notification);
         }
+
+        // The row carries `workspace.branch`, and HEAD has just moved. Inside
+        // the `git_head_enabled` gate above, so a client that did not ask for
+        // HEAD notifications refreshes its row at turn end instead.
+        self.emit_status_snapshot_detached();
     }
 
     /// Live subagents and sticky usage-not-applied. `None` if the query failed.
@@ -404,6 +409,9 @@ impl SessionActor {
             extra_meta,
         )
         .await;
+
+        // Cost, context occupancy and the turn timer all moved during the turn.
+        self.emit_status_snapshot_detached();
     }
 
     /// Telemetry error category; delegates to `stop_failure_error_type` so the

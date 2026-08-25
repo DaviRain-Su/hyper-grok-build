@@ -3909,6 +3909,35 @@ fn handle_user_message_finishes_pending_tool_entries() {
         "no entries should be animating after user message",
     );
 }
+/// A send-now interrupt must not finalize the freshly armed page-flip pin.
+#[test]
+fn handle_user_message_does_not_finalize_fresh_pin() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    for i in 0..30 {
+        sb.push_block(RenderBlock::agent_message(format!("history {i}")));
+    }
+    sb.push_block(RenderBlock::user_prompt("new question"));
+    let prompt_idx = sb.len() - 1;
+    sb.prepare_layout(80, 8);
+    sb.follow_new_turn(Some(prompt_idx), true);
+    sb.prepare_layout(80, 8);
+    assert!(sb.is_pin_reserve_active(), "pin armed for the new turn");
+    assert!(
+        !sb.is_pin_reserve_after_turn(),
+        "fresh pin is not finalized"
+    );
+    tracker.handle_update(agent_chunk("responding..."), &meta(), &mut sb);
+    tracker.handle_update(user_message("interrupt"), &meta(), &mut sb);
+    assert!(
+        sb.is_pin_reserve_active(),
+        "the interrupt must not drop the pin"
+    );
+    assert!(
+        !sb.is_pin_reserve_after_turn(),
+        "a send-now must not finalize the fresh pin (that blocks the overflow chase)"
+    );
+}
 /// Regression: finish_turn must call finish_running even for tools that are
 /// in bg_deferred_tools. The turn is over — the original Execute block must
 /// not stay orphaned as "running".

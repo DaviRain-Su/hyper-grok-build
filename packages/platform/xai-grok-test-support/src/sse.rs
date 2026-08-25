@@ -573,6 +573,109 @@ pub fn responses_api_with_doom_loop_frame(
     events
 }
 
+/// Replace the `output` list of a turn's terminal `response.completed` frame,
+/// composing over any turn builder. The deltas the turn streamed are left
+/// alone, so a caller can script a terminal shape that deliberately differs
+/// from them — a reasoning item carrying `encrypted_content`, or a tool item
+/// (`mcp_call`) the conversation form does not model.
+pub fn with_terminal_output_items(
+    mut events: Vec<SseEvent>,
+    output: Vec<serde_json::Value>,
+) -> Vec<SseEvent> {
+    let at = completed_frame_index(&events);
+    let mut value: serde_json::Value =
+        serde_json::from_str(&events[at].data).expect("the completed frame is valid JSON");
+    value["response"]["output"] = json!(output);
+    events[at].data = value.to_string();
+    events
+}
+
+/// Index of a turn's terminal `response.completed` frame.
+fn completed_frame_index(events: &[SseEvent]) -> usize {
+    events
+        .iter()
+        .position(|event| {
+            serde_json::from_str::<serde_json::Value>(&event.data)
+                .ok()
+                .is_some_and(|value| value["type"] == "response.completed")
+        })
+        .expect("turn builders always emit a response.completed frame")
+}
+
+/// Splice ONE named `response.doom_loop_check` frame in just before the first
+/// frame of `before_type`, composing over any turn builder. An armed client
+/// observes the signal and aborts on that next frame, so the caller chooses
+/// which frame the abort lands on — `response.function_call_arguments.delta`
+/// to abort on tool activity, for instance. Panics when the turn has no such
+/// frame, since that is a script bug.
+pub fn with_doom_loop_frame_before_type(
+    mut events: Vec<SseEvent>,
+    check_frame_data: &str,
+    before_type: &str,
+) -> Vec<SseEvent> {
+    let at = events
+        .iter()
+        .position(|event| {
+            serde_json::from_str::<serde_json::Value>(&event.data)
+                .ok()
+                .is_some_and(|value| value["type"] == before_type)
+        })
+        .unwrap_or_else(|| panic!("the turn emits no {before_type} frame"));
+    events.insert(
+        at,
+        SseEvent::with_event(DOOM_LOOP_CHECK_EVENT, check_frame_data),
+    );
+    events
+}
+
+/// Splice ONE named `response.doom_loop_check` frame in just before a turn's
+/// terminal `response.completed`, composing over any turn builder (the
+/// think-then-call turn, for instance). The frame is the last thing an armed
+/// client sees before the terminal frame, so the signal lands with the turn's
+/// items complete — the terminal-detection lane. Append a non-terminal event
+/// after it (as
+/// [`responses_api_with_doom_loop_frame_after_text`] does) to exercise the
+/// mid-stream abort instead.
+pub fn with_doom_loop_frame_before_completed(
+    events: Vec<SseEvent>,
+    check_frame_data: &str,
+) -> Vec<SseEvent> {
+    with_doom_loop_frame_before_type(events, check_frame_data, "response.completed")
+}
+
+/// A reasoning + text turn whose check frame arrives after all of its text,
+/// followed by an empty typed delta — a non-terminal event that observes the
+/// signal, so the mid-stream abort fires with the whole streamed turn already
+/// captured. Exercises the exact text a client retains before detection.
+pub fn responses_api_with_doom_loop_frame_after_text(
+    check_frame_data: &str,
+    reasoning: &str,
+    text: &str,
+    model: &str,
+) -> Vec<SseEvent> {
+    let mut events = with_doom_loop_frame_before_completed(
+        responses_api_reasoning_and_text_events(reasoning, text, model),
+        check_frame_data,
+    );
+    let at = completed_frame_index(&events);
+    events.insert(
+        at,
+        SseEvent::data(
+            json!({
+                "type": "response.output_text.delta",
+                "sequence_number": at,
+                "item_id": "item_test",
+                "output_index": 1,
+                "content_index": 0,
+                "delta": "",
+                "logprobs": []
+            })
+            .to_string(),
+        ),
+    );
+    events
+}
+
 /// Generate Responses API SSE events for a turn that streams reasoning
 /// summary deltas FIRST and then issues one `function_call` — the shape a
 /// reasoning-capable model produces when it thinks before its first tool
@@ -1114,5 +1217,126 @@ mod tests {
         assert_eq!(events[1].data, payload);
         let created: serde_json::Value = serde_json::from_str(&events[0].data).unwrap();
         assert_eq!(created["type"], "response.created");
+    }
+
+    /// Shape guard for the positional composer: the named frame lands
+    /// immediately before the first frame of the requested type, so an armed
+    /// client aborts on that frame.
+    #[test]
+    fn with_doom_loop_frame_before_type_lands_before_the_named_frame() {
+        let payload = r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:8@thinking"]}}"#;
+        let events = with_doom_loop_frame_before_type(
+            responses_api_reasoning_then_tool_call_events("hm", "call-1", "read_file", "{}", "m"),
+            payload,
+            "response.function_call_arguments.delta",
+        );
+
+        let at = events
+            .iter()
+            .position(|e| e.event.as_deref() == Some(DOOM_LOOP_CHECK_EVENT))
+            .expect("the named frame is spliced in");
+        assert_eq!(events[at].data, payload);
+        let next: serde_json::Value = serde_json::from_str(&events[at + 1].data).unwrap();
+        assert_eq!(next["type"], "response.function_call_arguments.delta");
+    }
+
+    /// Shape guard for the terminal-output composer: the completed frame
+    /// carries exactly the caller's items (including wire shapes the
+    /// conversation form does not model), the rest of the frame survives, and
+    /// the streamed deltas are untouched.
+    #[test]
+    fn with_terminal_output_items_replaces_only_the_completed_output() {
+        let events = with_terminal_output_items(
+            responses_api_reasoning_and_text_events("thinking", "the answer", "m"),
+            vec![json!({
+                "type": "mcp_call",
+                "id": "mcp-1",
+                "name": "search",
+                "server_label": "docs",
+                "arguments": "{}"
+            })],
+        );
+
+        let parsed: Vec<serde_json::Value> = events
+            .iter()
+            .filter(|e| e.data != "[DONE]")
+            .map(|e| serde_json::from_str(&e.data).expect("each event is valid JSON"))
+            .collect();
+        assert!(
+            parsed
+                .iter()
+                .any(|v| v["type"] == "response.output_text.delta"),
+            "the streamed deltas are left alone"
+        );
+        let completed = parsed
+            .iter()
+            .find(|v| v["type"] == "response.completed")
+            .expect("must emit a completed event");
+        let output = completed["response"]["output"].as_array().unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["type"], "mcp_call");
+        assert_eq!(
+            completed["response"]["model"], "m",
+            "the rest of the frame survives"
+        );
+    }
+
+    /// Shape guard for the terminal-side composer: the caller's payload rides
+    /// verbatim in the slot immediately before `response.completed`, over an
+    /// arbitrary turn builder (here the think-then-call turn).
+    #[test]
+    fn with_doom_loop_frame_before_completed_lands_last_before_the_terminal_frame() {
+        let payload = r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:8@thinking"]}}"#;
+        let events = with_doom_loop_frame_before_completed(
+            responses_api_reasoning_then_tool_call_events("hm", "call-1", "read_file", "{}", "m"),
+            payload,
+        );
+
+        let at = events
+            .iter()
+            .position(|e| e.event.as_deref() == Some(DOOM_LOOP_CHECK_EVENT))
+            .expect("the named frame is spliced in");
+        assert_eq!(events[at].data, payload);
+        let next: serde_json::Value = serde_json::from_str(&events[at + 1].data).unwrap();
+        assert_eq!(
+            next["type"], "response.completed",
+            "the frame is the last event before the terminal frame"
+        );
+        let output = next["response"]["output"].as_array().unwrap();
+        assert!(
+            output.iter().any(|o| o["type"] == "function_call"),
+            "the composed turn keeps its tool call"
+        );
+    }
+
+    /// Shape guard for the mid-stream variant: the check frame follows every
+    /// text delta and is itself followed by one empty typed delta — the
+    /// non-terminal event an armed client aborts on — before the terminal
+    /// frame.
+    #[test]
+    fn doom_loop_frame_after_text_is_followed_by_an_empty_delta() {
+        let payload = r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:8@thinking"]}}"#;
+        let events =
+            responses_api_with_doom_loop_frame_after_text(payload, "hm", "the answer", "m");
+
+        let at = events
+            .iter()
+            .position(|e| e.event.as_deref() == Some(DOOM_LOOP_CHECK_EVENT))
+            .expect("the named frame is spliced in");
+        let text_delta_before = events[..at]
+            .iter()
+            .filter(|e| e.data != "[DONE]")
+            .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+            .any(|v| v["type"] == "response.output_text.delta");
+        assert!(
+            text_delta_before,
+            "the frame arrives after the turn's visible text"
+        );
+
+        let next: serde_json::Value = serde_json::from_str(&events[at + 1].data).unwrap();
+        assert_eq!(next["type"], "response.output_text.delta");
+        assert_eq!(next["delta"], "", "the abort rides an empty typed delta");
+        let terminal: serde_json::Value = serde_json::from_str(&events[at + 2].data).unwrap();
+        assert_eq!(terminal["type"], "response.completed");
     }
 }

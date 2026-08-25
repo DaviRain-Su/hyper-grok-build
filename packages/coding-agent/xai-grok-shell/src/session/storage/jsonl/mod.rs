@@ -679,6 +679,7 @@ impl JsonlStorageAdapter {
         // read order — `read_dir` order is unspecified and varies by FS).
         entries.sort_by_key(|entry| entry.file_name());
         let entries_truncated = entries.len() > MAX_RESTORED_WORKFLOW_RUNS;
+        entries.sort_by_key(|entry| entry.file_name());
         entries.truncate(MAX_RESTORED_WORKFLOW_RUNS);
         if entries_truncated {
             tracing::warn!(
@@ -758,10 +759,46 @@ impl JsonlStorageAdapter {
                     continue;
                 }
             };
+            let effort_path = run_dir.join("effort");
+            let effort = match read_bounded_nofollow(
+                &effort_path,
+                crate::session::workflow::store::MAX_WORKFLOW_EFFORT_BYTES,
+            ) {
+                Ok(bytes) => {
+                    match String::from_utf8(bytes)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+                        .and_then(|effort| {
+                            let parsed = effort
+                                .parse::<xai_grok_sampling_types::ReasoningEffort>()
+                                .map_err(|error| {
+                                    io::Error::new(io::ErrorKind::InvalidData, error)
+                                })?;
+                            if effort != parsed.as_str() {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "workflow effort is not canonical",
+                                ));
+                            }
+                            Ok(parsed)
+                        }) {
+                        Ok(effort) => Some(effort),
+                        Err(error) => {
+                            tracing::warn!(path = %effort_path.display(), %error, "skipping workflow with invalid immutable effort");
+                            continue;
+                        }
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    tracing::warn!(path = %effort_path.display(), %error, "skipping workflow with invalid immutable effort");
+                    continue;
+                }
+            };
             restored.push(crate::session::workflow::store::RestoredWorkflowRun {
                 manifest,
                 script,
                 args,
+                effort,
             });
         }
         Ok(restored)

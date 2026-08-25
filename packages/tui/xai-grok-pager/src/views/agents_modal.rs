@@ -317,6 +317,9 @@ pub struct AgentsModalState {
     /// Model `agentType` from the pager's default/current model catalog entry,
     /// used when re-resolving after `s` toggles `[agent] name`.
     model_agent_type: Option<String>,
+    /// Plugin registry snapshot for listing plugin-provided agents
+    /// (`None` when no plugins are installed/enabled).
+    plugin_registry: Option<xai_grok_agent::plugins::PluginRegistry>,
     pub personas: Vec<PersonaDetail>,
     pub persona_selected: usize,
     pub persona_scroll: usize,
@@ -346,9 +349,10 @@ impl AgentsModalState {
         bundle: &BundleState,
         model_agent_type: Option<&str>,
         active_agent: Option<String>,
+        plugin_registry: Option<xai_grok_agent::plugins::PluginRegistry>,
         available_models: Vec<ModelChoice>,
     ) -> Self {
-        let agents = build_agent_list(cwd, toggle);
+        let agents = build_agent_list(cwd, toggle, plugin_registry.as_ref());
         let personas = merge_persona_lists(bundle, cwd);
         let default_agent = resolve_default_agent_name(cwd, model_agent_type);
         let model_pins = load_agent_model_pins();
@@ -383,6 +387,7 @@ impl AgentsModalState {
             default_agent,
             active_agent,
             model_agent_type: model_agent_type.map(str::to_owned),
+            plugin_registry,
             personas,
             persona_selected: 0,
             persona_scroll: 0,
@@ -392,7 +397,7 @@ impl AgentsModalState {
     /// Rebuild agent list from disk after a mutation.
     fn rebuild_agents(&mut self) {
         let toggle = load_agent_toggle();
-        self.agents = build_agent_list(&self.cwd, &toggle);
+        self.agents = build_agent_list(&self.cwd, &toggle, self.plugin_registry.as_ref());
         self.model_pins = load_agent_model_pins();
         self.effort_pins = load_agent_effort_pins();
         if self.selected >= self.agents.len() {
@@ -472,8 +477,13 @@ impl AgentsModalState {
     }
 }
 /// Build the full agent list: user-visible built-ins first, then
-/// file-based agents from discovery, with dedup.
-pub fn build_agent_list(cwd: &Path, toggle: &HashMap<String, bool>) -> Vec<AgentListEntry> {
+/// file-based agents from discovery (with dedup), then plugin-provided
+/// agents under qualified `plugin:agent` names.
+pub fn build_agent_list(
+    cwd: &Path,
+    toggle: &HashMap<String, bool>,
+    plugins: Option<&xai_grok_agent::plugins::PluginRegistry>,
+) -> Vec<AgentListEntry> {
     let mut entries = Vec::new();
     for &builtin in user_visible_builtins() {
         let def = builtin.definition();
@@ -537,6 +547,24 @@ pub fn build_agent_list(cwd: &Path, toggle: &HashMap<String, bool>) -> Vec<Agent
                 is_builtin: false,
                 expanded: false,
                 definition: def,
+            });
+        }
+    }
+    if let Some(registry) = plugins {
+        for agent in xai_grok_agent::discovery::plugin_agents(registry) {
+            if entries.iter().any(|e| e.name == agent.qualified_name) {
+                continue;
+            }
+            let enabled = toggle.get(&agent.qualified_name).copied().unwrap_or(true);
+            entries.push(AgentListEntry {
+                name: agent.qualified_name,
+                description: agent.definition.description.clone(),
+                scope: agent.scope,
+                source_path: agent.definition.source_path.clone(),
+                enabled,
+                is_builtin: false,
+                expanded: false,
+                definition: agent.definition,
             });
         }
     }
@@ -1115,6 +1143,9 @@ pub fn format_agent_detail(
     if !def.skills.is_empty() {
         lines.push(format!("  Skills: {}", def.skills.join(", ")));
     }
+    if let Some(ref plugin) = def.plugin_name {
+        lines.push(format!("  Plugin: {plugin}"));
+    }
     if let Some(ref path) = entry.source_path {
         lines.push(format!("  Source: {}", path.display()));
     }
@@ -1130,7 +1161,7 @@ pub fn format_agent_detail(
             lines.push(format!("  Prompt extension: {truncated}"));
         }
     } else if entry.source_path.is_some() {
-        lines.push("  Prompt extension: (in file — Enter to view)".to_string());
+        lines.push("  Prompt extension: (in file, Enter to view)".to_string());
     } else {
         lines.push("  Prompt extension: (none)".to_string());
     }
@@ -1802,12 +1833,13 @@ fn render_agents_tab(
     }
     let visible_width = content_area.width as usize;
     let mut rows: Vec<FlatRow> = Vec::new();
-    let mut current_scope: Option<AgentScope> = None;
+    let mut current_group: Option<AgentGroup> = None;
     for &idx in &filtered {
         let entry = &state.agents[idx];
-        if current_scope != Some(entry.scope) {
-            current_scope = Some(entry.scope);
-            rows.push(FlatRow::ScopeHeader(entry.scope));
+        let group = AgentGroup::of(entry);
+        if current_group != Some(group) {
+            current_group = Some(group);
+            rows.push(FlatRow::GroupHeader(group));
         }
         rows.push(FlatRow::Agent(idx));
         if !entry.description.is_empty() {
@@ -1864,12 +1896,19 @@ fn render_agents_tab(
             break;
         }
         match &rows[ri] {
-            FlatRow::ScopeHeader(scope) => {
-                let label = match scope {
-                    AgentScope::BuiltIn => "\u{2500}\u{2500} Built-in \u{2500}\u{2500}",
-                    AgentScope::Project => "\u{2500}\u{2500} Project \u{2500}\u{2500}",
-                    AgentScope::User => "\u{2500}\u{2500} User \u{2500}\u{2500}",
-                    AgentScope::Bundled => "\u{2500}\u{2500} Bundled \u{2500}\u{2500}",
+            FlatRow::GroupHeader(group) => {
+                let label = match group {
+                    AgentGroup::Scope(AgentScope::BuiltIn) => {
+                        "\u{2500}\u{2500} Built-in \u{2500}\u{2500}"
+                    }
+                    AgentGroup::Scope(AgentScope::Project) => {
+                        "\u{2500}\u{2500} Project \u{2500}\u{2500}"
+                    }
+                    AgentGroup::Scope(AgentScope::User) => "\u{2500}\u{2500} User \u{2500}\u{2500}",
+                    AgentGroup::Scope(AgentScope::Bundled) => {
+                        "\u{2500}\u{2500} Bundled \u{2500}\u{2500}"
+                    }
+                    AgentGroup::Plugin => "\u{2500}\u{2500} Plugins \u{2500}\u{2500}",
                 };
                 let style = Style::default()
                     .fg(theme.gray_dim)
@@ -2011,7 +2050,14 @@ fn render_agents_tab(
                         x += effort_label.width() as u16;
                     }
                 }
-                let (badge_text, mut badge_style) = scope_badge(entry.scope, theme);
+                let (badge_text, mut badge_style) = if entry.definition.plugin_name.is_some() {
+                    (
+                        " plugin ".to_string(),
+                        Style::default().fg(theme.text_secondary),
+                    )
+                } else {
+                    scope_badge(entry.scope, theme)
+                };
                 if let Some(bg_color) = bg {
                     badge_style = badge_style.bg(bg_color);
                 }
@@ -2236,7 +2282,7 @@ fn render_personas_tab(
                     && let Some(ref desc) = persona.description
                     && !desc.is_empty()
                 {
-                    let sep = " \u{2014} ";
+                    let sep = " \u{00b7} ";
                     let desc_remaining =
                         (content_area.x + content_area.width).saturating_sub(x) as usize;
                     if desc_remaining > sep.width() + 3 {
@@ -2516,8 +2562,24 @@ fn render_persona_confirm_dialog(
     let hint = "y: confirm | n/Esc: cancel";
     buf.set_string(content_area.x, y, hint, Style::default().fg(theme.gray_dim));
 }
+/// Group an agent entry belongs to in the flat list: its scope, or the
+/// dedicated plugins group for plugin-provided agents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentGroup {
+    Scope(AgentScope),
+    Plugin,
+}
+impl AgentGroup {
+    fn of(entry: &AgentListEntry) -> Self {
+        if entry.definition.plugin_name.is_some() {
+            Self::Plugin
+        } else {
+            Self::Scope(entry.scope)
+        }
+    }
+}
 enum FlatRow {
-    ScopeHeader(AgentScope),
+    GroupHeader(AgentGroup),
     Agent(usize),
     /// Word-wrapped description line, always shown below the agent header row.
     Description(usize, String),
@@ -3006,7 +3068,7 @@ fn handle_agents_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
         KeyCode::Enter | KeyCode::Char('o') => {
             if let Some(entry) = state.agents.get(state.selected) {
                 if let Some(ref path) = entry.source_path {
-                    let title = format!("{} \u{2014} prompt extension", entry.name);
+                    let title = format!("{} \u{00b7} prompt extension", entry.name);
                     return AgentsModalOutcome::ViewAgent {
                         title,
                         source_path: Some(path.clone()),
@@ -3014,7 +3076,7 @@ fn handle_agents_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
                     };
                 }
                 if entry.definition.prompt_body.is_some() {
-                    let title = format!("{} \u{2014} prompt extension", entry.name);
+                    let title = format!("{} \u{00b7} prompt extension", entry.name);
                     return AgentsModalOutcome::ViewAgent {
                         title,
                         source_path: None,
@@ -3033,6 +3095,13 @@ fn handle_agents_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
         KeyCode::Char('q') => AgentsModalOutcome::Close,
         KeyCode::Char('s') => {
             if let Some(entry) = state.agents.get(state.selected) {
+                if entry.definition.plugin_name.is_some() {
+                    state.message = Some(AgentsModalMessage::info(
+                        "Plugin agents can't be the session default \u{2014} \
+                         they are spawned as subagents via the Task tool.",
+                    ));
+                    return AgentsModalOutcome::Changed;
+                }
                 let name = entry.name.clone();
                 let is_already_default = load_config_agent_name().as_deref() == Some(name.as_str());
                 let new_default = if is_already_default {
@@ -3045,7 +3114,7 @@ fn handle_agents_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
                         refresh_default_agent(state);
                         state.message = Some(if is_already_default {
                             AgentsModalMessage::info(format!(
-                                "Cleared \u{2014} new sessions use '{}'",
+                                "Cleared: new sessions use '{}'",
                                 state.default_agent
                             ))
                         } else {
@@ -3085,6 +3154,11 @@ fn handle_agents_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
                 match toggle_agent(&name, new_enabled) {
                     Ok(()) => {
                         state.rebuild_agents();
+                        state.message = Some(AgentsModalMessage::info(format!(
+                            "{} '{}' \u{2014} applies to new sessions",
+                            if new_enabled { "Enabled" } else { "Disabled" },
+                            name
+                        )));
                     }
                     Err(e) => {
                         state.message = Some(AgentsModalMessage::error(e));
@@ -3738,6 +3812,7 @@ mod tests {
                 default_agent: DEFAULT_AGENT_TYPE.to_string(),
                 active_agent: None,
                 model_agent_type: None,
+                plugin_registry: None,
                 personas: personas.clone(),
                 persona_selected: 0,
                 persona_scroll: 0,
@@ -3787,6 +3862,7 @@ mod tests {
             default_agent: DEFAULT_AGENT_TYPE.to_string(),
             active_agent: None,
             model_agent_type: None,
+            plugin_registry: None,
             personas,
             persona_selected: selected,
             persona_scroll: 0,
@@ -4694,5 +4770,73 @@ ignored = 42
         assert_eq!(read_persona_model(&written), None);
         let content = std::fs::read_to_string(&written).unwrap();
         assert!(content.contains("instructions"));
+    }
+    /// Fixture: a one-plugin registry whose `agents/` dir holds `reviewer.md`.
+    fn plugin_registry_with_reviewer(
+        plugin_root: &Path,
+    ) -> xai_grok_agent::plugins::PluginRegistry {
+        use xai_grok_agent::plugins::discovery::PluginId;
+        use xai_grok_agent::plugins::{
+            DiscoveredPlugin, PluginManifest, PluginOrigin, PluginRegistry, PluginScope,
+        };
+        let agents_dir = plugin_root.join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("reviewer.md"),
+            "---\nname: reviewer\ndescription: Reviews code\n---\nBody.\n",
+        )
+        .unwrap();
+        let dp = DiscoveredPlugin {
+            manifest: PluginManifest {
+                name: "my-plugin".to_string(),
+                ..Default::default()
+            },
+            id: PluginId::new(PluginScope::User, plugin_root, "my-plugin"),
+            root: plugin_root.to_path_buf(),
+            canonical_root: plugin_root.to_path_buf(),
+            scope: PluginScope::User,
+            origin: PluginOrigin::UserGrok,
+            trusted: true,
+            skill_dirs: vec![],
+            command_dirs: vec![],
+            agent_dirs: vec![agents_dir],
+            hooks_path: None,
+            mcp_config_path: None,
+            lsp_config_path: None,
+            conflict: None,
+        };
+        PluginRegistry::from_discovered(vec![dp], &[], &["my-plugin".to_string()])
+    }
+    #[test]
+    fn build_agent_list_includes_plugin_agents_under_qualified_names() {
+        let plugin_root = tempfile::tempdir().unwrap();
+        let registry = plugin_registry_with_reviewer(plugin_root.path());
+        let cwd = tempfile::tempdir().unwrap();
+        let entries = build_agent_list(cwd.path(), &HashMap::new(), Some(&registry));
+        let entry = entries
+            .iter()
+            .find(|e| e.name == "my-plugin:reviewer")
+            .expect("plugin agent must be listed under its qualified name");
+        assert_eq!(entry.description, "Reviews code");
+        assert!(entry.enabled);
+        assert!(!entry.is_builtin);
+        assert!(
+            entry.source_path.is_some(),
+            "source path opens the .md file"
+        );
+        assert_eq!(entry.definition.plugin_name.as_deref(), Some("my-plugin"));
+    }
+    #[test]
+    fn build_agent_list_plugin_agent_toggle_keys_on_qualified_name() {
+        let plugin_root = tempfile::tempdir().unwrap();
+        let registry = plugin_registry_with_reviewer(plugin_root.path());
+        let cwd = tempfile::tempdir().unwrap();
+        let toggle = HashMap::from([("my-plugin:reviewer".to_string(), false)]);
+        let entries = build_agent_list(cwd.path(), &toggle, Some(&registry));
+        let entry = entries
+            .iter()
+            .find(|e| e.name == "my-plugin:reviewer")
+            .expect("disabled plugin agent stays visible in the list");
+        assert!(!entry.enabled);
     }
 }

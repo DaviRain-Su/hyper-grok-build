@@ -180,9 +180,13 @@ Lookup order for each reference:
 2. The current process environment (the env Grok itself sees).
 
 If a reference is unset in both, it's **preserved verbatim** (e.g. `${UNSET}`
-stays as the literal string). The runtime `sh -c` branch may resolve it later
-if the var becomes set; otherwise the runner refuses to spawn with a clear
-"required env var(s) not set" error.
+stays as the literal string). Runner-injected names (`CLAUDE_PROJECT_DIR`,
+`GROK_WORKSPACE_ROOT`, `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`,
+`GROK_SESSION_ID`) are not taken from the Grok process environment at
+load. Unix `sh -c` expands them from the child env; Windows PowerShell
+rewrites `$VAR` to `$env:VAR`. HTTP `url` substitutes them at request
+time. Remaining unresolved command refs are refused with "required env
+var(s) not set".
 
 For HTTP hooks specifically, `url` is also re-expanded **at request time**
 (immediately before SSRF validation), so plugin-injected vars like
@@ -257,6 +261,7 @@ The full event envelope is POSTed as JSON. Useful for webhooks, analytics, or se
 - **Hook not running?** → Press `Ctrl+L` on non–VS Code family (or run `/hooks` anywhere) to see if it's loaded and matched.
 - **Project hooks ignored?** → Trust the project first.
 - **Script not found?** → Check the path is relative to the `.json` file and executable (`chmod +x`).
+- **`The argument '/.claude/hooks/….ps1' to the -File parameter does not exist`?** → PowerShell treated `$CLAUDE_PROJECT_DIR` as empty. Grok rewrites it to `$env:CLAUDE_PROJECT_DIR` unless `GROK_SHELL=cmd`.
 - **See errors?** → Check the pager logs (usually in the tracing pane or `~/.grok/logs`).
 
 ## More Examples

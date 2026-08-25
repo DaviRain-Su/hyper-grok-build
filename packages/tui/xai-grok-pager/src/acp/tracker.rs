@@ -1027,6 +1027,7 @@ impl AcpUpdateTracker {
     pub fn finish_turn(&mut self, scrollback: &mut ScrollbackState) {
         self.epoch_at_last_finish = self.agent_output_epoch;
         self.finish_thinking(scrollback);
+        scrollback.note_pin_reserve_turn_finished();
         if let Some(agent_id) = self.current_agent_msg.take() {
             scrollback.finish_running(agent_id);
         }

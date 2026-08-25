@@ -196,6 +196,16 @@ pub static USER_GUIDE: &[Doc] = &[
         "Monitoring Usage (External OpenTelemetry)",
         "Export usage metrics to a customer OpenTelemetry collector"
     ),
+    guide!(
+        "25-status-line.md",
+        "Status Line",
+        "A bottom row of live session context, or the output of your own script"
+    ),
+    guide!(
+        "26-config-reference.md",
+        "Configuration Reference",
+        "Field list for config.toml, managed_config.toml, and requirements.toml"
+    ),
 ];
 
 /// Non-user-guide reference docs. Separate from USER_GUIDE because they
@@ -378,12 +388,8 @@ mod tests {
         for doc in USER_GUIDE {
             let path = docs_dir.join(doc.filename);
             assert!(path.exists(), "Expected doc {} to exist", doc.filename);
-            assert_eq!(
-                std::fs::read_to_string(&path).unwrap(),
-                doc.content,
-                "Content mismatch for {}",
-                doc.filename
-            );
+            let got = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(got, doc.content, "Content mismatch for {}", doc.filename);
         }
         assert!(
             !docs_dir.join("99-removed.md").exists(),

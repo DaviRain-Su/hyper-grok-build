@@ -462,7 +462,7 @@ These variables are passed through to the hook process, but they cannot override
 
 #### Using variables in `command` and `url` fields
 
-Both `command` and `url` support `${VAR}` and `$VAR` expansion. See the custom-hooks reference for full details on load-time vs runtime expansion, the `env` map lookup order, and how parameter-expansion modifiers (e.g. `${VAR:-default}`) are handled.
+Both `command` and `url` support `${VAR}` and `$VAR` expansion. On Windows PowerShell, known `$VAR` refs are rewritten to `$env:VAR` so they read the child environment. See the custom-hooks reference for load-time vs runtime expansion, the `env` map lookup order, and parameter-expansion modifiers (e.g. `${VAR:-default}`).
 
 ---
 

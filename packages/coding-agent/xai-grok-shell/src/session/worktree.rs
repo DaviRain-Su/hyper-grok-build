@@ -10,6 +10,10 @@ use std::path::Path;
 use xai_grok_workspace::session::git::find_git_root_from_path;
 pub use xai_grok_workspace::worktree::*;
 const WORKTREE_LOG: &str = "xai_worktree";
+/// Resume always consults the grove gate with `remote = None` (fail closed).
+pub(crate) fn resume_grove_worktree_flag() -> Option<bool> {
+    Some(crate::util::config::grove_worktree_enabled(None))
+}
 impl From<ShellWorktreeType> for WorktreeType {
     fn from(t: ShellWorktreeType) -> Self {
         match t {
@@ -50,6 +54,7 @@ async fn create_worktree_for_resume(
         git_ref,
         worktree_type: Some(WorktreeType::from(worktree_type)),
         label: None,
+        grove_worktree: resume_grove_worktree_flag(),
         cancellation_token: None,
         resolved_dest_path: None,
     };
@@ -545,6 +550,18 @@ pub(crate) async fn rehydrate_session_in_worktree(
 mod tests {
     use super::*;
     use serial_test::serial;
+    #[test]
+    #[serial]
+    fn resume_grove_worktree_flag_runs_gate_fail_closed() {
+        unsafe { std::env::set_var("GROK_WORKTREE_TYPE", "grove") };
+        let flag = resume_grove_worktree_flag();
+        unsafe { std::env::remove_var("GROK_WORKTREE_TYPE") };
+        assert_eq!(
+            flag,
+            Some(false),
+            "resume must call the grove gate; remote=None is fail-closed even when env asked for grove"
+        );
+    }
     #[test]
     fn resume_request_deserializes_with_defaults() {
         let json = r#"{"sessionId":"s1","sourceCwd":"/project"}"#;

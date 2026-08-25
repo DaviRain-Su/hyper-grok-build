@@ -4,6 +4,9 @@ use super::common::*;
 
 const FEEDBACK_PLACEHOLDER_SENTINEL: &str = "Please provide as much detail as possible.";
 const FEEDBACK_LABEL_SENTINEL: &str = "How can we improve Grok Build?";
+// Fragment of `FEEDBACK_TRACE_QUESTION_LABEL` short enough to survive
+// terminal wrapping at any tested width.
+const TRACE_QUESTION_SENTINEL: &str = "Opt-in to provide your trace";
 const THANKS_SENTINEL: &str = "Thanks for the feedback";
 const INLINE_FEEDBACK: &str = "pty-inline-feedback-report-xyz";
 const PANE_FEEDBACK: &str = "pty-pane-feedback-crash-on-empty-xyz";
@@ -12,7 +15,20 @@ fn thanks_count(harness: &PtyHarness) -> usize {
     harness.screen_contents().matches(THANKS_SENTINEL).count()
 }
 
-/// Bare `/feedback` opens the descriptive freeform pane; typing + Enter submits. `/feedback <text>` skips the pane and submits immediately.
+/// Trace eligibility depends on the environment's auth, so the consent
+/// question may or may not follow Enter. When it does, Esc skips the upload
+/// and still sends the report.
+fn skip_trace_question_if_offered(harness: &mut PtyHarness) {
+    harness.update(Duration::from_millis(400));
+    if harness.contains_text(TRACE_QUESTION_SENTINEL) {
+        harness
+            .inject_keys(b"\x1b")
+            .expect("esc skips the trace question");
+    }
+}
+
+/// Bare `/feedback` opens the descriptive freeform pane; typing + Enter submits.
+/// `/feedback <text>` opens the same pane with the text prefilled; a second Enter submits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn feedback_slash_opens_descriptive_pane() {
@@ -73,6 +89,7 @@ async fn feedback_slash_opens_descriptive_pane() {
     harness
         .inject_keys(format!("{PANE_FEEDBACK}\r").as_bytes())
         .expect("type + submit pane feedback");
+    skip_trace_question_if_offered(&mut harness);
     harness
         .wait_for_text(THANKS_SENTINEL, Duration::from_secs(15))
         .expect("pane submit should thank the user");
@@ -87,22 +104,38 @@ async fn feedback_slash_opens_descriptive_pane() {
         harness.screen_contents()
     );
 
-    // Inline `/feedback <text>` submits without reopening the pane.
+    // Inline `/feedback <text>` opens the pane with the text already in the box.
     harness
         .inject_keys(format!("/feedback {INLINE_FEEDBACK}\r").as_bytes())
         .expect("type inline /feedback");
     harness
+        .wait_for_text(FEEDBACK_LABEL_SENTINEL, Duration::from_secs(15))
+        .expect("inline /feedback should open the freeform pane");
+    assert!(
+        harness.contains_text(INLINE_FEEDBACK),
+        "inline text must prefill the report box\nscreen:\n{}",
+        harness.screen_contents()
+    );
+    assert_eq!(
+        thanks_count(&harness),
+        1,
+        "opening the prefilled pane must not send yet"
+    );
+
+    harness.inject_keys(b"\r").expect("submit prefilled pane");
+    skip_trace_question_if_offered(&mut harness);
+    harness
         .wait_until(
-            "second thanks for inline submit",
+            "second thanks for prefilled submit",
             Duration::from_secs(15),
             |h| thanks_count(h) >= 2,
         )
-        .expect("inline feedback should produce a second thanks");
+        .expect("prefilled pane Enter should produce a second thanks");
 
     harness.update(Duration::from_millis(400));
     assert!(
         !harness.contains_text(FEEDBACK_LABEL_SENTINEL),
-        "inline /feedback must not open the freeform pane\nscreen:\n{}",
+        "feedback pane should close after prefilled submit\nscreen:\n{}",
         harness.screen_contents()
     );
     assert!(

@@ -183,8 +183,8 @@ events only, never metrics.
 
 `startup.total` measures process start to a usable session, recorded once per
 process; `outcome` = `timeout` or `error` means startup ended without one.
-`phase_duration` breaks the connect attempt down by step (`load_config`,
-`managed_policy`, `bootstrap`, `model_catalog`, `spawn_worker`,
+`phase_duration` breaks the connect attempt down by step (`config_load`,
+`managed_policy`, `bootstrap`, `model_catalog`, `worker_spawn`,
 `leader_connect`, `acp_initialize`, `eager_auth`); filter on its `outcome`
 (`ok` | `timeout` | `cancelled` | `error`) so truncated samples do not skew
 `ok` percentiles. The later `app_init`

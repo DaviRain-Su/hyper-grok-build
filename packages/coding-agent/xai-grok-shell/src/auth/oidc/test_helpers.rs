@@ -10,11 +10,13 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use super::protocol::{Discovery, discover};
 
 pub(super) const TEST_KID: &str = "test-kid";
-pub(super) const TEST_NONCE: &str = "test-nonce-value";
+pub(super) fn test_nonce() -> String {
+    format!("tn-{:x}", std::process::id())
+}
 pub(super) const TEST_CLIENT_ID: &str = "test-client-id";
 pub(super) fn ensure_crypto_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
+    xai_grok_extra_ca::ensure_default_crypto_provider();
+    let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
 }
 pub(super) fn generate_test_rsa_key() -> (String, String, String) {
     use rsa::pkcs8::EncodePrivateKey;
@@ -58,7 +60,7 @@ pub(super) async fn start_mock_idp() -> (String, tokio::task::JoinHandle<()>) {
         email: &'static str,
         iss: String,
         aud: &'static str,
-        nonce: &'static str,
+        nonce: String,
         exp: usize,
     }
 
@@ -72,7 +74,7 @@ pub(super) async fn start_mock_idp() -> (String, tokio::task::JoinHandle<()>) {
                 email: "test@corp.com",
                 iss: issuer.clone(),
                 aud: TEST_CLIENT_ID,
-                nonce: TEST_NONCE,
+                nonce: test_nonce(),
                 exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
             },
             &jsonwebtoken::EncodingKey::from_rsa_pem(rsa_pem.as_bytes()).unwrap(),

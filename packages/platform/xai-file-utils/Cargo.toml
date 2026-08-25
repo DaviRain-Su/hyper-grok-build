@@ -29,6 +29,7 @@ chrono = { workspace = true }
 dirs = { workspace = true }
 indexmap = { workspace = true }
 reqwest = { workspace = true }
+xai-grok-extra-ca = { workspace = true }
 reqwest-middleware = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs"] }
 sha2 = { workspace = true, features = ["force-soft"] }

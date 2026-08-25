@@ -38,6 +38,34 @@ impl AgentView {
         prompt
     }
 
+    /// The `bool` is whether the row is server-authoritative.
+    pub(in crate::app) fn resolve_queue_row(
+        &self,
+        id: u64,
+    ) -> (bool, Option<crate::views::queue_pane::QueueRowRef>) {
+        let row = self.queue.row_ref(id);
+        let is_server = matches!(
+            row.as_ref().map(|r| r.origin),
+            Some(crate::views::queue_pane::QueueRowOrigin::Server)
+        );
+        (is_server, row)
+    }
+
+    /// Highlights the bottom row (last under the server-then-local merge order) and leaves the composer untouched.
+    pub(super) fn try_focus_queue_from_prompt(&mut self) -> Option<InputOutcome> {
+        self.sync_queue_pane();
+        let id = *self.queue.entry_ids().last()?;
+
+        if !self.set_active_pane(AgentPane::Queue, false) {
+            return Some(InputOutcome::Changed);
+        }
+
+        self.queue.overlay.visible = true;
+        self.queue.overlay.focused = true;
+        self.queue.list_state.select_by_id(id);
+        Some(InputOutcome::Changed)
+    }
+
     /// Force-send a queued follow-up mid-turn from the prompt (empty composer).
     ///
     /// Always the **top** visible row (first under the server-then-local merge
@@ -311,30 +339,20 @@ impl AgentView {
         Some(kind_from_wire(&wire.kind) == QueueEntryKind::Prompt)
     }
 
-    /// Send one merged-queue row now (cancel-and-send), by selection id. The
-    /// shell cancels the running turn and runs this row as the next turn.
+    /// Send one merged-queue row now (cancel-and-send), by selection id. The shell cancels the running turn and runs this row as the next turn.
     pub(in crate::app) fn force_interject_queue_row(&mut self, id: u64) -> InputOutcome {
         if !self.session.state.is_turn_running() {
-            self.show_toast("No turn running — prompt will send when ready");
+            self.show_toast("No turn running: prompt will send when ready");
             return InputOutcome::Changed;
         }
-        let row = self.queue.row_ref(id);
-        let is_server = matches!(
-            row.as_ref().map(|r| r.origin),
-            Some(crate::views::queue_pane::QueueRowOrigin::Server)
-        );
+        let (is_server, row) = self.resolve_queue_row(id);
         if is_server {
             // Server row: the agent promotes it to run next (`x.ai/queue/interject`); any kind may send now.
             if let Some(row) = row.as_ref()
                 && let Some(server_id) = row.server_id.clone()
             {
-                // Still an optimistic echo: its `session/prompt` RPC is in
-                // flight, so an interject fired now would overtake the row
-                // shell-side and silently no-op (dropping the send-now and
-                // hiding the row behind the armed cancel expectation). Park
-                // the intent; the confirming `x.ai/queue/changed` broadcast
-                // fires it with the row's authoritative version (see
-                // `resolve_send_now_awaiting_confirm`).
+                // Still an optimistic echo: its `session/prompt` RPC is in flight, so an interject now would overtake the row shell-side and no-op.
+                // Park the intent; the confirming `x.ai/queue/changed` broadcast fires it with the row's authoritative version.
                 if self.optimistic_queue_ids.contains(&server_id) {
                     self.send_now_awaiting_confirm = Some(server_id);
                     return InputOutcome::Changed;
@@ -349,7 +367,7 @@ impl AgentView {
         }
         // Local rows: only plain prompts / raw skill rows can re-send (others would send display text, not payload).
         if self.queue_row_prompt_like(id) != Some(true) {
-            self.show_toast("Can't send this now — it runs when the current turn ends");
+            self.show_toast("Can't send this now: it runs when the current turn ends");
             return InputOutcome::Changed;
         }
         if let Some(prompt) = self.remove_local_queue_row(id) {
@@ -482,16 +500,14 @@ impl AgentView {
         }
     }
 
-    /// Queue-pane-focused key handling.
-    ///
-    /// Routes through: overlay structural keys → queue actions → navigation.
+    /// Routes through overlay structural keys, then queue actions, then navigation.
     pub(in crate::app) fn handle_queue_key(
         &mut self,
         key: &KeyEvent,
         registry: &ActionRegistry,
     ) -> InputOutcome {
         use crate::views::overlay::{handle_overlay_key, handle_overlay_nav_key};
-        use crate::views::queue_pane::{QueueEvent, QueueRowOrigin};
+        use crate::views::queue_pane::QueueEvent;
 
         // Structural keys through shared handler (Esc, Ctrl-F, etc.).
         let action = handle_overlay_key(&mut self.queue.overlay, key)
@@ -510,12 +526,8 @@ impl AgentView {
 
         // Queue-specific actions (delete, edit, reorder). `x`/Delete = row delete.
         if let Some(event) = self.queue.handle_key(key, registry) {
-            // Resolve the selected row's origin so edits route correctly:
-            // Server-origin rows go to the agent as `x.ai/queue/*`
-            // commands (the rebroadcast is the source of truth); Local rows
-            // keep today's in-place mutation.
-            let row = self.queue.row_ref(Self::queue_event_id(&event));
-            let is_server = matches!(row.as_ref().map(|r| r.origin), Some(QueueRowOrigin::Server));
+            // Server rows route to the agent as `x.ai/queue/*` commands (the rebroadcast is the source of truth); local rows mutate in place.
+            let (is_server, row) = self.resolve_queue_row(Self::queue_event_id(&event));
 
             match event {
                 QueueEvent::DeleteSelected { id } => {
@@ -565,12 +577,21 @@ impl AgentView {
                     self.session.swap_prompt_down(id);
                 }
                 QueueEvent::ForceInterject { id } => {
-                    // Same InterjectPrompt chord as the prompt; surface is the
-                    // queue pane (not When::PromptFocused).
+                    // Same InterjectPrompt chord as the prompt; surface is the queue pane (not When::PromptFocused).
                     crate::actions::log_shortcut_used(key, ActionId::InterjectPrompt, "queue");
                     return self.force_interject_queue_row(id);
                 }
             }
+            return InputOutcome::Changed;
+        }
+
+        // Down off the last row returns to the composer, as the history panel does past its newest entry.
+        // Up stays clamped, because overshooting there would open history and rewrite the composer.
+        if crate::key!(Down).matches(key)
+            && self.queue.selected_id() == self.queue.entry_ids().last().copied()
+        {
+            self.queue.overlay.focused = false;
+            self.set_active_pane(AgentPane::Prompt, false);
             return InputOutcome::Changed;
         }
 
@@ -763,9 +784,55 @@ mod queue_edit_routing_tests {
         assert!(!agent.visible_queue_is_empty());
     }
 
-    /// Keyboard-deleting the last *local* row while a server row remains keeps
-    /// the pane open and focused (regression: it previously force-hid the pane
-    /// and stranded the server rows).
+    fn down_key() -> KeyEvent {
+        KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        )
+    }
+
+    /// Down off the last row hands focus back, so Up in and Down out is a round trip.
+    #[test]
+    fn down_off_the_last_row_returns_to_the_composer() {
+        let mut agent = make_running_agent();
+        agent.active_pane = AgentPane::Queue;
+        agent.queue.overlay.focused = true;
+        let ids = agent.queue.entry_ids();
+        agent.queue.list_state.select_by_id(*ids.last().unwrap());
+
+        agent.handle_queue_key(&down_key(), &ActionRegistry::defaults());
+
+        assert_eq!(agent.active_pane, AgentPane::Prompt);
+        assert!(!agent.queue.overlay.focused);
+    }
+
+    /// Above the last row Down steps the highlight and stays in the pane.
+    #[test]
+    fn down_above_the_last_row_stays_in_the_queue() {
+        let mut agent = make_running_agent();
+        agent.active_pane = AgentPane::Queue;
+        agent.queue.overlay.focused = true;
+        // Two local rows: their order is the order they were queued, with no
+        // server row whose visibility depends on which turn is running.
+        agent.shared_queue.clear();
+        agent.session.pending_prompts.clear();
+        agent.session.enqueue_prompt("queued first".to_string());
+        agent.session.enqueue_prompt("queued last".to_string());
+        agent.sync_queue_pane();
+        let ids = agent.queue.entry_ids();
+        assert_eq!(ids.len(), 2, "two rows so Down has somewhere to go");
+        agent.queue.list_state.select_by_id(ids[0]);
+
+        agent.handle_queue_key(&down_key(), &ActionRegistry::defaults());
+
+        // Only the exit rule is asserted. Stepping is the list pane's own, and it moves by
+        // index, which nothing resolves until a render, so it cannot move in a headless test.
+        assert_eq!(agent.active_pane, AgentPane::Queue);
+        assert!(agent.queue.overlay.focused);
+    }
+
+    /// Keyboard-deleting the last *local* row while a server row remains keeps the pane open and
+    /// focused (regression: it previously force-hid the pane and stranded the server rows).
     #[test]
     fn delete_last_local_row_keeps_pane_open_when_server_remains() {
         let mut agent = make_running_agent();
@@ -1600,12 +1667,12 @@ mod watcher_tests {
     use crate::views::turn_status::Watchers;
     use crate::views::workflows::WorkflowRunSnapshot;
 
-    fn active_workflow(run_id: &str) -> WorkflowRunSnapshot {
+    fn workflow(run_id: &str, status: &str) -> WorkflowRunSnapshot {
         WorkflowRunSnapshot {
             run_id: run_id.to_owned(),
             name: "workflow".to_owned(),
             objective: "objective".to_owned(),
-            status: "active".to_owned(),
+            status: status.to_owned(),
             management_available: true,
             builtin: false,
             phases: Vec::new(),
@@ -1678,7 +1745,7 @@ mod watcher_tests {
     #[test]
     fn workflow_children_coalesce_into_one_workflow_watcher() {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        agent.workflow_runs.push(active_workflow("wf-1"));
+        agent.workflow_runs.push(workflow("wf-1", "active"));
         let mut child_a = test_fixtures::running_subagent_info("child-a");
         child_a.workflow_run_id = Some("wf-1".into());
         let mut child_b = test_fixtures::running_subagent_info("child-b");
@@ -1699,9 +1766,17 @@ mod watcher_tests {
     }
 
     #[test]
+    fn paused_workflows_are_not_running_watchers() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent.workflow_runs.push(workflow("wf-1", "user_paused"));
+
+        assert_eq!(agent.watchers(), Watchers::default());
+    }
+
+    #[test]
     fn standalone_subagent_and_workflow_remain_distinct_watchers() {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        agent.workflow_runs.push(active_workflow("wf-1"));
+        agent.workflow_runs.push(workflow("wf-1", "active"));
         let mut workflow_child = test_fixtures::running_subagent_info("workflow-child");
         workflow_child.workflow_run_id = Some("wf-1".into());
         agent

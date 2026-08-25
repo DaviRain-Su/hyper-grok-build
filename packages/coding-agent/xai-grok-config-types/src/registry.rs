@@ -28,6 +28,8 @@ pub enum Feature {
     WriteFile,
     /// Heuristic feedback popups and the `/feedback` command.
     Feedback,
+    /// The `/feedback` trace-consent card (the trace-upload opt-in offer).
+    FeedbackTraceCard,
     /// The per-turn summary on the agent dashboard.
     TurnSummary,
     /// Ctrl+C before a turn's first activity restores the prompt.
@@ -142,6 +144,14 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "GROK_FEEDBACK_ENABLED",
         default_enabled: true,
         remote: Some(|settings| settings.feedback_enabled),
+    },
+    FeatureSpec {
+        id: Feature::FeedbackTraceCard,
+        key: "feedback_trace_card",
+        path: "features.feedback_trace_card",
+        env: "GROK_FEEDBACK_TRACE_CARD",
+        default_enabled: false,
+        remote: Some(|settings| settings.feedback_trace_card_enabled),
     },
     FeatureSpec {
         id: Feature::TurnSummary,

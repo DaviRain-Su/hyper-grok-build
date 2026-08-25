@@ -1098,6 +1098,54 @@ fn session_loaded_clears_stale_running_entries() {
         "no entries should be animating after SessionLoaded",
     );
 }
+/// A failed `x.ai/prompt_history` fetch arrives as `PromptHistoryLoaded` with an empty list.
+#[test]
+fn a_restored_transcript_stays_recallable_after_a_failed_fetch() {
+    let mut app = test_app();
+    dispatch(
+        Action::LoadSession("sess-history".into(), None, false),
+        &mut app,
+    );
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("first prompt"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("second prompt"));
+    }
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new("sess-history"),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id].session.prompt_history,
+        ["second prompt", "first prompt"]
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptHistoryLoaded {
+            agent_id: id,
+            prompts: vec![],
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id].session.prompt_history,
+        ["second prompt", "first prompt"]
+    );
+    assert!(!app.agents[&id].session.prompt_history_loading);
+}
 #[test]
 fn session_restore_failed_clears_prompt_history_loading() {
     let mut app = test_app();

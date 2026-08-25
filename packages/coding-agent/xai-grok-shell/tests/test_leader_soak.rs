@@ -100,7 +100,7 @@ async fn registry_counts(client: &mut LeaderClient, id: u64) -> serde_json::Valu
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "leader soak; run with --ignored (LEADER_SOAK_SECS bounds the duration)"]
 async fn leader_soak_churning_clients_no_leaks_no_zombies() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    xai_grok_extra_ca::ensure_default_crypto_provider();
 
     let server = xai_grok_test_support::MockInferenceServer::start()
         .await

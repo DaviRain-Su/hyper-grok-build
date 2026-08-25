@@ -264,6 +264,42 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
     assert_eq!(loaded.workflow_runs.len(), 1);
     assert_eq!(loaded.workflow_runs[0].script, "complete(\"ok\");");
     assert_eq!(loaded.workflow_runs[0].args, serde_json::json!({"objective": "ship"}));
+    assert_eq!(loaded.workflow_runs[0].effort, None);
+    let effort_path = run_dir.join("effort");
+    std::fs::write(&effort_path, "high").unwrap();
+    let loaded_with_effort = adapter.load_session_without_updates(&info).await.unwrap();
+    assert_eq!(loaded_with_effort.workflow_runs[0].effort,
+            Some(xai_grok_sampling_types::ReasoningEffort::High));
+    for invalid in ["XHIGH", "turbo"] {
+        std::fs::write(&effort_path, invalid).unwrap();
+        assert!(
+                adapter
+                    .load_session_without_updates(&info)
+                    .await
+                    .unwrap()
+                    .workflow_runs
+                    .is_empty(),
+                "present effort sidecar must be canonical: {invalid}"
+            );
+    }
+    std::fs::remove_file(&effort_path).unwrap();
+    std::fs::create_dir(&effort_path).unwrap();
+    assert!(adapter.load_session_without_updates(&info).await.unwrap().workflow_runs.is_empty());
+    std::fs::remove_dir(&effort_path).unwrap();
+    std::fs::write(&effort_path, [0xff]).unwrap();
+    assert!(adapter.load_session_without_updates(&info).await.unwrap().workflow_runs.is_empty());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let effort_target = run_dir.join("effort-target");
+        std::fs::write(&effort_target, "high").unwrap();
+        std::fs::remove_file(&effort_path).unwrap();
+        symlink(&effort_target, &effort_path).unwrap();
+        assert!(adapter.load_session_without_updates(&info).await.unwrap().workflow_runs.is_empty());
+        std::fs::remove_file(&effort_path).unwrap();
+        std::fs::remove_file(&effort_target).unwrap();
+    }
+    std::fs::write(&effort_path, "high").unwrap();
     let mut legacy = manifest.clone();
     legacy.version = 2;
     adapter.write_workflow_run_state(&info, &legacy).await.unwrap();

@@ -32,7 +32,7 @@ pub(crate) fn version_mismatch_banner(params: &str) -> Option<String> {
     }
     Some(
         sanitize_toast_message(&format!(
-            "⚠ {VERSION_MISMATCH_MARKER} client {client}, leader {leader} — restart grok to match"
+            "⚠ {VERSION_MISMATCH_MARKER} client {client}, leader {leader}. Restart grok to match"
         ))
         .into_owned(),
     )

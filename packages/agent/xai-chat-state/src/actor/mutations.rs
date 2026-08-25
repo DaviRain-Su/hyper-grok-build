@@ -230,6 +230,21 @@ impl ChatStateActor {
                 "ChatState: push_message updated estimated_tokens_since_model"
             );
         }
+        self.persist_and_push_message(item);
+    }
+
+    /// Persist model output already included in the provider's usage total.
+    pub(super) fn push_model_output(&mut self, item: ConversationItem) {
+        self.persist_and_push_message(item);
+    }
+
+    /// Persist model output whose provider response omitted usage.
+    pub(super) fn push_unreported_model_output(&mut self, item: ConversationItem) {
+        self.state.estimated_tokens_since_model += super::state::estimate_item_tokens(&item);
+        self.persist_and_push_message(item);
+    }
+
+    fn persist_and_push_message(&mut self, item: ConversationItem) {
         self.persistence.persist_message(&item);
         self.state.conversation.push(item);
     }

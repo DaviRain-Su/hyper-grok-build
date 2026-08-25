@@ -45,7 +45,7 @@ impl RelocationJournal {
         Self {
             version: JOURNAL_VERSION,
             session_id: session_id.into(),
-            nonce: "nonce-1".into(),
+            nonce: format!("n-{}", std::process::id()),
             source_cwd: source_cwd.into(),
             target_cwd: target_cwd.into(),
             cwd_generation: 1,

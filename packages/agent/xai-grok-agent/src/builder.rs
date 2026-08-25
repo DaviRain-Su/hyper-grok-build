@@ -97,7 +97,7 @@ pub struct AgentBuilder {
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
     app_builder_deployer_config:
-        xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig,
+        xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig,
     write_file_enabled: bool,
     subagents_enabled: bool,
     background_workflows_enabled: bool,
@@ -181,6 +181,7 @@ fn merge_tool_params(
 fn apply_workflow_tool_gates(
     tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
     background_workflows_enabled: bool,
+    is_subagent: bool,
 ) {
     use xai_grok_tools::types::tool::ToolKind;
     if background_workflows_enabled {
@@ -188,6 +189,11 @@ fn apply_workflow_tool_gates(
             .tools
             .retain(|tool| tool.kind != Some(ToolKind::GoalUpdate));
     } else {
+        tool_config
+            .tools
+            .retain(|tool| tool.kind != Some(ToolKind::Workflow));
+    }
+    if is_subagent {
         tool_config
             .tools
             .retain(|tool| tool.kind != Some(ToolKind::Workflow));
@@ -501,7 +507,7 @@ impl AgentBuilder {
     /// Set the deploy service configuration.
     pub fn with_app_builder_deployer_config(
         mut self,
-        config: xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig,
+        config: xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig,
     ) -> Self {
         self.app_builder_deployer_config = config;
         self
@@ -562,14 +568,15 @@ impl AgentBuilder {
         self.task_model_slugs = slugs;
         self
     }
-    /// Enable or disable the `ask_user_question` tool.
+    /// Enable or disable the `ask_user_question` tool for a primary agent.
     ///
-    /// When disabled, `GrokBuild:ask_user_question` is stripped from the
-    /// agent's tool config after `ensure_plan_mode_tools` injection, so
-    /// the model cannot ask the user structured questions regardless of
-    /// which built-in profile is in use. Driven by the shell's resolved gate
-    /// (the `ask_user_question` feature, default ON: remote settings/config/env act as
-    /// a kill-switch) and/or the pager's `--no-ask-user` (`_meta.askUserQuestion`).
+    /// Subagents never receive this tool. Otherwise, when disabled,
+    /// `GrokBuild:ask_user_question` is stripped from the agent's tool config
+    /// after `ensure_plan_mode_tools` injection, so the model cannot ask the
+    /// user structured questions regardless of which built-in profile is in
+    /// use. Driven by the shell's resolved gate (the `ask_user_question`
+    /// feature, default ON: remote settings/config/env act as a kill-switch)
+    /// and/or the pager's `--no-ask-user` (`_meta.askUserQuestion`).
     pub fn with_ask_user_question_enabled(mut self, enabled: bool) -> Self {
         self.ask_user_question_enabled = enabled;
         self
@@ -782,14 +789,22 @@ impl AgentBuilder {
                 .tools
                 .retain(|tc| tc.id != mem_search_id && tc.id != mem_get_id);
         }
-        if !self.ask_user_question_enabled {
+        if self.prompt_audience == crate::prompt::context::PromptAudience::Subagent {
+            tool_config
+                .tools
+                .retain(|tool| tool.kind != Some(xai_grok_tools::types::tool::ToolKind::AskUser));
+        } else if !self.ask_user_question_enabled {
             let ask_user_id = format!(
                 "{}:ask_user_question",
                 xai_grok_tools::types::tool::ToolNamespace::GrokBuild,
             );
-            tool_config.tools.retain(|tc| tc.id != ask_user_id);
+            tool_config.tools.retain(|tool| tool.id != ask_user_id);
         }
-        apply_workflow_tool_gates(&mut tool_config, self.background_workflows_enabled);
+        apply_workflow_tool_gates(
+            &mut tool_config,
+            self.background_workflows_enabled,
+            self.prompt_audience == crate::prompt::context::PromptAudience::Subagent,
+        );
         let task_tool_id = format!(
             "{}:{}",
             xai_grok_tools::types::tool::ToolNamespace::GrokBuild,
@@ -1823,6 +1838,32 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn subagent_audience_never_receives_ask_user_question() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::notification::ToolNotificationHandle;
+        let agent = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(crate::config::AgentDefinition::grok_build_ask_user())
+        .with_ask_user_question_enabled(true)
+        .with_prompt_audience(crate::prompt::context::PromptAudience::Subagent)
+        .build()
+        .await
+        .expect("subagent should build");
+        let names: Vec<String> = agent
+            .tool_definitions()
+            .await
+            .into_iter()
+            .map(|definition| definition.function.name)
+            .collect();
+        assert!(
+            !names.iter().any(|name| name == "ask_user_question"),
+            "subagents must not receive ask_user_question even when their profile and parent gate enable it: {names:?}"
+        );
+    }
     #[tokio::test]
     async fn curated_empty_toolset_fails_agent_build() {
         use xai_grok_tools::computer::local::LocalTerminalBackend;

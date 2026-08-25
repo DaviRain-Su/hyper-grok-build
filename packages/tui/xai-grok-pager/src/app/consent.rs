@@ -134,8 +134,8 @@ fn text_or(raw: Option<&str>, fallback: &str, max_cols: usize) -> String {
     crate::render::line_utils::truncate_str(&sanitize_notice_text(cleaned), max_cols)
 }
 
-/// Narrower than a url's own set: Windows opens one through `cmd /c start`, which expands `%VAR%`
-/// and honours `&`, and a machine with no browser offers it for pasting into a shell.
+/// Narrower than a url's own set: a machine with no browser offers the URL for
+/// pasting into a shell, so keep it free of quoting and expansion hazards.
 fn is_safe_url_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
         || matches!(

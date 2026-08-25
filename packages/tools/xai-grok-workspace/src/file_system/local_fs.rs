@@ -1,22 +1,31 @@
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tokio::fs;
 
 use crate::file_system::{AsyncFileSystem, FsError};
 
 pub struct LocalFs {
     root: PathBuf,
+    remount: OnceLock<PathBuf>,
 }
 
 impl LocalFs {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            remount: OnceLock::new(),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl AsyncFileSystem for LocalFs {
     fn root(&self) -> &Path {
-        &self.root
+        self.remount.get().unwrap_or(&self.root)
+    }
+
+    fn remount_root(&self, root: PathBuf) {
+        let _ = self.remount.set(root);
     }
 
     async fn exists(&self, path: &Path) -> Result<bool, FsError> {

@@ -318,12 +318,34 @@ fn apply_managed_config(
 fn map_transport_failure(failure: crate::http::TransportFailure) -> ManagedConfigError {
     use crate::http::TransportFailureKind;
     match failure.kind {
+        TransportFailureKind::CertificateUntrusted => {
+            ManagedConfigError::CertificateUntrusted(certificate_detail(
+                failure.detail,
+                xai_grok_extra_ca::configured_bundle_env(),
+                xai_grok_extra_ca::extra_root_ders().len(),
+            ))
+        }
+        TransportFailureKind::CertificateInvalid => {
+            ManagedConfigError::CertificateInvalid(failure.detail)
+        }
         TransportFailureKind::Unreachable => ManagedConfigError::Network(failure.detail),
         TransportFailureKind::Interrupted => {
             ManagedConfigError::ConnectionInterrupted(failure.detail)
         }
         // A builder/redirect failure is a client-side defect, not a bad server response: terminal.
         TransportFailureKind::Permanent => ManagedConfigError::RequestFailed(failure.detail),
+    }
+}
+
+/// Names the configured bundle variable; loading is fail-open, so this error
+/// can be the only visible symptom.
+fn certificate_detail(detail: String, bundle_env: Option<&str>, loaded_roots: usize) -> String {
+    match bundle_env {
+        Some(env) if loaded_roots == 0 => format!(
+            "{detail}; {env} is set but no usable roots were loaded from it: check that the file is readable, contains PEM certificates, and is under the size cap"
+        ),
+        Some(env) => format!("{detail}; {env} is set: verify it includes the issuing root CA"),
+        None => detail,
     }
 }
 

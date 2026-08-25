@@ -1,6 +1,5 @@
 use super::*;
 use xai_grok_shell::sampling::error::format_rate_limited_user_message;
-use xai_grok_shell::session::storage::ReplayLookupFallback;
 /// Stash a live stop-family batch under `stash_pid` for the turn marker
 /// to fold. `merge_same_name` merges a same-name repeat instead of standalone.
 pub(super) fn stash_live_stop_batch(
@@ -226,6 +225,7 @@ pub(super) fn handle_session_notification_with_origin(
         return false;
     }
     let mut plugins_changed_needs_skills_refetch = false;
+    let mut status_snapshot_applied = false;
     let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
     let mut deferred_subagent_finish: Option<SessionNotification> = None;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
@@ -606,31 +606,11 @@ pub(super) fn handle_session_notification_with_origin(
                 .restricted_commands();
             child_view.set_restricted_commands(&restricted);
             agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view));
-            if !agent.session.loading_replay && !meta.is_replay {
-                let fallback = if live_resume {
-                    ReplayLookupFallback::Relocation
-                } else {
-                    ReplayLookupFallback::HintedOnly
-                };
-                let _ =
-                    crate::app::subagent::replay_child_and_mark(agent, &child_session_id, fallback);
-            }
             let prompt_to_inject = agent
                 .subagent_sessions
                 .get(&child_session_id)
                 .and_then(|info| info.prompt.as_deref())
                 .filter(|p| !p.trim().is_empty())
-                .filter(|p| {
-                    agent
-                        .subagent_views
-                        .get(&child_session_id)
-                        .is_some_and(|cv| {
-                            !crate::app::subagent::child_scrollback_already_shows_prompt(
-                                &cv.scrollback,
-                                p,
-                            )
-                        })
-                })
                 .map(str::to_owned);
             if let (Some(prompt), Some(child_view)) = (
                 prompt_to_inject,
@@ -847,16 +827,18 @@ pub(super) fn handle_session_notification_with_origin(
                 info.pending_kill = false;
                 info.kill_requested_at = None;
                 info.last_progress_at = std::time::Instant::now();
+                info.transcript.retry_disk_after_finish();
             }
             let resuming = agent.session.loading_replay;
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
                 child_view.session.state = AgentState::Idle;
             }
             if !resuming {
-                let evicted =
+                let outcome =
                     crate::app::subagent::evict_finished_child_view(agent, &child_session_id);
-                if !evicted
-                    && let Some(child_view) = agent.subagent_views.get_mut(&child_session_id)
+                if outcome == crate::app::subagent::EvictOutcome::Retained
+                    && let Some(child_view) =
+                        agent.child_view_for_live_update_mut(&child_session_id)
                 {
                     crate::app::subagent::finalize_finished_child_view(child_view, elapsed_dur);
                 }
@@ -1298,6 +1280,11 @@ pub(super) fn handle_session_notification_with_origin(
         XaiSessionUpdate::InteractionResolved { tool_call_id } => {
             agent.dismiss_resolved_interaction(&tool_call_id)
         }
+        XaiSessionUpdate::SessionStatus(status) => {
+            agent.status_context = Some(*status);
+            status_snapshot_applied = true;
+            false
+        }
         _ => {
             tracing::trace!(
                 "Ignoring {}: {:?}",
@@ -1307,6 +1294,11 @@ pub(super) fn handle_session_notification_with_origin(
             return false;
         }
     };
+    let mut changed = changed;
+    if status_snapshot_applied && is_active {
+        app.refresh_status_line_now();
+        changed |= app.status_line.take_changed();
+    }
     if plugins_changed_needs_skills_refetch {
         if let Some(agent) = app.agents.get(&parent_id)
             && let Some(session_id) = agent.session.session_id.clone()
@@ -1406,7 +1398,7 @@ pub(super) fn handle_child_session_notification(
         | XaiSessionUpdate::MemoryDreamCompleted { .. }
         | XaiSessionUpdate::MemorySessionSaved { .. } => {
             let mut changed = false;
-            if let Some(child_view) = agent.subagent_views.get_mut(child_sid) {
+            if let Some(child_view) = agent.child_view_for_live_update_mut(child_sid) {
                 changed = apply_child_view_session_event(child_view, &update, is_api_key_auth);
             }
             if let XaiSessionUpdate::AutoCompactCompleted { tokens_after, .. } = update
@@ -1454,7 +1446,7 @@ pub(super) fn handle_child_session_notification(
 }
 /// Apply one xAI session event to a child view: the scrollback/session
 /// rendering shared by the live child routing above and the from-disk child
-/// replay ([`crate::app::subagent::replay_inherited_updates`]), so a rebuilt
+/// replay (`crate::app::subagent::replay_inherited_updates`), so a rebuilt
 /// transcript keeps the same compaction/retry markers the live one had.
 pub(crate) fn apply_child_view_session_event(
     child_view: &mut AgentView,

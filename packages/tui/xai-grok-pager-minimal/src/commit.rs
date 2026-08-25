@@ -331,7 +331,7 @@ pub(crate) fn minimal_renderer<'a>(
 /// allocate one `Buffer` of `desired_height` rows and emit a huge writer-thread
 /// send burst (§6.15). When the block is taller than `max_rows`, only the top
 /// `max_rows - 1` content rows are committed and the final row becomes a
-/// `… N more lines — /transcript to view` footer. The block is laid out at its
+/// `… N more lines · /transcript to view` footer. The block is laid out at its
 /// **full** `desired_height` so wrapping is byte-identical to an uncapped commit
 /// (K5); the `insert_before` buffer is only `commit_h` rows tall, so any content
 /// past it is clipped — bounding the allocation to the cap.
@@ -374,7 +374,7 @@ pub(super) fn insert_gap(terminal: &mut PagerTerminal) {
 /// Paint a committed block into `buf` (a `commit_h`-row buffer), laying it out at
 /// its full `full_h` so wrapping matches an uncapped commit exactly (K5). When
 /// `buf` is shorter than `full_h` the block is capped: rows past it are clipped
-/// and the final row becomes a `… N more lines — /transcript to view` footer
+/// and the final row becomes a `… N more lines · /transcript to view` footer
 /// (§6.15). Extracted from [`insert_committed`] so the cap is unit-testable
 /// without a live terminal.
 fn paint_committed(
@@ -406,7 +406,7 @@ fn paint_committed(
         let style = footer_style.bg(Color::Reset);
         // Clear any clipped content that landed on the footer row first.
         buf.set_style(row, style);
-        let text = format!("\u{2026} {hidden} more lines \u{2014} /transcript to view");
+        let text = format!("\u{2026} {hidden} more lines \u{00b7} /transcript to view");
         buf.set_span(buf.area.x, y, &Span::styled(text, style), width);
     }
 }

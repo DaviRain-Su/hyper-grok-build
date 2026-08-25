@@ -191,9 +191,6 @@ fn connection_interrupted_is_retryable_not_auth() {
     );
 }
 
-/// Each `TransportFailureKind` maps to the right `ManagedConfigError` with the right retryability:
-/// a `Permanent` (builder/redirect) failure is a client-side defect, so it maps to the terminal
-/// `RequestFailed`, not the server-blaming `InvalidResponse`, and must never be retried.
 #[test]
 fn transport_failure_maps_to_managed_config_error() {
     use crate::http::{TransportFailure, TransportFailureKind};
@@ -235,6 +232,45 @@ fn transport_failure_maps_to_managed_config_error() {
         "a client-side defect is terminal and must not be retried"
     );
     assert!(!permanent.is_auth_rejection());
+
+    let untrusted = map_transport_failure(TransportFailure {
+        kind: TransportFailureKind::CertificateUntrusted,
+        detail: "invalid peer certificate: UnknownIssuer".into(),
+    });
+    assert!(matches!(
+        untrusted,
+        ManagedConfigError::CertificateUntrusted(_)
+    ));
+    assert!(
+        !untrusted.is_retryable(),
+        "the same untrusted certificate will fail again until roots are installed"
+    );
+
+    let invalid = map_transport_failure(TransportFailure {
+        kind: TransportFailureKind::CertificateInvalid,
+        detail: "invalid peer certificate: Expired".into(),
+    });
+    assert!(matches!(invalid, ManagedConfigError::CertificateInvalid(_)));
+    assert!(
+        !invalid.is_retryable(),
+        "an expired or wrong-host certificate will fail again; retrying cannot fix it"
+    );
+}
+
+#[test]
+fn certificate_detail_names_the_bundle_env_only_when_set() {
+    assert_eq!(
+        certificate_detail("UnknownIssuer".into(), Some("GROK_EXTRA_CA_BUNDLE"), 2),
+        "UnknownIssuer; GROK_EXTRA_CA_BUNDLE is set: verify it includes the issuing root CA"
+    );
+    assert_eq!(
+        certificate_detail("UnknownIssuer".into(), Some("GROK_EXTRA_CA_BUNDLE"), 0),
+        "UnknownIssuer; GROK_EXTRA_CA_BUNDLE is set but no usable roots were loaded from it: check that the file is readable, contains PEM certificates, and is under the size cap"
+    );
+    assert_eq!(
+        certificate_detail("UnknownIssuer".into(), None, 0),
+        "UnknownIssuer"
+    );
 }
 
 /// `send_with_retry_escaping_pool` combinator behavior with a counting op (no network):

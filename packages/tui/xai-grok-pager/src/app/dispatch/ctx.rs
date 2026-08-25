@@ -229,6 +229,37 @@ pub(super) fn surface_screen_mode_switch_hint(app: &mut AppView, target: AgentId
     }
 }
 
+/// Re-anchor the global permission-mode mirror to the active agent.
+pub(super) fn sync_active_permission_mode_mirror(app: &mut AppView) {
+    let ActiveView::Agent(target) = app.active_view else {
+        return;
+    };
+    let Some(agent) = app.agents.get(&target) else {
+        return;
+    };
+    let (is_yolo, is_auto) = (agent.session.is_yolo(), agent.session.is_auto());
+    let reanchor = if is_yolo {
+        Some("always-approve")
+    } else if is_auto && app.auto_mode_gate {
+        // Gate-aware: never re-anchor the global mirror to "auto" when the
+        // feature gate is off, even if a stale per-session `auto_mode`
+        // survived (defense-in-depth with the settings kill-switch fan-out).
+        Some("auto")
+    } else if matches!(
+        app.current_ui.permission_mode.as_deref(),
+        Some("always-approve") | Some("auto")
+    ) {
+        // Non-yolo/non-auto agent: clear a stale yolo/auto mirror left by a
+        // different agent; preserve an existing ask/default distinction.
+        Some("ask")
+    } else {
+        None
+    };
+    if let Some(canonical) = reanchor {
+        app.current_ui.permission_mode = Some(canonical.to_string());
+    }
+}
+
 /// Switch the active agent — the primary funnel for assigning `ActiveView::Agent`
 /// (new, resume, picker, fork); also fires [`surface_yolo_launch_block_notice`].
 ///
@@ -272,29 +303,7 @@ pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, cause: SwitchC
     // cycle's `sync_active_auto_flag` (which derives from the global) can't copy a
     // different agent's stale Auto/Always-Approve onto this one. Per-session
     // yolo/auto are the source of truth; the global is a write-only mirror.
-    if let Some(agent) = app.agents.get(&target) {
-        let (is_yolo, is_auto) = (agent.session.is_yolo(), agent.session.is_auto());
-        let reanchor = if is_yolo {
-            Some("always-approve")
-        } else if is_auto && app.auto_mode_gate {
-            // Gate-aware: never re-anchor the global mirror to "auto" when the
-            // feature gate is off, even if a stale per-session `auto_mode`
-            // survived (defense-in-depth with the settings kill-switch fan-out).
-            Some("auto")
-        } else if matches!(
-            app.current_ui.permission_mode.as_deref(),
-            Some("always-approve") | Some("auto")
-        ) {
-            // Non-yolo/non-auto agent: clear a stale yolo/auto mirror left by a
-            // different agent; preserve an existing ask/default distinction.
-            Some("ask")
-        } else {
-            None
-        };
-        if let Some(c) = reanchor {
-            app.current_ui.permission_mode = Some(c.to_string());
-        }
-    }
+    sync_active_permission_mode_mirror(app);
     // Seed the auto feature gate on the (possibly new) active agent's slash
     // registry.
     app.sync_permission_mode_slash_gate();

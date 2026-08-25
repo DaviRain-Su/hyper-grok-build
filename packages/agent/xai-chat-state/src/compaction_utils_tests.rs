@@ -1,5 +1,31 @@
 use super::*;
 use xai_grok_sampling_types::SyntheticReason;
+use xai_grok_sampling_types::{BackendToolCallItem, BackendToolKind, rs};
+#[test]
+fn summarization_prep_drops_backend_tool_calls() {
+    let items = vec![
+        ConversationItem::user("hi"),
+        ConversationItem::BackendToolCall(BackendToolCallItem {
+            kind: BackendToolKind::WebSearch(rs::WebSearchToolCall {
+                id: "ws_res-uuid_call-uuid-1".to_string(),
+                status: rs::WebSearchToolCallStatus::Completed,
+                action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
+                    query: "weather".to_string(),
+                    sources: None,
+                }),
+            }),
+        }),
+        ConversationItem::assistant("done"),
+    ];
+    let prepared = prepare_conversation_for_summarization(items);
+    assert!(
+        !prepared
+            .iter()
+            .any(|i| matches!(i, ConversationItem::BackendToolCall(_))),
+        "provider-minted native items must not reach the summarizer request"
+    );
+    assert_eq!(prepared.len(), 2);
+}
 #[test]
 fn compaction_attempt_serde_roundtrip_and_skips_none() {
     let attempt = CompactionAttempt {

@@ -493,14 +493,14 @@ impl CopyDelivery {
         match self {
             Self::Clipboard { result, file } => match (result.delivery, file) {
                 (ClipboardDelivery::Unverified, Some(path)) => Cow::Owned(format!(
-                    "{} — saved to {}",
+                    "{}, saved to {}",
                     result.message_lead,
                     display_copy_path(path)
                 )),
                 _ => Cow::Borrowed(result.message),
             },
             Self::File { path } => Cow::Owned(format!(
-                "Clipboard unreachable — wrote {}",
+                "Clipboard unreachable: wrote {}",
                 display_copy_path(path)
             )),
             Self::Failed { clipboard, .. } => Cow::Borrowed(clipboard.message),
@@ -2400,7 +2400,7 @@ mod tests {
         };
         assert_eq!(
             unverified.toast_message(),
-            "Copy sent — saved to /tmp/grok-1/last-copy.txt"
+            "Copy sent, saved to /tmp/grok-1/last-copy.txt"
         );
         assert_eq!(unverified.toast_ticks(), 120);
 
@@ -2416,7 +2416,7 @@ mod tests {
         let file_only = CopyDelivery::File { path };
         assert_eq!(
             file_only.toast_message(),
-            "Clipboard unreachable — wrote /tmp/grok-1/last-copy.txt"
+            "Clipboard unreachable: wrote /tmp/grok-1/last-copy.txt"
         );
         assert_eq!(file_only.toast_ticks(), 120);
 

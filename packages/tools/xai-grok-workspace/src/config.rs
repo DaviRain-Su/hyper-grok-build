@@ -124,6 +124,9 @@ pub struct WorkspaceBindConfig {
     /// Opt-in: forward `BackgroundTaskCompleted` system notifications for this session.
     pub system_notifications: bool,
     pub rpc_only: bool,
+    /// Real guest session root (`/workspace/<conversation_id>`). When set,
+    /// the workspace virtualizes that tree as `/workspace`.
+    pub session_root: Option<PathBuf>,
 }
 /// Outcome of resolving a [`WorkspaceBindConfig`]; lets callers fail closed
 /// instead of widening to the default toolset. Deliberately has **no preset
@@ -182,6 +185,7 @@ impl WorkspaceBindConfig {
             manifest_hash: wire.manifest_hash,
             system_notifications: wire.system_notifications.unwrap_or(false),
             rpc_only: wire.rpc_only,
+            session_root: wire.session_root.map(PathBuf::from),
         }
     }
     /// Resolve the selected toolset.
@@ -402,6 +406,24 @@ mod bind_config_tests {
         let explicit_off =
             WorkspaceBindConfig::from_metadata(&serde_json::json!({"rpc_only": false}));
         assert!(!explicit_off.rpc_only);
+    }
+    #[test]
+    fn workspace_bind_config_extracts_session_root() {
+        let on = WorkspaceBindConfig::from_metadata(&serde_json::json!({
+            "session_root": "/workspace/conv-abc",
+        }));
+        assert_eq!(
+            on.session_root.as_deref(),
+            Some(std::path::Path::new("/workspace/conv-abc"))
+        );
+        let off = WorkspaceBindConfig::from_metadata(&serde_json::json!({"preset": "explore"}));
+        assert!(off.session_root.is_none());
+        let malformed = WorkspaceBindConfig::from_metadata(&serde_json::json!({
+            "session_root": 123,
+            "preset": "explore",
+        }));
+        assert!(malformed.session_root.is_none());
+        assert_eq!(malformed.preset.as_deref(), Some("explore"));
     }
     #[test]
     fn workspace_bind_config_from_metadata_extracts_manifest_fields() {

@@ -235,6 +235,11 @@ pub(crate) fn downgrade_displayed_auto_if_gated(app: &mut AppView) {
     for agent in app.agents.values_mut() {
         agent.session.auto_mode = false;
     }
+    if let Some(dashboard) = app.dashboard.as_mut()
+        && dashboard.pending_mode == crate::views::dashboard::DashboardDispatchMode::Auto
+    {
+        dashboard.pending_mode = crate::views::dashboard::DashboardDispatchMode::Normal;
+    }
     if app.current_ui.permission_mode.as_deref() == Some("auto") {
         app.current_ui.permission_mode = Some("ask".into());
     }

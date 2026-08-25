@@ -17,9 +17,9 @@ pub const EMPTY_PLAN_PLACEHOLDER: &str = "\
 
 The agent exited plan mode without writing a plan.
 
-- **Approve** — leave plan mode and start implementing
-- **Request changes** — send the agent back to planning
-- **Quit** — abandon and turn plan mode off
+- **Approve**: leave plan mode and start implementing
+- **Request changes**: send the agent back to planning
+- **Quit**: abandon and turn plan mode off
 ";
 
 /// Status-line label while plan approval is parked.
@@ -30,7 +30,7 @@ pub fn plan_approval_status_label(has_plan: bool) -> &'static str {
     if has_plan {
         "Waiting on plan approval"
     } else {
-        "No plan written — approve or request changes"
+        "No plan written: approve or request changes"
     }
 }
 
@@ -402,7 +402,7 @@ mod tests {
         assert_eq!(plan_approval_status_label(true), "Waiting on plan approval");
         assert_eq!(
             plan_approval_status_label(false),
-            "No plan written — approve or request changes"
+            "No plan written: approve or request changes"
         );
         // Placeholder must be non-empty so the line viewer accepts it.
         assert!(!EMPTY_PLAN_PLACEHOLDER.trim().is_empty());

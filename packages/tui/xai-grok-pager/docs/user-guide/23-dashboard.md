@@ -7,8 +7,8 @@ listed; they run under their parent, which already shows when work is in
 flight.
 
 Not the agents modal (`/config-agents` / `/agents` — definitions and
-personas), the session picker (`/resume` / `Ctrl+S` — past conversations on
-disk), or the workflows run UI (`/workflows`).
+personas), the session picker (`/resume` / `F3`, past conversations on
+disk), or the workflows run UI (`/workflow runs`).
 
 ---
 
@@ -200,8 +200,8 @@ The selected agent's **model** and, in always-approve (yolo) mode, an
 the dispatch box), including while answering questions. List rows no longer
 repeat model or always-approve badges.
 
-**`Shift+Tab` cycles the peeked agent's mode** (Normal → Plan →
-Always-approve → Normal) on the **live** agent. On the dispatch box,
+**`Shift+Tab` cycles the peeked agent's mode** (Normal → Plan → Auto
+(when enabled) → Always-approve → Normal) on the **live** agent. On the dispatch box,
 Shift+Tab only stages mode for the *next* agent.
 
 Unlike dispatch (new sessions only), peek reply **talks to the selected

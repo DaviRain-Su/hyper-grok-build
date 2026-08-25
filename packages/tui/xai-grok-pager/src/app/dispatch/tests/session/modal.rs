@@ -61,6 +61,58 @@ fn open_extensions_modal_with_session_resets_stale_flag() {
 }
 
 #[test]
+fn reload_skills_marks_both_lists_loading_and_refetches() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, TabDataState};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let mut modal = ExtensionsModalState::new(ExtensionsTab::Workflows);
+    modal.skills_data = TabDataState::Loaded(vec![]);
+    modal.workflows_data = TabDataState::Loaded(vec![]);
+    app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+
+    let effects = dispatch(Action::ReloadSkills, &mut app);
+
+    // The router arm is the sole owner of the Loading transitions; the modal
+    // key handler only emits the action.
+    let modal = app.agents[&id].extensions_modal.as_ref().unwrap();
+    assert!(matches!(modal.skills_data, TabDataState::Loading));
+    assert!(matches!(modal.workflows_data, TabDataState::Loading));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::FetchSkillsList { .. })),
+        "reload must refetch skills, got {effects:?}"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::FetchWorkflowsList { .. })),
+        "reload must refetch workflows, got {effects:?}"
+    );
+}
+
+#[test]
+fn reload_skills_without_session_keeps_loaded_state() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, TabDataState};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.session_id = None;
+    let mut modal = ExtensionsModalState::new(ExtensionsTab::Workflows);
+    modal.skills_data = TabDataState::Loaded(vec![]);
+    modal.workflows_data = TabDataState::Loaded(vec![]);
+    app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+
+    let effects = dispatch(Action::ReloadSkills, &mut app);
+
+    // Nothing can fetch without a session, so nothing may flip to Loading —
+    // a stranded spinner would make repeat presses no-ops.
+    assert!(effects.is_empty(), "got {effects:?}");
+    let modal = app.agents[&id].extensions_modal.as_ref().unwrap();
+    assert!(matches!(modal.skills_data, TabDataState::Loaded(_)));
+    assert!(matches!(modal.workflows_data, TabDataState::Loaded(_)));
+}
+
+#[test]
 fn session_created_with_flag_but_modal_closed_clears_flag_no_fetches() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);

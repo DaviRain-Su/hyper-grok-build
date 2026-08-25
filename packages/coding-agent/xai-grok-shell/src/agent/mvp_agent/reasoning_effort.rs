@@ -83,11 +83,25 @@ pub(crate) enum NewSessionEffort {
     None,
 }
 
+/// Resolve the effort hint for `session/new`.
+///
+/// Precedence: an explicit `_meta.reasoningEffort` wins over the process-wide
+/// last-used / `[models].default_reasoning_effort` value
+/// ([`ModelsManager::current_reasoning_effort`]). The catalog default is the
+/// last resort and is left on the sampling config when this returns `None`.
+pub(crate) fn resolve_new_session_effort_hint(
+    meta_hint: Option<ReasoningEffort>,
+    current: Option<ReasoningEffort>,
+) -> Option<ReasoningEffort> {
+    meta_hint.or(current)
+}
+
 /// Route a `session/new` reasoning-effort hint to exactly one consumer.
 ///
-/// New-session precedence: an explicit `_meta.reasoningEffort` hint wins over
-/// the model's catalog default; an explicit `modelId` routes the hint to the
-/// post-spawn model switch, while the default-model path seeds it at spawn.
+/// New-session precedence: `_meta.reasoningEffort` wins over last-used /
+/// config default, which wins over the model's catalog default. An explicit
+/// `modelId` routes the hint to the post-spawn model switch; the default-model
+/// path seeds it at spawn.
 pub(crate) fn split_new_session_effort(
     resolved_custom_model: Option<&str>,
     hint: Option<ReasoningEffort>,

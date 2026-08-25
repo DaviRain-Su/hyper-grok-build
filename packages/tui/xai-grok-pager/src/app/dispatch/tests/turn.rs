@@ -723,7 +723,11 @@ fn do_cancel_turn_cancels_running_wake_turn() {
         });
     }
 
-    let effects = super::super::turn::do_cancel_turn(&mut app, true);
+    let effects = super::super::turn::do_cancel_turn(
+        &mut app,
+        true,
+        crate::app::cancel_latency::CancelOrigin::UserGesture,
+    );
     assert!(
         matches!(
             effects.as_slice(),
@@ -1801,7 +1805,7 @@ fn reconcile_error_formats_marker_and_defers_to_banner() {
 
     assert_eq!(
         run(false).as_deref(),
-        Some("Request failed \u{2014} boom. Try sending again."),
+        Some("Request failed: boom. Try sending again."),
         "the raw agent_result must render as a formatted marker"
     );
     assert_eq!(
@@ -2532,4 +2536,102 @@ fn mouse_reporting_toggle_sticky_survives_subagent_esc_to_parent() {
     assert!(parent.toast.is_none() || parent.sticky_toast.is_some());
 
     reset_mouse_capture_enabled(true);
+}
+
+#[test]
+fn fork_failure_force_idle_drops_a_live_cancel_anchor() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+    let _ = super::super::turn::do_cancel_turn(
+        &mut app,
+        true,
+        crate::app::cancel_latency::CancelOrigin::UserGesture,
+    );
+    assert!(
+        app.agents[&id].cancel_latency.is_some(),
+        "the cancel armed the anchor"
+    );
+
+    let _ = super::super::session::fork::handle_fork_session_failed(&mut app, id, "boom".into());
+
+    assert!(
+        app.agents[&id].cancel_latency.is_none(),
+        "the fork teardown drops the anchor (no leak into a later settle)"
+    );
+}
+
+#[test]
+fn settled_cancel_emits_latency_from_arm_anchor_once() {
+    use crate::app::cancel_latency::{CancelLatency, CancelOrigin, TurnEnd};
+    use std::time::{Duration, Instant};
+    use xai_grok_telemetry::events::CancellationScope;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let _ = super::super::turn::do_cancel_turn(&mut app, true, CancelOrigin::UserGesture);
+    assert_eq!(
+        app.agents[&id].cancel_latency.map(|c| c.scope),
+        Some(CancellationScope::Turn),
+        "the real arm path armed a Turn-scoped anchor"
+    );
+
+    let t0 = Instant::now();
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.cancel_latency = Some(CancelLatency::new(t0, CancellationScope::Turn));
+
+    let event = agent
+        .settle_cancel(TurnEnd::Completed, t0 + Duration::from_millis(50))
+        .expect("a settled turn emits the pending anchor");
+    assert_eq!(event.latency_ms, 50);
+    assert_eq!(event.scope, CancellationScope::Turn);
+
+    assert!(
+        agent
+            .settle_cancel(TurnEnd::Completed, t0 + Duration::from_millis(999))
+            .is_none(),
+        "the anchor is consumed, so a second settle emits nothing"
+    );
+
+    agent.cancel_latency = Some(CancelLatency::new(t0, CancellationScope::Turn));
+    assert!(
+        agent
+            .settle_cancel(TurnEnd::Aborted, t0 + Duration::from_millis(50))
+            .is_none(),
+        "a torn-down turn discards the anchor unmeasured"
+    );
+}
+
+#[test]
+fn cancel_and_arm_anchors_before_the_cancel_teardown() {
+    use crate::app::cancel_latency::CancelOrigin;
+    use xai_grok_telemetry::events::CancellationScope;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    crate::app::agent_view::test_fixtures::add_running_execute(app.agents.get_mut(&id).unwrap());
+
+    let agent = app.agents.get_mut(&id).unwrap();
+    assert!(
+        agent.scrollback.last().is_some_and(|e| e.is_running),
+        "the running tool entry is live before the cancel"
+    );
+
+    agent.cancel_and_arm(CancellationScope::Turn, CancelOrigin::UserGesture);
+
+    let requested_at = agent
+        .cancel_latency
+        .expect("the user gesture armed the anchor")
+        .requested_at;
+    let teardown_at = agent
+        .scrollback
+        .last()
+        .and_then(|e| e.finished_at)
+        .expect("the cancel teardown finished the running entry");
+    assert!(
+        requested_at <= teardown_at,
+        "the latency anchor must be sampled before the cancel teardown finishes the turn"
+    );
 }

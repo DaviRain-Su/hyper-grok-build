@@ -144,6 +144,7 @@ top_p                       = 0.95
 max_completion_tokens       = 8192
 max_retries                 = 8
 inference_idle_timeout_secs = 600
+subagent_rate_limit_max_attempts = 8
 stream_tool_calls           = true
 ```
 

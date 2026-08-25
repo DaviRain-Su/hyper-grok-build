@@ -542,7 +542,7 @@ mod rss {
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "heavy: builds a full MvpAgent and loads a large session; run with --ignored --nocapture"]
     async fn session_load_e2e_peak_rss() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        xai_grok_extra_ca::ensure_default_crypto_provider();
 
         let server = xai_grok_test_support::MockInferenceServer::start()
             .await

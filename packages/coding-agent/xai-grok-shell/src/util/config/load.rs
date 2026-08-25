@@ -111,6 +111,8 @@ pub fn load_config_from_toml(root: &TomlValue) -> Config {
             .unwrap_or_default(),
         privacy: section(table, "privacy"),
         consent: section(table, "consent"),
+        telemetry: section(table, "telemetry"),
+        features: section(table, "features"),
     }
 }
 #[cfg(test)]

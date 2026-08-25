@@ -12,8 +12,6 @@
 //!   CONNECT request to create a tunnel, wraps the result in TLS, and returns a
 //!   stream suitable for `tokio_tungstenite::client_async`.
 
-use std::sync::{Arc, OnceLock};
-
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio_tungstenite::MaybeTlsStream;
@@ -199,57 +197,11 @@ async fn open_connect_tunnel(
     Ok(stream)
 }
 
-/// Lazily-initialized TLS client configuration.
-///
-/// Loading native root certificates involves syscalls (reading `/etc/ssl/certs/`
-/// or the macOS Keychain) and the cert store never changes at runtime.  We build
-/// the `ClientConfig` once and reuse it across all proxy connections / reconnects.
-///
-/// Stores `Ok(config)` on success or `Err(message)` if cert loading fails.
-static TLS_CONFIG: OnceLock<Result<Arc<rustls::ClientConfig>, String>> = OnceLock::new();
-
-/// Build (or return the cached) TLS client configuration.
-fn get_tls_config() -> anyhow::Result<Arc<rustls::ClientConfig>> {
-    let result = TLS_CONFIG.get_or_init(|| {
-        let mut root_store = rustls::RootCertStore::empty();
-        let cert_result = rustls_native_certs::load_native_certs();
-        if cert_result.certs.is_empty() {
-            let errors: Vec<_> = cert_result.errors.iter().map(|e| e.to_string()).collect();
-            return Err(format!(
-                "No native root certificates found. Errors: {}",
-                if errors.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    errors.join("; ")
-                }
-            ));
-        }
-        for cert in cert_result.certs {
-            if let Err(e) = root_store.add(cert) {
-                tracing::warn!(error = %e, "Skipping unparseable native root certificate");
-            }
-        }
-
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-        Ok(Arc::new(config))
-    });
-
-    match result {
-        Ok(config) => Ok(config.clone()),
-        Err(msg) => anyhow::bail!("{msg}"),
-    }
-}
-
-/// Perform a TLS handshake over an existing TCP stream using rustls with
-/// native root certificates (cached via [`TLS_CONFIG`]).
 async fn tls_wrap(
     stream: TcpStream,
     server_name: &str,
 ) -> anyhow::Result<tokio_rustls::client::TlsStream<TcpStream>> {
-    let tls_config = get_tls_config()?;
-    let connector = tokio_rustls::TlsConnector::from(tls_config);
+    let connector = tokio_rustls::TlsConnector::from(xai_grok_extra_ca::rustls_client_config());
     let dns_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
         .map_err(|e| anyhow::anyhow!("Invalid TLS server name '{server_name}': {e}"))?;
 

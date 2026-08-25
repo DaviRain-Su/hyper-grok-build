@@ -11,6 +11,9 @@ use ratatui::{
 use crate::render::SafeBuf;
 use crate::theme::Theme;
 
+/// Columns between the composer's border and the text of the rows above it.
+pub const HINT_INSET: u16 = 1;
+
 /// Compute the number of rows a tip needs when rendered at the given `width`.
 pub fn tip_height(width: u16, tip: &str) -> u16 {
     if width == 0 {
@@ -40,18 +43,34 @@ fn tip_line(tip: &str) -> Line<'_> {
     ])
 }
 
+/// Rows above the composer line up one column inside its border, not out at its edge.
+/// Callers paint the full slot and place text here, so the background still covers column zero.
+pub fn hint_text_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x + HINT_INSET,
+        width: area.width.saturating_sub(HINT_INSET),
+        ..area
+    }
+}
+
 /// Render a tip into the provided area, word-wrapping if it exceeds the width.
-pub fn render_tip(area: Rect, buf: &mut Buffer, tip: &str) {
+pub fn render_tip(area: Rect, buf: &mut Buffer, tip: &str, inset: u16) {
     if area.height == 0 {
         return;
     }
 
     let theme = Theme::current();
+    let text = Rect {
+        x: area.x + inset,
+        width: area.width.saturating_sub(inset),
+        ..area
+    };
 
+    clear_rect(buf, area, theme.bg_base);
     Paragraph::new(tip_line(tip))
         .style(Style::default().bg(theme.bg_base))
         .wrap(Wrap { trim: false })
-        .render(area, buf);
+        .render(text, buf);
 }
 
 /// Blank every cell of `area` (chars, colors, and modifiers) in `color`.
@@ -83,7 +102,8 @@ pub fn render_ephemeral_tip(area: Rect, buf: &mut Buffer, line: &Line<'static>) 
     }
     let theme = Theme::current();
     clear_rect(buf, area, theme.bg_base);
-    buf.set_line_safe(area.x, area.y, line, area.width);
+    let text = hint_text_area(area);
+    buf.set_line_safe(text.x, text.y, line, text.width);
 }
 
 #[cfg(test)]
@@ -107,7 +127,11 @@ mod tests {
         let line = Line::from("0123456789"); // wider than the rect
         render_ephemeral_tip(area, &mut buf, &line);
 
-        assert_eq!(row_text(&buf, area, 0), "01234567", "truncated at width");
+        assert_eq!(
+            row_text(&buf, area, 0),
+            " 0123456",
+            "inset by one, truncated at width"
+        );
         assert_eq!(
             row_text(&buf, area, 1),
             "        ",
@@ -151,10 +175,7 @@ mod tests {
         ]);
         render_ephemeral_tip(area, &mut buf, &line);
 
-        assert_eq!(
-            row_text(&buf, area, 0).trim_end(),
-            "Queued · Enter to send now"
-        );
+        assert_eq!(row_text(&buf, area, 0).trim(), "Queued · Enter to send now");
         let bold_cols: Vec<u16> = (0..area.width)
             .filter(|&x| {
                 buf.cell((x, 0))
@@ -163,10 +184,10 @@ mod tests {
                     .contains(Modifier::BOLD)
             })
             .collect();
-        // "Queued · " occupies cols 0..9, "Enter" cols 9..14.
+        // Inset by one: "Queued · " occupies cols 1..10, "Enter" cols 10..15.
         assert_eq!(
             bold_cols,
-            (9..14).collect::<Vec<u16>>(),
+            (10..15).collect::<Vec<u16>>(),
             "only the Enter chord may be bold — no leak from the underpaint"
         );
     }

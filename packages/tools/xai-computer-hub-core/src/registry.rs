@@ -242,13 +242,30 @@ pub struct ServerRecord {
 /// The recency key for bind newest-wins and strictly-older eviction.
 static REGISTRATION_CLOCK: AtomicU64 = AtomicU64::new(0);
 
+/// Bits reserved below the wall-clock milliseconds in a registration seq:
+/// the per-process HLC bump space. Single source of truth for the layout;
+/// encode/decode via [`seq_from_wall_ms`] / [`seq_wall_ms`].
+pub const REGISTRATION_SEQ_SHIFT: u32 = 10;
+
+/// Encode a wall-clock millisecond reading as a registration seq (before
+/// the HLC bump applied by [`next_registration_seq`]).
+pub fn seq_from_wall_ms(wall_ms: u64) -> u64 {
+    wall_ms << REGISTRATION_SEQ_SHIFT
+}
+
+/// Decode the wall-clock milliseconds a registration seq was issued at
+/// (inverse of [`seq_from_wall_ms`], dropping the HLC bump bits).
+pub fn seq_wall_ms(seq: u64) -> u64 {
+    seq >> REGISTRATION_SEQ_SHIFT
+}
+
 /// Issue the next monotonic registration stamp. See [`REGISTRATION_CLOCK`].
 pub fn next_registration_seq() -> u64 {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let candidate = now_ms << 10;
+    let candidate = seq_from_wall_ms(now_ms);
     let mut prev = REGISTRATION_CLOCK.load(Ordering::Relaxed);
     loop {
         let next = candidate.max(prev + 1);

@@ -274,6 +274,104 @@ impl FeedbackContent {
     }
 }
 
+pub const MAX_FEEDBACK_IMAGES: usize = 4;
+
+pub const MAX_FEEDBACK_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+pub const MAX_FEEDBACK_IMAGE_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+
+/// The allow-list: only the formats Slack image blocks render inline
+/// (notably not webp).
+pub fn feedback_image_extension(mime_type: &str) -> Option<&'static str> {
+    match mime_type {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackImage {
+    /// Base64 (standard alphabet) of the raw image bytes.
+    pub data: String,
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+}
+
+impl FeedbackImage {
+    /// Exact, so an image at the cap can't pass the TUI's raw-byte check and
+    /// fail here.
+    pub fn decoded_len(&self) -> usize {
+        let unpadded = self.data.trim_end_matches('=');
+        unpadded.len() / 4 * 3
+            + match unpadded.len() % 4 {
+                2 => 1,
+                3 => 2,
+                _ => 0,
+            }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeedbackImageError {
+    TooManyImages { count: usize },
+    ImageTooLarge { index: usize },
+    TotalTooLarge,
+    UnsupportedMimeType { index: usize, mime_type: String },
+}
+
+impl std::fmt::Display for FeedbackImageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManyImages { count } => {
+                write!(f, "too many images: {count} > {MAX_FEEDBACK_IMAGES}")
+            }
+            Self::ImageTooLarge { index } => write!(
+                f,
+                "image {index} exceeds {MAX_FEEDBACK_IMAGE_BYTES} decoded bytes"
+            ),
+            Self::TotalTooLarge => write!(
+                f,
+                "images exceed {MAX_FEEDBACK_IMAGE_TOTAL_BYTES} combined decoded bytes"
+            ),
+            Self::UnsupportedMimeType { index, mime_type } => {
+                write!(f, "image {index} has unsupported media type {mime_type}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FeedbackImageError {}
+
+pub fn validate_feedback_images(images: &[FeedbackImage]) -> Result<(), FeedbackImageError> {
+    if images.len() > MAX_FEEDBACK_IMAGES {
+        return Err(FeedbackImageError::TooManyImages {
+            count: images.len(),
+        });
+    }
+    let mut total = 0usize;
+    for (index, image) in images.iter().enumerate() {
+        if feedback_image_extension(&image.mime_type).is_none() {
+            return Err(FeedbackImageError::UnsupportedMimeType {
+                index,
+                mime_type: image.mime_type.clone(),
+            });
+        }
+        let decoded = image.decoded_len();
+        if decoded > MAX_FEEDBACK_IMAGE_BYTES {
+            return Err(FeedbackImageError::ImageTooLarge { index });
+        }
+        total = total.saturating_add(decoded);
+    }
+    if total > MAX_FEEDBACK_IMAGE_TOTAL_BYTES {
+        return Err(FeedbackImageError::TotalTooLarge);
+    }
+    Ok(())
+}
+
 /// Request body for POST /v1/feedback. Construct via
 /// [`FeedbackSubmission::with_content`]; the `Default` impl exists for
 /// builder-style construction and test fixtures and does not produce a valid
@@ -312,6 +410,10 @@ pub struct FeedbackSubmission {
     /// Free-form feedback text
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feedback_text: Option<String>,
+
+    /// Enforce [`validate_feedback_images`] before sending.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<FeedbackImage>,
 
     /// Feedback categories (e.g., ["accuracy", "speed", "helpfulness"])
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2033,5 +2135,98 @@ mod tests {
         let round_tripped: FeedbackHeuristicsConfig = serde_json::from_str(&serialized).unwrap();
         assert_eq!(round_tripped.target_user_cohorts, vec!["beta"]);
         assert_eq!(round_tripped.priority, 10);
+    }
+
+    fn feedback_image(encoded_len: usize, mime_type: &str) -> FeedbackImage {
+        FeedbackImage {
+            data: "A".repeat(encoded_len),
+            mime_type: mime_type.to_string(),
+            file_name: None,
+        }
+    }
+
+    #[test]
+    fn feedback_submission_images_backward_compat() {
+        let legacy = r#"{"sessionId":"s1","clientType":"tui","feedbackType":"text"}"#;
+        let submission: FeedbackSubmission = serde_json::from_str(legacy).unwrap();
+        assert!(submission.images.is_empty());
+        assert!(
+            !serde_json::to_string(&submission)
+                .unwrap()
+                .contains("images")
+        );
+
+        let mut with_image = submission.clone();
+        with_image.images = vec![FeedbackImage {
+            data: "aGk=".into(),
+            mime_type: "image/png".into(),
+            file_name: Some("shot.png".into()),
+        }];
+        let round_tripped: FeedbackSubmission =
+            serde_json::from_str(&serde_json::to_string(&with_image).unwrap()).unwrap();
+        assert_eq!(round_tripped.images.len(), 1);
+        assert_eq!(round_tripped.images[0].data, "aGk=");
+        assert_eq!(round_tripped.images[0].mime_type, "image/png");
+        assert_eq!(
+            round_tripped.images[0].file_name.as_deref(),
+            Some("shot.png")
+        );
+    }
+
+    #[test]
+    fn validate_feedback_images_enforces_shared_limits() {
+        assert!(validate_feedback_images(&[]).is_ok());
+        assert!(validate_feedback_images(&[feedback_image(100, "image/png")]).is_ok());
+
+        let too_many = vec![feedback_image(4, "image/png"); MAX_FEEDBACK_IMAGES + 1];
+        assert_eq!(
+            validate_feedback_images(&too_many),
+            Err(FeedbackImageError::TooManyImages {
+                count: MAX_FEEDBACK_IMAGES + 1
+            })
+        );
+
+        assert_eq!(
+            validate_feedback_images(&[feedback_image(100, "image/tiff")]),
+            Err(FeedbackImageError::UnsupportedMimeType {
+                index: 0,
+                mime_type: "image/tiff".into()
+            })
+        );
+
+        let oversized = feedback_image(MAX_FEEDBACK_IMAGE_BYTES / 3 * 4 + 8, "image/png");
+        assert_eq!(
+            validate_feedback_images(&[oversized]),
+            Err(FeedbackImageError::ImageTooLarge { index: 0 })
+        );
+
+        // Individually valid, collectively over the total budget.
+        let per_image = MAX_FEEDBACK_IMAGE_TOTAL_BYTES / 3 * 4 / 3;
+        let over_total = vec![feedback_image(per_image, "image/png"); 4];
+        assert_eq!(
+            validate_feedback_images(&over_total),
+            Err(FeedbackImageError::TotalTooLarge)
+        );
+    }
+
+    #[test]
+    fn decoded_len_is_exact() {
+        let cases = [
+            ("", 0),
+            ("YQ==", 1),
+            ("YQ", 1),
+            ("YWI=", 2),
+            ("YWI", 2),
+            ("YWJj", 3),
+            ("YWJjZGVmZ2hp", 9),
+        ];
+        for (encoded, decoded_len) in cases {
+            let image = FeedbackImage {
+                data: encoded.to_string(),
+                mime_type: "image/png".into(),
+                file_name: None,
+            };
+            assert_eq!(image.decoded_len(), decoded_len, "{encoded:?}");
+        }
     }
 }

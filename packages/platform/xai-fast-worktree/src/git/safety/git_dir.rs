@@ -64,16 +64,9 @@ pub(super) fn find_repo_local_state(repo: &gix::Repository) -> Option<KeepReason
         .or_else(|| find_operation_in_progress(repo.git_dir()))
 }
 
-/// Stores that die with `git_dir` and that no ref comparison covers: submodule
-/// stores (`.git/modules`) and the LFS objects a pointer stands for. A file the
-/// `surviving` repo does not also hold → keep. Only a standalone copy reaches
-/// this; a linked worktree shares both stores with its source.
-///
-/// The comparison is by relative path, not by content, so it errs toward keep:
-/// if the survivor repacked its submodule store (a `git gc` renames the pack
-/// files) the copy's now-differently-named pack reads as missing and the
-/// worktree is kept. That over-keep is safe — it never deletes a last copy — but
-/// it persists until the copy is removed explicitly.
+/// Stores that die with `git_dir` and that no ref covers: `.git/modules` and LFS
+/// objects. Standalone only; keep when `surviving` lacks a file. Path-matched, so
+/// it over-keeps rather than risk dropping a last copy.
 pub(super) fn find_dying_stores(
     repo: &gix::Repository,
     surviving: Option<&gix::Repository>,
@@ -99,8 +92,6 @@ pub(super) fn find_dying_stores(
     None
 }
 
-/// A store that dies with the worktree's git directory and that no ref
-/// comparison covers.
 #[derive(Clone, Copy)]
 enum DyingStore {
     /// Submodule object stores under `.git/modules`.

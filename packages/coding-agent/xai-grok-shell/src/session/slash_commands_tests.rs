@@ -1698,6 +1698,92 @@ fn listing(name: &str) -> crate::session::workflow::registry::WorkflowListing {
 }
 
 #[test]
+fn same_named_builtin_projects_workflow_metadata_without_replacing_command() {
+    let workflow = crate::session::workflow::registry::WorkflowListing {
+        name: "deep-research".to_string(),
+        description: "Workflow metadata description".to_string(),
+        when_to_use: None,
+        source: "builtin",
+        path: None,
+    };
+    let commands = available_commands(&[], all_gated(), std::slice::from_ref(&workflow));
+    let matching: Vec<_> = commands
+        .iter()
+        .filter(|command| command.name == "deep-research")
+        .collect();
+    assert_eq!(matching.len(), 1);
+    let command = matching[0];
+    assert_eq!(
+        command.description,
+        "Research with bounded parallel agents, cross-check evidence, and write a cited report"
+    );
+    assert_eq!(
+        command.input,
+        Some(acp::AvailableCommandInput::Unstructured(
+            acp::UnstructuredCommandInput::new("<query>".to_string())
+        ))
+    );
+    let meta = command.meta.as_ref().expect("workflow metadata");
+    assert_eq!(
+        meta.get("workflowSource")
+            .and_then(serde_json::Value::as_str),
+        Some("builtin")
+    );
+    assert!(!meta.contains_key("workflowPath"));
+
+    assert!(matches!(
+        resolve(
+            vec![text_block("/deep-research rust pitfalls")],
+            &[],
+            all_gated(),
+            SkillSlashRewrite::default(),
+            std::slice::from_ref(&workflow),
+        )
+        .unwrap_err(),
+        SlashCommandOutcome::Builtin(BuiltinAction::DeepResearch { query })
+            if query == "rust pitfalls"
+    ));
+}
+
+#[test]
+fn ordinary_builtin_collisions_do_not_project_workflow_metadata() {
+    let mut status_workflow = listing("status");
+    status_workflow.source = "project";
+    let mut goal_workflow = listing("goal");
+    goal_workflow.source = "user";
+    let commands = available_commands(&[], all_gated(), &[status_workflow, goal_workflow]);
+
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command.name == "session-info")
+            .count(),
+        1
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command.name == "goal")
+            .count(),
+        1
+    );
+    assert!(commands.iter().all(|command| command.name != "status"));
+    for name in ["session-info", "goal"] {
+        let command = commands
+            .iter()
+            .find(|command| command.name == name)
+            .expect("builtin command");
+        assert!(
+            command
+                .meta
+                .as_ref()
+                .is_none_or(|meta| !meta.contains_key("workflowSource")),
+            "{name} must not expose a colliding saved workflow"
+        );
+    }
+}
+
+#[test]
 fn named_workflows_advertise_and_resolve() {
     let workflows = vec![listing("triage-flakes"), listing("goal")];
     let commands = available_commands(&[], all_gated(), &workflows, &[], &[]);
@@ -1870,6 +1956,8 @@ fn workflow_manage_parses_both_orders_and_optional_id() {
         ("pause wf_12ab", "wf_12ab", "pause"),
         ("SAVE wf_12ab", "wf_12ab", "save"),
         ("pause deep research", "deep research", "pause"),
+        ("runs", "", "runs"),
+        ("RUNS", "", "runs"),
         ("", "", ""),
     ] {
         match resolve_workflow(args) {
@@ -1898,6 +1986,8 @@ fn workflow_manage_parses_both_orders_and_optional_id() {
             "triage",
             "resume the failed jobs",
         ),
+        // `runs` is only an op in the bare form; with args it stays a launch.
+        ("runs extra words", "runs", "extra words"),
     ] {
         match resolve_workflow(args) {
             BuiltinAction::WorkflowLaunch { name, input } => {
@@ -1910,6 +2000,37 @@ fn workflow_manage_parses_both_orders_and_optional_id() {
             ),
         }
     }
+}
+
+#[test]
+fn workflow_named_runs_is_shadowed_by_the_runs_op() {
+    // `/workflow runs` is always the overview op, even with a workflow named
+    // `runs` installed; that workflow still launches via its advertised bare
+    // `/runs` command or `/workflow runs <args>`.
+    let workflows = vec![listing("runs")];
+    assert!(matches!(
+        resolve(
+            vec![text_block("/workflow runs")],
+            &[],
+            all_gated(),
+            SkillSlashRewrite::default(),
+            &workflows,
+        )
+        .unwrap_err(),
+        SlashCommandOutcome::Builtin(BuiltinAction::WorkflowManage { run_id, op })
+            if run_id.is_empty() && op == "runs"
+    ));
+    assert!(matches!(
+        resolve(
+            vec![text_block("/runs")],
+            &[],
+            all_gated(),
+            SkillSlashRewrite::default(),
+            &workflows,
+        )
+        .unwrap_err(),
+        SlashCommandOutcome::Builtin(BuiltinAction::WorkflowLaunch { name, .. }) if name == "runs"
+    ));
 }
 
 #[test]

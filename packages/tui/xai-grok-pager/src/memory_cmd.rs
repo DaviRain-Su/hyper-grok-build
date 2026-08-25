@@ -77,7 +77,7 @@ fn run_clear(storage: &MemoryStorage, targets: &[ClearTarget], skip_confirm: boo
     let existing: Vec<_> = targets.iter().filter(|t| t.path.exists()).collect();
 
     if existing.is_empty() {
-        println!("Nothing to clear \u{2014} no memory files found.");
+        println!("Nothing to clear: no memory files found.");
         return Ok(());
     }
 

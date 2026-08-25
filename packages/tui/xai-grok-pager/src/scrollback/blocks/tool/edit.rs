@@ -21,7 +21,6 @@
 //! Cost magnitudes: see `benches/edit_highlight` (hunk-only first paint is
 //! cheap; full-file is once-per-upgrade; naïve prefix-per-hunk is not shipped).
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
@@ -112,15 +111,6 @@ impl Default for DiffRenderConfig {
 const INDENT: &str = "  ";
 const GUTTER_GAP: &str = " ";
 const CONTENT_GAP: &str = "  ";
-
-/// Expand tabs using the global tab_width (`Cow::Borrowed` when none).
-fn expand_tabs(text: &str) -> Cow<'_, str> {
-    let tw = crate::appearance::tab_width();
-    if tw == 0 || !text.contains('\t') {
-        return Cow::Borrowed(text);
-    }
-    Cow::Owned(text.replace('\t', &" ".repeat(tw as usize)))
-}
 
 /// A rendered diff line with optional background color.
 pub struct DiffLineOutput {
@@ -214,7 +204,7 @@ fn render_diff_hunks_core(
         let mut new_highlighter = syntect.highlight_lines_by_file_path(path);
         for line in hunk {
             let trimmed = line.text.trim_end_matches(['\r', '\n']);
-            let text = expand_tabs(trimmed);
+            let text = xai_grok_pager_render::appearance::expand_tabs(trimmed);
             // Cold spans render unconditionally so Delete lines and any map
             // miss (text drift) paint exactly like the hunk-only phase.
             let mut content_spans = match line.tag {
@@ -274,7 +264,10 @@ fn hunk_new_line_texts(hunks: &[DiffHunk]) -> HashMap<usize, String> {
         for line in hunk {
             if matches!(line.tag, ChangeTag::Equal | ChangeTag::Insert) && line.ln > 0 {
                 let trimmed = line.text.trim_end_matches(['\r', '\n']);
-                out.insert(line.ln, expand_tabs(trimmed).into_owned());
+                out.insert(
+                    line.ln,
+                    xai_grok_pager_render::appearance::expand_tabs(trimmed).into_owned(),
+                );
             }
         }
     }
@@ -325,7 +318,7 @@ pub fn compute_file_scoped_styles(
         if ln > max_needed {
             break;
         }
-        let expanded = expand_tabs(line);
+        let expanded = xai_grok_pager_render::appearance::expand_tabs(line);
         let owned = format!("{expanded}\n");
         let ranges = highlighter
             .highlight_line(&owned, &syntect.syntax_set)

@@ -16,7 +16,6 @@ use std::io::Cursor;
 
 use base64::Engine as _;
 use image::ImageReader;
-use reqwest::header::AUTHORIZATION;
 
 use crate::attribution::ToolConsumer;
 use crate::implementations::grok_build::image_gen::{ImageGenClient, ImageGenResponse};
@@ -376,10 +375,7 @@ impl xai_tool_runtime::Tool for ImageEditTool {
         }
 
         let sent_bearer = client.current_bearer().await;
-        let mut req = client.http().post(&url).json(&payload);
-        if let Some(ref key) = sent_bearer {
-            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
-        }
+        let req = client.post_json(&url, &payload, sent_bearer.as_deref());
 
         let response = req.send().await.map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(

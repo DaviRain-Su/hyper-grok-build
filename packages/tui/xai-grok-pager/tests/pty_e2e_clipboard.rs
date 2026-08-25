@@ -101,9 +101,10 @@ async fn unknown_ssh_clipboard_delivery_is_unverified() {
     harness
         .wait_for_text("clipboard.delivery-unverified", Duration::from_secs(10))
         .expect("named clipboard finding");
+    // The one-off SSH command wraps at 80 columns; this remediation stays contiguous.
     harness
-        .wait_for_text("grok wrap ssh <host>", Duration::from_secs(10))
-        .expect("doctor-owned wrapped SSH guidance");
+        .wait_for_text("grok doctor fix ssh-wrap", Duration::from_secs(10))
+        .expect("doctor-owned SSH-wrap remediation");
     assert!(!harness.contains_text("Copy failed"));
     assert!(!harness.contains_text("panicked"));
 

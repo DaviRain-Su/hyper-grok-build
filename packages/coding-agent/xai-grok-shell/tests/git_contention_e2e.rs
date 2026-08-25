@@ -411,7 +411,7 @@ async fn run_storm(
 #[test]
 #[ignore = "perf repro; real FS events; run locally with --ignored --nocapture"]
 fn git_rebase_refresh_storm_e2e() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    xai_grok_extra_ca::ensure_default_crypto_provider();
     let counter = install_global_scan_counter();
 
     // The mock gets its own runtime thread: agent startup blocks the test

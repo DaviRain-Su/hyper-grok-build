@@ -22,7 +22,11 @@ async fn minimal_feedback_session_gate_and_pane() {
     // Minimal dispatches NewSession at startup; session_id binds when ACP
     // session/new returns. wait_minimal_ready only waits for the idle prompt,
     // so the first `/feedback` can hit the no-session gate or open the pane.
-    harness.inject_keys(b"/feedback\r").expect("bare /feedback");
+    // Under remote CI a single-shot `/feedback\r` can land Enter before the
+    // composer has absorbed the slash filter, so the command never runs and
+    // the welcome card still fills the screen after the wait.
+    inject_keys_paced(&mut harness, b"/feedback");
+    harness.inject_keys(b"\r").expect("submit bare /feedback");
     harness
         .wait_until(
             "session gate notice or feedback pane",
@@ -46,9 +50,10 @@ async fn minimal_feedback_session_gate_and_pane() {
         harness
             .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
             .expect("response rendered");
+        inject_keys_paced(&mut harness, b"/feedback");
         harness
-            .inject_keys(b"/feedback\r")
-            .expect("bare /feedback with session");
+            .inject_keys(b"\r")
+            .expect("submit bare /feedback with session");
         harness
             .wait_for_text(FEEDBACK_LABEL_SENTINEL, Duration::from_secs(15))
             .expect("feedback pane label in minimal");

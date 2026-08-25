@@ -26,18 +26,78 @@ use crate::acp::model_state::ModelState;
 
 use matcher::FuzzyMatcher;
 use registry::{CommandRegistry, CommandSource, CommandTrigger};
+use xai_grok_tools::implementations::skills::types::SkillScope;
 
 pub use command::{
     AppCtx, ArgItem, CommandExecCtx, CommandProvenance, CommandResult, SlashCommand,
+    WorkflowChoice, WorkflowRunChoice,
 };
 pub use mode_support::{ModeSupport, Remedy};
 
 /// Maximum number of visible rows in the dropdown (scroll beyond this).
-pub const MAX_VISIBLE_SUGGESTIONS: usize = 6;
+pub const MAX_VISIBLE_SUGGESTIONS: usize = 8;
 
 // ---------------------------------------------------------------------------
 // SuggestionRow
 // ---------------------------------------------------------------------------
+
+/// Grouping for the bare `/` menu, ordered top to bottom. Skills sink below the commands because there can be far more of them than fit on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MenuGroup {
+    Command,
+    BundledSkill,
+    /// User, project, server and plugin skills.
+    OtherSkill,
+}
+
+impl MenuGroup {
+    fn of(provenance: &CommandProvenance) -> Self {
+        match provenance {
+            // A skill's source is its plugin name when it has one, else its scope, and bundled skills never come from a plugin.
+            CommandProvenance::Skill { source }
+                if source.as_str() == SkillScope::Bundled.as_ref() =>
+            {
+                Self::BundledSkill
+            }
+            CommandProvenance::Skill { .. } => Self::OtherSkill,
+            CommandProvenance::Builtin | CommandProvenance::Shell => Self::Command,
+        }
+    }
+}
+
+/// Sort key for the bare `/` menu; fields compare in declaration order.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct MenuKey {
+    group: MenuGroup,
+    /// `false` first, so a curated tag pulls its row to the top of the band.
+    untagged: bool,
+    /// Zero for skills, which are ranked by name instead.
+    recency: std::cmp::Reverse<u64>,
+    /// Empty for commands, which are ranked by recency then registry order.
+    name: String,
+}
+
+impl MenuKey {
+    fn new(
+        group: MenuGroup,
+        row: &SuggestionRow,
+        canonical: &str,
+        mru: &mut mru::SlashMru,
+    ) -> Self {
+        let (recency, name) = match group {
+            MenuGroup::Command => (mru.rank_score("", canonical), String::new()),
+            // Nothing ranks skills, so alphabetical is the only order predictable enough to find one in.
+            _ => (0, row.display.to_lowercase()),
+        };
+
+        Self {
+            group,
+            untagged: row.tag.is_none(),
+            recency: std::cmp::Reverse(recency),
+            name,
+        }
+    }
+}
 
 /// A single row in the slash suggestion dropdown.
 #[derive(Debug, Clone)]
@@ -307,6 +367,8 @@ pub struct SlashController {
     /// Whether `/usage` is offered. Default `true`; cleared for external auth.
     usage_command_visible: bool,
     workflows_available: bool,
+    /// Session run handles for `/workflow` manage-verb autocomplete.
+    workflow_runs: Vec<crate::slash::command::WorkflowRunChoice>,
     /// Effective render mode of this process (immutable after startup — it only
     /// changes via a full `/minimal`-`/fullscreen` re-exec). Injected via
     /// [`Self::set_screen_mode`] wherever prompts are created; gates the
@@ -353,6 +415,7 @@ impl SlashController {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: false,
+            workflow_runs: Vec::new(),
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
             mru,
@@ -411,6 +474,14 @@ impl SlashController {
         self.workflows_available
     }
 
+    pub fn set_workflow_runs(&mut self, runs: Vec<crate::slash::command::WorkflowRunChoice>) {
+        self.workflow_runs = runs;
+    }
+
+    pub fn workflow_runs(&self) -> &[crate::slash::command::WorkflowRunChoice] {
+        &self.workflow_runs
+    }
+
     /// Record the process's effective screen mode (see the field doc).
     pub(crate) fn set_screen_mode(&mut self, mode: crate::app::ScreenMode) {
         self.screen_mode = mode;
@@ -440,6 +511,8 @@ impl SlashController {
             billing_surface_visible: self.billing_surface_visible,
             usage_command_visible: self.usage_command_visible,
             workflows_available: self.workflows_available,
+            saved_workflows: self.registry.saved_workflows(),
+            workflow_runs: &self.workflow_runs,
             screen_mode: self.screen_mode,
             current_title: self.current_title.as_deref(),
         }
@@ -963,6 +1036,7 @@ impl SlashController {
             // Retain canonicals so tags are set in a second pass, keeping the
             // `takes_args_now` command callback outside any tag-map borrow.
             let mut canonicals: Vec<&str> = Vec::new();
+            let mut groups: Vec<MenuGroup> = Vec::new();
             for (i, trigger) in triggers.iter().enumerate() {
                 if !visible_indices.contains(&i) {
                     continue;
@@ -979,6 +1053,7 @@ impl SlashController {
                         colliding_command_indices.contains(&trigger.command_index),
                     ));
                     canonicals.push(trigger.canonical.as_str());
+                    groups.push(MenuGroup::of(&trigger.provenance));
                 }
             }
             // Tag from the data map in one scoped borrow; key off canonical
@@ -989,10 +1064,21 @@ impl SlashController {
                     row.tag = command_tags.get(*canonical).cloned();
                 }
             }
-            // Surface tagged commands (curated new/beta) at the top of the bare "/" menu;
-            // stable so registry order is preserved within the tagged and untagged groups.
-            rows.sort_by_key(|r| r.tag.is_none());
-            return rows;
+
+            // One MRU borrow for the whole menu, not one per row.
+            let mut keyed: Vec<(MenuKey, SuggestionRow)> = {
+                let mut mru = self.mru.borrow_mut();
+                rows.into_iter()
+                    .zip(canonicals)
+                    .zip(groups)
+                    .map(|((row, canonical), group)| {
+                        (MenuKey::new(group, &row, canonical, &mut mru), row)
+                    })
+                    .collect()
+            };
+            // Stable sort, so rows with equal keys keep registry order.
+            keyed.sort_by(|a, b| a.0.cmp(&b.0));
+            return keyed.into_iter().map(|(_, row)| row).collect();
         }
 
         // Reject double-slash sequences.
@@ -1217,8 +1303,8 @@ impl SlashController {
 ///
 /// Commands are also filtered by the render mode they declare support for
 /// ([`SlashCommand::mode_support`]): a fullscreen-only command
-/// (`/find`, `/theme`, …) is not offered under `--minimal`, and a minimal-only
-/// command (`/expand`, `/edit-prompt`) is not offered in the full TUI. Note
+/// (`/find`, `/theme`, …) is not offered under `--minimal`, and a
+/// minimal-only command (`/expand`) is not offered in the full TUI. Note
 /// this gate is completion-only — [`registry::CommandRegistry::get_for_dispatch`]
 /// still resolves such a command so a fully-typed invocation reaches the
 /// central dispatch gate's [`ModeSupport::refusal`] instead of leaking to the
@@ -2913,6 +2999,116 @@ mod tests {
             order,
             vec!["/bravo", "/delta", "/alpha", "/charlie"],
             "tagged-first, stable registry order within each group"
+        );
+    }
+
+    /// Build a skill-shaped ACP command in `scope`.
+    fn skill_cmd(name: &str, scope: &str) -> agent_client_protocol::AvailableCommand {
+        let meta =
+            serde_json::json!({ "scope": scope, "path": format!("/skills/{name}/SKILL.md") })
+                .as_object()
+                .cloned()
+                .expect("skill meta is an object");
+        agent_client_protocol::AvailableCommand::new(name.to_string(), String::new()).meta(meta)
+    }
+
+    /// Bundled skills sort above the other scopes, both alphabetized, and the whole skill block sits below the commands.
+    #[test]
+    fn empty_query_sinks_skills_below_commands_alphabetized() {
+        let mut ctrl = tie_controller(&["alpha", "bravo"], &[]);
+        ctrl.registry_mut().set_acp_commands(&[
+            skill_cmd("zeta-user", "user"),
+            skill_cmd("beta-bundled", "bundled"),
+            skill_cmd("alpha-user", "user"),
+            skill_cmd("apex-bundled", "bundled"),
+        ]);
+        let state = SlashState::default();
+        let models = ModelState::default();
+
+        ctrl.refresh(&state, "/", 1, &models);
+
+        let order: Vec<String> = state
+            .snapshot()
+            .matches
+            .iter()
+            .map(|r| r.display.clone())
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                "/alpha",
+                "/bravo",
+                "/apex-bundled",
+                "/beta-bundled",
+                "/alpha-user",
+                "/zeta-user",
+            ],
+            "commands, then bundled skills, then the rest"
+        );
+    }
+
+    /// A curated tag outranks recency, so `MenuKey` must keep `untagged` above `recency`.
+    #[test]
+    fn empty_query_puts_a_tagged_command_above_a_recent_one() {
+        let mut ctrl = tie_controller(&["alpha", "bravo"], &[("bravo", 1_700_000_999)]);
+        set_tags(&mut ctrl, &[("alpha", "new")]);
+        let state = SlashState::default();
+        let models = ModelState::default();
+
+        ctrl.refresh(&state, "/", 1, &models);
+
+        let order: Vec<String> = state
+            .snapshot()
+            .matches
+            .iter()
+            .map(|r| r.display.clone())
+            .collect();
+        assert_eq!(order, vec!["/alpha", "/bravo"]);
+    }
+
+    /// A tag lifts a skill only inside its own band; the bands come first.
+    #[test]
+    fn empty_query_keeps_a_tagged_skill_below_the_commands() {
+        let mut ctrl = tie_controller(&["alpha"], &[]);
+        ctrl.registry_mut()
+            .set_acp_commands(&[skill_cmd("zulu", "bundled")]);
+        set_tags(&mut ctrl, &[("zulu", "new")]);
+        let state = SlashState::default();
+        let models = ModelState::default();
+
+        ctrl.refresh(&state, "/", 1, &models);
+
+        let order: Vec<String> = state
+            .snapshot()
+            .matches
+            .iter()
+            .map(|r| r.display.clone())
+            .collect();
+        assert_eq!(order, vec!["/alpha", "/zulu"]);
+    }
+
+    /// Within the command group the menu leads with what you actually use.
+    #[test]
+    fn empty_query_orders_commands_by_recency_then_registry_order() {
+        let mut ctrl = tie_controller(
+            &["alpha", "bravo", "charlie"],
+            &[("charlie", 1_700_000_999), ("bravo", 1_700_000_010)],
+        );
+        let state = SlashState::default();
+        let models = ModelState::default();
+
+        ctrl.refresh(&state, "/", 1, &models);
+
+        let order: Vec<String> = state
+            .snapshot()
+            .matches
+            .iter()
+            .map(|r| r.display.clone())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["/charlie", "/bravo", "/alpha"],
+            "most recently used first; never-used keeps registry order"
         );
     }
 

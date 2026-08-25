@@ -1052,8 +1052,8 @@ async fn edit_queued_prompt_is_last_writer_wins() {
 }
 
 /// Editing a missing id is a benign no-op (the entry was already drained or
-/// removed by another client); no rebroadcast is required because nothing
-/// changed.
+/// removed by another client), but it still releases the editor's edit hold
+/// so promote is not parked on a vanished row.
 #[tokio::test]
 async fn edit_queued_prompt_missing_id_is_noop() {
     let local = tokio::task::LocalSet::new();
@@ -1063,6 +1063,10 @@ async fn edit_queued_prompt_missing_id_is_noop() {
             {
                 let mut state = actor.state.lock().await;
                 state.pending_inputs.push_back(user_item("p1", "alice"));
+                // Hold whose row vanished mid-edit: the rejected save is its release point.
+                state
+                    .edit_holds
+                    .insert("ghost".into(), std::time::Instant::now());
             }
 
             actor
@@ -1079,6 +1083,10 @@ async fn edit_queued_prompt_missing_id_is_noop() {
             assert_eq!(meta.text, "text for p1");
             assert_eq!(meta.version, 0);
             assert!(meta.last_editor.is_none());
+            assert!(
+                !state.edit_holds.contains_key("ghost"),
+                "a rejected edit must release its edit hold"
+            );
         })
         .await;
 }
@@ -1097,6 +1105,10 @@ async fn edit_queued_prompt_running_turn_is_noop() {
                 // Mark p1 as the running turn (race-free identity: the task
                 // slot, not the `current_prompt_id` pin).
                 state.running_task = Some(running_task_stub("p1"));
+                // Editor opened while p1 was still queued; promoted mid-edit.
+                state
+                    .edit_holds
+                    .insert("p1".into(), std::time::Instant::now());
             }
             *actor
                 .current_prompt_id
@@ -1116,6 +1128,10 @@ async fn edit_queued_prompt_running_turn_is_noop() {
             assert_eq!(meta.text, "text for p1", "running turn untouched");
             assert_eq!(meta.version, 0);
             assert!(meta.last_editor.is_none());
+            assert!(
+                !state.edit_holds.contains_key("p1"),
+                "a save rejected for the running turn must release its edit hold"
+            );
         })
         .await;
 }
@@ -3612,6 +3628,329 @@ async fn rewind_if_pristine_never_pops_an_interjection_fallback_front() {
                 ),
                 "a fallback front resolves through the normal cancel, never the rewind pop"
             );
+        })
+        .await;
+}
+
+/// Yield predicate: skip synthetics/running front; held first user blocks.
+#[tokio::test]
+async fn goal_yield_predicate_ignores_synthetics_and_the_running_front() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.running_task = Some(running_task_stub("running"));
+                state.pending_inputs.push_back(
+                    input_with_origin_rx(
+                        "goal-summary-1",
+                        crate::session::PromptOrigin::GoalSummary,
+                    )
+                    .0,
+                );
+            }
+            assert!(
+                !actor.has_runnable_queued_user_row().await,
+                "the running front and synthetic rows are not queued user work"
+            );
+
+            actor
+                .state
+                .lock()
+                .await
+                .pending_inputs
+                .push_back(user_item("held", "A"));
+            assert!(
+                actor.has_runnable_queued_user_row().await,
+                "a user row queued behind the running turn is queued user work"
+            );
+
+            // Mid-edit row must not trigger yield (promote is blocked on hold).
+            actor
+                .state
+                .lock()
+                .await
+                .edit_holds
+                .insert("held".into(), std::time::Instant::now());
+            assert!(
+                !actor.has_runnable_queued_user_row().await,
+                "a row under composer edit is not yieldable user work"
+            );
+
+            // FIFO: unheld row behind a held front must not re-arm the yield.
+            actor
+                .state
+                .lock()
+                .await
+                .pending_inputs
+                .push_back(user_item("behind-held", "A"));
+            assert!(
+                !actor.has_runnable_queued_user_row().await,
+                "an unheld row behind a held front must not trigger the yield"
+            );
+
+            actor.state.lock().await.edit_holds.remove("held");
+            assert!(
+                actor.has_runnable_queued_user_row().await,
+                "clearing the hold re-arms the yield"
+            );
+        })
+        .await;
+}
+
+/// A leaked (expired) hold on the first user row no longer blocks the yield.
+/// The leaked-hold GC cannot run during the in-turn goal loop, so the predicate
+/// must apply the same TTL itself or a crashed editor starves the queue.
+#[tokio::test]
+async fn goal_yield_ignores_expired_edit_hold() {
+    use crate::session::acp_session::EDIT_HOLD_TTL;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.running_task = Some(running_task_stub("running"));
+                state.pending_inputs.push_back(user_item("held", "A"));
+                state
+                    .edit_holds
+                    .insert("held".into(), std::time::Instant::now());
+            }
+            assert!(
+                !actor.has_runnable_queued_user_row().await,
+                "a live hold on the first user row blocks the yield"
+            );
+
+            super::backdate_edit_hold(
+                &mut actor.state.lock().await.edit_holds,
+                "held",
+                EDIT_HOLD_TTL + std::time::Duration::from_secs(1),
+            );
+            assert!(
+                actor.has_runnable_queued_user_row().await,
+                "a hold older than the TTL is expired and no longer blocks the yield"
+            );
+        })
+        .await;
+}
+
+/// A queued goal continuation is detected so a user turn can skip
+/// run_goal_round_end (and still hit run_stop_gate) instead of driving the
+/// goal loop and resuming the goal a second time.
+#[tokio::test]
+async fn has_pending_goal_continuation_detects_queued_continuation() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            assert!(
+                !actor.has_pending_goal_continuation().await,
+                "an empty queue has no pending continuation"
+            );
+
+            actor
+                .state
+                .lock()
+                .await
+                .pending_inputs
+                .push_back(user_item("u1", "alice"));
+            assert!(
+                !actor.has_pending_goal_continuation().await,
+                "a queued user row is not a goal continuation"
+            );
+
+            actor.state.lock().await.pending_inputs.push_back(
+                input_with_origin_rx("goal-summary-1", crate::session::PromptOrigin::GoalSummary).0,
+            );
+            assert!(
+                actor.has_pending_goal_continuation().await,
+                "a queued GoalSummary is a pending continuation"
+            );
+        })
+        .await;
+}
+
+/// Stale GoalSummary front is dropped at promote when the goal is inactive.
+#[tokio::test(flavor = "current_thread")]
+async fn stale_goal_summary_front_dropped_when_goal_inactive() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(
+                    input_with_origin_rx(
+                        "goal-summary-1",
+                        crate::session::PromptOrigin::GoalSummary,
+                    )
+                    .0,
+                );
+                state.pending_inputs.push_back(user_item("p1", "alice"));
+            }
+
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.clone().maybe_start_running_task(completion_tx).await;
+
+            // Abort the promoted turn unpolled (see
+            // `promoter_clears_committed_flag_and_handle_prompt_sets_it`).
+            let state = actor.state.try_lock().expect("no await since promote");
+            assert_eq!(
+                state.running_prompt_id(),
+                Some("p1"),
+                "the user's queued prompt runs; the stale continuation does not"
+            );
+            assert!(
+                !state
+                    .pending_inputs
+                    .iter()
+                    .any(|i| i.prompt_id == "goal-summary-1"),
+                "the stale continuation left the queue"
+            );
+            if let Some(task) = state.running_task.as_ref() {
+                task.handle.abort();
+            }
+        })
+        .await;
+}
+
+/// Active-goal GoalSummary front is not stale and still promotes.
+#[tokio::test(flavor = "current_thread")]
+async fn goal_summary_front_promotes_while_goal_active() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            set_goal_harness_for_tests(&actor);
+            actor.goal_tracker.lock().create_goal(
+                "goal".into(),
+                "objective".into(),
+                None,
+                0,
+                "2026-01-01T00:00:00Z".into(),
+                None,
+            );
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(
+                    input_with_origin_rx(
+                        "goal-summary-1",
+                        crate::session::PromptOrigin::GoalSummary,
+                    )
+                    .0,
+                );
+            }
+
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.clone().maybe_start_running_task(completion_tx).await;
+
+            let state = actor.state.try_lock().expect("no await since promote");
+            assert_eq!(
+                state.running_prompt_id(),
+                Some("goal-summary-1"),
+                "an Active goal's continuation is not stale"
+            );
+            if let Some(task) = state.running_task.as_ref() {
+                task.handle.abort();
+            }
+        })
+        .await;
+}
+
+/// The full yield ordering: with a user row queued behind a running goal turn, the yield's
+/// success turn end re-arms the continuation BEHIND that row, the row promotes and runs as the
+/// next turn, and the continuation promotes after it so the goal resumes. Pins the ordering a
+/// refactor of the round loop, `handle_turn_end`, or promote is most likely to break.
+#[tokio::test(flavor = "current_thread")]
+async fn goal_yield_runs_queued_row_next_then_resumes_goal() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            set_goal_harness_for_tests(&actor);
+            actor.goal_tracker.lock().create_goal(
+                "goal".into(),
+                "objective".into(),
+                None,
+                0,
+                "2026-01-01T00:00:00Z".into(),
+                None,
+            );
+            {
+                let mut state = actor.state.lock().await;
+                state
+                    .pending_inputs
+                    .push_back(user_item("goal-round", "alice"));
+                state.running_task = Some(running_task_stub("goal-round"));
+                state.pending_inputs.push_back(user_item("p1", "alice"));
+            }
+            assert!(
+                actor.has_runnable_queued_user_row().await,
+                "the queued row arms the yield in the goal round loop"
+            );
+
+            // The yield breaks out of the round loop as a success; this is the
+            // turn end it reaches.
+            actor.handle_turn_end(true, false).await;
+            let continuation_id = {
+                let mut state = actor.state.lock().await;
+                let order: Vec<String> = state
+                    .pending_inputs
+                    .iter()
+                    .map(|i| i.prompt_id.clone())
+                    .collect();
+                assert_eq!(
+                    order.len(),
+                    3,
+                    "turn end queued one continuation: {order:?}"
+                );
+                assert_eq!(order[1], "p1", "the user row stays ahead: {order:?}");
+                assert!(
+                    order[2].starts_with("goal-summary-"),
+                    "the continuation re-arms behind the user row: {order:?}"
+                );
+                // The yielded turn finishes: its front row drains and the task
+                // slot clears, as after any completed turn.
+                if let Some(task) = state.running_task.take() {
+                    task.handle.abort();
+                }
+                state.pending_inputs.retain(|i| i.prompt_id != "goal-round");
+                order[2].clone()
+            };
+
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor
+                .clone()
+                .maybe_start_running_task(completion_tx.clone())
+                .await;
+            {
+                // Abort the promoted turn unpolled (see
+                // `promoter_clears_committed_flag_and_handle_prompt_sets_it`).
+                let mut state = actor.state.try_lock().expect("no await since promote");
+                assert_eq!(
+                    state.running_prompt_id(),
+                    Some("p1"),
+                    "the queued user row runs as the next turn"
+                );
+                if let Some(task) = state.running_task.take() {
+                    task.handle.abort();
+                }
+                state.pending_inputs.retain(|i| i.prompt_id != "p1");
+            }
+
+            actor.clone().maybe_start_running_task(completion_tx).await;
+            let state = actor.state.try_lock().expect("no await since promote");
+            assert_eq!(
+                state.running_prompt_id(),
+                Some(continuation_id.as_str()),
+                "the goal resumes behind the user row"
+            );
+            if let Some(task) = state.running_task.as_ref() {
+                task.handle.abort();
+            }
         })
         .await;
 }

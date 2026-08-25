@@ -55,6 +55,7 @@ crates = [
 from = ["crates/codegen"]
 crates = [
   "xai-grok-pager",
+  "xai-grok-status-line",
   "xai-grok-pager-diff",
   "xai-grok-pager-render",
   "xai-grok-pager-minimal",
@@ -76,6 +77,7 @@ crates = [
   "xai-grok-shell",
   "xai-grok-shell-base",
   "xai-grok-shell-session-support",
+  "xai-grok-shell-terminal",
   "xai-grok-config",
   "xai-grok-config-types",
   "xai-grok-dashboard",

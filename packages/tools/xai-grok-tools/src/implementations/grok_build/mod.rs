@@ -9,6 +9,8 @@
 //! the standard toolset. It inserts shared resources (`Terminal`,
 //! `AvailableSkills`, `BashParams`) and registers every built-in tool.
 pub mod agent_hub;
+#[path = "app_builder_stub.rs"]
+pub mod app_builder;
 pub mod ask_user_question;
 pub mod bash;
 pub mod dap_debug;
@@ -19,6 +21,8 @@ pub mod exit_plan_mode;
 pub mod grep;
 pub mod image_edit;
 pub mod image_gen;
+#[path = "init_or_update_app_stub.rs"]
+pub mod init_or_update_app;
 pub mod kill_task;
 pub mod list_dir;
 pub mod lsp;
@@ -39,10 +43,11 @@ pub use agent_hub::{
     AGENT_HUB_TOOL_NAME, AgentBus, AgentBusResource, AgentHubTool, AgentSelfIdResource,
     MAIN_PEER_ID, PeerWakeFn,
 };
+pub use app_builder::AppBuilderDeployerConfig;
 pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
 pub use dap_debug::{DAP_DEBUG_TOOL_NAME, DapDebugTool};
-pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};
+pub use deploy_app::DEPLOY_APP_TOOL_NAME;
 pub use enter_plan_mode::EnterPlanModeTool;
 pub use exit_plan_mode::ExitPlanModeTool;
 pub use grep::GrepTool;
@@ -51,6 +56,7 @@ pub use image_gen::{
     IMAGE_GEN_TOOL_NAME, IMAGINE_COMMAND_NAME, ImageGenTool, imagine_instruction,
     imagine_usage_message,
 };
+pub use init_or_update_app::INIT_OR_UPDATE_APP_TOOL_NAME;
 pub use kill_task::{KillTaskTool, KillTerminalCommandTool};
 pub use list_dir::ListDirTool;
 pub use lsp::LspTool;

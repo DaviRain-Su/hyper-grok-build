@@ -88,6 +88,33 @@ fn build_entries_dedupes_identically_rendered_alt_keys() {
 }
 
 #[test]
+fn build_entries_lists_prompt_stash_with_ctrl_s_and_alt_s() {
+    let registry = crate::actions::ActionRegistry::defaults();
+    let entries = build_entries(&[When::PromptFocused], &registry, false);
+    let alt = if cfg!(target_os = "macos") {
+        "Opt"
+    } else {
+        "Alt"
+    };
+
+    let (item, dimmed) = entries
+        .iter()
+        .find_map(|e| match e {
+            ShortcutsHelpEntry::Hint {
+                item,
+                dimmed,
+                action_id: Some(crate::actions::ActionId::StashPrompt),
+                ..
+            } => Some((item, *dimmed)),
+            _ => None,
+        })
+        .expect("StashPrompt must be listed in the shortcuts window");
+
+    assert!(!dimmed, "stash must be lit while the prompt is focused");
+    assert_eq!(hint_key_pretty(item), format!("Ctrl+s / {alt}+s"));
+}
+
+#[test]
 fn filter_empty_query_returns_all_indices() {
     let entries = vec![
         header("Nav", 0, 2),

@@ -169,6 +169,14 @@ pub struct ClientCapabilities {
     pub fs_read: bool,
     #[serde(default)]
     pub fs_write: bool,
+
+    /// Whether this client will draw a status row (`x.ai/statusLine`). When
+    /// true, the leader injects `clientStatusLine: true` so the agent builds the
+    /// payload for a client that asked rather than for whichever one started the
+    /// process. The flag it sets is per session, so other subscribers of a
+    /// shared session receive the payload too.
+    #[serde(default)]
+    pub status_line: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

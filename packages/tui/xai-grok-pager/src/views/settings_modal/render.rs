@@ -1805,7 +1805,7 @@ fn render_int_stepper(
         // current value, so this branch should be unreachable, but
         // a blank cell would be confusing if a future refactor
         // dropped the seed.
-        "—".to_string()
+        "-".to_string()
     } else {
         buffer.to_string()
     };

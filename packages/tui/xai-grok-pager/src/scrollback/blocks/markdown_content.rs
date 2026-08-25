@@ -6,7 +6,6 @@
 //! [`AgentMessageBlock`](super::AgentMessageBlock) and
 //! [`ThinkingBlock`](super::ThinkingBlock).
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 
 use ratatui::text::Line;
@@ -68,17 +67,6 @@ pub struct WrappedLines<'a> {
     pub joiners: &'a [Option<String>],
 }
 
-/// Expand tab characters to spaces using the current global tab_width.
-///
-/// Returns `Cow::Borrowed` when the input contains no tabs (zero-copy fast path).
-fn expand_tabs(text: &str) -> Cow<'_, str> {
-    let tw = crate::appearance::tab_width();
-    if tw == 0 || !text.contains('\t') {
-        return Cow::Borrowed(text);
-    }
-    Cow::Owned(text.replace('\t', &" ".repeat(tw as usize)))
-}
-
 impl MarkdownContent {
     /// Create with initial text (rendered immediately).
     pub fn new(text: impl Into<String>) -> Self {
@@ -113,7 +101,7 @@ impl MarkdownContent {
         renderer.set_max_table_width(max_table_width);
         renderer.set_collapse_soft_breaks(collapse_soft_breaks);
         let text = text.into();
-        let expanded = expand_tabs(&text);
+        let expanded = xai_grok_pager_render::appearance::expand_tabs(&text);
         renderer.push(&expanded);
         // finish() (not render()) so the streaming LaTeX-delimiter normalizer
         // flushes any trailing held-back delimiter bytes for this complete,
@@ -155,7 +143,7 @@ impl MarkdownContent {
 
     /// Append a streaming chunk and re-render.
     pub fn push_chunk(&mut self, chunk: &str) {
-        let expanded = expand_tabs(chunk);
+        let expanded = xai_grok_pager_render::appearance::expand_tabs(chunk);
         self.state
             .get_mut()
             .renderer
@@ -168,7 +156,7 @@ impl MarkdownContent {
     /// Used for historical replay during `session/load` so the pager can batch
     /// markdown work and render once after replay completes.
     pub fn push_chunk_deferred(&mut self, chunk: &str) {
-        let expanded = expand_tabs(chunk);
+        let expanded = xai_grok_pager_render::appearance::expand_tabs(chunk);
         self.state.get_mut().renderer.push(&expanded);
         self.generation += 1;
     }

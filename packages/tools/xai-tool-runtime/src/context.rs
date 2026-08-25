@@ -224,6 +224,14 @@ pub struct WorkspaceBindMetadata {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub rpc_only: bool,
+    /// Real guest session root (`/workspace/<conversation_id>`). When set,
+    /// the workspace virtualizes that tree as `/workspace`.
+    #[serde(
+        default,
+        deserialize_with = "ok_or_default",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub session_root: Option<String>,
 }
 
 /// Deserialize a field, falling back to its default on a malformed value
@@ -264,6 +272,7 @@ mod bind_metadata_tests {
             manifest_hash: Some("abc123".to_owned()),
             system_notifications: Some(true),
             rpc_only: true,
+            session_root: Some("/workspace/conv-abc".to_owned()),
         };
         let value = serde_json::to_value(&md).unwrap();
         let back: WorkspaceBindMetadata = serde_json::from_value(value).unwrap();
@@ -276,6 +285,7 @@ mod bind_metadata_tests {
         assert_eq!(back.manifest_hash.as_deref(), Some("abc123"));
         assert_eq!(back.system_notifications, Some(true));
         assert!(back.rpc_only);
+        assert_eq!(back.session_root.as_deref(), Some("/workspace/conv-abc"));
     }
 
     #[test]
@@ -332,5 +342,16 @@ mod bind_metadata_tests {
         let md: WorkspaceBindMetadata =
             serde_json::from_value(serde_json::json!({"preset": "explore"})).unwrap();
         assert!(md.viewer_ctx.is_none());
+    }
+
+    #[test]
+    fn session_root_is_wire_compatible() {
+        let md = WorkspaceBindMetadata::default();
+        let value = serde_json::to_value(&md).unwrap();
+        assert!(value.get("session_root").is_none());
+
+        let md: WorkspaceBindMetadata =
+            serde_json::from_value(serde_json::json!({"session_root": "/workspace/c1"})).unwrap();
+        assert_eq!(md.session_root.as_deref(), Some("/workspace/c1"));
     }
 }

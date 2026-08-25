@@ -381,7 +381,7 @@ fn session_new_increments_session_count_only() {
 fn agent_connect_timeout_emits_phase_histogram_and_timeout_counter() {
     let stream = build(gates_off());
     let mut phase_durations_ms = std::collections::BTreeMap::new();
-    phase_durations_ms.insert("load_config".into(), 12);
+    phase_durations_ms.insert("config_load".into(), 12);
     phase_durations_ms.insert("model_catalog".into(), 28_700);
     emit_event_into(
         &stream,
@@ -389,7 +389,7 @@ fn agent_connect_timeout_emits_phase_histogram_and_timeout_counter() {
             connect_target: crate::startup::AgentKind::Embedded,
             outcome: crate::startup::StartupOutcome::Timeout,
             stuck_in: Some("model_catalog".into()),
-            phases: "load_config=12ms, model_catalog>=28.7s".into(),
+            phases: "config_load=12ms, model_catalog>=28.7s".into(),
             phase_durations_ms,
             elapsed_ms: 30_000,
             timeout_secs: Some(30),
@@ -410,15 +410,21 @@ fn agent_connect_timeout_emits_phase_histogram_and_timeout_counter() {
 }
 
 #[test]
-fn startup_complete_records_the_total_histogram_only() {
+fn startup_completed_records_the_total_histogram_only() {
     let stream = build(gates_off());
     emit_event_into(
         &stream,
-        &events::StartupComplete {
+        &events::StartupCompleted {
             total_ms: 1_234,
             outcome: crate::startup::StartupOutcome::Ok,
-            phases: "load_config=12ms, session_create=800ms".into(),
+            phases: "config_load=12ms, session_create=800ms".into(),
             auth_mode: crate::startup::AuthMode::Team,
+            prefetch_wait_ms: Some(210),
+            session_load_ms: Some(120),
+            session_replay_ms: None,
+            session_git_scan_ms: Some(40),
+            session_spawn_ms: Some(300),
+            time_to_first_frame_ms: Some(650),
         },
     );
     assert!(exported_events(&stream).is_empty());
@@ -548,6 +554,7 @@ fn tool_result_gates_off_collapses_and_reduces() {
             tool_name: "nebula__post_message".into(),
             outcome: xai_grok_session_events::types::ToolOutcome::Success,
             duration_ms: 42,
+            tool_result_size_bytes: None,
             file_path: Some("/Users/alice/secret-project/main.rs".into()),
             parameters: Some(serde_json::json!({"text": "CANARY_TOOL_ARGS"})),
         },
@@ -586,6 +593,7 @@ fn tool_result_details_gate_exposes_verbatim_scrubbed() {
             tool_name: "nebula__post_message".into(),
             outcome: xai_grok_session_events::types::ToolOutcome::Success,
             duration_ms: 42,
+            tool_result_size_bytes: None,
             file_path: Some(path.clone()),
             parameters: Some(serde_json::json!({"key": "sk-CANARYabcdefghij1234567890"})),
         },
@@ -729,6 +737,8 @@ fn tool_decision_snapshot() {
             subagent_type: None,
             manager_prompt_attempted: Some(true),
             prompt_outcome: Some(events::PermissionPromptOutcome::Reject),
+            prompt_outcome_detail: Some(events::PermissionPromptOutcomeDetail::RejectOnce),
+            remember_tool_approvals: Some(true),
             decision_reason: Some(events::PermissionDecisionReason::AutoDenialLimit),
             classifier_source: Some(events::PermissionClassifierSource::Llm),
             classifier_verdict: Some(events::PermissionClassifierVerdict::Block),
@@ -753,6 +763,8 @@ fn tool_decision_snapshot() {
     for key in [
         "manager_prompt_attempted",
         "prompt_outcome",
+        "prompt_outcome_detail",
+        "remember_tool_approvals",
         "decision_reason",
         "classifier_source",
         "classifier_verdict",

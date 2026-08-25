@@ -16,7 +16,6 @@ fn configured_garbage_file_yields_zero_roots_and_builds() {
 
     assert!(xai_grok_extra_ca::extra_root_ders().is_empty());
 
-    xai_grok_extra_ca::with_extra_root_certificates(reqwest::Client::builder())
-        .build()
+    xai_grok_extra_ca::build_reqwest_client(|builder| builder)
         .expect("client builds after zero-cert configured file");
 }

@@ -42,12 +42,12 @@ pub struct TaskToolInput {
     )]
     pub run_in_background: bool,
 
-    /// Capability mode controlling the child's tool access.
-    #[schemars(
-        description = "Capability mode: \"read-only\", \"read-write\", \"execute\", or \"all\". \
-            Controls which tool classes the child can use. Default is determined by the role."
-    )]
-    #[serde(default)]
+    /// Harness-internal only. Not advertised on the model-facing schema;
+    /// JSON that still sends this key is ignored so a `general-purpose`
+    /// child keeps its type's full toolset. Compat-harness adapters and
+    /// role/definition defaults still set this in-process.
+    #[schemars(skip)]
+    #[serde(default, skip_deserializing, skip_serializing)]
     pub capability_mode: Option<SubagentCapabilityMode>,
 
     /// Isolation mode for the child's execution environment.
@@ -1820,6 +1820,22 @@ mod tests {
         };
         let value = serde_json::to_value(&input).unwrap();
         assert!(value.get("model").is_none());
+        assert!(value.get("capability_mode").is_none());
+    }
+
+    #[test]
+    fn task_tool_input_ignores_capability_mode_json() {
+        let input: TaskToolInput = serde_json::from_str(
+            r#"{"description":"d","prompt":"p","capability_mode":"read-only"}"#,
+        )
+        .unwrap();
+        assert!(input.capability_mode.is_none());
+    }
+
+    #[test]
+    fn task_tool_input_schema_omits_capability_mode() {
+        let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
+        assert!(schema["properties"].get("capability_mode").is_none());
     }
 
     #[test]

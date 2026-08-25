@@ -19,6 +19,7 @@ parking_lot = { workspace = true }
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 ignore = { workspace = true }
 regex = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -103,7 +104,7 @@ tracing-subscriber = { workspace = true }
 # "enable" required for the SDK's spans to record at all.
 fastrace = { workspace = true, features = ["enable"] }
 xai-tracing = { workspace = true }
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+xai-grok-extra-ca = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 tempfile = { workspace = true }
 zstd = { workspace = true }
@@ -137,6 +138,7 @@ default-bazel = [
 
 [dev-dependencies]
 tempfile = { workspace = true }
+axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 xai-test-utils = { path = "../../platform/xai-test-utils" }
 # Decode tar.gz archives produced by workspace upload helpers in tests.

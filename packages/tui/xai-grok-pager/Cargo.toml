@@ -112,6 +112,10 @@ xai-grok-config = { workspace = true }
 xai-grok-voice = { path = "../../ai/xai-grok-voice", default-features = false, features = ["audio"] }
 xai-grok-shell = { workspace = true }
 xai-grok-models = { workspace = true }
+# The status-line contract: the config the user writes and the payload the
+# agent sends. A leaf crate rather than the agent's, so the client reads it
+# from upstream of the crate that fills it in.
+xai-grok-status-line = { workspace = true }
 xai-grok-workspace = { workspace = true }
 # Foreign coding-agent session discovery.
 xai-grok-foreign-sessions = { workspace = true }
@@ -181,6 +185,8 @@ core-foundation = { workspace = true }
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 
 [dev-dependencies]
+# The fixture that builds a `[ui.status_line]` section field by field.
+xai-grok-status-line = { workspace = true, features = ["test-support"] }
 xai-grok-pager-render = { path = "../xai-grok-pager-render", features = ["test-support"] }
 xai-grok-shell = { workspace = true, features = ["test-support"] }
 pretty_assertions = { workspace = true }
@@ -193,16 +199,8 @@ xai-grok-pager-pty-harness = { path = "../xai-grok-pager-pty-harness" }
 # In-process leader-cluster harness (mock inference server; no cycle:
 # xai-grok-test-support depends on neither the pager nor the shell).
 xai-grok-test-support = { workspace = true, features = [] }
-# Ring CryptoProvider install for the in-process leader-cluster tests. Explicit
-# spec mirroring the shell's, NOT `workspace = true`: the workspace pin enables
-# aws-lc-rs, under which `rustls::crypto::ring` does not exist. Dev-only — the
-# production lib deliberately dropped rustls (moved to xai-grok-pager-bin).
-rustls = { version = "0.23", default-features = false, features = [
-    "ring",
-    "logging",
-    "std",
-    "tls12",
-] }
+# Provider install for the in-process leader-cluster tests.
+xai-grok-extra-ca = { workspace = true }
 
 [[bench]]
 name = "render"

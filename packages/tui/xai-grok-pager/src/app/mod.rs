@@ -14,6 +14,7 @@ pub mod agent;
 pub mod agent_view;
 pub mod app_view;
 pub mod bundle;
+pub(crate) mod cancel_latency;
 pub mod cli;
 pub mod consent;
 pub use crate::link_opener;
@@ -23,6 +24,7 @@ pub mod edit_highlight_worker;
 pub mod mermaid_worker;
 pub use xai_prompt_queue as prompt_queue;
 mod acp_handler;
+mod connect_timeout;
 mod csi_filter;
 mod dispatch;
 /// Display-refresh probe + motion cadence + terminal telemetry at startup.
@@ -33,12 +35,15 @@ pub mod roster;
 pub mod session_startup;
 pub(crate) mod session_title_resolve;
 pub mod status_blocks;
+pub(crate) mod status_line;
+mod status_line_policy;
 pub mod subagent;
 pub mod subscription;
 #[cfg(feature = "codex-live")]
 pub(crate) use dispatch::stop_live_on_teardown;
 pub(crate) use effects::sanitize_user_error;
 mod event_loop;
+mod event_loop_stall;
 mod exit_timeout;
 pub(crate) mod external_editor;
 mod foreign_sessions;
@@ -47,6 +52,7 @@ mod inline_edit;
 mod leader_cluster;
 mod modals;
 pub(crate) mod model_config_reload;
+pub(crate) mod mode_switch;
 mod mouse;
 mod queue_edit;
 pub(crate) mod screen_mode_relaunch;
@@ -132,6 +138,18 @@ pub fn set_minimal_show_switch_back_to_fullscreen_for_test(on: bool) {
 /// panic hook, which can't thread parameters) resets the style only when
 /// true: under inherit, `0 q` would clobber a shell-chosen style.
 pub(crate) static CURSOR_STYLE_FORCED: AtomicBool = AtomicBool::new(false);
+/// The screen the terminal is ACTUALLY on, for teardown paths that cannot
+/// thread parameters (panic hook, signal handler, post-loop restore); updated
+/// eagerly at every screen flip so mid-switch failures tear down correctly.
+static CURRENT_SCREEN_MODE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(ScreenMode::INITIAL_U8);
+pub(crate) fn set_current_screen_mode(mode: ScreenMode) {
+    CURRENT_SCREEN_MODE.store(mode.to_u8(), Ordering::Release);
+    signal_handler::set_mode(mode);
+}
+pub(crate) fn current_screen_mode() -> ScreenMode {
+    ScreenMode::from_u8(CURRENT_SCREEN_MODE.load(Ordering::Acquire))
+}
 /// Whether this process runs the minimal (scrollback-native) screen mode.
 /// Set once by [`apply_screen_mode_globals`] from the *effective* mode.
 ///
@@ -312,6 +330,21 @@ pub(crate) enum ScreenMode {
     Minimal,
 }
 impl ScreenMode {
+    const INITIAL_U8: u8 = 1;
+    pub(crate) fn to_u8(self) -> u8 {
+        match self {
+            Self::Fullscreen => 0,
+            Self::Inline => 1,
+            Self::Minimal => 2,
+        }
+    }
+    pub(crate) fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Fullscreen,
+            2 => Self::Minimal,
+            _ => Self::Inline,
+        }
+    }
     pub(crate) fn is_fullscreen(self) -> bool {
         matches!(self, Self::Fullscreen)
     }
@@ -340,6 +373,7 @@ impl ScreenMode {
 /// mode is safe and keeps the effective-mode source of truth singular.
 fn apply_screen_mode_globals(screen_mode: ScreenMode) {
     let minimal = screen_mode.is_minimal();
+    set_current_screen_mode(screen_mode);
     MINIMAL_MODE_ACTIVE.store(minimal, Ordering::Release);
     crate::terminal::image::set_inline_overlay_force_off(minimal);
     crate::views::modal_window::set_embedded(minimal);
@@ -356,6 +390,7 @@ fn engage_startup_theme(screen_mode: ScreenMode) {
     } else {
         let initial_theme = crate::theme::cache::resolve_initial_theme();
         crate::theme::cache::set(initial_theme);
+        mode_switch::mark_theme_resolved();
     }
 }
 /// Step 2 of the startup theme handshake: if a `--minimal` start was
@@ -366,6 +401,7 @@ fn finish_theme_after_probe(requested_minimal: bool, effective_mode: ScreenMode)
         let late_theme = crate::theme::cache::resolve_initial_theme_no_osc11();
         crate::theme::cache::set(late_theme);
         crate::theme::apply_cursor_color();
+        mode_switch::mark_theme_resolved();
         tracing::info!(?late_theme, "minimal downgrade: resolved regular theme");
     }
 }
@@ -650,7 +686,12 @@ pub async fn run(
     if let Ok(cwd) = std::env::current_dir() {
         crate::git_info::populate_from_cwd_async(cwd);
     }
+    let prefetch_wait_started = std::time::Instant::now();
+    let had_prefetch = early_prefetch.is_some();
     let remote_settings = join_early_prefetch(early_prefetch);
+    if had_prefetch {
+        xai_grok_telemetry::startup::record_prefetch_wait(prefetch_wait_started.elapsed());
+    }
     xai_grok_shell::util::config::cache_remote_auto_mode(
         remote_settings.as_ref().and_then(|s| s.auto_mode.clone()),
     );
@@ -788,12 +829,12 @@ pub async fn run(
         args.permission_mode_flag.as_deref(),
         remote_permission_mode,
     );
-    let launch_auto = xai_grok_shell::util::config::effective_auto_for_launch(
+    let launch_auto = xai_grok_shell::util::config::effective_auto_for_launch_interactive(
         args.yolo,
         args.permission_mode_flag.as_deref(),
         remote_permission_mode,
     );
-    let connect_flags = crate::acp::ConnectFlags {
+    let mut connect_flags = crate::acp::ConnectFlags {
         subagents: !args.no_subagents,
         memory_enabled_override: args.memory_enabled_override(),
         memory_override_flag: args.memory_override_flag(),
@@ -820,6 +861,7 @@ pub async fn run(
         ),
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
+        status_line: false,
     };
     let mut config_watcher = crate::appearance::ConfigWatcher::start().await?;
     let alt_screen_config_mode = config_watcher.current().alt_screen;
@@ -852,6 +894,9 @@ pub async fn run(
         Ordering::Release,
     );
     let minimal = screen_mode.is_minimal();
+    connect_flags.status_line = event_loop::load_initial_ui_config()
+        .status_line
+        .reserves_a_row();
     let relaunched_into_minimal = screen_mode_override == Some(ScreenMode::Minimal);
     let relaunched_into_fullscreen = screen_mode_override == Some(ScreenMode::Fullscreen);
     tracing::info!(
@@ -898,7 +943,17 @@ pub async fn run(
     if let Some(ref t) = session_title {
         set_terminal_title(t);
     }
-    const CONNECT_UI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    let connect_ui_timeout_env = std::env::var(connect_timeout::CONNECT_UI_TIMEOUT_ENV).ok();
+    let connect_ui_timeout = connect_timeout::resolve(connect_ui_timeout_env.as_deref());
+    if let Some(raw) = connect_ui_timeout_env {
+        crate::unified_log::write_direct_info(
+            "startup connect budget from env",
+            Some(serde_json::json!({
+                "raw": raw,
+                "timeout_secs": connect_ui_timeout.as_secs(),
+            })),
+        );
+    }
     let fallback_flags = use_leader.then(|| connect_flags.clone());
     let primary_target = if use_leader {
         crate::acp::AgentKind::Leader
@@ -919,7 +974,7 @@ pub async fn run(
     let primary_started = std::time::Instant::now();
     let connect_result = bounded_connect(
         &cancel,
-        CONNECT_UI_TIMEOUT,
+        connect_ui_timeout,
         primary_target,
         startup_failure::ConnectAttempt::First,
         &timer,
@@ -941,7 +996,7 @@ pub async fn run(
             let target = crate::acp::AgentKind::Embedded;
             let fallback = bounded_connect(
                 &cancel,
-                CONNECT_UI_TIMEOUT,
+                connect_ui_timeout,
                 target,
                 startup_failure::ConnectAttempt::AfterFallback(startup_failure::EarlierAttempt {
                     target: primary_target,
@@ -1030,9 +1085,11 @@ pub async fn run(
         exit_timeout::hold_teardown_for_test();
     }
     crate::unified_log::flush_blocking().await;
-    let restore_result = restore_terminal(terminal, writer_thread, screen_mode);
+    let restore_result = restore_terminal(terminal, writer_thread, current_screen_mode());
     drop(agent_guard);
+    xai_grok_telemetry::session_ctx::drain_at_process_exit().await;
     xai_tty_utils::global_process_scope().kill_all();
+    crate::app::status_line::metrics::global().report_health();
     if let Err(cleanup_error) = restore_result {
         match &result {
             Ok(_) => {
@@ -1434,7 +1491,8 @@ fn init_terminal(
             io::Result::Ok(())
         })?;
         MOUSE_CAPTURE_ENABLED.store(!want_minimal, Ordering::Release);
-        set_panic_hook(mode);
+        set_current_screen_mode(mode);
+        set_panic_hook();
         signal_handler::install(mode);
         let drain_timeout = if crate::terminal::terminal_context().vte_version.is_some() {
             std::time::Duration::from_millis(20)
@@ -1697,10 +1755,12 @@ fn terminal_title_string(title: &str) -> String {
         format!("{} - grok", truncated)
     }
 }
-fn set_panic_hook(mode: ScreenMode) {
+/// Reads [`current_screen_mode`] at panic time — never capture a mode here,
+/// or an in-process mode switch tears down the wrong screen.
+fn set_panic_hook() {
     let hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
-        emit_terminal_teardown_sequences(mode, None);
+        emit_terminal_teardown_sequences(current_screen_mode(), None);
         let _ = terminal::disable_raw_mode();
         signal_handler::mark_restored();
         xai_crash_handler::disable_terminal_escape_restore();

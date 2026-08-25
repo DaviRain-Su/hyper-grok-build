@@ -1,4 +1,4 @@
-use base64::Engine;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use super::codec::*;
 
@@ -23,14 +23,14 @@ fn ts() -> Timestamp {
 fn hx(byte: u8, width: usize) -> String {
     format!("{byte:02x}").repeat(width)
 }
-fn text(bytes: &[u8]) -> AgentText {
+pub(super) fn text(bytes: &[u8]) -> AgentText {
     AgentText::try_new(bytes).unwrap()
 }
 fn line(body: String) -> String {
     body + "\n"
 }
 
-fn records(content: AgentText) -> Vec<RecordV1> {
+pub(super) fn records(content: AgentText) -> Vec<RecordV1> {
     vec![
         RecordV1::AttemptHeader(AttemptHeaderRecord {
             attempt: d!(AttemptId, 1),
@@ -180,8 +180,7 @@ fn max_content_is_exact_and_unpadded() {
     let boundary = records(text(&vec![b'a'; MAX_MESSAGE_RAW_BYTES])).remove(2);
     let encoded = EncodedRecord::try_new(&boundary).unwrap();
     assert_eq!(encoded.len(), 43_871);
-    let encoded_text =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vec![b'a'; MAX_MESSAGE_RAW_BYTES]);
+    let encoded_text = URL_SAFE_NO_PAD.encode(vec![b'a'; MAX_MESSAGE_RAW_BYTES]);
     assert!(
         std::str::from_utf8(encoded.as_bytes())
             .unwrap()

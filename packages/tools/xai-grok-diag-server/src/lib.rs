@@ -181,6 +181,8 @@ impl DiagHandle {
     /// Hub sent a terminal close (4100–4199). Latches disconnected and records
     /// the code on `/ready`. [`Self::set_disconnected`] must not clear it —
     /// the SDK also fires `on_disconnect` after this callback.
+    /// A later [`Self::set_connected`] is a no-op while the latch is set;
+    /// only [`Self::clear_terminal_close`] (deliberate revival) clears it.
     pub fn set_terminal_close(&self, code: u16) {
         let mut inner = self.lock();
         if inner.is_failed() {
@@ -188,6 +190,40 @@ impl DiagHandle {
         }
         inner.state = DiagState::Disconnected;
         inner.last_close_code = Some(code);
+        inner.state_changed_at = now_ms();
+    }
+
+    /// Drop a latched terminal close so a deliberate revival (SDK reconnect
+    /// after embedder opt-in, or remint/reexec) can publish connected again.
+    /// No-op after [`Self::set_failed`] or [`Self::set_shutting_down`]:
+    /// those states stay terminal. Does not change `state` — callers
+    /// follow with [`Self::set_connected`] once the new hub hello settles.
+    pub fn clear_terminal_close(&self) {
+        let mut inner = self.lock();
+        if inner.is_failed() || inner.shutting_down {
+            return;
+        }
+        inner.last_close_code = None;
+        inner.state_changed_at = now_ms();
+    }
+
+    /// Atomic clear + connected for a deliberate revival (the epoch-guarded
+    /// reconnect settle). One lock, so a racing [`Self::set_terminal_close`]
+    /// serializes wholly before or after. Only codes in `revivable` are
+    /// cleared: a newer non-revivable latch survives a stale settle. No-op
+    /// after failed/shutting-down.
+    pub fn revive_connected(&self, revivable: &[u16]) {
+        let mut inner = self.lock();
+        if inner.is_failed() || inner.shutting_down {
+            return;
+        }
+        if let Some(code) = inner.last_close_code
+            && !revivable.contains(&code)
+        {
+            return;
+        }
+        inner.last_close_code = None;
+        inner.state = DiagState::Connected;
         inner.state_changed_at = now_ms();
     }
 
@@ -632,6 +668,23 @@ mod tests {
         );
         assert_eq!(handle.ready_body().state, DiagState::Disconnected);
 
+        handle.clear_terminal_close();
+        assert!(
+            handle.ready_body().last_close_code.is_none(),
+            "explicit clear must drop the latch"
+        );
+        assert_eq!(
+            handle.ready_body().state,
+            DiagState::Disconnected,
+            "clear does not republish connected by itself"
+        );
+        handle.set_connected();
+        assert_eq!(handle.ready_body().state, DiagState::Connected);
+        assert!(
+            handle.ready_body().last_close_code.is_none(),
+            "connected after a deliberate clear must omit last_close_code"
+        );
+
         handle.set_terminal_close(4103);
         handle.set_shutting_down();
         assert_eq!(
@@ -639,12 +692,88 @@ mod tests {
             Some(4103),
             "shutdown drain after CLEANUP still reports the close code"
         );
+        handle.clear_terminal_close();
+        assert_eq!(
+            handle.ready_body().last_close_code,
+            Some(4103),
+            "clear must not drop the latch after shutdown"
+        );
 
         handle.set_failed(ErrorClass::Unknown, "late fail");
         assert_eq!(handle.ready_body().state, DiagState::Failed);
         assert!(
             handle.ready_body().last_close_code.is_none(),
             "failed must not advertise last_close_code"
+        );
+        handle.clear_terminal_close();
+        assert_eq!(
+            handle.ready_body().state,
+            DiagState::Failed,
+            "clear must not unstick failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_clear_then_set_connected_revives_ready_after_4103() {
+        let handle = DiagHandle::new(None);
+        let bound = serve(DiagListener::Tcp(0), handle.clone(), None)
+            .await
+            .expect("bind");
+        let port = bound.port.expect("tcp port");
+
+        handle.set_connected();
+        handle.set_terminal_close(4103);
+        handle.set_connected();
+        let (status, body) = get_json(port, "/ready").await;
+        assert_eq!(status, 503);
+        assert_eq!(body["last_close_code"], 4103);
+
+        handle.clear_terminal_close();
+        handle.set_connected();
+        let (status, body) = get_json(port, "/ready").await;
+        assert_eq!(status, 200);
+        assert_eq!(body["state"], "connected");
+        assert!(
+            body.get("last_close_code").is_none(),
+            "revival must omit last_close_code: {body}"
+        );
+    }
+
+    /// The settle path's one-lock revival: clears a revivable latch and
+    /// publishes connected together; a non-revivable latch survives; a close
+    /// after it re-latches; failed stays failed.
+    #[test]
+    fn revive_connected_is_atomic_and_code_gated() {
+        let handle = DiagHandle::new(None);
+        handle.set_connected();
+        handle.set_terminal_close(4103);
+        handle.revive_connected(&[4103]);
+        assert_eq!(handle.ready_body().state, DiagState::Connected);
+        assert!(handle.ready_body().last_close_code.is_none());
+
+        handle.set_terminal_close(4100);
+        handle.revive_connected(&[4103]);
+        assert_eq!(
+            handle.ready_body().state,
+            DiagState::Disconnected,
+            "a non-revivable latch must survive a stale settle"
+        );
+        assert_eq!(handle.ready_body().last_close_code, Some(4100));
+
+        handle.clear_terminal_close();
+        handle.set_terminal_close(4103);
+        assert_eq!(
+            handle.ready_body().last_close_code,
+            Some(4103),
+            "a close after a revival must latch again"
+        );
+
+        handle.set_failed(ErrorClass::Unknown, "fail");
+        handle.revive_connected(&[4103]);
+        assert_eq!(
+            handle.ready_body().state,
+            DiagState::Failed,
+            "revive must not unstick failed"
         );
     }
 

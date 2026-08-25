@@ -47,6 +47,19 @@ pub(crate) const PROMPT: &str = "go";
 /// unambiguous sentinel word that we can `wait_for_text` on.
 pub(crate) const MOCK_RESPONSE_SENTINEL: &str = "MOCKRESPONSE";
 
+/// The sandbox's unified log (shell-written; forwarded pager entries land
+/// here too). No cross-process helper exists to reuse whole:
+/// `xai_grok_telemetry::unified_log::path()` resolves the calling process's
+/// own grok home and the file-name const is private, so this composes the
+/// sandbox grok home with the exported `LOG_DIR`.
+pub(crate) fn unified_log_path(content: &ContentController) -> PathBuf {
+    content
+        .sandbox()
+        .grok_home()
+        .join(xai_grok_telemetry::unified_log::LOG_DIR)
+        .join("unified.jsonl")
+}
+
 // ── Undo-tip e2e helpers ────────────────────────────────────────────────
 
 /// Suffix of the undo-tip banner, now "Input cleared · ctrl+z to undo" on all
@@ -1048,6 +1061,31 @@ pub(crate) fn quit_minimal(harness: &mut PtyHarness) {
     {
         PtyExitPoll::Running => harness.quit().expect("kill minimal pager after timeout"),
         PtyExitPoll::Exited(_) | PtyExitPoll::PendingStatus => {}
+    }
+}
+
+/// Write a local non-interactive editor script into `dir` and return the
+/// quoted command to hand to `$VISUAL`. Both bodies receive the draft path
+/// as their first argument.
+pub(crate) fn fake_editor_command(
+    dir: &std::path::Path,
+    unix_body: &str,
+    windows_body: &str,
+) -> String {
+    if cfg!(windows) {
+        let script = dir.join("local-editor.cmd");
+        std::fs::write(&script, windows_body).expect("write Windows editor script");
+        format!("cmd /C '{}'", script.display())
+    } else {
+        let script = dir.join("local-editor.sh");
+        std::fs::write(&script, unix_body).expect("write Unix editor script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+                .expect("make editor executable");
+        }
+        format!("'{}'", script.display())
     }
 }
 

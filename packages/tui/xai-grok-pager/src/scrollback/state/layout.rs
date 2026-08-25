@@ -1095,20 +1095,22 @@ impl ScrollbackState {
     /// once content exceeded 65 535 rows, `scroll_offset`/`max_offset`
     /// could not point past the cap and the last rows were unreachable.
     pub(super) fn compute_total_height_from_cache(&mut self) {
-        if let Some(ref cache) = self.layout_cache {
-            let range = self.visible_entry_range();
-            let layouts = &cache.entries[range.clone()];
-            // Sum entry heights + gap_after values in the visible range.
-            // Per-entry heights are u16; accumulate into usize so a long
-            // session (many entries / tall content) is not truncated.
-            let total: usize = layouts
-                .iter()
-                .map(|e| e.height as usize + e.gap_after as usize)
-                .sum();
-            // gap_after of the last entry acts as the trailing gap (always 1)
-            // for selection box bottom corner space, so total is correct as-is.
-            self.total_height = total;
-        }
+        let Some(cache) = self.layout_cache.as_ref() else {
+            return;
+        };
+        let range = self.visible_entry_range();
+        // Sum entry heights + gap_after in the visible range. Per-entry heights
+        // are u16; accumulate into usize so a long session (many entries / tall
+        // content) is not truncated. The last entry's gap_after (always 1) is
+        // the trailing gap for the selection box, so the sum is correct as-is.
+        let total: usize = cache.entries[range]
+            .iter()
+            .map(|e| e.height as usize + e.gap_after as usize)
+            .sum();
+        // Release on every layout path, then include the active reserve in scroll geometry.
+        self.release_pin_reserve_if_below_fold();
+        self.pin_reserve_pad = self.pin_reserve_pad_rows(total);
+        self.total_height = total.saturating_add(self.pin_reserve_pad);
     }
 
     /// Update heights for dirty entries only.

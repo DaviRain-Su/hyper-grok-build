@@ -298,13 +298,13 @@ fn has_classifier_activity(goal: &GoalDisplayState) -> bool {
 /// Display string for the classifier details-path row: the path when it
 /// exists (existence resolved once on receipt and passed as `exists`),
 /// `(unavailable)` when a path was reported but the file is missing (a
-/// fail-open run may not have written it), or an em-dash when no path was
+/// fail-open run may not have written it), or a hyphen when no path was
 /// reported at all.
 fn classifier_details_display(path: Option<&str>, exists: bool) -> &str {
     match path {
         Some(p) if exists => p,
         Some(_) => "(unavailable)",
-        None => "\u{2014}",
+        None => "-",
     }
 }
 
@@ -643,7 +643,7 @@ pub fn render_goal_detail(
     ];
     if !phase_text.is_empty() {
         status_spans.push(Span::styled(
-            format!(" \u{2014} {phase_text}"),
+            format!(" \u{00b7} {phase_text}"),
             Style::default().fg(theme.gray_bright),
         ));
     }
@@ -1002,10 +1002,10 @@ pub fn render_goal_detail(
 
         if y < inner.y + inner.height {
             // Shared label with the chip; empty (no run reserved yet) falls
-            // back to an em-dash so the row never reads "Attempts: ".
+            // back to a hyphen so the row never reads "Attempts: ".
             let attempts = classifier_attempts_label(goal);
             let attempts_display = if attempts.is_empty() {
-                "\u{2014}".to_owned()
+                "-".to_owned()
             } else {
                 attempts
             };
@@ -1215,7 +1215,7 @@ mod tests {
 
     #[test]
     fn goal_detail_area_widens_for_pause_hint() {
-        // A paused goal renders one extra row (the "type /goal resume"
+        // A paused goal renders one extra row (the "Type /goal resume"
         // hint), so the modal's content height must be exactly +1 row
         // larger than the same goal in the Active state.
         let screen = Rect::new(0, 0, 120, 40);
@@ -1331,7 +1331,7 @@ mod tests {
         assert!(text.contains("Completion review:"));
         assert!(text.contains("Last verdict: Not yet evaluated"));
         assert!(text.contains("Attempts: 0/3"));
-        assert!(text.contains("Details: \u{2014}"));
+        assert!(text.contains("Details: -"));
     }
 
     #[test]
@@ -1345,7 +1345,7 @@ mod tests {
 
         let text = render_to_text(&goal);
         assert!(
-            text.contains("Active \u{2014} Verifying (2/3)"),
+            text.contains("Active \u{00b7} Verifying (2/3)"),
             "status line must show the verifying overlay with counter, got:\n{text}"
         );
         assert!(
@@ -1361,7 +1361,7 @@ mod tests {
 
         let text = render_to_text(&goal);
         assert!(
-            text.contains("Active \u{2014} Planning"),
+            text.contains("Active \u{00b7} Planning"),
             "status line must show the planning overlay, got:\n{text}"
         );
     }
@@ -1381,7 +1381,7 @@ mod tests {
             "verifying overlay must win over planning, got:\n{text}"
         );
         assert!(
-            !text.contains("\u{2014} Planning"),
+            !text.contains("\u{00b7} Planning"),
             "planning must not render when verifying is also set, got:\n{text}"
         );
     }
@@ -1394,7 +1394,7 @@ mod tests {
 
         let text = render_to_text(&goal);
         assert!(
-            text.contains("Active \u{2014} Executing"),
+            text.contains("Active \u{00b7} Executing"),
             "steady-state status line must show Executing, got:\n{text}"
         );
     }
@@ -1767,7 +1767,7 @@ mod tests {
         render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
 
         let text = buffer_text(&buf);
-        assert!(text.contains("type /goal resume to continue"));
+        assert!(text.contains("Type /goal resume to continue"));
     }
 
     #[test]
@@ -1779,7 +1779,7 @@ mod tests {
         render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
 
         let text = buffer_text(&buf);
-        assert!(!text.contains("type /goal resume to continue"));
+        assert!(!text.contains("Type /goal resume to continue"));
     }
 
     #[test]
@@ -1817,7 +1817,7 @@ mod tests {
             "modal must render the pause_message text, got:\n{text}"
         );
         assert!(
-            text.contains("type /goal resume to continue"),
+            text.contains("Type /goal resume to continue"),
             "InfraPaused is paused so the resume hint must render, got:\n{text}"
         );
     }
@@ -1842,7 +1842,7 @@ mod tests {
             "modal must render the pause_message text, got:\n{text}"
         );
         assert!(
-            text.contains("type /goal resume to continue"),
+            text.contains("Type /goal resume to continue"),
             "Blocked is paused so the resume hint must render, got:\n{text}"
         );
     }
@@ -1897,7 +1897,7 @@ mod tests {
 
     #[test]
     fn render_blocked_reason_line_appears_after_pause_hint() {
-        // Modal visual order: Status → "type /goal resume" pause hint →
+        // Modal visual order: Status → "Type /goal resume" pause hint →
         // "Reason: ...". Pin both the presence of each line and their
         // relative position so a future refactor that reorders the
         // render blocks gets caught.
@@ -1911,7 +1911,7 @@ mod tests {
 
         let text = buffer_text(&buf);
         let hint_pos = text
-            .find("type /goal resume to continue")
+            .find("Type /goal resume to continue")
             .expect("pause hint must render");
         let reason_pos = text
             .find("Reason: no windows sdk")
@@ -2253,8 +2253,8 @@ mod tests {
     #[test]
     fn classifier_details_display_handles_missing_present_and_none() {
         // Existence is a precomputed bool, so the display is pure: no path →
-        // em-dash; path + !exists → "(unavailable)"; path + exists → the path.
-        assert_eq!(classifier_details_display(None, false), "\u{2014}");
+        // hyphen; path + !exists → "(unavailable)"; path + exists → the path.
+        assert_eq!(classifier_details_display(None, false), "-");
         assert_eq!(
             classifier_details_display(Some("/no/such/path/zzz-details.md"), false),
             "(unavailable)"
@@ -2283,10 +2283,10 @@ mod tests {
         );
     }
 
-    // -- Attempts em-dash branch --------------------------------------------
+    // -- Attempts hyphen branch --------------------------------------------
 
     #[test]
-    fn modal_attempts_shows_em_dash_when_classifier_active_without_counts() {
+    fn modal_attempts_shows_hyphen_when_classifier_active_without_counts() {
         // Completion review renders (a verdict is present) but no run counter
         // has arrived (both counts absent) → "Attempts: —", never "Attempts: ".
         let mut goal = make_goal();
@@ -2299,8 +2299,8 @@ mod tests {
             "section must render, got:\n{text}"
         );
         assert!(
-            text.contains("Attempts: \u{2014}"),
-            "empty counter must fall back to an em-dash, got:\n{text}"
+            text.contains("Attempts: -"),
+            "empty counter must fall back to a hyphen, got:\n{text}"
         );
     }
 

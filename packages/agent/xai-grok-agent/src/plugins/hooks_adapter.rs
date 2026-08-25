@@ -125,7 +125,7 @@ fn process_hooks_content(
         if let Some(cmd) = &spec.command {
             let cmd_str = cmd.to_string_lossy();
             let substituted = substitute_env_vars(&cmd_str, plugin_root, plugin_data);
-            let expanded = xai_grok_config::expand_env_vars_in_string(&substituted);
+            let expanded = xai_grok_hooks::config::expand_env_skipping_runner_vars(&substituted);
             if expanded != cmd_str {
                 spec.command = Some(PathBuf::from(expanded));
             }

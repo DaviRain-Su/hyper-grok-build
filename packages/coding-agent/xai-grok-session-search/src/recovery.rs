@@ -53,10 +53,8 @@ pub(crate) fn is_unusable_db_error(error: &rusqlite::Error) -> bool {
 fn message_indicates_unusable_db(msg: &str) -> bool {
     let lower = msg.to_ascii_lowercase();
     lower.contains("disk image is malformed")
-        || lower.contains("database schema is malformed")
-        || lower.contains("database is corrupt")
-        || lower.contains("file is not a database")
-        || lower.contains("file is encrypted or is not a database")
+        || lower.contains("malformed database schema")
+        || lower.contains("is not a database")
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -226,7 +224,14 @@ mod tests {
         assert!(message_indicates_unusable_db(
             "database disk image is malformed"
         ));
+        assert!(message_indicates_unusable_db(
+            "malformed database schema (members)"
+        ));
         assert!(message_indicates_unusable_db("file is not a database"));
+        assert!(message_indicates_unusable_db(
+            "file is encrypted or is not a database"
+        ));
         assert!(!message_indicates_unusable_db("malformed MATCH expression"));
+        assert!(!message_indicates_unusable_db("database is corrupt"));
     }
 }

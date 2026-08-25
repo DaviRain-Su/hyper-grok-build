@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use super::AuthManager;
-use super::lock::try_lock_auth_file_async;
+use super::lock::{Heartbeat, try_lock_auth_file_async};
 use crate::auth::manager::AUTH_LOCK_TIMEOUT;
 use crate::auth::model::{GrokAuth, UserInfo, lookup_auth};
 use crate::auth::storage::{read_auth_json, write_auth_json};
@@ -144,7 +144,9 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: GrokAuth) {
     // AT/RT on disk (a rolled-back RT is a future `invalid_grant` → forced
     // re-login). Enrichment is cosmetic; it re-runs on the next refresh.
     let lock_started = std::time::Instant::now();
-    let lock_guard = try_lock_auth_file_async(&manager.path, AUTH_LOCK_TIMEOUT).await;
+    let lock_guard = try_lock_auth_file_async(&manager.path, AUTH_LOCK_TIMEOUT, Heartbeat::Skip)
+        .await
+        .into_guard();
     let lock_wait_ms = lock_started.elapsed().as_millis() as u64;
     let Some(_lock_guard) = lock_guard else {
         xai_grok_telemetry::unified_log::warn(

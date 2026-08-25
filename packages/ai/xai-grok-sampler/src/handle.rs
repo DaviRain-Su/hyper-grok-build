@@ -2,11 +2,11 @@
 
 use tokio::sync::{mpsc, oneshot};
 
-use xai_grok_sampling_types::{ConversationRequest, ConversationResponse, SamplingError};
+use xai_grok_sampling_types::{ConversationRequest, SamplingError};
 
+use crate::actor::request_task::CompletionResult;
 use crate::commands::SamplerCommand;
 use crate::config::SamplerConfig;
-use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
 
 /// Cheaply-cloneable handle to the sampler actor.
@@ -114,7 +114,7 @@ impl SamplerHandle {
         &self,
         request_id: RequestId,
         request: ConversationRequest,
-    ) -> Result<(ConversationResponse, InferenceLatencyStats), SamplingError> {
+    ) -> CompletionResult {
         // RAII guard: when this future is dropped (cancel, panic, or normal return),
         // tell the sampler actor to cancel the in-flight request_id. No-op if the
         // actor already finished and removed it from its active set.

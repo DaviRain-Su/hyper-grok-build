@@ -153,6 +153,13 @@ impl BashSecurityAssessment {
             .any(ClassifierSecurityFinding::is_grant_floor)
     }
 
+    /// Whether `FileWrite` is the only finding — the one floor a narrow allow
+    /// rule naming a write-capable command can vouch for; mixed assessments
+    /// never qualify.
+    pub(crate) fn is_file_write_only(&self) -> bool {
+        self.0.len() == 1 && self.0.contains(&ClassifierSecurityFinding::FileWrite)
+    }
+
     /// Compact `[token, token]` list in canonical order, for tests to pin the
     /// ordered/deduplicated invariant. The system message uses `render_glossary`.
     #[cfg(test)]

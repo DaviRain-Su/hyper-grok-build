@@ -169,6 +169,12 @@ impl ChatStateActor {
             ChatStateCommand::PushToolResult { item } => {
                 self.push_message(item);
             }
+            ChatStateCommand::PushModelOutput { item } => {
+                self.push_model_output(item);
+            }
+            ChatStateCommand::PushUnreportedModelOutput { item } => {
+                self.push_unreported_model_output(item);
+            }
             ChatStateCommand::RecordTokenUsage { total_tokens } => {
                 self.record_token_usage(total_tokens);
             }

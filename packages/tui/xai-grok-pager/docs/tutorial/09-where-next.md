@@ -14,7 +14,7 @@ You know enough to be productive. When you want more:
 ## Good habits
 
 - Sessions save automatically. Resume the latest with `grok -c`, or pick
-  one with `/resume` (`Ctrl+S`).
+  one with `/resume` (`F3`).
 - Long session getting slow? `/compact` frees context; `/context` shows
   where it's going.
 - Automate anything: `grok -p "summarize new TODOs" --output-format json`

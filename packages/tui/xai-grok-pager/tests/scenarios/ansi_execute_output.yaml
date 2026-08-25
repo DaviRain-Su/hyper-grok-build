@@ -31,12 +31,13 @@ steps:
     timeout_ms: 20000
   - action: wait
     millis: 500
-  # Stdout body shows clean filenames (gutter-prefixed), proving SGR was rendered
-  # natively rather than printed as literal `[1m[36m...` escape codes.
+  # Stdout body shows clean filenames, proving SGR was rendered natively rather than
+  # printed as literal `[1m[36m...` escape codes. The needle carries no gutter glyph:
+  # a finished command is collapsed, and collapsed rows have no accent rail.
   - action: assert_contains
-    text: "┃  bazel"
-  - action: assert_contains
-    text: "┃  AGENTS.md"
+    text: bazel
+  - action: assert_not_contains
+    text: "[1m"
   - action: screenshot
     name: ansi-execute-native-render
     note: Bash stdout shows styled bazel/AGENTS.md (SGR rendered, no literal escapes).

@@ -470,6 +470,16 @@ impl ModelsManager {
         self.inner.catalog_epoch.load(Ordering::Acquire)
     }
 
+    /// One name without cloning the catalog, for callers on a hot path.
+    pub fn display_name(&self, id: &str) -> Option<String> {
+        self.inner
+            .catalog
+            .read()
+            .models
+            .get(id)
+            .and_then(|entry| entry.info.name.clone())
+    }
+
     pub fn endpoints(&self) -> config::EndpointsConfig {
         self.inner.cfg.read().endpoints.clone()
     }

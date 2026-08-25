@@ -23,6 +23,10 @@ use super::actions::Action;
 use super::agent_view::{AgentPane, AgentView, PromptInputMode};
 use super::app_view::InputOutcome;
 
+/// Toast for an edit attempted on an optimistic queue row whose enqueue RPC has not confirmed.
+/// Shared by the keyboard and mouse edit paths, which both funnel through `enter_queue_edit`.
+pub(in crate::app) const STILL_QUEUEING_TOAST: &str = "Still queueing, try again in a moment";
+
 /// State of the prompt widget's editing context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptMode {
@@ -218,14 +222,15 @@ impl AgentView {
     /// `QueueEvent::EditSelected` (called from `handle_queue_key`).
     pub(super) fn enter_queue_edit(&mut self, id: u64, is_server: bool, row: Option<QueueRowRef>) {
         use crate::app::agent::QueueEntryKind;
-        // Still an optimistic echo: its `session/prompt` RPC is in flight, so
-        // the shell has no row to hold yet — the `hold_edit` would no-op and
-        // the later-confirmed row could be absorbed while the composer edits
-        // it. Ignore until the confirming `x.ai/queue/changed` lands (mirrors
-        // the send-now park gate in `force_interject_queue_row`).
+        // Optimistic echo whose enqueue RPC has not confirmed: the shell has no row to hold
+        // yet, so toast instead of silently dropping the keypress and wait for the confirming
+        // `x.ai/queue/changed` before allowing the edit. Mirrors the send-now park gate in
+        // `force_interject_queue_row`: both gates enforce the same unconfirmed-row rule, so a
+        // change to one likely applies to the other.
         if let Some(sid) = row.as_ref().and_then(|r| r.server_id.as_deref())
             && self.optimistic_queue_ids.contains(sid)
         {
+            self.show_toast(STILL_QUEUEING_TOAST);
             return;
         }
         type QueueEditEntryData = (
@@ -311,6 +316,9 @@ impl AgentView {
                         id: sid,
                     });
             }
+        } else {
+            // The row left the mirror between selection and keypress, so there is nothing to edit.
+            self.show_toast("Queued prompt is no longer in the queue");
         }
     }
 
@@ -464,7 +472,7 @@ impl AgentView {
         // Non-prompt rows stay queued (see `queue_row_prompt_like`): save the edit.
         let row_prompt_like = self.queue_row_prompt_like(id);
         if row_prompt_like == Some(false) {
-            self.show_toast("Can't send this mid-turn — it runs when the current turn ends");
+            self.show_toast("Can't send this mid-turn: it runs when the current turn ends");
             return self.save_edited_queued_row(id, server_id, true);
         }
         if row_prompt_like.is_none() && kind != crate::app::agent::QueueEntryKind::Prompt {
@@ -736,6 +744,51 @@ mod tests {
         );
     }
 
+    /// Edit on an optimistic (unconfirmed) server row toasts and stays Normal.
+    #[test]
+    fn edit_on_optimistic_server_row_toasts() {
+        let mut agent = make_running_agent();
+        agent.optimistic_queue_ids.insert("p1".into());
+        let registry = non_vscode_registry();
+        let ids = agent.queue.entry_ids();
+        agent.queue.list_state.select_by_id(ids[0]);
+        let _ = agent.handle_queue_key(&edit_key(), &registry);
+
+        assert!(
+            matches!(agent.prompt_mode, PromptMode::Normal),
+            "an unconfirmed echo must not be editable"
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(message, _)| message.as_str()),
+            Some(super::STILL_QUEUEING_TOAST),
+        );
+        assert!(
+            agent.pending_effects.is_empty(),
+            "no QueueHoldEdit may be emitted for a row the shell doesn't have"
+        );
+    }
+
+    /// Edit on a row no longer in the mirror toasts instead of a silent drop.
+    #[test]
+    fn edit_on_vanished_row_toasts() {
+        let mut agent = make_running_agent();
+        let row = crate::views::queue_pane::QueueRowRef {
+            origin: crate::views::queue_pane::QueueRowOrigin::Server,
+            server_id: Some("gone".into()),
+            version: 0,
+        };
+        agent.enter_queue_edit(999, true, Some(row));
+
+        assert!(
+            matches!(agent.prompt_mode, PromptMode::Normal),
+            "a vanished row must not enter edit mode"
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(message, _)| message.as_str()),
+            Some("Queued prompt is no longer in the queue"),
+        );
+    }
+
     /// Editing a Server-origin row enters `EditingQueued` with `server_id`
     /// populated (the new behavior replacing the "isn't supported yet" toast).
     #[test]
@@ -939,6 +992,7 @@ mod tests {
             target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
                 agent_id: agent.session.id,
                 images_dir: None,
+                from_feedback_pane: false,
             },
             source: crate::app::actions::ClipboardPasteSource::ClipboardKey {
                 text: crate::app::actions::ClipboardTextRead::Success(None),

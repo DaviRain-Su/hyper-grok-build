@@ -89,7 +89,7 @@ impl TelemetryClient {
             config
                 .mixpanel_token
                 .as_ref()
-                .map(|token| Arc::new(Mixpanel::new(token.as_str())))
+                .map(|token| Arc::new(Mixpanel::with_client(token.as_str(), http_client.clone())))
         } else {
             None
         };
@@ -179,6 +179,114 @@ impl UserContext {
     }
 }
 
+static IS_CI: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn is_ci_env() -> bool {
+    std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
+}
+
+/// Per-event enrichment; the serde field names are the wire keys.
+#[derive(serde::Serialize)]
+struct EventEnrichment {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entrypoint: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_leader_mode: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_interactive: Option<bool>,
+    is_ci: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    release_channel: Option<&'static str>,
+    dev_build: bool,
+    os: &'static str,
+    arch: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_cores: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_share_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_window_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    child_cpu_share_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_time_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    child_cpu_time_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_user_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_system_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rss_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    footprint_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_limit_bytes: Option<u64>,
+    uptime_secs: u64,
+}
+
+impl EventEnrichment {
+    fn capture() -> Self {
+        use crate::process_info::{Interactivity, LeaderMode};
+        let identity = crate::process_info::identity();
+        let process = crate::process_metrics::snapshot();
+        Self {
+            entrypoint: identity.map(|i| i.entrypoint.as_str()),
+            is_leader_mode: identity.map(|i| i.leader == LeaderMode::Attached),
+            is_interactive: identity.map(|i| i.interactivity == Interactivity::Interactive),
+            is_ci: *IS_CI.get_or_init(is_ci_env),
+            release_channel: crate::process_info::release_channel().map(|c| c.as_str()),
+            dev_build: xai_grok_version::IS_DEV_BUILD,
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            cpu_cores: process.cpu_cores,
+            cpu_share_percent: process.cpu.map(|w| w.share_percent),
+            cpu_window_ms: process.cpu.map(|w| w.window_ms),
+            child_cpu_share_percent: process.cpu.and_then(|w| w.child_share_percent),
+            cpu_time_ms: process.cpu_time_ms,
+            child_cpu_time_ms: process.child_cpu_time_ms,
+            cpu_user_ms: process.cpu_user_ms,
+            cpu_system_ms: process.cpu_system_ms,
+            rss_bytes: process.rss_bytes,
+            footprint_bytes: process.footprint_bytes,
+            memory_limit_bytes: process.memory_limit_bytes,
+            uptime_secs: process.uptime_secs,
+        }
+    }
+}
+
+#[doc(hidden)]
+pub const RESERVED_EVENT_KEYS: &[&str] = &[
+    "entrypoint",
+    "is_leader_mode",
+    "is_interactive",
+    "is_ci",
+    "release_channel",
+    "dev_build",
+    "os",
+    "arch",
+    "cpu_cores",
+    "cpu_share_percent",
+    "cpu_window_ms",
+    "child_cpu_share_percent",
+    "cpu_time_ms",
+    "child_cpu_time_ms",
+    "cpu_user_ms",
+    "cpu_system_ms",
+    "rss_bytes",
+    "footprint_bytes",
+    "memory_limit_bytes",
+    "uptime_secs",
+    "sessions_active",
+    "subagents_active",
+    "compaction_active",
+    "mcp_servers_connected",
+    "turns_active",
+    "workflow_runs_active",
+    "session_id",
+    "turn_number",
+];
+
 /// Core telemetry emitter. Routes to product events + Mixpanel.
 pub async fn track(event_name: &str, request_id: &str, ctx: &UserContext, mut metadata: Metadata) {
     let lock = TELEMETRY_CLIENT.get_or_init(|| Mutex::new(None));
@@ -190,7 +298,7 @@ pub async fn track(event_name: &str, request_id: &str, ctx: &UserContext, mut me
         }
     };
 
-    let agent_id = crate::id::agent_id();
+    let agent_id = crate::id::agent_id_async().await;
     let user_id = client.user_id.as_deref().unwrap_or(&agent_id);
     metadata.insert("agent_id".into(), json!(agent_id));
     if let Some(ref team_id) = client.team_id {
@@ -208,6 +316,13 @@ pub async fn track(event_name: &str, request_id: &str, ctx: &UserContext, mut me
     }
     if let Some(ref subscription_tier) = client.subscription_tier {
         metadata.insert("subscription_tier".into(), json!(subscription_tier));
+    }
+
+    if let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(EventEnrichment::capture())
+    {
+        for (key, value) in fields {
+            metadata.entry(key).or_insert(value);
+        }
     }
 
     // Product events path
@@ -298,10 +413,9 @@ pub fn sync_profile() {
         return;
     };
 
-    let agent_id = crate::id::agent_id();
-    let user_id = client.user_id.as_deref().unwrap_or(&agent_id).to_owned();
-
     tokio::spawn(async move {
+        let agent_id = crate::id::agent_id_async().await;
+        let user_id = client.user_id.as_deref().unwrap_or(&agent_id).to_owned();
         let mut props = std::collections::HashMap::new();
         props.insert("agent_id".into(), json!(agent_id));
         props.insert("shell_version".into(), json!(client.shell_version));
@@ -404,6 +518,7 @@ pub fn init_if_needed(
     }
 }
 
+#[allow(clippy::disallowed_methods)] // test clients hit localhost mocks
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,6 +634,59 @@ mod tests {
         // API key is a dedicated Mixpanel segment — never free.
         assert_eq!(normalize_tier("API Key"), "api_key");
         assert_eq!(normalize_tier("api_key"), "api_key");
+    }
+
+    /// Every reserved key comes from serializing the structs that own the
+    /// wire names, so the const cannot drift from them.
+    #[test]
+    fn reserved_event_keys_derive_from_the_serialized_schema() {
+        let enrichment = EventEnrichment {
+            entrypoint: Some("cli"),
+            is_leader_mode: Some(false),
+            is_interactive: Some(false),
+            is_ci: false,
+            release_channel: Some("stable"),
+            dev_build: false,
+            os: "linux",
+            arch: "x86_64",
+            cpu_cores: Some(1),
+            cpu_share_percent: Some(0.0),
+            cpu_window_ms: Some(1),
+            child_cpu_share_percent: Some(0.0),
+            cpu_time_ms: Some(0),
+            child_cpu_time_ms: Some(0),
+            cpu_user_ms: Some(0),
+            cpu_system_ms: Some(0),
+            rss_bytes: Some(1),
+            footprint_bytes: Some(1),
+            memory_limit_bytes: Some(1),
+            uptime_secs: 0,
+        };
+        let mut expected: std::collections::BTreeSet<String> = serde_json::to_value(&enrichment)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        expected.extend(
+            serde_json::to_value(crate::activity::ActivitySnapshot::read())
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned(),
+        );
+        expected.extend(["session_id".to_string(), "turn_number".to_string()]);
+
+        let reserved: std::collections::BTreeSet<String> =
+            RESERVED_EVENT_KEYS.iter().map(|k| k.to_string()).collect();
+        assert_eq!(
+            RESERVED_EVENT_KEYS.len(),
+            reserved.len(),
+            "RESERVED_EVENT_KEYS must not repeat a key"
+        );
+        assert_eq!(reserved, expected);
     }
 
     /// `event_value`'s first-match-wins over `EmitterOrigin::ALL` is only

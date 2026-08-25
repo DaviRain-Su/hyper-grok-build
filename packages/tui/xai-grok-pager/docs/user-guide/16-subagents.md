@@ -212,7 +212,7 @@ The main agent calls the `spawn_subagent` tool. Its parameters:
 | `prompt`          | The full task prompt for the subagent.                           |
 | `description`     | A short label for the task (3-5 words).                          |
 | `subagent_type`   | The agent type to launch. Defaults to `general-purpose`.         |
-| `background`       | Run the subagent in the background and return immediately with a subagent ID. Defaults to `true`. |
+| `background`       | Run the subagent in the background and return immediately with a subagent ID. Defaults to `false`. |
 | `capability_mode` | Restrict the subagent's tools: `read-only`, `read-write`, `execute`, or `all`. |
 | `isolation`       | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |
 | `resume_from`     | Continue a completed subagent's conversation. Pass its subagent ID. |
@@ -224,14 +224,14 @@ When you run a subagent in the background, retrieve its result later with `get_c
 
 ## Capability Modes
 
-A capability mode is an optional, coarse filter on a subagent's tools:
+Capability mode is not a spawn argument. A child's tools come from its **agent type** and any **role / definition default**. `general-purpose` is unrestricted (`all`). The built-in `explore` and `plan` types read, search, and run shell commands but cannot edit files.
 
 | Mode         | Read | Write | Execute | Description                                  |
 | ------------ | ---- | ----- | ------- | -------------------------------------------- |
 | `read-only`  | Yes  | No    | No      | Read, search, and inspect (also web search and LSP); no file edits or shell. |
 | `read-write` | Yes  | Yes   | No      | Read, plus create, edit, delete, and move files. No shell. |
 | `execute`    | Yes  | No    | Yes     | Read, plus run shell commands and background tasks. No file edits. |
-| `all`        | Yes  | Yes   | Yes     | Unrestricted tool access.                    |
+| `all`        | Yes  | Yes   | Yes     | Unrestricted tool access. Default for `general-purpose`. |
 
 If you omit `capability_mode`, the subagent uses its agent type's toolset. The built-in `explore`, `plan`, and `oracle` types are enforced read-only and have no shell or editing tools; `general-purpose` ships the full toolset.
 
@@ -372,7 +372,7 @@ Subagents appear in several places in the interactive TUI:
 
 When a subagent is spawned, a compact lifecycle block is added to the *parent's* scrollback:
 
-- `Subagent running: "do the thing" (Implementer · grok-3) — Thinking`
+- `Subagent running: "do the thing" (Implementer · grok-3) · Thinking`
 - Or for background subagents: `Subagent started: "..."`
 
 While running, the block shows a live activity suffix (e.g. "Running: cargo test", "Compacting", "Retrying (2/3)") pulled from the child's turn tracker. The bullet animates (or is colored) according to state.

@@ -326,6 +326,7 @@ fn default_response_text() -> String {
     "Hello from the pty_harness mock inference server.".to_owned()
 }
 
+#[allow(clippy::disallowed_methods)] // test clients hit localhost mocks
 #[cfg(test)]
 mod tests {
     use super::*;

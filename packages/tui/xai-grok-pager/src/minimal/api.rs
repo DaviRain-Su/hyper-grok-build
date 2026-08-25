@@ -256,6 +256,16 @@ pub fn minimal_committed_plan_id(app: &AppView) -> Option<&str> {
     app.minimal_state.committed_plan_tool_call_id.as_deref()
 }
 
+/// [`AppView::status_line_frame`].
+pub fn status_line_frame(app: &AppView) -> crate::views::status_line::StatusLineFrame {
+    app.status_line_frame()
+}
+
+/// [`crate::views::status_line::inner_width`].
+pub fn status_line_inner_width(width: u16, padding: u16) -> Option<u16> {
+    crate::views::status_line::inner_width(width, padding)
+}
+
 /// Whether minimal's Ctrl+O remap opens the full-transcript pager *right now*.
 ///
 /// Minimal remaps Ctrl+O to `Action::OpenTranscriptPager` except when:

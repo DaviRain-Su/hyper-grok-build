@@ -57,6 +57,7 @@ use crate::app::actions::{
     TaskResult,
 };
 use crate::app::agent::AgentId;
+use crate::app::agent_view::AgentDeferredSend;
 use crate::app::app_view::{ActiveView, AppView, AuthState};
 use crate::scrollback::block::RenderBlock;
 use agent_client_protocol as acp;
@@ -162,11 +163,9 @@ fn drain_clipboard_target(target: &ClipboardPasteTarget, app: &mut AppView) -> V
                 return vec![];
             };
             let resend = agent.take_deferred_send_after_paste();
-            let action = if is_active {
-                resend.and_then(|kind| agent.build_deferred_send_action(kind))
-            } else {
-                None
-            };
+            let action = resend
+                .filter(|kind| is_active || matches!(kind, AgentDeferredSend::Stash))
+                .and_then(|kind| agent.resume_deferred_send(kind));
             let mut effects = std::mem::take(&mut agent.pending_effects);
             if let Some(action) = action {
                 effects.extend(dispatch(action, app));
@@ -521,6 +520,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     }
                 }
             }
+            app.refresh_status_line_for(agent_id);
             effects
         }
         TaskResult::SendPromptNowFailed {
@@ -566,7 +566,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                             crate::app::agent::QueueEntryKind::Prompt,
                         )
                     });
-                agent.show_toast(&format!("Send now failed — requeued: {error}"));
+                agent.show_toast(&format!("Send now failed. Requeued: {error}"));
             }
             // Codex Live broker: a send-now failure is a prompt error for the
             // delegation bound to this prompt_id — route through the single
@@ -761,10 +761,35 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             use xai_grok_tools::implementations::skills::skill::extract_skill_display_text;
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent.session.prompt_history_loading = false;
-                agent.session.prompt_history = prompts
+                let fetched: Vec<String> = prompts
                     .into_iter()
                     .map(|p| extract_skill_display_text(&p).unwrap_or(p))
                     .collect();
+                let local: std::collections::HashSet<String> = agent
+                    .session
+                    .prompt_history
+                    .iter()
+                    .flat_map(|p| {
+                        let t = p.trim();
+                        [t.to_owned(), t.strip_prefix("! ").unwrap_or(t).to_owned()]
+                    })
+                    .collect();
+                let local_entries = agent.session.prompt_history.len();
+                let fetched_entries = fetched.len();
+                agent
+                    .session
+                    .prompt_history
+                    .extend(fetched.into_iter().filter(|p| !local.contains(p.trim())));
+                agent
+                    .session
+                    .prompt_history
+                    .truncate(crate::app::agent::PROMPT_HISTORY_CAP);
+                tracing::info!(
+                    history.local_entries = local_entries,
+                    history.fetched_entries = fetched_entries,
+                    history.merged_entries = agent.session.prompt_history.len(),
+                    "history.fetch_merged"
+                );
                 if agent.prompt.history_search.is_active() {
                     let history = agent.combined_prompt_history();
                     agent.prompt.history_search.refresh_items(&history);
@@ -901,7 +926,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && agent.session.session_id.as_ref() == Some(&session_id)
                 && let Some(ref mut modal) = agent.extensions_modal
             {
-                modal.seed_workflows_group_once();
                 modal.workflows_data = match result {
                     Ok(workflows) => TabDataState::Loaded(workflows),
                     Err(e) => TabDataState::Error(e),
@@ -1283,6 +1307,18 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::FeedbackTraceUploaded { agent_id, error } => {
+            if let Some(error) = error
+                && let Some(agent) = app.agents.get_mut(&agent_id)
+            {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
+                        "Couldn't upload a session trace; your feedback was still sent. {error}"
+                    )));
+            }
+            vec![]
+        }
         TaskResult::MemoryNoteSaved { agent_id, result } => {
             handle_memory_note_saved(app, agent_id, result)
         }
@@ -1406,7 +1442,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         skill_token_ranges: Vec::new(),
                         combined_texts: Vec::new(),
                     });
-                agent.show_toast(&format!("Interjection failed — requeued: {error}"));
+                agent.show_toast(&format!("Interjection failed. Requeued: {error}"));
             }
             vec![]
         }
@@ -1418,6 +1454,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 agent.session.available_commands_generation += 1;
                 super::super::acp_handler::refresh_workflow_run_capabilities(agent);
             }
+            vec![]
+        }
+        TaskResult::StatusLineCommandFinished { id, outcome } => {
+            app.on_status_line_command_finished(id, outcome);
             vec![]
         }
         TaskResult::AuthCopyFeedbackTimeout { generation } => {

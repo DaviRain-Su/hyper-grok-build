@@ -41,7 +41,7 @@ impl SlashCommand for DashboardCommand {
     }
 
     fn description(&self) -> &str {
-        "Open the Agent Dashboard — a fullscreen overview of every running session"
+        "Open the Agent Dashboard"
     }
 
     fn usage(&self) -> &str {

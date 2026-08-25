@@ -13,6 +13,7 @@ use crate::scrollback::blocks::SessionEvent;
 use super::agent::AgentId;
 use super::agent_view::AgentView;
 use super::app_view::AppView;
+use super::cancel_latency::TurnEnd;
 
 /// `_meta.cancellationCategory` of a hook-denied turn end: renders the
 /// "blocked by a hook" marker instead of "cancelled by user" on every rail.
@@ -357,7 +358,7 @@ pub(super) fn finalize_turn_from_terminal(
     };
     push_turn_terminal_marker(agent, event, ending_prompt_id.as_deref());
 
-    agent.mark_turn_finished();
+    agent.mark_turn_finished(TurnEnd::Completed);
 
     TerminalApply::ViewerFinalized
 }

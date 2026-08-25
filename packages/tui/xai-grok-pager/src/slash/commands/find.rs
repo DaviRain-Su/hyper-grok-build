@@ -38,7 +38,7 @@ impl SlashCommand for FindCommand {
 
     fn mode_support(&self) -> ModeSupport {
         ModeSupport::FullscreenOnly(Remedy::SwitchMode {
-            why: "minimal has no scrollback pane — use your terminal's own search",
+            why: "minimal has no scrollback pane: use your terminal's own search",
         })
     }
 

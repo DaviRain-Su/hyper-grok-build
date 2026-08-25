@@ -3,6 +3,7 @@
 use super::*;
 use crate::util::dual_clock::DualClock;
 use xai_grok_tools::implementations::grok_build::LoopFireMode;
+use xai_grok_tools::types::tool::ToolKind;
 /// Synthetic tool the model calls to return its schema-constrained final answer
 /// on backends that can't constrain output natively (Messages API). Intercepted
 /// in the loop, never executed as a real tool.
@@ -332,6 +333,7 @@ impl SessionActor {
         persist_ack: Option<oneshot::Sender<()>>,
         parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
     ) -> PromptTurnResult {
+        let _active = xai_grok_telemetry::activity::TURNS_ACTIVE.enter();
         let handle_prompt_start = std::time::Instant::now();
         let prompt_length: usize = prompt_blocks
             .iter()
@@ -2374,6 +2376,7 @@ impl SessionActor {
         let mut identical_tool_calls = IdenticalToolCallRun::default();
         let mut todo_gate_fires: u32 = 0;
         let mut auth_retry_schedule = AuthRetrySchedule::new();
+        let mut rate_limit_waits = self.rate_limit_wait_budget();
         let mut turn_span_totals = TurnSpanTotals::default();
         let mut model_fingerprint: Option<String> = None;
         let mut structured_output_retries: u32 = 0;
@@ -2412,6 +2415,7 @@ impl SessionActor {
                 let run_len = identical_tool_calls.run_len;
                 let tool_name = identical_tool_calls.tool_name.clone();
                 let true_noop = identical_tool_calls.is_true_noop_run;
+                let problematically_repeating = identical_tool_calls.is_problematically_repeating();
                 tracing::warn!(
                     session_id = %self.session_info.id,
                     tool_name = %tool_name,
@@ -2427,11 +2431,13 @@ impl SessionActor {
                         "tool_name": tool_name,
                         "run_len": run_len,
                         "true_noop": true_noop,
+                        "problematically_repeating": problematically_repeating,
                     })),
                 );
                 xai_grok_telemetry::session_ctx::log_event(
                     xai_grok_telemetry::events::ActionStationarityStop {
                         true_noop,
+                        problematically_repeating,
                         run_len,
                         tool_name: tool_name.clone(),
                     },
@@ -2451,6 +2457,7 @@ impl SessionActor {
             if identical_tool_calls.take_nudge() {
                 let run_len = identical_tool_calls.run_len;
                 let tool_name = identical_tool_calls.tool_name.clone();
+                let problematically_repeating = identical_tool_calls.is_problematically_repeating();
                 tracing::warn!(
                     session_id = %self.session_info.id,
                     tool_name = %tool_name,
@@ -2464,7 +2471,15 @@ impl SessionActor {
                         "loop_index": loop_index,
                         "tool_name": tool_name,
                         "run_len": run_len,
+                        "problematically_repeating": problematically_repeating,
                     })),
+                );
+                xai_grok_telemetry::session_ctx::log_event(
+                    xai_grok_telemetry::events::ActionStationarityNudge {
+                        problematically_repeating,
+                        run_len,
+                        tool_name: tool_name.clone(),
+                    },
                 );
                 let reminder = self
                     .tool_bridge_handle()
@@ -2510,7 +2525,7 @@ impl SessionActor {
             }
             if self.tool_context.task_output_token_budget.is_none()
                 && let Some(trigger_info) = self.check_auto_compact_needed().await
-                && let Err(e) = self.run_compact_only(trigger_info).await
+                && let Err(e) = self.run_compact_only(trigger_info, false).await
             {
                 tracing::error!(error = %e, "Pre-sampling auto-compaction failed");
                 if Self::is_auth_compact_error(&e) {
@@ -2524,7 +2539,11 @@ impl SessionActor {
             );
             let mut effective_tools: Vec<ToolSpec> =
                 if let Some(ref override_tools) = self.forked_tool_override {
-                    override_tools.clone()
+                    let mut tools = override_tools.clone();
+                    if self.startup_hints.is_subagent {
+                        crate::agent::subagent::strip_ask_user_question_tool(&mut tools);
+                    }
+                    tools
                 } else {
                     self.turn_base_tool_specs(tool_definitions.as_ref()).await
                 };
@@ -2606,7 +2625,10 @@ impl SessionActor {
                 })),
             );
             let model_timer = std::time::Instant::now();
-            let (response, latency) = match self.run_turn_via_sampler((*request).clone()).await {
+            let (response, latency) = match self
+                .run_turn_via_sampler(request.clone(), &mut rate_limit_waits)
+                .await
+            {
                 Ok(SamplerTurnOutcome::Response(r, latency)) => (Box::new(r), latency),
                 Err(error) => {
                     self.tool_context.fail_task_output_usage_closed();
@@ -2818,7 +2840,15 @@ impl SessionActor {
             }
             self.record_response_token_usage(&response, Some(model_duration_ms));
             let response_completed = self.response_completed_update(&response);
-            if let Some(pt) = prompt_timing.take() {
+            if let Some(mut pt) = prompt_timing.take() {
+                pt.record_stream_latency(
+                    latency.time_to_first_token_ms,
+                    latency.time_to_last_byte_ms,
+                );
+                pt.record_model_result(
+                    latency.attempts,
+                    response.usage.as_ref().map(|u| u.completion_tokens),
+                );
                 let mcp_count = self.mcp_state.lock().await.configs.len() as u32;
                 let mcp_tools = self
                     .agent
@@ -2896,16 +2926,9 @@ impl SessionActor {
                 stop_reason == Some(xai_grok_sampling_types::StopReason::ContentFilter);
             let refusal_explanation = response.stop_message.clone();
             let final_answer_text = json_schema.is_some().then(|| response.assistant_text());
-            for item in response.items {
-                match item {
-                    xai_grok_sampling_types::ConversationItem::Assistant(_) => {
-                        self.record_assistant_response(item).await;
-                    }
-                    _ => {
-                        self.chat_state_handle.push_tool_result(item);
-                    }
-                }
-            }
+            let usage_reported = response.usage.is_some();
+            self.record_response_items(response.items, usage_reported)
+                .await;
             if let Some(text) = fallback_text {
                 tracing::warn!(
                     text_len = text.len(),
@@ -3071,17 +3094,25 @@ impl SessionActor {
                 }
                 turn_tools_called.push(tc.name.clone());
             }
-            let step_signature = tool_calls
-                .iter()
-                .map(|tc| format!("{}\u{1f}{}", tc.name, tc.arguments.as_ref()))
-                .collect::<Vec<_>>()
-                .join("\u{1e}");
+            let step_signature = step_signature(&tool_calls);
             let step_tool_name = tool_calls
-                .first()
+                .iter()
                 .map(|tc| tc.name.clone())
+                .min()
                 .unwrap_or_default();
+            let tool_bridge = self.tool_bridge_handle();
+            let step_tool_kinds = tool_calls
+                .iter()
+                .map(|tc| tool_bridge.tool_kind(&tc.name))
+                .collect::<Vec<_>>();
+            let step_problematic = step_is_problematically_repeating(&step_tool_kinds);
             let is_true_noop = self.is_run_true_step(&tool_calls).await;
-            identical_tool_calls.observe(&step_signature, &step_tool_name, is_true_noop);
+            identical_tool_calls.observe(
+                &step_signature,
+                &step_tool_name,
+                step_problematic,
+                is_true_noop,
+            );
             if is_true_noop {
                 xai_grok_telemetry::session_ctx::log_event(
                     xai_grok_telemetry::events::ShellTrueNoop {
@@ -3155,7 +3186,7 @@ impl SessionActor {
             if self.tool_context.task_output_token_budget.is_none()
                 && let Some(trigger_info) = self.check_preflight_overflow().await
             {
-                if let Err(e) = self.run_compact_only(trigger_info).await {
+                if let Err(e) = self.run_compact_only(trigger_info, false).await {
                     tracing::error!(error = %e, "Preflight overflow compaction failed");
                     if Self::is_auth_compact_error(&e) {
                         return Err(self.surface_compact_auth_failure(e).await);
@@ -3169,11 +3200,44 @@ impl SessionActor {
 /// Discard an egregious (2× cap) media-gen generation and re-sample this
 /// many times; later over-caps in the same turn use first-K.
 const MAX_MEDIA_GEN_OVER_CAP_RESAMPLES: u32 = 1;
-const MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS: u32 = 16;
-const NUDGE_AFTER_IDENTICAL_TOOL_CALLS: u32 = 8;
+/// Tool kinds whose identical repeats are almost never productive, so they get tighter
+/// thresholds than everything else. A production turn repeated one `ToolKind::Plan` call
+/// (`todo_write`) with byte-identical arguments 12 times — 224 in the turn — and replaying
+/// it showed the model answers the user as soon as it is interrupted. `ToolKind::Read`
+/// behaves the same way: re-reading the same path with the same range returns the same
+/// bytes.
+///
+/// Matched by kind, not by wire name, because names are client-renameable and vary by
+/// toolset (`read_file`, `hashline_read`, `Read`; `todo_write`, `todowrite`) while the
+/// registered kind does not. Unregistered names (MCP tools) resolve to `None` and fall
+/// through to the looser tier, as does any kind added later — an identical repeat there
+/// can be legitimate, such as polling a job or re-running a command after an external
+/// change.
+fn is_problematically_repeating_kind(kind: Option<ToolKind>) -> bool {
+    matches!(kind, Some(ToolKind::Read | ToolKind::Plan))
+}
+/// Whether a whole sampling step belongs in the tight tier: every call in it must be a
+/// problematically repeating kind.
+///
+/// Order-insensitive, like [`step_signature`] — a reordered step is the same step, so it
+/// must not flip tiers. Requiring *every* call, rather than any, keeps a mixed step in the
+/// looser tier: one call that can legitimately repeat (polling a job) makes repeating the
+/// whole step legitimate.
+fn step_is_problematically_repeating(kinds: &[Option<ToolKind>]) -> bool {
+    !kinds.is_empty()
+        && kinds
+            .iter()
+            .all(|kind| is_problematically_repeating_kind(*kind))
+}
+pub(super) const NUDGE_AFTER_IDENTICAL_PROBLEMATIC_TOOL_CALLS: u32 = 4;
+pub(super) const NUDGE_AFTER_IDENTICAL_TOOL_CALLS: u32 = 8;
+pub(super) const MAX_CONSECUTIVE_IDENTICAL_PROBLEMATIC_TOOL_CALLS: u32 = 8;
+pub(super) const MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS: u32 = 12;
 const MAX_CONSECUTIVE_TRUE_NOOPS: u32 = 4;
+const _: () = assert!(
+    NUDGE_AFTER_IDENTICAL_PROBLEMATIC_TOOL_CALLS < MAX_CONSECUTIVE_IDENTICAL_PROBLEMATIC_TOOL_CALLS
+);
 const _: () = assert!(NUDGE_AFTER_IDENTICAL_TOOL_CALLS < MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS);
-const _: () = assert!(MAX_CONSECUTIVE_TRUE_NOOPS < NUDGE_AFTER_IDENTICAL_TOOL_CALLS);
 const ACTION_STATIONARITY_NUDGE_TEMPLATE: &str = "You have called the same tool \
      (`${{ tool_name }}`) with the exact same arguments ${{ run_len }} times in a row — \
      you appear to be stuck in a polling loop. Stop repeating this call. If you are \
@@ -3191,16 +3255,69 @@ fn hash_step_signature(signature: &str) -> u64 {
 fn command_is_true(cmd: &str) -> bool {
     cmd.trim().eq_ignore_ascii_case("true")
 }
+/// Recursively sort object keys so the same arguments compare equal however the model
+/// happened to serialize them — `{"path":"x","limit":10}` and `{"limit":10,"path":"x"}`
+/// are the same call. Array order is left alone: it is semantic (a todo list, a batch of
+/// edits), so reordering one is a real change.
+///
+/// `serde_json` is built with `preserve_order` here, so a `Map` keeps insertion order and
+/// re-inserting in sorted order is what makes this canonical.
+fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            serde_json::Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k, canonicalize_json(v)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(canonicalize_json).collect())
+        }
+        other => other,
+    }
+}
+/// Signature of one sampling step: every tool call it emitted, each canonicalized, then
+/// sorted so that re-emitting the same set of parallel calls in a different order does not
+/// read as progress.
+///
+/// Arguments that do not parse as JSON fall back to their trimmed raw text, which is the
+/// pre-canonicalization behaviour.
+fn step_signature(tool_calls: &[xai_grok_sampling_types::conversation::ToolCall]) -> String {
+    let mut parts: Vec<String> = tool_calls
+        .iter()
+        .map(|tc| {
+            let args = serde_json::from_str::<serde_json::Value>(tc.arguments.as_ref())
+                .map(|v| canonicalize_json(v).to_string())
+                .unwrap_or_else(|_| tc.arguments.trim().to_string());
+            format!("{}\u{1f}{}", tc.name, args)
+        })
+        .collect();
+    parts.sort();
+    parts.join("\u{1e}")
+}
 #[derive(Default)]
 struct IdenticalToolCallRun {
     last_signature_hash: Option<u64>,
     tool_name: String,
+    /// Whether the repeated step is in the tight threshold tier, decided by the registered
+    /// kinds of every call in it (see [`step_is_problematically_repeating`]).
+    problematically_repeating_step: bool,
     run_len: u32,
     is_true_noop_run: bool,
     nudged: bool,
 }
 impl IdenticalToolCallRun {
-    fn observe(&mut self, signature: &str, tool_name: &str, is_true_noop: bool) -> u32 {
+    fn observe(
+        &mut self,
+        signature: &str,
+        tool_name: &str,
+        problematically_repeating_step: bool,
+        is_true_noop: bool,
+    ) -> u32 {
         let hash = hash_step_signature(if is_true_noop {
             "\0true_noop"
         } else {
@@ -3215,17 +3332,35 @@ impl IdenticalToolCallRun {
             self.nudged = false;
         }
         self.tool_name = tool_name.to_string();
+        self.problematically_repeating_step = problematically_repeating_step;
         self.run_len
     }
+    /// Whether this run gets the tighter nudge and hard-stop thresholds (see
+    /// [`step_is_problematically_repeating`]).
+    fn is_problematically_repeating(&self) -> bool {
+        !self.is_true_noop_run && self.problematically_repeating_step
+    }
+    fn nudge_threshold(&self) -> u32 {
+        if self.is_problematically_repeating() {
+            NUDGE_AFTER_IDENTICAL_PROBLEMATIC_TOOL_CALLS
+        } else {
+            NUDGE_AFTER_IDENTICAL_TOOL_CALLS
+        }
+    }
     /// Once per identical run at/after the nudge threshold. Call only after results are committed.
+    ///
+    /// `true` keepalive runs are exempt: they end the turn silently at
+    /// [`MAX_CONSECUTIVE_TRUE_NOOPS`] rather than being told to stop polling.
     fn take_nudge(&mut self) -> bool {
-        let fire = self.run_len >= NUDGE_AFTER_IDENTICAL_TOOL_CALLS && !self.nudged;
+        let fire = !self.is_true_noop_run && self.run_len >= self.nudge_threshold() && !self.nudged;
         self.nudged |= fire;
         fire
     }
     fn hard_stop_threshold(&self) -> u32 {
         if self.is_true_noop_run {
             MAX_CONSECUTIVE_TRUE_NOOPS
+        } else if self.is_problematically_repeating() {
+            MAX_CONSECUTIVE_IDENTICAL_PROBLEMATIC_TOOL_CALLS
         } else {
             MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS
         }
@@ -3234,18 +3369,20 @@ impl IdenticalToolCallRun {
 #[cfg(test)]
 mod identical_tool_call_run_tests {
     use super::{
-        IdenticalToolCallRun, MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS, MAX_CONSECUTIVE_TRUE_NOOPS,
-        NUDGE_AFTER_IDENTICAL_TOOL_CALLS, command_is_true,
+        IdenticalToolCallRun, MAX_CONSECUTIVE_IDENTICAL_PROBLEMATIC_TOOL_CALLS,
+        MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS, MAX_CONSECUTIVE_TRUE_NOOPS,
+        NUDGE_AFTER_IDENTICAL_PROBLEMATIC_TOOL_CALLS, NUDGE_AFTER_IDENTICAL_TOOL_CALLS, ToolKind,
+        command_is_true, step_is_problematically_repeating, step_signature,
     };
     #[test]
-    fn identical_non_true_resets_and_caps_at_16() {
+    fn identical_non_true_resets_and_caps_at_the_hard_limit() {
         let mut run = IdenticalToolCallRun::default();
-        assert_eq!(run.observe("a", "a", false), 1);
-        assert_eq!(run.observe("a", "a", false), 2);
-        assert_eq!(run.observe("b", "b", false), 1);
+        assert_eq!(run.observe("a", "a", false, false), 1);
+        assert_eq!(run.observe("a", "a", false, false), 2);
+        assert_eq!(run.observe("b", "b", false, false), 1);
         let mut last = 0;
         for _ in 0..MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS {
-            last = run.observe("same", "same", false);
+            last = run.observe("same", "same", false, false);
         }
         assert_eq!(last, MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS);
         assert_eq!(
@@ -3257,12 +3394,51 @@ mod identical_tool_call_run_tests {
     fn true_noops_chain_across_args_and_stop_at_4() {
         let mut run = IdenticalToolCallRun::default();
         for i in 1..=4 {
-            assert_eq!(run.observe(&format!("sig{i}"), "bash", true), i);
+            assert_eq!(run.observe(&format!("sig{i}"), "bash", false, true), i);
         }
         assert!(run.is_true_noop_run);
         assert_eq!(run.hard_stop_threshold(), MAX_CONSECUTIVE_TRUE_NOOPS);
-        assert_eq!(run.observe("squeue", "bash", false), 1);
+        assert_eq!(run.observe("squeue", "bash", false, false), 1);
         assert!(!run.is_true_noop_run);
+    }
+    /// Reordering argument keys, or reordering the calls within one step, is the same
+    /// step — otherwise a loop could evade the counter by shuffling either one.
+    #[test]
+    fn step_signature_ignores_key_order_and_call_order() {
+        let call = |name: &str, args: &str| xai_grok_sampling_types::conversation::ToolCall {
+            id: "id".into(),
+            name: name.to_string(),
+            arguments: args.into(),
+        };
+        assert_eq!(
+            step_signature(&[call("read_file", r#"{"path":"a","limit":10}"#)]),
+            step_signature(&[call("read_file", r#"{"limit":10,"path":"a"}"#)]),
+            "key order must not matter"
+        );
+        assert_eq!(
+            step_signature(&[call("read_file", r#"{"a":{"x":1,"y":2}}"#)]),
+            step_signature(&[call("read_file", r#"{"a":{"y":2,"x":1}}"#)]),
+            "nested key order must not matter"
+        );
+        let a = call("read_file", r#"{"path":"a"}"#);
+        let b = call("read_file", r#"{"path":"b"}"#);
+        assert_eq!(
+            step_signature(&[a.clone(), b.clone()]),
+            step_signature(&[b, a]),
+            "order of parallel calls must not matter"
+        );
+        assert_ne!(
+            step_signature(&[call("read_file", r#"{"path":"a"}"#)]),
+            step_signature(&[call("read_file", r#"{"path":"b"}"#)])
+        );
+        assert_ne!(
+            step_signature(&[call("todo_write", r#"{"todos":[1,2]}"#)]),
+            step_signature(&[call("todo_write", r#"{"todos":[2,1]}"#)])
+        );
+        assert_ne!(
+            step_signature(&[call("x", "not json a")]),
+            step_signature(&[call("x", "not json b")])
+        );
     }
     #[test]
     fn command_is_true_trim_and_case() {
@@ -3275,26 +3451,102 @@ mod identical_tool_call_run_tests {
     fn nudge_latch_fires_once_per_run_after_threshold() {
         let mut run = IdenticalToolCallRun::default();
         for i in 1..NUDGE_AFTER_IDENTICAL_TOOL_CALLS {
-            assert_eq!(run.observe("poll", "get_task_output", false), i);
+            assert_eq!(run.observe("poll", "get_task_output", false, false), i);
             assert!(
                 !run.take_nudge(),
                 "must not nudge before threshold; run_len={i}"
             );
         }
         assert_eq!(
-            run.observe("poll", "get_task_output", false),
+            run.observe("poll", "get_task_output", false, false),
             NUDGE_AFTER_IDENTICAL_TOOL_CALLS
         );
         assert!(run.take_nudge());
         assert!(!run.take_nudge());
         assert_eq!(
-            run.observe("poll", "get_task_output", false),
+            run.observe("poll", "get_task_output", false, false),
             NUDGE_AFTER_IDENTICAL_TOOL_CALLS + 1
         );
         assert!(!run.take_nudge());
-        assert_eq!(run.observe("other", "bash", false), 1);
+        assert_eq!(run.observe("other", "bash", false, false), 1);
         assert!(!run.nudged);
         assert!(!run.take_nudge());
+    }
+    /// `ToolKind::Read` / `ToolKind::Plan` (`read_file` / `todo_write`) nudge and stop
+    /// earlier than everything else, including tools with no registered kind.
+    #[test]
+    fn problematically_repeating_tools_use_the_tighter_thresholds() {
+        for tool in ["read_file", "todo_write"] {
+            let mut run = IdenticalToolCallRun::default();
+            for i in 1..NUDGE_AFTER_IDENTICAL_PROBLEMATIC_TOOL_CALLS {
+                assert_eq!(run.observe("same", tool, true, false), i);
+                assert!(!run.take_nudge(), "{tool} must not nudge at run_len={i}");
+            }
+            assert_eq!(
+                run.observe("same", tool, true, false),
+                NUDGE_AFTER_IDENTICAL_PROBLEMATIC_TOOL_CALLS
+            );
+            assert!(run.take_nudge(), "{tool} must nudge at its own threshold");
+            assert!(run.is_problematically_repeating());
+            assert_eq!(
+                run.hard_stop_threshold(),
+                MAX_CONSECUTIVE_IDENTICAL_PROBLEMATIC_TOOL_CALLS
+            );
+        }
+        let mut run = IdenticalToolCallRun::default();
+        for i in 1..NUDGE_AFTER_IDENTICAL_TOOL_CALLS {
+            assert_eq!(run.observe("same", "run_terminal_command", false, false), i);
+            assert!(
+                !run.take_nudge(),
+                "loose tier must not nudge at run_len={i}"
+            );
+        }
+        assert_eq!(
+            run.observe("same", "run_terminal_command", false, false),
+            NUDGE_AFTER_IDENTICAL_TOOL_CALLS
+        );
+        assert!(run.take_nudge());
+        assert!(!run.is_problematically_repeating());
+        assert_eq!(
+            run.hard_stop_threshold(),
+            MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS
+        );
+    }
+    /// A step is in the tight tier only when every call in it is `Read`/`Plan`, and the
+    /// answer must not depend on the order the model emitted them in.
+    #[test]
+    fn step_tier_needs_every_call_and_ignores_order() {
+        let read = Some(ToolKind::Read);
+        let plan = Some(ToolKind::Plan);
+        let exec = Some(ToolKind::Execute);
+        assert!(step_is_problematically_repeating(&[read]));
+        assert!(step_is_problematically_repeating(&[plan]));
+        assert!(step_is_problematically_repeating(&[read, plan]));
+        assert!(!step_is_problematically_repeating(&[exec]));
+        assert!(!step_is_problematically_repeating(&[None]));
+        assert!(!step_is_problematically_repeating(&[]));
+        assert!(!step_is_problematically_repeating(&[read, exec]));
+        assert!(!step_is_problematically_repeating(&[exec, read]));
+    }
+    /// A `true` keepalive run must end the turn silently at MAX_CONSECUTIVE_TRUE_NOOPS
+    /// instead of being told to stop polling, even though it passes the nudge threshold.
+    #[test]
+    fn true_noop_runs_are_never_nudged() {
+        let mut run = IdenticalToolCallRun::default();
+        for i in 1..=MAX_CONSECUTIVE_TRUE_NOOPS {
+            assert_eq!(run.observe(&format!("sig{i}"), "bash", false, true), i);
+            assert!(
+                !run.take_nudge(),
+                "keepalive run must not nudge; run_len={i}"
+            );
+        }
+        assert_eq!(run.hard_stop_threshold(), MAX_CONSECUTIVE_TRUE_NOOPS);
+        let mut last = 0;
+        for _ in 0..NUDGE_AFTER_IDENTICAL_TOOL_CALLS {
+            last = run.observe("poll", "get_task_output", false, false);
+        }
+        assert_eq!(last, NUDGE_AFTER_IDENTICAL_TOOL_CALLS);
+        assert!(run.take_nudge());
     }
 }
 #[cfg(test)]

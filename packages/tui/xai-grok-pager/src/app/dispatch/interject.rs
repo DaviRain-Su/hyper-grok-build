@@ -1,11 +1,9 @@
-//! Mid-turn interjection dispatch: optimistic local echo, the
-//! `x.ai/interject` effect, and prompt-history recording. Split out of
-//! `dispatch.rs` verbatim (pure code motion).
+//! Mid-turn interjection dispatch: optimistic local echo, the `x.ai/interject` effect, and prompt-history recording.
 
 use super::ctx::NO_SESSION_NOTICE;
 use super::voice::voice_stop_on_submit;
 use crate::app::actions::Effect;
-use crate::app::agent_view::AgentView;
+use crate::app::agent::AgentId;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 
@@ -25,11 +23,27 @@ pub(super) fn dispatch_interject(
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
-    // Hard-reset only — `text` may not be from the composer.
-    let _ = voice_stop_on_submit(app);
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    dispatch_interject_on(app, id, text, images)
+}
+
+/// Same as [`dispatch_interject`], but targets `agent_id` instead of the
+/// focused pane. Used when a `/btw` answer lands on a non-active session.
+pub(super) fn dispatch_interject_on(
+    app: &mut AppView,
+    id: AgentId,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
+    // Voice is app-wide and bound to the focused composer. A /btw answer
+    // on another session must not commit interim text or kill dictation
+    // on the pane the user is actually talking into.
+    if matches!(app.active_view, ActiveView::Agent(active) if active == id) {
+        // Hard-reset only — `text` may not be from the composer.
+        let _ = voice_stop_on_submit(app);
+    }
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -44,7 +58,7 @@ pub(super) fn dispatch_interject(
         return vec![];
     };
 
-    record_interject_prompt_history(agent, &text);
+    agent.record_prompt_in_history(&text);
 
     // Push a standard user prompt block locally for instant feedback, and
     // record its id so the broadcast echo (`x.ai/session/interjection`) is
@@ -130,7 +144,7 @@ pub(super) fn dispatch_send_prompt_now(
         return vec![];
     };
 
-    record_interject_prompt_history(agent, &text);
+    agent.record_prompt_in_history(&text);
 
     let prompt_id = uuid::Uuid::new_v4().to_string();
     // Self-originated: the ACP gate must treat this prompt's deltas as ours.
@@ -160,24 +174,6 @@ pub(super) fn dispatch_send_prompt_now(
         blocks,
         prompt_id,
     }]
-}
-
-/// Record an interjection in prompt history (Ctrl+R finds interjections).
-/// Shared by `dispatch_interject` and the edited-queued-interject arm — the
-/// user typed both, so both must be recallable.
-pub(super) fn record_interject_prompt_history(agent: &mut AgentView, text: &str) {
-    let trimmed_key = text.trim().to_string();
-    if trimmed_key.is_empty() {
-        return;
-    }
-    agent
-        .session
-        .prompt_history
-        .retain(|p| p.trim() != trimmed_key);
-    agent.session.prompt_history.insert(0, text.to_string());
-    if agent.session.prompt_history.len() > 200 {
-        agent.session.prompt_history.truncate(200);
-    }
 }
 
 #[cfg(test)]

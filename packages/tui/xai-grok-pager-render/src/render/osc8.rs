@@ -158,9 +158,33 @@ fn link_finder() -> &'static LinkFinder {
     static FINDER: OnceLock<LinkFinder> = OnceLock::new();
     FINDER.get_or_init(|| {
         let mut f = LinkFinder::new();
-        f.kinds(&[LinkKind::Url]);
+        f.kinds(&[LinkKind::Url, LinkKind::Email]);
         f
     })
+}
+
+/// True when `start..end` is a valid UTF-8 substring of `text`.
+fn is_str_range(text: &str, start: usize, end: usize) -> bool {
+    start <= end && end <= text.len() && text.is_char_boundary(start) && text.is_char_boundary(end)
+}
+
+/// linkify's Email kind yields the bare address; the opener expects `mailto:`.
+/// `None` for scp-style remotes (`git@github.com:org/repo`) so those stay
+/// plain text instead of becoming a mail link, or when the match range is
+/// not a char-boundary substring.
+fn linkify_href(text: &str, link: &linkify::Link<'_>) -> Option<String> {
+    if !is_str_range(text, link.start(), link.end()) {
+        return None;
+    }
+    match link.kind() {
+        LinkKind::Email => {
+            if matches!(text.as_bytes().get(link.end()), Some(b':' | b'/')) {
+                return None;
+            }
+            Some(format!("mailto:{}", link.as_str()))
+        }
+        _ => Some(link.as_str().to_string()),
+    }
 }
 
 /// One path segment without spaces (`main.rs`, `.grok`, `@scope`). Leading `.`
@@ -533,15 +557,17 @@ fn scan_logical_line(
     let mut path_byte_ranges: Vec<std::ops::Range<usize>> = Vec::new();
 
     for link in finder.links(text) {
-        let url = link.as_str();
-        if !crate::link_opener::is_safe_to_open(url, scheme_filter) {
+        let Some(url) = linkify_href(text, &link) else {
+            continue;
+        };
+        if !crate::link_opener::is_safe_to_open(&url, scheme_filter) {
             continue;
         }
         url_byte_ranges
             .get_or_insert_with(Vec::new)
             .push(link.start()..link.end());
 
-        let target = LinkTarget::Url(Arc::from(url));
+        let target = LinkTarget::Url(Arc::from(url.as_str()));
         push_link_segments(
             text,
             rows,
@@ -1206,6 +1232,58 @@ mod tests {
         assert!(
             overlay.is_empty(),
             "javascript:// scheme should be filtered"
+        );
+    }
+
+    #[test]
+    fn scan_email_produces_mailto_overlay() {
+        let line = make_line("Email foo@bar.com please.");
+        let mut overlay = LinkOverlay::new();
+        scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
+
+        assert_eq!(overlay.links().len(), 1);
+        assert_eq!(
+            &*resolve_link_target(&overlay.links()[0].target)
+                .and_then(|resolved| resolved.osc8_url)
+                .expect("url"),
+            "mailto:foo@bar.com"
+        );
+        assert_eq!(overlay.links()[0].col_start, 6); // "Email "
+        assert_eq!(
+            overlay.links()[0].col_end,
+            6 + UnicodeWidthStr::width("foo@bar.com") as u16
+        );
+    }
+
+    #[test]
+    fn scan_email_after_multibyte_prefix_is_mailto() {
+        let line = make_line("連絡先: foo@bar.com です");
+        let mut overlay = LinkOverlay::new();
+        scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
+
+        assert_eq!(overlay.links().len(), 1);
+        assert_eq!(
+            &*resolve_link_target(&overlay.links()[0].target)
+                .and_then(|resolved| resolved.osc8_url)
+                .expect("url"),
+            "mailto:foo@bar.com"
+        );
+    }
+
+    #[test]
+    fn scan_scp_git_remote_is_not_mailto() {
+        let line = make_line("clone git@github.com:org/repo.git please");
+        let mut overlay = LinkOverlay::new();
+        scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
+
+        assert!(
+            overlay
+                .links()
+                .iter()
+                .all(|l| resolve_link_target(&l.target)
+                    .and_then(|resolved| resolved.osc8_url)
+                    .is_none_or(|u| !u.starts_with("mailto:"))),
+            "scp-style git remotes must not become mailto links"
         );
     }
 

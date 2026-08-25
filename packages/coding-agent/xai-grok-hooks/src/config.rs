@@ -202,6 +202,22 @@ pub struct HookSpec {
     pub layer: HookProvenance,
 }
 
+pub const RUNNER_ALWAYS_SET_ENV: &[&str] = &[
+    "GROK_HOOK_EVENT",
+    "GROK_HOOK_NAME",
+    "GROK_SESSION_ID",
+    "GROK_WORKSPACE_ROOT",
+    "CLAUDE_PROJECT_DIR",
+];
+
+pub fn expand_env_skipping_runner_vars(input: &str) -> String {
+    crate::env_expand::expand_env_vars_with_process_skip(
+        input,
+        &HashMap::new(),
+        RUNNER_ALWAYS_SET_ENV,
+    )
+}
+
 /// Namespace prefixes stamped on hook names, matched by [`hook_origin`]. Shared
 /// so a rename can't silently reclassify a tier.
 pub const GLOBAL_HOOK_PREFIX: &str = "global/";
@@ -543,7 +559,11 @@ fn build_one_spec(
                     detail: "command handler requires a 'command' field".into(),
                 });
             };
-            let expanded = crate::env_expand::expand_env_vars_with_extra(&command, &extra_env);
+            let expanded = crate::env_expand::expand_env_vars_with_process_skip(
+                &command,
+                &extra_env,
+                RUNNER_ALWAYS_SET_ENV,
+            );
             (Some(PathBuf::from(expanded)), Some(command), None, None)
         }
         HandlerType::Http => {
@@ -554,7 +574,11 @@ fn build_one_spec(
                     detail: "http handler requires a 'url' field".into(),
                 });
             };
-            let expanded = crate::env_expand::expand_env_vars_with_extra(&url, &extra_env);
+            let expanded = crate::env_expand::expand_env_vars_with_process_skip(
+                &url,
+                &extra_env,
+                RUNNER_ALWAYS_SET_ENV,
+            );
             (None, None, Some(expanded), Some(url))
         }
     };
@@ -583,7 +607,7 @@ fn strip_reserved_env_keys(
     spec_name: &str,
     file_path: &Path,
 ) {
-    for reserved in crate::runner::command::RUNNER_ALWAYS_SET_ENV {
+    for reserved in RUNNER_ALWAYS_SET_ENV {
         if extra_env.remove(*reserved).is_some() {
             tracing::warn!(
                 hook = %spec_name,

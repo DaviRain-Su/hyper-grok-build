@@ -1130,6 +1130,10 @@ const STALE_TMP_AGE: Duration = Duration::from_secs(60 * 60);
 /// transfer to abort and restart from zero repeatedly.
 const DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
+fn download_client() -> reqwest::Result<reqwest::Client> {
+    xai_grok_extra_ca::build_reqwest_client(|builder| builder.timeout(DOWNLOAD_REQUEST_TIMEOUT))
+}
+
 /// Unique temp path for an in-flight download of `dest`.
 ///
 /// Appends `.{pid}-{seq}.tmp` to the FULL file name instead of using
@@ -1193,9 +1197,7 @@ async fn try_parallel_download(
     dest: &std::path::Path,
     with_progress: bool,
 ) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(DOWNLOAD_REQUEST_TIMEOUT)
-        .build()?;
+    let client = download_client()?;
 
     let head = client.head(url).send().await?;
     if !head.status().is_success() {
@@ -1331,9 +1333,7 @@ pub async fn download_with_progress(url: &str, dest: &std::path::Path) -> Result
         }
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(DOWNLOAD_REQUEST_TIMEOUT)
-        .build()?;
+    let client = download_client()?;
     let resp = client.get(url).send().await?;
 
     if !resp.status().is_success() {
@@ -1391,9 +1391,7 @@ pub async fn download_silent(url: &str, dest: &std::path::Path) -> Result<()> {
         }
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(DOWNLOAD_REQUEST_TIMEOUT)
-        .build()?;
+    let client = download_client()?;
     let resp = client.get(url).send().await?;
 
     if !resp.status().is_success() {

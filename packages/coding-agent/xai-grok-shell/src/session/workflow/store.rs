@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
+use xai_grok_sampling_types::ReasoningEffort;
 
 use crate::session::persistence::PersistenceMsg;
 
@@ -14,6 +15,7 @@ pub(crate) const WORKFLOW_RUN_MANIFEST_VERSION: u8 = 4;
 pub(crate) const MAX_RESTORED_WORKFLOW_RUNS: usize = 128;
 pub(crate) const MAX_WORKFLOW_MANIFEST_BYTES: u64 = 512 * 1024;
 pub(crate) const MAX_WORKFLOW_ARGS_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_WORKFLOW_EFFORT_BYTES: u64 = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRunManifest {
@@ -27,12 +29,14 @@ pub struct RestoredWorkflowRun {
     pub manifest: WorkflowRunManifest,
     pub script: String,
     pub args: serde_json::Value,
+    pub effort: Option<ReasoningEffort>,
 }
 
 #[derive(Debug, Clone)]
 struct RunSource {
     script: String,
     args: serde_json::Value,
+    effort: Option<ReasoningEffort>,
     revision: u32,
 }
 
@@ -93,6 +97,7 @@ impl WorkflowRunStore {
                     RunSource {
                         script: run.script,
                         args: run.args,
+                        effort: run.effort,
                         revision: run.manifest.script_revision,
                     },
                 );
@@ -121,6 +126,7 @@ impl WorkflowRunStore {
         run_id: &str,
         script: &str,
         args: &serde_json::Value,
+        effort: Option<ReasoningEffort>,
     ) -> io::Result<()> {
         validate_run_id(run_id)?;
         if self.sources.lock().contains_key(run_id) {
@@ -135,6 +141,9 @@ impl WorkflowRunStore {
             std::fs::create_dir_all(&scripts_dir)?;
             let args_json = serde_json::to_vec_pretty(args).map_err(io::Error::other)?;
             atomic_write_new(&run_dir.join("args.json"), &args_json)?;
+            if let Some(effort) = effort {
+                atomic_write_new(&run_dir.join("effort"), effort.as_str().as_bytes())?;
+            }
             atomic_write_new(&script_revision_path(&run_dir, 0), script.as_bytes())?;
             atomic_write_replace(&run_dir.join("script.rhai"), script.as_bytes())?;
         }
@@ -144,6 +153,7 @@ impl WorkflowRunStore {
             RunSource {
                 script: script.to_owned(),
                 args: args.clone(),
+                effort,
                 revision: 0,
             },
         );
@@ -254,6 +264,13 @@ impl WorkflowRunStore {
             .lock()
             .get(run_id)
             .map(|source| source.args.clone())
+    }
+
+    pub(crate) fn effort_for(&self, run_id: &str) -> Option<ReasoningEffort> {
+        self.sources
+            .lock()
+            .get(run_id)
+            .and_then(|source| source.effort)
     }
 
     pub(crate) fn script_copy_path(&self, run_id: &str) -> Option<PathBuf> {
@@ -406,7 +423,9 @@ mod tests {
         let store = WorkflowRunStore::new(Some(dir.path().to_path_buf()), tx);
         let args = serde_json::json!({"objective": "ship"});
 
-        store.register("wf_1", "complete(1);", &args).unwrap();
+        store
+            .register("wf_1", "complete(1);", &args, Some(ReasoningEffort::High))
+            .unwrap();
         std::fs::write(
             dir.path().join("workflows/wf_1/script.rhai"),
             "complete(2);",
@@ -421,6 +440,32 @@ mod tests {
         assert!(!run_dir.join("scripts/0001.rhai").exists());
         assert_eq!(store.script_for("wf_1").as_deref(), Some("complete(1);"));
         assert_eq!(store.args_for("wf_1"), Some(args));
+        assert_eq!(store.effort_for("wf_1"), Some(ReasoningEffort::High));
+        assert_eq!(
+            std::fs::read_to_string(run_dir.join("effort")).unwrap(),
+            "high"
+        );
+    }
+
+    #[test]
+    fn register_serializes_canonical_effort() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let store = WorkflowRunStore::new(Some(dir.path().to_path_buf()), tx);
+
+        store
+            .register(
+                "wf_xhigh",
+                "complete(1);",
+                &serde_json::json!({}),
+                Some(ReasoningEffort::Xhigh),
+            )
+            .unwrap();
+        assert_eq!(store.effort_for("wf_xhigh"), Some(ReasoningEffort::Xhigh));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("workflows/wf_xhigh/effort")).unwrap(),
+            "xhigh"
+        );
     }
 
     #[tokio::test]
@@ -428,7 +473,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let store = WorkflowRunStore::new(None, tx);
         store
-            .register("wf_1", "complete(1);", &serde_json::json!({}))
+            .register("wf_1", "complete(1);", &serde_json::json!({}), None)
             .unwrap();
         let state = WorkflowTracker::default().start_run(
             "wf_1".into(),
@@ -472,6 +517,7 @@ mod tests {
             },
             script: "complete(1);".into(),
             args: serde_json::json!({}),
+            effort: None,
         };
 
         let (_store, states) = WorkflowRunStore::from_restored(None, tx, vec![restored]);

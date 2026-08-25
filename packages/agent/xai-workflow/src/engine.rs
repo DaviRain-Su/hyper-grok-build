@@ -242,6 +242,29 @@ fn map_to_value(map: rhai::Map) -> ScriptResult<serde_json::Value> {
         .map_err(|e| runtime_error(format!("invalid options map: {e}")))
 }
 
+fn replay_spawn_agent(
+    journal: &Journal,
+    seq: u64,
+    payload: &serde_json::Value,
+    hash: &str,
+) -> Result<Option<serde_json::Value>, JournalError> {
+    let normal = journal.replay(seq, "spawn_agent", hash);
+    match &normal {
+        Ok(Some(_)) => return normal,
+        Ok(None) | Err(JournalError::Divergence { .. }) => {}
+        Err(_) => return normal,
+    }
+
+    let Some(mut legacy_payload) = payload.as_object().cloned() else {
+        return normal;
+    };
+    if legacy_payload.remove("effort").is_none() {
+        return normal;
+    }
+    let legacy_hash = request_hash("spawn_agent", &serde_json::Value::Object(legacy_payload));
+    journal.replay(seq, "spawn_agent", &legacy_hash)
+}
+
 fn host_call<T>(
     ctx: &Rc<RefCell<Ctx>>,
     kind: &'static str,
@@ -252,7 +275,15 @@ fn host_call<T>(
     let hash = request_hash(kind, &payload);
     let seq = ctx.borrow_mut().next_seq()?;
 
-    match ctx.borrow().journal.replay(seq, kind, &hash) {
+    let replayed = {
+        let ctx = ctx.borrow();
+        if kind == "spawn_agent" {
+            replay_spawn_agent(&ctx.journal, seq, &payload, &hash)
+        } else {
+            ctx.journal.replay(seq, kind, &hash)
+        }
+    };
+    match replayed {
         Ok(Some(recorded)) => {
             if let Some(err) = replay_host_error(&recorded) {
                 return Err(err);
@@ -416,7 +447,7 @@ fn spawn_agent_call(ctx: &Rc<RefCell<Ctx>>, opts: AgentOpts) -> ScriptResult<Dyn
     let hash = request_hash("spawn_agent", &payload);
     let is_live = {
         let ctx = ctx.borrow();
-        match ctx.journal.replay(ctx.seq, "spawn_agent", &hash) {
+        match replay_spawn_agent(&ctx.journal, ctx.seq, &payload, &hash) {
             Ok(Some(_)) => false,
             Ok(None) => true,
             Err(error) => return Err(journal_fatal(error)),
@@ -499,15 +530,16 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                 .map(|opts| {
                     let payload = serde_json::to_value(&opts)
                         .map_err(|e| runtime_error(format!("invalid agent options: {e}")))?;
-                    Ok((opts, request_hash("spawn_agent", &payload)))
+                    let hash = request_hash("spawn_agent", &payload);
+                    Ok((opts, payload, hash))
                 })
                 .collect::<ScriptResult<Vec<_>>>()?;
             let live_count = {
                 let ctx = c.borrow();
                 let mut seq = ctx.seq;
                 let mut live = 0usize;
-                for (_, hash) in &requests {
-                    match ctx.journal.replay(seq, "spawn_agent", hash) {
+                for (_, payload, hash) in &requests {
+                    match replay_spawn_agent(&ctx.journal, seq, payload, hash) {
                         Ok(Some(_)) => {}
                         Ok(None) => live += 1,
                         Err(error) => return Err(journal_fatal(error)),
@@ -522,11 +554,11 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
             };
             reserve_agent_calls(&c, live_count)?;
             let mut pending = Vec::with_capacity(requests.len());
-            for (opts, hash) in requests {
+            for (opts, payload, hash) in requests {
                 let seq = c.borrow_mut().next_seq().inspect_err(|_| {
                     drain_parallel_replies(std::mem::take(&mut pending));
                 })?;
-                match c.borrow().journal.replay(seq, "spawn_agent", &hash) {
+                match replay_spawn_agent(&c.borrow().journal, seq, &payload, &hash) {
                     Ok(Some(value)) => pending.push(PendingAgent::Replayed(value)),
                     Ok(None) => {
                         let (reply_tx, reply_rx) = oneshot::channel();
@@ -906,6 +938,12 @@ mod tests {
             cancel: CancellationToken::new(),
             max_ops: WorkflowRunParams::DEFAULT_MAX_OPS,
         }
+    }
+
+    fn legacy_spawn_agent_hash(opts: &AgentOpts) -> String {
+        let mut payload = serde_json::to_value(opts).unwrap();
+        assert!(payload.as_object_mut().unwrap().remove("effort").is_some());
+        request_hash("spawn_agent", &payload)
     }
 
     #[test]
@@ -1578,6 +1616,181 @@ mod tests {
             }
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_replays_legacy_hash_without_effort() {
+        let opts = AgentOpts {
+            prompt: "legacy single".into(),
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        let legacy_hash = legacy_spawn_agent_hash(&opts);
+        assert_ne!(
+            legacy_hash,
+            request_hash("spawn_agent", &serde_json::to_value(&opts).unwrap())
+        );
+        let mut journal = Journal::new(None);
+        journal
+            .record(
+                0,
+                "spawn_agent",
+                legacy_hash,
+                serde_json::to_value(agent_result("legacy result")).unwrap(),
+            )
+            .unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let outcome = run_workflow(params(
+            r#"
+            let meta = #{ name: "t", description: "d" };
+            let result = agent("legacy single", #{ effort: "high" });
+            complete(result.output);
+            "#,
+            journal,
+            tx,
+        ));
+
+        match outcome {
+            WorkflowOutcome::Completed { result } => {
+                assert_eq!(result, serde_json::json!("legacy result"));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "replay must not hit the host");
+    }
+
+    #[test]
+    fn parallel_replays_legacy_hashes_without_effort() {
+        let opts = [
+            AgentOpts {
+                prompt: "legacy first".into(),
+                effort: Some("low".into()),
+                ..Default::default()
+            },
+            AgentOpts {
+                prompt: "legacy second".into(),
+                effort: Some("high".into()),
+                ..Default::default()
+            },
+        ];
+        let mut journal = Journal::new(None);
+        for (seq, (opts, output)) in opts
+            .iter()
+            .zip(["first result", "second result"])
+            .enumerate()
+        {
+            journal
+                .record(
+                    seq as u64,
+                    "spawn_agent",
+                    legacy_spawn_agent_hash(opts),
+                    serde_json::to_value(agent_result(output)).unwrap(),
+                )
+                .unwrap();
+        }
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let outcome = run_workflow(params(
+            r#"
+            let meta = #{ name: "t", description: "d" };
+            let results = parallel([
+                #{ prompt: "legacy first", effort: "low" },
+                #{ prompt: "legacy second", effort: "high" },
+            ]);
+            complete(results.map(|result| result.output));
+            "#,
+            journal,
+            tx,
+        ));
+
+        match outcome {
+            WorkflowOutcome::Completed { result } => {
+                assert_eq!(result, serde_json::json!(["first result", "second result"]));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "replay must not hit the host");
+    }
+
+    #[test]
+    fn new_agent_recording_hash_includes_effort() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("journal.jsonl");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let host = spawn_mock_host(rx, |req| {
+            if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
+                let _ = reply.send(Ok(agent_result("recorded")));
+            }
+        });
+        let outcome = run_workflow(params(
+            r#"
+            let meta = #{ name: "t", description: "d" };
+            agent("new recording", #{ effort: "high" });
+            complete("ok");
+            "#,
+            Journal::new(Some(journal_path.clone())),
+            tx,
+        ));
+        drop(host);
+        assert!(matches!(outcome, WorkflowOutcome::Completed { .. }));
+
+        let opts = AgentOpts {
+            prompt: "new recording".into(),
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        let journal = Journal::load(journal_path).unwrap();
+        let current_hash = request_hash("spawn_agent", &serde_json::to_value(&opts).unwrap());
+        assert!(
+            journal
+                .replay(0, "spawn_agent", &current_hash)
+                .unwrap()
+                .is_some()
+        );
+        assert!(matches!(
+            journal.replay(0, "spawn_agent", &legacy_spawn_agent_hash(&opts)),
+            Err(JournalError::Divergence { .. })
+        ));
+    }
+
+    #[test]
+    fn agent_current_hash_mismatch_still_diverges() {
+        let opts = AgentOpts {
+            prompt: "original prompt".into(),
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        let mut journal = Journal::new(None);
+        journal
+            .record(
+                0,
+                "spawn_agent",
+                request_hash("spawn_agent", &serde_json::to_value(&opts).unwrap()),
+                serde_json::to_value(agent_result("must not replay")).unwrap(),
+            )
+            .unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let outcome = run_workflow(params(
+            r#"
+            let meta = #{ name: "t", description: "d" };
+            agent("edited prompt", #{ effort: "high" });
+            "#,
+            journal,
+            tx,
+        ));
+
+        match outcome {
+            WorkflowOutcome::Failed { error } => {
+                assert!(error.contains("divergence"), "got: {error}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "divergent replay must not hit the host"
+        );
     }
 
     #[test]

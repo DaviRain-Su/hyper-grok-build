@@ -5,9 +5,41 @@
 
 use serde::Serialize;
 
+/// The ACP method the client called, kept separate from the warm/cold
+/// mechanism (`SessionStarted::restored_from_disk`) so intent and mechanism can
+/// be queried independently.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStartKind {
+    New,
+    Load,
+    Resume,
+}
+
 #[derive(Serialize)]
 pub struct SessionStarted {
     pub session_id: String,
+    pub kind: SessionStartKind,
+    pub setup_duration_ms: u64,
+    /// Whether setup rebuilt the session from disk (cold) rather than
+    /// reconnecting to a resident actor (warm). Mirrors `SessionLoad`.
+    pub restored_from_disk: bool,
+}
+
+impl SessionStarted {
+    pub fn new(
+        session_id: String,
+        kind: SessionStartKind,
+        setup_duration: std::time::Duration,
+        restored_from_disk: bool,
+    ) -> Self {
+        Self {
+            session_id,
+            kind,
+            setup_duration_ms: setup_duration.as_millis() as u64,
+            restored_from_disk,
+        }
+    }
 }
 
 #[derive(Serialize)]

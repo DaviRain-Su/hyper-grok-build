@@ -104,6 +104,7 @@ impl Middleware for AuthRetryMiddleware {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // test clients hit localhost mocks
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,7 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
-    /// On resume, a replayed spawn+finish pair leaves the subagent terminal.
     #[test]
     fn replayed_subagent_finished_marks_orphan_terminal() {
         let mut app = make_app_with_agent("sess-1");
@@ -54,114 +53,60 @@
         assert_eq!(info.status.as_deref(), Some("cancelled"));
     }
 
-    /// `cancelled = false` must finalize the row, not revert "killing" to "running".
     #[test]
-    fn kill_finalizes_orphan_when_shell_reports_not_cancelled() {
-        let mut app = make_app_with_agent("sess-1");
-        app.agents
-            .get_mut(&AgentId(0))
-            .unwrap()
-            .session
-            .loading_replay = true;
+    fn killing_a_stuck_orphan_records_the_shell_reported_status() {
+        // The kill call carries the shell's terminal status: "cancelled" is the
+        // default when nothing was live, "completed" a real terminal report.
+        for status in ["cancelled", "completed"] {
+            let mut app = make_app_with_agent("sess-1");
+            app.agents
+                .get_mut(&AgentId(0))
+                .unwrap()
+                .session
+                .loading_replay = true;
 
-        let spawned = subagent_ext_replay(
-            "sess-1",
-            serde_json::json!({
-                "sessionUpdate": "subagent_spawned",
-                "subagent_id": "sa-1",
-                "parent_session_id": "sess-1",
-                "child_session_id": "child-1",
-                "subagent_type": "general-purpose",
-                "description": "orphan review",
-            }),
-            "sess-1-1",
-        );
-        handle_ext_notification(&spawned, &mut app);
+            let spawned = subagent_ext_replay(
+                "sess-1",
+                serde_json::json!({
+                    "sessionUpdate": "subagent_spawned",
+                    "subagent_id": "sa-1",
+                    "parent_session_id": "sess-1",
+                    "child_session_id": "child-1",
+                    "subagent_type": "general-purpose",
+                    "description": "orphan review",
+                }),
+                "sess-1-1",
+            );
+            handle_ext_notification(&spawned, &mut app);
 
-        // User clicks kill after load.
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.loading_replay = false;
-            let info = agent.subagent_sessions.get_mut("child-1").unwrap();
-            assert!(!info.finished);
-            info.pending_kill = true;
-            info.kill_requested_at = Some(std::time::Instant::now());
+            {
+                let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+                agent.session.loading_replay = false;
+                let info = agent.subagent_sessions.get_mut("child-1").unwrap();
+                assert!(!info.finished);
+                info.pending_kill = true;
+                info.kill_requested_at = Some(std::time::Instant::now());
+            }
+
+            let finalized = finalize_killed_subagent(
+                &mut app,
+                &acp::SessionId::new("sess-1".to_owned()),
+                "sa-1",
+                status,
+            );
+            assert!(finalized, "the stuck orphan row must be finalized");
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let info = agent.subagent_sessions.get("child-1").unwrap();
+            assert!(info.finished, "kill must finalize the stuck orphan");
+            assert_eq!(info.status.as_deref(), Some(status));
+            assert!(!info.pending_kill, "pending_kill must clear so it can't revert");
+            assert!(info.kill_requested_at.is_none());
         }
-
-        // Shell: cancelled=false (nothing live), no real status → "cancelled".
-        let finalized = finalize_killed_subagent(
-            &mut app,
-            &acp::SessionId::new("sess-1".to_owned()),
-            "sa-1",
-            "cancelled",
-        );
-        assert!(finalized, "row should have been finalized");
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let info = agent.subagent_sessions.get("child-1").unwrap();
-        assert!(info.finished, "kill must finalize the stuck orphan row");
-        assert_eq!(info.status.as_deref(), Some("cancelled"));
-        assert!(
-            !info.pending_kill,
-            "pending_kill must clear so it can't revert"
-        );
-        assert!(info.kill_requested_at.is_none());
     }
 
-    /// An already-finished subagent killed → finalize stamps the REAL terminal
-    /// status (e.g. "completed"), not a forced "cancelled".
     #[test]
-    fn kill_finalizes_orphan_with_real_status_when_already_finished() {
-        let mut app = make_app_with_agent("sess-1");
-        app.agents
-            .get_mut(&AgentId(0))
-            .unwrap()
-            .session
-            .loading_replay = true;
-
-        let spawned = subagent_ext_replay(
-            "sess-1",
-            serde_json::json!({
-                "sessionUpdate": "subagent_spawned",
-                "subagent_id": "sa-1",
-                "parent_session_id": "sess-1",
-                "child_session_id": "child-1",
-                "subagent_type": "general-purpose",
-                "description": "orphan review",
-            }),
-            "sess-1-1",
-        );
-        handle_ext_notification(&spawned, &mut app);
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.loading_replay = false;
-            let info = agent.subagent_sessions.get_mut("child-1").unwrap();
-            info.pending_kill = true;
-        }
-
-        let finalized = finalize_killed_subagent(
-            &mut app,
-            &acp::SessionId::new("sess-1".to_owned()),
-            "sa-1",
-            "completed",
-        );
-        assert!(finalized, "row should have been finalized");
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let info = agent.subagent_sessions.get("child-1").unwrap();
-        assert!(info.finished);
-        assert_eq!(
-            info.status.as_deref(),
-            Some("completed"),
-            "already-finished kill must stamp the real terminal status"
-        );
-    }
-
-    /// NothingLive refreshes an existing terminal child without replacing its
-    /// real finish status, statistics, or error detail. The call default
-    /// (`completed`/`cancelled`) must not repaint a failed child.
-    #[test]
-    fn kill_refresh_preserves_existing_terminal_metrics() {
+    fn killing_an_already_finished_subagent_keeps_its_real_status() {
         let mut app = make_app_with_agent("sess-1");
         let spawn = make_ext_session_notification(
             "sess-1",
@@ -223,10 +168,10 @@
         );
     }
 
-    /// Re-finalizing an already-finished background child must refresh the
-    /// existing completed row, not append a second one.
     #[test]
-    fn kill_refresh_does_not_duplicate_background_completed_row() {
+    fn refreshing_a_killed_background_child_adds_no_duplicate_row_or_footer() {
+        use crate::app::agent_view::test_fixtures::count_turn_markers;
+
         let mut app = make_app_with_agent("sess-1");
         app.agents
             .get_mut(&AgentId(0))
@@ -236,10 +181,7 @@
             .task_tool_background
             .insert("child-bg".into(), true);
         assert!(handle(
-            make_ext_session_notification(
-                "sess-1",
-                test_subagent_spawned("sess-1", "child-bg"),
-            ),
+            make_ext_session_notification("sess-1", test_subagent_spawned("sess-1", "child-bg")),
             &mut app,
         ));
         assert!(handle(
@@ -258,7 +200,12 @@
                 })
                 .count()
         };
-        assert_eq!(terminal_rows(&app), 1);
+        let footer_count = |app: &crate::app::app_view::AppView| {
+            count_turn_markers(&app.agents[&AgentId(0)].subagent_views["child-bg"])
+        };
+        assert_eq!(terminal_rows(&app), 1, "first finish appends one terminal row");
+        assert_eq!(footer_count(&app), 1, "first finish appends one footer");
+
         app.agents
             .get_mut(&AgentId(0))
             .unwrap()
@@ -266,7 +213,6 @@
             .get_mut("child-bg")
             .unwrap()
             .pending_kill = true;
-
         assert!(finalize_killed_subagent(
             &mut app,
             &acp::SessionId::new("sess-1".to_owned()),
@@ -274,67 +220,13 @@
             "completed",
         ));
 
-        assert_eq!(terminal_rows(&app), 1);
+        assert_eq!(terminal_rows(&app), 1, "re-finalize must not add a second row");
+        assert_eq!(footer_count(&app), 1, "re-finalize must not add a second footer");
         let info = &app.agents[&AgentId(0)].subagent_sessions["child-bg"];
-        assert!(info.finished);
-        assert!(info.is_background);
+        assert!(info.finished && info.is_background);
         assert_eq!(info.status.as_deref(), Some("completed"));
     }
 
-    /// Kill reconciliation / late re-finalize must not append a second
-    /// `TurnCompleted` footer on the child transcript (parent-row count alone
-    /// misses this).
-    #[test]
-    fn kill_refresh_does_not_duplicate_child_transcript_footer() {
-        use crate::app::agent_view::test_fixtures::count_turn_markers;
-
-        let mut app = make_app_with_agent("sess-1");
-        app.agents
-            .get_mut(&AgentId(0))
-            .unwrap()
-            .session
-            .tracker
-            .task_tool_background
-            .insert("child-footer".into(), true);
-        assert!(handle(
-            make_ext_session_notification(
-                "sess-1",
-                test_subagent_spawned("sess-1", "child-footer"),
-            ),
-            &mut app,
-        ));
-        assert!(handle(
-            make_ext_session_notification("sess-1", test_subagent_finished("child-footer")),
-            &mut app,
-        ));
-        let footer_count = |app: &crate::app::app_view::AppView| {
-            count_turn_markers(&app.agents[&AgentId(0)].subagent_views["child-footer"])
-        };
-        assert_eq!(footer_count(&app), 1, "first finish must append one footer");
-        app.agents
-            .get_mut(&AgentId(0))
-            .unwrap()
-            .subagent_sessions
-            .get_mut("child-footer")
-            .unwrap()
-            .pending_kill = true;
-
-        assert!(finalize_killed_subagent(
-            &mut app,
-            &acp::SessionId::new("sess-1".to_owned()),
-            "child-footer",
-            "cancelled",
-        ));
-        assert_eq!(
-            footer_count(&app),
-            1,
-            "re-finalize must not append a second child TurnCompleted footer"
-        );
-    }
-
-    /// An earlier turn's `TurnCompleted` deeper in the child transcript must
-    /// not suppress a later turn's trailing footer; only a trailing footer is
-    /// re-finalize-idempotent.
     #[test]
     fn multi_turn_child_keeps_second_footer_on_re_finalize() {
         use crate::app::agent_view::test_fixtures::count_turn_markers;
@@ -393,16 +285,8 @@
         }
     }
 
-    /// Thread-leak regression: every `SubagentSpawned` creates a child
-    /// `AgentView` whose `PromptWidget` owns a `HistorySearchState`, and the
-    /// matcher thread used to spawn eagerly per view — one leaked thread per
-    /// subagent ever spawned, for the process lifetime.
-    ///
-    /// Drives the real handler with spawn+finish pairs and asserts the exact
-    /// invariant on every platform: no child view ever builds a matcher
-    /// daemon (each daemon owns exactly one named thread).
     #[test]
-    fn subagent_spawn_storm_spawns_no_matcher_daemons() {
+    fn spawning_many_subagents_starts_no_history_search_threads() {
         const SUBAGENTS: usize = 50;
 
         let mut app = make_app_with_agent("sess-parent");
@@ -443,11 +327,8 @@
         );
     }
 
-    /// Regression: replay from `updates.jsonl` emits `x.ai/session/update` (not
-    /// `session_notification`). Subagent lifecycle events must still populate
-    /// `subagent_sessions` and the parent scrollback `SubagentBlock`.
     #[test]
-    fn ext_session_update_replay_handles_subagent_spawned_and_finished() {
+    fn a_spawn_then_finish_updates_the_parent_row() {
         let mut app = make_app_with_agent("sess-parent");
         let child_sid = "child-sess-replay";
 
@@ -645,9 +526,6 @@
         );
     }
 
-    /// xAI lifecycle lines can be delivered in persistence order rather than
-    /// event-id order. An early finish is buffered and applied when spawn lands,
-    /// even if an unrelated update has already moved the reconnect cursor.
     #[test]
     fn finish_before_spawn_is_applied_after_later_cursor_progress() {
         let mut app = make_app_with_agent("sess-parent");
@@ -703,10 +581,8 @@
         );
     }
 
-    /// A retained terminal child can outlive the row discarded by reload. A
-    /// replay spawn rebuilds that row without reviving the child.
     #[test]
-    fn replay_spawn_rebuild_preserves_retained_finish_without_current_row() {
+    fn replaying_a_spawn_rebuilds_a_removed_row_and_keeps_the_finish() {
         let mut app = make_app_with_agent("sess-parent");
         let child_sid = "child-finished-before-rebuild";
         let spawn = subagent_ext_replay(
@@ -757,10 +633,8 @@
         assert!(!agent.scrollback.needs_animation());
     }
 
-    /// Reapplying a retained finish is part of a late replay row rebuild. It
-    /// must not masquerade as a live update and close the remaining grace.
     #[test]
-    fn late_replay_terminal_rebuild_keeps_grace_for_following_updates() {
+    fn a_terminal_rebuild_still_accepts_the_replay_updates_that_follow() {
         let mut app = make_app_with_agent("sess-parent");
         let child_sid = "child-late-terminal-rebuild";
         assert!(handle(
@@ -806,10 +680,8 @@
         assert_eq!(agent.last_seen_event_id.as_deref(), Some("sess-parent-2"));
     }
 
-    /// A live duplicate spawn never replaces retained domain state when its row
-    /// is temporarily absent. Only accepted replay may rebuild such a row.
     #[test]
-    fn live_spawn_without_current_row_stays_idempotent() {
+    fn a_duplicate_live_spawn_keeps_the_existing_child_view() {
         let mut app = make_app_with_agent("sess-parent");
         let spawn = make_ext_session_notification(
             "sess-parent",
@@ -847,10 +719,8 @@
         );
     }
 
-    /// Workflow children intentionally render through their workflow block,
-    /// so retained child state—not `scrollback_entry_id`—dedupes replay.
     #[test]
-    fn replayed_workflow_spawn_is_idempotent_without_a_child_row() {
+    fn a_duplicate_workflow_replay_spawn_keeps_the_existing_child_view() {
         let mut app = make_app_with_agent("sess-parent");
         app.agents
             .get_mut(&AgentId(0))
@@ -889,12 +759,8 @@
         );
     }
 
-    /// The live activity label fans out to `SubagentInfo` (tasks pane /
-    /// dashboard rows) alongside the scrollback block — from both the child
-    /// session/update path and the `SubagentProgress` path — and
-    /// `SubagentFinished` clears both surfaces.
     #[test]
-    fn subagent_activity_label_stamps_info_and_clears_on_finish() {
+    fn a_subagents_activity_label_updates_live_and_clears_on_finish() {
         let mut app = make_app_with_agent("sess-parent");
         let child_sid = "child-activity";
         let _ = handle(
@@ -968,237 +834,150 @@
     }
 
     #[test]
-    fn subagent_tool_call_delta_stamps_writing_activity_label() {
-        let mut app = make_app_with_agent("sess-parent");
-        let child_sid = "child-writing";
-        let _ = handle(
-            make_ext_session_notification(
-                "sess-parent",
-                test_subagent_spawned("sess-parent", child_sid),
-            ),
-            &mut app,
-        );
-
-        let changed = handle(
-            make_ext_session_notification(
-                child_sid,
-                XaiSessionUpdate::ToolCallDeltaChunk {
-                    tool_call_id: Some("call_1".into()),
-                    tool_index: 0,
-                    name: Some("write".into()),
-                    arguments_delta: None,
-                },
-            ),
-            &mut app,
-        );
-        assert!(changed, "first delta must request a redraw");
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let info = agent.subagent_sessions.get(child_sid).unwrap();
-        assert_eq!(info.activity_label.as_deref(), Some("Writing file…"));
-    }
-
-    #[test]
-    fn subagent_tool_call_delta_ignored_while_child_loading_replay() {
-        let mut app = make_app_with_agent("sess-parent");
-        let child_sid = "child-writing-replay";
-        let _ = handle(
-            make_ext_session_notification(
-                "sess-parent",
-                test_subagent_spawned("sess-parent", child_sid),
-            ),
-            &mut app,
-        );
-        app.agents
-            .get_mut(&AgentId(0))
-            .unwrap()
-            .subagent_views
-            .get_mut(child_sid)
-            .unwrap()
-            .session
-            .loading_replay = true;
-
-        let changed = handle(
-            make_ext_session_notification(
-                child_sid,
-                XaiSessionUpdate::ToolCallDeltaChunk {
-                    tool_call_id: Some("call_1".into()),
-                    tool_index: 0,
-                    name: Some("write".into()),
-                    arguments_delta: None,
-                },
-            ),
-            &mut app,
-        );
-        assert!(!changed);
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            agent
-                .subagent_sessions
-                .get(child_sid)
-                .unwrap()
-                .activity_label
-                .is_none()
-        );
-        assert_eq!(
-            agent
-                .subagent_views
-                .get(child_sid)
-                .unwrap()
-                .session
-                .tracker
-                .activity(),
-            None,
-            "reloading child tracker must not pick up the delta"
-        );
-    }
-
-    #[test]
-    fn subagent_tool_call_delta_without_registry_row_reports_no_redraw() {
-        let mut app = make_app_with_agent("sess-parent");
-        let child_sid = "child-writing-orphan";
-        let _ = handle(
-            make_ext_session_notification(
-                "sess-parent",
-                test_subagent_spawned("sess-parent", child_sid),
-            ),
-            &mut app,
-        );
-        app.agents
-            .get_mut(&AgentId(0))
-            .unwrap()
-            .subagent_sessions
-            .remove(child_sid);
-
-        let changed = handle(
-            make_ext_session_notification(
-                child_sid,
-                XaiSessionUpdate::ToolCallDeltaChunk {
-                    tool_call_id: Some("call_1".into()),
-                    tool_index: 0,
-                    name: Some("write".into()),
-                    arguments_delta: None,
-                },
-            ),
-            &mut app,
-        );
-        assert!(!changed, "no registry row → nothing visible → no redraw");
-    }
-
-    #[test]
-    fn subagent_acp_chunk_after_finish_does_not_restamp_label() {
-        let mut app = make_app_with_agent("sess-parent");
-        let child_sid = "child-acp-finished";
-        let _ = handle(
-            make_ext_session_notification(
-                "sess-parent",
-                test_subagent_spawned("sess-parent", child_sid),
-            ),
-            &mut app,
-        );
-        let _ = handle(
-            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
-            &mut app,
-        );
-        // Simulate the racing child rail still looking live.
-        app.agents
-            .get_mut(&AgentId(0))
-            .unwrap()
-            .subagent_views
-            .get_mut(child_sid)
-            .unwrap()
-            .session
-            .state = AgentState::TurnRunning;
-
-        let _ = handle(
-            make_agent_chunk_with_event(child_sid, "late text", "p-child", None),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            agent
-                .subagent_sessions
-                .get(child_sid)
-                .unwrap()
-                .activity_label
-                .is_none(),
-            "finished row must not be re-stamped by the child ACP fan-out"
-        );
-    }
-
-    #[test]
-    fn subagent_tool_call_delta_after_finish_does_not_restamp_label() {
-        let mut app = make_app_with_agent("sess-parent");
-        let child_sid = "child-writing-finished";
-        let _ = handle(
-            make_ext_session_notification(
-                "sess-parent",
-                test_subagent_spawned("sess-parent", child_sid),
-            ),
-            &mut app,
-        );
-        let _ = handle(
-            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
-            &mut app,
-        );
-
-        let changed = handle(
-            make_ext_session_notification(
-                child_sid,
-                XaiSessionUpdate::ToolCallDeltaChunk {
-                    tool_call_id: Some("call_1".into()),
-                    tool_index: 0,
-                    name: Some("write".into()),
-                    arguments_delta: None,
-                },
-            ),
-            &mut app,
-        );
-        assert!(!changed);
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            agent
-                .subagent_sessions
-                .get(child_sid)
-                .unwrap()
-                .activity_label
-                .is_none(),
-            "finished row must keep its cleared label"
-        );
-    }
-
-    /// Regression: replayed SubagentSpawned (resumed_from unset) must load child
-    /// updates.jsonl so fullscreen scrollback is not prompt-only.
-    #[test]
-    fn subagent_spawned_replays_child_updates_without_resumed_from() {
-        with_replay_disk_home(|_| {
-            let child_sid = "child-with-updates";
+    fn a_write_tool_call_labels_a_live_child_only() {
+        enum Case {
+            Live,
+            ReloadingTranscript,
+            Unregistered,
+        }
+        for (case, child_sid) in [
+            (Case::Live, "child-writing-live"),
+            (Case::ReloadingTranscript, "child-writing-reloading"),
+            (Case::Unregistered, "child-writing-unregistered"),
+        ] {
             let mut app = make_app_with_agent("sess-parent");
-            spawn_subagent_with_optional_updates(
+            let _ = handle(
+                make_ext_session_notification(
+                    "sess-parent",
+                    test_subagent_spawned("sess-parent", child_sid),
+                ),
                 &mut app,
-                child_sid,
-                Some(&(child_tool_line(child_sid) + "\n")),
+            );
+            match case {
+                Case::Live => {}
+                Case::ReloadingTranscript => {
+                    app.agents
+                        .get_mut(&AgentId(0))
+                        .unwrap()
+                        .subagent_views
+                        .get_mut(child_sid)
+                        .unwrap()
+                        .session
+                        .loading_replay = true;
+                }
+                Case::Unregistered => {
+                    app.agents
+                        .get_mut(&AgentId(0))
+                        .unwrap()
+                        .subagent_sessions
+                        .remove(child_sid);
+                }
+            }
+
+            let changed = handle(
+                make_ext_session_notification(
+                    child_sid,
+                    XaiSessionUpdate::ToolCallDeltaChunk {
+                        tool_call_id: Some("call_1".into()),
+                        tool_index: 0,
+                        name: Some("write".into()),
+                        arguments_delta: None,
+                    },
+                ),
+                &mut app,
             );
 
             let agent = app.agents.get(&AgentId(0)).unwrap();
-            assert_eq!(
-                child_scrollback_tool_call_count(agent, child_sid),
-                1,
-                "spawn must replay exactly one tool call"
-            );
-            assert!(
-                agent
-                    .subagent_sessions
-                    .get(child_sid)
-                    .is_some_and(|i| !i.transcript.needs_replay()),
-                "an emitting spawn replay must settle the transcript state"
-            );
-        });
+            match case {
+                Case::Live => {
+                    assert!(changed, "a live child's write delta must redraw");
+                    assert_eq!(
+                        agent.subagent_sessions[child_sid].activity_label.as_deref(),
+                        Some("Writing file…")
+                    );
+                }
+                Case::ReloadingTranscript => {
+                    assert!(!changed, "a delta must be ignored while the child reloads its transcript");
+                    assert!(agent.subagent_sessions[child_sid].activity_label.is_none());
+                    assert_eq!(
+                        agent.subagent_views[child_sid].session.tracker.activity(),
+                        None,
+                        "the reloading tracker must not pick up the delta"
+                    );
+                }
+                Case::Unregistered => {
+                    assert!(!changed, "a delta for an unregistered child must not redraw");
+                }
+            }
+        }
     }
 
-    /// Isolated `isReplay` with `loading_replay == false`: drop_unexpected_replay
-    /// runs before SubagentSpawned (`!meta.is_replay` is defense-in-depth).
     #[test]
-    fn replayed_subagent_spawned_without_loading_replay_is_dropped() {
+    fn a_finished_subagents_label_is_not_restamped_by_late_events() {
+        enum LateEvent {
+            AcpChunk,
+            ToolCallDelta,
+        }
+        for (event, child_sid) in [
+            (LateEvent::AcpChunk, "child-late-acp"),
+            (LateEvent::ToolCallDelta, "child-late-delta"),
+        ] {
+            let mut app = make_app_with_agent("sess-parent");
+            let _ = handle(
+                make_ext_session_notification(
+                    "sess-parent",
+                    test_subagent_spawned("sess-parent", child_sid),
+                ),
+                &mut app,
+            );
+            let _ = handle(
+                make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+                &mut app,
+            );
+
+            let changed = match event {
+                LateEvent::AcpChunk => {
+                    // Simulate the racing child rail still looking live.
+                    app.agents
+                        .get_mut(&AgentId(0))
+                        .unwrap()
+                        .subagent_views
+                        .get_mut(child_sid)
+                        .unwrap()
+                        .session
+                        .state = AgentState::TurnRunning;
+                    handle(
+                        make_agent_chunk_with_event(child_sid, "late text", "p-child", None),
+                        &mut app,
+                    )
+                }
+                LateEvent::ToolCallDelta => handle(
+                    make_ext_session_notification(
+                        child_sid,
+                        XaiSessionUpdate::ToolCallDeltaChunk {
+                            tool_call_id: Some("call_1".into()),
+                            tool_index: 0,
+                            name: Some("write".into()),
+                            arguments_delta: None,
+                        },
+                    ),
+                    &mut app,
+                ),
+            };
+            if matches!(event, LateEvent::ToolCallDelta) {
+                assert!(!changed, "a delta after finish must not redraw");
+            }
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                agent.subagent_sessions[child_sid].activity_label.is_none(),
+                "a finished subagent's label must stay cleared after a late event"
+            );
+        }
+    }
+
+    #[test]
+    fn a_replay_tagged_spawn_outside_a_session_load_is_dropped() {
         with_replay_disk_home(|_| {
             let child_sid = "child-unexpected-replay";
             let mut app = make_app_with_agent("sess-parent");
@@ -1231,40 +1010,29 @@
     }
 
     #[test]
-    fn late_replay_grace_accepts_is_replay_after_loading_replay_clears() {
+    fn a_stray_replay_is_accepted_briefly_after_a_load_then_a_live_update_stops_it() {
+        let replay = || crate::acp::meta::NotificationMeta {
+            is_replay: true,
+            ..crate::acp::meta::NotificationMeta::default()
+        };
         let mut app = make_app_with_agent("sess-late");
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         assert!(!agent.session.loading_replay);
         agent.arm_late_replay_grace();
-        let meta = crate::acp::meta::NotificationMeta {
-            is_replay: true,
-            ..crate::acp::meta::NotificationMeta::default()
-        };
-        assert!(
-            !drop_unexpected_replay(agent, &meta, "sess-late", "test"),
-            "isReplay during late grace must apply"
-        );
-    }
 
-    #[test]
-    fn live_update_closes_late_replay_grace() {
-        let mut app = make_app_with_agent("sess-late");
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.arm_late_replay_grace();
+        assert!(
+            !drop_unexpected_replay(agent, &replay(), "sess-late", "test"),
+            "a stray replay must still apply during the post-load grace"
+        );
+
         let live = crate::acp::meta::NotificationMeta::default();
         assert!(!drop_unexpected_replay(agent, &live, "sess-late", "test"));
-        let replay = crate::acp::meta::NotificationMeta {
-            is_replay: true,
-            ..crate::acp::meta::NotificationMeta::default()
-        };
         assert!(
-            drop_unexpected_replay(agent, &replay, "sess-late", "test"),
-            "this-session live must close late grace"
+            drop_unexpected_replay(agent, &replay(), "sess-late", "test"),
+            "a live update ends the grace so later replays are dropped"
         );
     }
 
-    /// Resume: a `SubagentSpawned` during `loading_replay` must defer the child
-    /// transcript load (the dominant large-session resume cost) to first open.
     #[test]
     fn subagent_spawned_during_resume_defers_child_replay_until_open() {
         with_replay_disk_home(|_| {
@@ -1294,31 +1062,136 @@
                     .subagent_sessions
                     .get(child_sid)
                     .is_some_and(|i| i.transcript.needs_replay()),
-                "resume spawn must leave the transcript NeedsReplay for lazy load"
+                "resume spawn must leave the transcript NeedsReplay for the first open"
             );
 
-            // Opening the subagent later triggers the deferred (lazy) replay.
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.open_subagent_fullscreen(child_sid.to_string());
             assert_eq!(
                 child_scrollback_tool_call_count(agent, child_sid),
                 1,
-                "opening the subagent after resume must lazily replay its transcript"
+                "opening the subagent after resume must replay its transcript"
             );
             assert!(
                 agent
                     .subagent_sessions
                     .get(child_sid)
                     .is_some_and(|i| !i.transcript.needs_replay()),
-                "lazy open must settle the transcript state"
+                "the first open must record the disk copy"
             );
         });
     }
 
-    /// Regression (resume): a subagent that already finished must still show its
-    /// full transcript on open. The finished handler's `TurnCompleted` push is
-    /// suppressed during replay — otherwise it vetoes the deferred load
-    /// (`scrollback_is_prompt_only`), leaving a permanently empty transcript.
+    #[test]
+    fn live_spawn_burst_defers_child_replay_until_open() {
+        // The burst size that froze the TUI in the field.
+        const BURST_CHILDREN: usize = 25;
+
+        with_replay_disk_home(|_| {
+            let mut app = make_app_with_agent("sess-parent");
+            let child_sids: Vec<String> = (0..BURST_CHILDREN)
+                .map(|i| format!("child-burst-{i}"))
+                .collect();
+            let reads_before = crate::app::subagent::test_support::transcript_reads();
+            for sid in &child_sids {
+                spawn_subagent_with_optional_updates(
+                    &mut app,
+                    sid,
+                    Some(&(child_tool_line(sid) + "\n")),
+                );
+            }
+            assert_eq!(
+                crate::app::subagent::test_support::transcript_reads(),
+                reads_before,
+                "a spawn burst must not open a single child transcript"
+            );
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            for sid in &child_sids {
+                assert_eq!(
+                    child_scrollback_tool_call_count(agent, sid),
+                    0,
+                    "a live spawn must not replay the on-disk transcript"
+                );
+                assert!(
+                    agent
+                        .subagent_sessions
+                        .get(sid.as_str())
+                        .is_some_and(|i| i.transcript.needs_replay()),
+                    "a live spawn must leave the transcript NeedsReplay for the first open"
+                );
+            }
+
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.open_subagent_fullscreen(child_sids[0].clone());
+            assert_eq!(
+                crate::app::subagent::test_support::transcript_reads(),
+                reads_before + 1,
+                "the first open must read exactly the opened child's transcript"
+            );
+            assert_eq!(child_scrollback_tool_call_count(agent, &child_sids[0]), 1);
+            assert_eq!(
+                child_scrollback_tool_call_count(agent, &child_sids[1]),
+                0,
+                "opening one child must not read its siblings"
+            );
+        });
+    }
+
+    #[test]
+    fn resumed_child_keeps_inherited_history_when_a_live_block_arrives_first() {
+        with_replay_disk_home(|home| {
+            let child_sid = "child-resume-live-first";
+            write_child_updates_jsonl(home, child_sid, &(child_tool_line(child_sid) + "\n"));
+
+            let mut app = make_app_with_agent("sess-parent");
+            let mut spawned = test_subagent_spawned("sess-parent", child_sid);
+            let XaiSessionUpdate::SubagentSpawned { resumed_from, .. } = &mut spawned else {
+                unreachable!();
+            };
+            *resumed_from = Some("orig-child".into());
+            let _ = handle(
+                make_ext_session_notification_with_method(
+                    "sess-parent",
+                    "x.ai/session/update",
+                    spawned,
+                ),
+                &mut app,
+            );
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(
+                child_scrollback_tool_call_count(agent, child_sid),
+                0,
+                "a resumed spawn must defer the read like any other"
+            );
+
+            // A background child streams its first live block before it is opened.
+            app.agents
+                .get_mut(&AgentId(0))
+                .unwrap()
+                .subagent_sessions
+                .get_mut(child_sid)
+                .unwrap()
+                .is_background = true;
+            let _ = handle(make_agent_chunk_message(child_sid, "working on it"), &mut app);
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(
+                child_scrollback_tool_call_count(agent, child_sid),
+                1,
+                "the inherited tool call must be read before the live block lands"
+            );
+
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.open_subagent_fullscreen(child_sid.to_string());
+            assert_eq!(
+                child_scrollback_tool_call_count(agent, child_sid),
+                1,
+                "opening the child must show the inherited history exactly once"
+            );
+        });
+    }
+
     #[test]
     fn subagent_resume_finished_then_open_shows_full_transcript() {
         with_replay_disk_home(|_| {
@@ -1357,7 +1230,6 @@
                     .is_some_and(|i| i.transcript.needs_replay()),
                 "finished-during-resume must leave the transcript NeedsReplay"
             );
-            // Even deferred, a finished subagent must not show a running spinner.
             assert!(
                 matches!(
                     agent.subagent_views.get(child_sid).unwrap().session.state,
@@ -1373,7 +1245,6 @@
                 1,
                 "opening a finished subagent after resume must show its transcript"
             );
-            // The lazy load reapplies the "Worked for" footer (live parity).
             let child = agent.subagent_views.get(child_sid).unwrap();
             assert!(
                 (0..child.scrollback.len()).any(|i| child
@@ -1385,11 +1256,58 @@
         });
     }
 
-    /// Finish-time / close-time eviction and rebuild-on-open scenarios.
-    ///
-    /// Each scenario owns one parent (`sess-parent`) plus a child driven
-    /// through the real notification handler, and the child's on-disk
-    /// transcript under the shared replay test home.
+    #[test]
+    fn an_open_resumed_child_that_finishes_without_streaming_hydrates_in_place() {
+        with_replay_disk_home(|home| {
+            let child_sid = "child-open-resume-finish";
+
+            // A resumed child spawns live; its inherited transcript has not
+            // flushed to disk yet.
+            let mut app = make_app_with_agent("sess-parent");
+            let mut spawned = test_subagent_spawned("sess-parent", child_sid);
+            let XaiSessionUpdate::SubagentSpawned { resumed_from, .. } = &mut spawned else {
+                unreachable!();
+            };
+            *resumed_from = Some("orig-child".into());
+            let _ = handle(
+                make_ext_session_notification_with_method(
+                    "sess-parent",
+                    "x.ai/session/update",
+                    spawned,
+                ),
+                &mut app,
+            );
+
+            // Open it fullscreen before any transcript exists: the read finds
+            // nothing, so the view stays prompt-only.
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.open_subagent_fullscreen(child_sid.to_string());
+            assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 0);
+
+            // The inherited transcript flushes, then the child finishes while
+            // still open, having streamed no live block.
+            write_child_updates_jsonl(home, child_sid, &(child_tool_line(child_sid) + "\n"));
+            let _ = handle(
+                make_ext_session_notification_with_method(
+                    "sess-parent",
+                    "x.ai/session/update",
+                    test_subagent_finished(child_sid),
+                ),
+                &mut app,
+            );
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(
+                child_scrollback_tool_call_count(agent, child_sid),
+                1,
+                "finishing must hydrate the open resumed child in place, not just stamp a footer"
+            );
+        });
+    }
+
+    /// Each scenario owns one parent plus a child driven through the real
+    /// notification handler, and the child's on-disk transcript under the
+    /// shared replay test home.
     mod eviction_and_rebuild {
         use super::*;
         use crate::app::subagent::ChildTranscript;
@@ -1416,7 +1334,6 @@
                 Scenario { app, child_sid }
             }
 
-            /// Spawn a second child under the same parent.
             fn spawn_sibling(&mut self, child_sid: &str, updates: Option<String>) {
                 spawn_subagent_with_optional_updates(&mut self.app, child_sid, updates.as_deref());
             }
@@ -1512,7 +1429,6 @@
                 })
             }
 
-            /// Count of compaction markers in the child scrollback.
             fn compaction_markers(&self) -> usize {
                 let child = self.agent().subagent_views.get(self.child_sid).unwrap();
                 (0..child.scrollback.len())
@@ -1545,7 +1461,6 @@
                 std::fs::create_dir(&path).unwrap();
             }
 
-            /// Replace the (possibly broken) transcript with `content`.
             fn replace_transcript(&self, content: &str) {
                 let path = self.updates_path();
                 if path.is_dir() {
@@ -1572,125 +1487,123 @@
             )
         }
 
-        /// Memory regression: a finished child view's transcript is evicted
-        /// on the live path (the eagerly-loaded scrollback is dropped and
-        /// the transcript re-armed `NeedsReplay`) and first open rebuilds
-        /// the full transcript from disk with the `TurnCompleted` footer,
-        /// through the same deferred path resume uses.
         #[test]
-        fn live_finish_evicts_child_transcript_and_open_rebuilds_it() {
-            let child_sid = "child-live-evict";
-            let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
-            // Live spawn eagerly loads the on-disk transcript into the view.
-            assert_eq!(s.tool_calls(), 1);
+        fn a_finished_foreground_child_is_evicted_then_rebuilds_on_open() {
+            enum Trigger {
+                FinishWhileClosed,
+                CloseWhileOpen,
+                SwitchToSibling,
+            }
+            for (trigger, child_sid) in [
+                (Trigger::FinishWhileClosed, "child-evict-finish"),
+                (Trigger::CloseWhileOpen, "child-evict-close"),
+                (Trigger::SwitchToSibling, "child-evict-switch"),
+            ] {
+                let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
+                match trigger {
+                    Trigger::FinishWhileClosed => {
+                        s.open();
+                        s.close();
+                        s.finish();
+                        let child = s.agent().subagent_views.get(child_sid).unwrap();
+                        assert_eq!(child.scrollback.len(), 0, "finish must evict the transcript");
+                        assert!(matches!(child.session.state, AgentState::Idle));
+                    }
+                    Trigger::CloseWhileOpen => {
+                        s.open();
+                        s.finish();
+                        assert_eq!(s.tool_calls(), 1, "an open child is guarded at finish");
+                        s.close();
+                    }
+                    Trigger::SwitchToSibling => {
+                        let sibling = "child-evict-sibling";
+                        s.spawn_sibling(sibling, Some(child_tool_line(sibling) + "\n"));
+                        s.open();
+                        s.finish();
+                        s.open_child(sibling);
+                    }
+                }
+                assert_eq!(s.tool_calls(), 0, "the finished child must be evicted");
+                assert_eq!(
+                    s.transcript(),
+                    ChildTranscript::NeedsReplay,
+                    "eviction must schedule the deferred on-open replay again"
+                );
 
-            s.finish();
-            let child = s.agent().subagent_views.get(child_sid).unwrap();
-            assert_eq!(
-                child.scrollback.len(),
-                0,
-                "live finish must evict the retained child transcript"
-            );
-            assert!(matches!(child.session.state, AgentState::Idle));
-            assert_eq!(
-                s.transcript(),
-                ChildTranscript::NeedsReplay,
-                "eviction must re-arm the deferred on-open replay"
-            );
-
-            s.open();
-            assert_eq!(
-                s.tool_calls(),
-                1,
-                "opening an evicted finished subagent must rebuild its transcript"
-            );
-            assert_eq!(
-                s.session_events(),
-                1,
-                "rebuilt transcript must end with the TurnCompleted footer"
-            );
+                s.open();
+                assert_eq!(s.tool_calls(), 1, "opening the evicted child must rebuild it");
+                assert_eq!(
+                    s.session_events(),
+                    1,
+                    "the rebuilt transcript ends with the TurnCompleted footer"
+                );
+            }
         }
 
-        /// The transcript the user is currently viewing is never blanked: a
-        /// child open fullscreen keeps its scrollback and gets the footer in
-        /// place.
         #[test]
-        fn live_finish_keeps_transcript_of_open_child() {
-            let child_sid = "child-open-no-evict";
-            let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
-            s.open();
-
-            s.finish();
-            assert_eq!(
-                s.tool_calls(),
-                1,
-                "the open child's transcript must survive its finish"
-            );
-            assert_eq!(
-                s.session_events(),
-                1,
-                "the open child must be finalized in place with the footer"
-            );
+        fn an_evict_guard_keeps_the_transcript_in_place() {
+            enum Guard {
+                OpenAtFinish,
+                RunningOnClose,
+            }
+            for (guard, child_sid, footer) in [
+                (Guard::OpenAtFinish, "child-guard-finish", 1),
+                (Guard::RunningOnClose, "child-guard-close", 0),
+            ] {
+                let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
+                s.open();
+                match guard {
+                    Guard::OpenAtFinish => s.finish(),
+                    Guard::RunningOnClose => s.close(),
+                }
+                assert_eq!(s.tool_calls(), 1, "the guarded transcript must survive");
+                assert_eq!(s.session_events(), footer);
+            }
         }
 
-        /// Eviction re-injects the task prompt (resume-state parity), and the
-        /// on-open replay dedups its on-disk echo: exactly one prompt after
-        /// evict → open, alongside the rebuilt transcript.
         #[test]
-        fn evicted_child_keeps_prompt_and_open_shows_it_once() {
-            let child_sid = "child-evict-prompt";
-            let task = "scan src/ for auth";
-            write_subagent_meta_json(replay_disk_test_home(), "sess-parent", child_sid, task);
-            let updates = format!(
-                "{}\n{}",
-                child_user_message_line(child_sid, task),
-                child_tool_line(child_sid)
-            );
-            let mut s = Scenario::spawn(child_sid, Some(updates));
+        fn an_on_disk_prompt_echo_dedups_against_the_injected_prompt_on_open() {
+            // Same echo-dedup on open whether the view is freshly spawned or was
+            // first evicted back to the task-prompt baseline.
+            enum Entry {
+                FreshSpawn,
+                Evicted,
+            }
+            for (entry, child_sid) in [
+                (Entry::FreshSpawn, "child-echo-fresh"),
+                (Entry::Evicted, "child-echo-evicted"),
+            ] {
+                let task = "scan src/ for auth";
+                write_subagent_meta_json(replay_disk_test_home(), "sess-parent", child_sid, task);
+                let updates = format!(
+                    "{}\n{}",
+                    child_user_message_line(child_sid, task),
+                    child_tool_line(child_sid)
+                );
+                let mut s = Scenario::spawn(child_sid, Some(updates));
 
-            s.finish();
-            // Evicted to the resume state: task prompt only.
-            assert_eq!(s.prompts_matching(task), 1);
-            assert_eq!(s.tool_calls(), 0);
+                // Spawn injects the task prompt once and reads no transcript.
+                assert_eq!(s.prompts_matching(task), 1, "spawn injects the task prompt once");
+                assert_eq!(s.tool_calls(), 0, "spawn does not replay the transcript");
 
-            s.open();
-            assert_eq!(
-                s.prompts_matching(task),
-                1,
-                "the replayed on-disk echo must dedup against the re-injected prompt"
-            );
-            assert_eq!(s.tool_calls(), 1);
+                if matches!(entry, Entry::Evicted) {
+                    s.finish();
+                    assert_eq!(s.prompts_matching(task), 1, "eviction keeps the task prompt");
+                    assert_eq!(s.tool_calls(), 0);
+                }
+
+                s.open();
+                assert_eq!(
+                    s.prompts_matching(task),
+                    1,
+                    "the replayed on-disk echo must dedup against the injected prompt"
+                );
+                assert_eq!(s.tool_calls(), 1);
+            }
         }
 
-        /// Closing the fullscreen view of a finished child evicts it: the
-        /// counterpart of finish-time eviction for children that were open
-        /// (and thus guarded) when they finished, or re-inflated by a later
-        /// open.
         #[test]
-        fn closing_fullscreen_finished_child_evicts_it() {
-            let child_sid = "child-close-evict";
-            let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
-            s.open();
-            s.finish();
-            // Open at finish: guarded, transcript kept.
-            assert_eq!(s.tool_calls(), 1);
-
-            s.close();
-            assert_eq!(s.agent().active_subagent, None);
-            assert_eq!(
-                s.tool_calls(),
-                0,
-                "closing a finished child must evict its transcript"
-            );
-            // And it still rebuilds on the next open.
-            s.open();
-            assert_eq!(s.tool_calls(), 1);
-        }
-
-        /// A late child event landing in an evicted scrollback must not veto
-        /// the on-open rebuild: finished + NeedsReplay always re-replays.
-        #[test]
-        fn late_event_after_evict_does_not_veto_open_rebuild() {
+        fn late_block_after_evict_still_rebuilds_on_open() {
             let child_sid = "child-late-event";
             let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
             s.finish();
@@ -1701,179 +1614,47 @@
             assert_eq!(
                 s.tool_calls(),
                 1,
-                "the on-open rebuild must not be vetoed by a late block"
+                "a late block must not stop the on-open rebuild"
             );
         }
 
-        /// Background children keep their transcript: they can receive
-        /// monitor/bg-task output after finish, and a late block in an
-        /// emptied scrollback would veto the on-open re-replay.
         #[test]
-        fn live_finish_keeps_transcript_of_background_child() {
-            let child_sid = "child-bg-no-evict";
-            let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
-            s.set_background();
+        fn a_nonemitting_rebuild_of_an_evicted_view_retries_until_disk_lands() {
+            // An evicted view holds nothing to restore, so a non-emitting read
+            // stays NeedsReplay and retries once real content lands. A read error
+            // applies no footer; an Empty read (flush not landed yet) still stamps
+            // the finished footer on the bare view.
+            enum Outcome {
+                ReadError,
+                Empty,
+            }
+            for (outcome, child_sid, footer_before_flush) in [
+                (Outcome::ReadError, "child-evict-io-retry", 0),
+                (Outcome::Empty, "child-evict-flush-race", 1),
+            ] {
+                let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
+                s.finish();
 
-            s.finish();
-            assert_eq!(
-                s.tool_calls(),
-                1,
-                "a background child's transcript must survive its finish"
-            );
+                match outcome {
+                    Outcome::ReadError => s.break_transcript(),
+                    Outcome::Empty => s.replace_transcript(""),
+                }
+                s.open();
+                assert_eq!(s.tool_calls(), 0, "a non-emitting rebuild reads nothing");
+                assert_eq!(
+                    s.transcript(),
+                    ChildTranscript::NeedsReplay,
+                    "a non-emitting rebuild of an evicted view stays NeedsReplay"
+                );
+                assert_eq!(s.session_events(), footer_before_flush);
+
+                s.replace_transcript(&(child_tool_line(child_sid) + "\n"));
+                s.open();
+                assert_eq!(s.tool_calls(), 1, "the retry rebuilds once disk content lands");
+                assert_eq!(s.session_events(), 1, "the rebuilt view ends with one footer");
+            }
         }
 
-        /// Switching the fullscreen takeover to another child evicts the
-        /// finished child being left, exactly like closing it.
-        #[test]
-        fn switching_fullscreen_to_another_child_evicts_the_finished_one() {
-            let child_a = "child-switch-a";
-            let child_b = "child-switch-b";
-            let mut s = Scenario::spawn(child_a, Some(child_tool_line(child_a) + "\n"));
-            s.spawn_sibling(child_b, Some(child_tool_line(child_b) + "\n"));
-            s.open();
-            s.finish();
-            // Open at finish: guarded, transcript kept.
-            assert_eq!(s.tool_calls(), 1);
-
-            s.open_child(child_b);
-            assert_eq!(s.agent().active_subagent.as_deref(), Some(child_b));
-            assert_eq!(
-                s.tool_calls_for(child_a),
-                0,
-                "switching away must evict the finished child being left"
-            );
-            assert_eq!(
-                s.transcript(),
-                ChildTranscript::NeedsReplay,
-                "the evicted child must re-arm its on-open rebuild"
-            );
-        }
-
-        /// Closing the fullscreen view of a still-running child must NOT
-        /// evict: its live transcript keeps streaming and is not yet on disk
-        /// in full.
-        #[test]
-        fn closing_fullscreen_running_child_keeps_transcript() {
-            let child_sid = "child-close-running";
-            let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
-            s.open();
-            s.close();
-            assert_eq!(s.agent().active_subagent, None);
-            assert_eq!(
-                s.tool_calls(),
-                1,
-                "closing a still-running child must keep its live transcript"
-            );
-        }
-
-        /// A failed rebuild (transient read error on `updates.jsonl`) must
-        /// stay `NeedsReplay`: post-eviction, disk is the only copy, so the
-        /// next open must retry once the I/O condition clears.
-        #[test]
-        fn failed_rebuild_after_evict_retries_on_next_open() {
-            let child_sid = "child-evict-io-retry";
-            let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
-            s.finish();
-
-            s.break_transcript();
-            s.open();
-            assert_eq!(s.tool_calls(), 0);
-            assert_eq!(
-                s.transcript(),
-                ChildTranscript::NeedsReplay,
-                "a failed rebuild must not settle the transcript state"
-            );
-            assert_eq!(
-                s.session_events(),
-                0,
-                "a failed rebuild must not apply the TurnCompleted footer"
-            );
-
-            // I/O condition clears; the next open retries and rebuilds.
-            s.replace_transcript(&(child_tool_line(child_sid) + "\n"));
-            s.open();
-            assert_eq!(
-                s.tool_calls(),
-                1,
-                "the next open must retry the rebuild after a failed read"
-            );
-            assert_eq!(
-                s.session_events(),
-                1,
-                "the successful retry must apply exactly one footer"
-            );
-        }
-
-        /// An `Empty` rebuild (missing transcript, not a read error) of a
-        /// bare evicted view leaves a retriable husk: prompt + footer stay,
-        /// the transcript stays `NeedsReplay`, and a late-landing persistence
-        /// flush is picked up by the next open instead of being lost to a
-        /// permanently "replayed" husk.
-        #[test]
-        fn empty_rebuild_of_evicted_view_retries_until_flush_lands() {
-            let child_sid = "child-flush-race";
-            let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
-            s.finish();
-
-            // The child's final persistence flush has not landed yet.
-            s.replace_transcript("");
-            s.open();
-            assert_eq!(s.tool_calls(), 0, "nothing to rebuild from yet");
-            assert_eq!(
-                s.transcript(),
-                ChildTranscript::NeedsReplay,
-                "an Empty rebuild must stay NeedsReplay, not settle as replayed"
-            );
-            s.close();
-
-            // The flush lands; the next open rebuilds the real transcript.
-            s.replace_transcript(&(child_tool_line(child_sid) + "\n"));
-            s.open();
-            assert_eq!(
-                s.tool_calls(),
-                1,
-                "the open after the late flush must rebuild the transcript"
-            );
-        }
-
-        /// Re-activating the prompt-plus-footer husk left by an `Empty`
-        /// rebuild must not settle it: the footer is rebuild-stamped, not
-        /// transcript content, so the husk stays `NeedsReplay` and a late
-        /// persistence flush is still replayed.
-        #[test]
-        fn empty_rebuild_husk_survives_reactivation_until_flush_lands() {
-            let child_sid = "child-husk-reopen";
-            let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
-            s.finish();
-
-            // The flush has not landed; the first open leaves the husk.
-            s.replace_transcript("");
-            s.open();
-            assert_eq!(s.transcript(), ChildTranscript::NeedsReplay);
-
-            // Activating the already-open child re-runs the ensure path.
-            s.open();
-            assert_eq!(
-                s.transcript(),
-                ChildTranscript::NeedsReplay,
-                "re-activating the husk must not settle it as the only copy"
-            );
-            assert_eq!(s.session_events(), 1, "the husk keeps exactly one footer");
-
-            // The flush lands; the next open rebuilds the real transcript.
-            s.replace_transcript(&(child_tool_line(child_sid) + "\n"));
-            s.open();
-            assert_eq!(
-                s.tool_calls(),
-                1,
-                "the late flush must still be replayed after husk reactivation"
-            );
-        }
-
-        /// A rebuild from a partially flushed transcript is transient, not
-        /// permanent: the close-path eviction of a `DiskBacked` view re-arms
-        /// `NeedsReplay`, so the open after the rest of the flush lands
-        /// replays the completed file.
         #[test]
         fn partial_flush_rebuild_self_heals_on_next_open_cycle() {
             let child_sid = "child-partial-flush";
@@ -1888,7 +1669,7 @@
             assert_eq!(
                 s.transcript(),
                 ChildTranscript::NeedsReplay,
-                "closing a disk-backed view must re-arm the replay"
+                "closing a disk-backed view must schedule the replay again"
             );
 
             // The rest of the flush lands after the partial rebuild.
@@ -1907,17 +1688,15 @@
             );
         }
 
-        /// A finished background child with in-memory content and an
-        /// unsettled transcript (failed eager replay) must NOT rebuild from
-        /// disk: it is never evicted and its view may hold post-finish
-        /// monitor output that is not on disk, so the in-memory view stays
-        /// the source of truth.
         #[test]
         fn finished_background_child_with_content_never_rebuilds() {
             let child_sid = "child-bg-no-rebuild";
             let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
             s.set_background();
-            // Simulate a failed eager replay: populated view, unsettled state.
+            // Populated view whose transcript was never read back from disk.
+            s.open();
+            assert_eq!(s.tool_calls(), 1);
+            s.close();
             s.set_transcript(ChildTranscript::NeedsReplay);
 
             s.finish();
@@ -1931,179 +1710,102 @@
             );
         }
 
-        /// A failed rebuild of a populated foreground view (failed eager
-        /// replay, finished while open, re-opened) restores the pre-reset
-        /// content instead of leaving a bare view; disk is retried on a
-        /// later open.
         #[test]
-        fn failed_rebuild_restores_populated_view() {
-            let child_sid = "child-restore";
-            let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
-            // Open at finish → guarded → finalized in place; simulate the
-            // eager replay having failed while the view keeps its
-            // (live-streamed) content.
-            s.open();
-            s.set_transcript(ChildTranscript::NeedsReplay);
-            s.finish();
-            assert_eq!(s.tool_calls(), 1);
-            assert_eq!(s.session_events(), 1);
+        fn a_nonemitting_rebuild_restores_the_populated_view() {
+            // Content the replay never read back is restored when the rebuild
+            // reads nothing: a read error stays retriable, an Empty read pins
+            // the only copy MemoryOnly.
+            enum Outcome {
+                ReadError,
+                Empty,
+            }
+            for (outcome, child_sid) in [
+                (Outcome::ReadError, "child-restore-err"),
+                (Outcome::Empty, "child-restore-empty"),
+            ] {
+                let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
+                s.open();
+                s.set_transcript(ChildTranscript::NeedsReplay);
+                s.finish();
+                assert_eq!(s.tool_calls(), 1);
+                assert_eq!(s.session_events(), 1);
 
-            // Break the transcript, then re-open: the rebuild fails and the
-            // pre-reset content must come back, footer included.
-            s.break_transcript();
-            s.open();
-            assert_eq!(
-                s.tool_calls(),
-                1,
-                "a failed rebuild must restore the populated view"
-            );
-            assert_eq!(
-                s.session_events(),
-                1,
-                "the restored view keeps its footer; no extra footer is applied"
-            );
+                match outcome {
+                    Outcome::ReadError => s.break_transcript(),
+                    Outcome::Empty => s.remove_session_dir(),
+                }
+                s.open();
+                assert_eq!(
+                    s.tool_calls(),
+                    1,
+                    "a non-emitting rebuild restores the populated view"
+                );
+                assert_eq!(s.session_events(), 1, "the restored view keeps its single footer");
 
-            // Repair the disk: the restored view must still reset and rebuild
-            // on the next open (restore re-arms the retry, not just once).
-            s.replace_transcript(&(child_tool_line(child_sid) + "\n"));
-            s.open();
-            assert_eq!(
-                s.tool_calls(),
-                1,
-                "the repaired disk must rebuild cleanly on the next open"
-            );
-            assert_eq!(
-                s.transcript(),
-                ChildTranscript::DiskBacked,
-                "a successful rebuild after restore must settle the state"
-            );
+                match outcome {
+                    Outcome::ReadError => {
+                        s.replace_transcript(&(child_tool_line(child_sid) + "\n"));
+                        s.open();
+                        assert_eq!(s.tool_calls(), 1, "the repaired disk rebuilds cleanly");
+                        assert_eq!(
+                            s.transcript(),
+                            ChildTranscript::DiskBacked,
+                            "a read error is retriable and records the disk copy once repaired"
+                        );
+                    }
+                    Outcome::Empty => {
+                        assert_eq!(
+                            s.transcript(),
+                            ChildTranscript::MemoryOnly,
+                            "nothing on disk pins the restored copy as the only one"
+                        );
+                        s.close();
+                        assert_eq!(s.tool_calls(), 1, "close must not drop the memory-only copy");
+                        s.open();
+                        assert_eq!(s.tool_calls(), 1);
+                    }
+                }
+            }
         }
 
-        /// A missing transcript (`Ok(Empty)`, not a read error) must also
-        /// restore a populated view: the in-memory copy is the only one, and
-        /// dropping it for a prompt-plus-footer husk loses the transcript
-        /// permanently.
         #[test]
-        fn empty_rebuild_restores_populated_view_and_settles() {
-            let child_sid = "child-restore-empty";
-            let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
-            // Open at finish → guarded → finalized in place; eager replay
-            // "failed": unsettled state, populated view kept.
-            s.open();
-            s.set_transcript(ChildTranscript::NeedsReplay);
-            s.finish();
+        fn finish_keeps_the_only_copy_when_disk_cannot_rebuild_it() {
+            // Two ways disk cannot rebuild: nothing persisted, or a non-emitting file.
+            for (child_sid, updates) in [
+                ("child-no-disk-copy", None),
+                (
+                    "child-non-emitting-disk",
+                    Some(child_compaction_started_line("child-non-emitting-disk") + "\n"),
+                ),
+            ] {
+                let mut s = Scenario::spawn(child_sid, updates);
+                // Live-streamed content that exists only in memory.
+                s.push_child_block(RenderBlock::system("streamed output".to_string()));
+                assert_eq!(s.transcript(), ChildTranscript::NeedsReplay);
 
-            // The session dir vanishes before the next open (cleanup /
-            // relocation): the rebuild resolves to Empty, not an error.
-            s.remove_session_dir();
-            s.open();
-            assert_eq!(
-                s.tool_calls(),
-                1,
-                "an Empty rebuild must restore the populated view, not drop it"
-            );
-            assert_eq!(
-                s.session_events(),
-                1,
-                "the restored view keeps exactly one footer"
-            );
-            assert_eq!(
-                s.transcript(),
-                ChildTranscript::MemoryOnly,
-                "with nothing on disk the restored copy is authoritative — no retry loop"
-            );
+                s.finish();
+                assert_eq!(
+                    s.transcript(),
+                    ChildTranscript::NeedsReplay,
+                    "a probe that proves nothing must keep retrying"
+                );
+                assert!(s.has_system_block(), "the only copy must survive the finish");
 
-            // The restored copy is memory-only: closing the fullscreen (the
-            // would-be evict) must NOT drop it: there is nothing on disk to
-            // rebuild from.
-            s.close();
-            assert_eq!(
-                s.tool_calls(),
-                1,
-                "closing a memory-only transcript must not evict it"
-            );
-            s.open();
-            assert_eq!(s.tool_calls(), 1);
+                s.open();
+                assert_eq!(
+                    s.transcript(),
+                    ChildTranscript::MemoryOnly,
+                    "the open's Empty rebuild records the restored copy as memory-only"
+                );
+                assert!(s.has_system_block());
+                s.close();
+                assert!(
+                    s.has_system_block(),
+                    "close must never drop the memory-only copy"
+                );
+            }
         }
 
-        /// A live-streamed transcript that never reached disk (child
-        /// persistence wrote nothing, or the finish raced the flush) must
-        /// not be dropped: the eviction probe finds no persisted copy and
-        /// keeps the only copy; the first open's `Empty` rebuild then
-        /// settles it as memory-only, permanently exempt from eviction.
-        #[test]
-        fn finish_without_persisted_transcript_keeps_only_copy() {
-            let child_sid = "child-no-disk-copy";
-            let mut s = Scenario::spawn(child_sid, None);
-            // Live-streamed content that exists only in memory.
-            s.push_child_block(RenderBlock::system("streamed output".to_string()));
-            assert_eq!(s.transcript(), ChildTranscript::NeedsReplay);
-
-            s.finish();
-            assert_eq!(
-                s.transcript(),
-                ChildTranscript::NeedsReplay,
-                "a probe miss keeps retrying rather than settling"
-            );
-            assert!(s.has_system_block(), "the only copy must survive the finish");
-
-            s.open();
-            assert_eq!(
-                s.transcript(),
-                ChildTranscript::MemoryOnly,
-                "the open's Empty rebuild settles the restored copy as memory-only"
-            );
-            assert!(s.has_system_block());
-            s.close();
-            assert!(
-                s.has_system_block(),
-                "close must never drop the memory-only copy"
-            );
-        }
-
-        /// A non-empty persisted file that would not EMIT on replay (here
-        /// xAI-only content; torn or catalog-only lines behave the same) is
-        /// not proof of a disk copy: the finish-time eviction probe must
-        /// keep the only in-memory copy instead of dropping content the
-        /// rebuild can never recreate.
-        #[test]
-        fn finish_with_non_emitting_transcript_keeps_only_copy() {
-            let child_sid = "child-non-emitting-disk";
-            let updates = child_compaction_started_line(child_sid) + "\n";
-            let mut s = Scenario::spawn(child_sid, Some(updates));
-            // Live-streamed content that exists only in memory (the xAI-only
-            // spawn replay was `Empty`, so nothing settled `DiskBacked`).
-            s.push_child_block(RenderBlock::system("streamed output".to_string()));
-            assert_eq!(s.transcript(), ChildTranscript::NeedsReplay);
-
-            s.finish();
-            assert!(
-                s.has_system_block(),
-                "a non-emitting disk copy must not license dropping the only copy"
-            );
-            assert_eq!(
-                s.transcript(),
-                ChildTranscript::NeedsReplay,
-                "the probe miss keeps retrying rather than settling"
-            );
-
-            s.open();
-            assert_eq!(
-                s.transcript(),
-                ChildTranscript::MemoryOnly,
-                "the open's Empty rebuild restores the copy as memory-only"
-            );
-            assert!(s.has_system_block());
-            s.close();
-            assert!(
-                s.has_system_block(),
-                "close must never drop the memory-only copy"
-            );
-        }
-
-        /// finish → evict → reopen preserves persisted child xAI events: the
-        /// rebuilt transcript re-renders the compaction markers the live view
-        /// had (start inline, completion flushed with the footer).
         #[test]
         fn rebuild_after_evict_preserves_child_compaction_markers() {
             let child_sid = "child-xai-marker";
@@ -2114,10 +1816,14 @@
                 child_compaction_completed_line(child_sid),
             );
             let mut s = Scenario::spawn(child_sid, Some(updates));
+            // Read the deferred transcript, then leave the child running.
+            s.open();
             assert!(
                 s.compaction_markers() >= 1,
-                "the eager spawn replay must render the compaction marker"
+                "the on-open replay must render the compaction marker"
             );
+            assert_eq!(s.tool_calls(), 1);
+            s.close();
 
             s.finish();
             assert_eq!(s.tool_calls(), 0, "finish must evict the transcript");
@@ -2132,150 +1838,51 @@
         }
     }
 
-    /// Regression (resume): with a meta.json task prompt AND a persisted child
-    /// transcript that echoes that prompt, opening after resume shows the task
-    /// exactly once — the deferred open must dedup the replayed prompt echo.
     #[test]
-    fn subagent_resume_with_meta_prompt_shows_task_once_after_open() {
-        with_replay_disk_home(|home| {
-            let parent_sid = "sess-parent";
-            let child_sid = "child-resume-meta";
-            let task = "scan src/ for auth";
-            write_subagent_meta_json(home, parent_sid, child_sid, task);
+    fn subagent_spawn_injects_meta_prompt_by_content_without_reading_disk() {
+        // (meta.json task prompt, whether spawn injects it and arms echo dedup)
+        let cases: &[(Option<&str>, bool)] = &[
+            (Some("explore handlers only"), true),
+            (Some("   "), false),
+            (None, false),
+        ];
+        for (idx, (meta, injects)) in cases.iter().enumerate() {
+            let child_sid = format!("child-inject-{idx}");
+            with_replay_disk_home(|home| {
+                let parent_sid = "sess-parent";
+                if let Some(meta) = meta {
+                    write_subagent_meta_json(home, parent_sid, &child_sid, meta);
+                }
+                let mut app = make_app_with_agent(parent_sid);
+                spawn_subagent_with_optional_updates(&mut app, &child_sid, None);
 
-            let mut app = make_app_with_agent(parent_sid);
-            app.agents
-                .get_mut(&AgentId(0))
-                .unwrap()
-                .session
-                .loading_replay = true;
-
-            let updates = format!(
-                "{}\n{}",
-                child_user_message_line(child_sid, task),
-                child_tool_line(child_sid)
-            );
-            spawn_subagent_with_optional_updates(&mut app, child_sid, Some(&updates));
-
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.open_subagent_fullscreen(child_sid.to_string());
-            assert_eq!(
-                child_scrollback_matching_prompt_count(agent, child_sid, task),
-                1,
-                "task prompt must appear exactly once after resume + open"
-            );
-            assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 1);
-        });
-    }
-
-    /// Regression: replayed user_message_chunk + meta prompt must not duplicate via injection.
-    #[test]
-    fn subagent_spawn_replay_and_meta_prompt_shows_task_once() {
-        with_replay_disk_home(|home| {
-            let parent_sid = "sess-parent";
-            let child_sid = "child-prompt-once";
-            let task = "scan src/ for auth";
-            write_subagent_meta_json(home, parent_sid, child_sid, task);
-
-            let mut app = make_app_with_agent(parent_sid);
-            let updates = format!(
-                "{}\n{}",
-                child_user_message_line(child_sid, task),
-                child_tool_line(child_sid)
-            );
-            spawn_subagent_with_optional_updates(&mut app, child_sid, Some(&updates));
-
-            let agent = app.agents.get(&AgentId(0)).unwrap();
-            assert_eq!(
-                child_scrollback_matching_prompt_count(agent, child_sid, task),
-                1,
-                "task prompt must appear exactly once in child scrollback"
-            );
-            assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 1);
-            assert!(
-                !child_tracker_expects_user_echo(agent, child_sid),
-                "replay path must not set expect_user_echo when injection is skipped"
-            );
-        });
-    }
-
-    /// Live spawn: meta prompt without updates.jsonl still injects the task once.
-    #[test]
-    fn subagent_spawn_live_injects_meta_prompt_once_without_updates() {
-        with_replay_disk_home(|home| {
-            let parent_sid = "sess-parent";
-            let child_sid = "child-live-prompt";
-            let task = "explore handlers only";
-            write_subagent_meta_json(home, parent_sid, child_sid, task);
-
-            let mut app = make_app_with_agent(parent_sid);
-            spawn_subagent_with_optional_updates(&mut app, child_sid, None);
-
-            let agent = app.agents.get(&AgentId(0)).unwrap();
-            assert_eq!(
-                child_scrollback_matching_prompt_count(agent, child_sid, task),
-                1,
-                "live spawn must inject meta prompt when updates.jsonl is absent"
-            );
-            assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 0);
-            assert!(
-                child_tracker_expects_user_echo(agent, child_sid),
-                "live spawn must set expect_user_echo after injecting meta prompt"
-            );
-        });
-    }
-
-    #[test]
-    fn subagent_spawn_skips_injection_for_whitespace_only_meta_prompt() {
-        with_replay_disk_home(|home| {
-            let parent_sid = "sess-parent";
-            let child_sid = "child-empty-meta";
-            write_subagent_meta_json(home, parent_sid, child_sid, "   ");
-
-            let mut app = make_app_with_agent(parent_sid);
-            spawn_subagent_with_optional_updates(&mut app, child_sid, None);
-
-            let agent = app.agents.get(&AgentId(0)).unwrap();
-            assert_eq!(
-                child_scrollback_matching_prompt_count(agent, child_sid, "   "),
-                0,
-                "whitespace-only meta prompt must not inject a user block"
-            );
-            assert!(
-                !child_tracker_expects_user_echo(agent, child_sid),
-                "whitespace-only meta prompt must not set expect_user_echo"
-            );
-        });
-    }
-
-    #[test]
-    fn subagent_spawn_without_updates_jsonl_is_noop() {
-        with_replay_disk_home(|_| {
-            let child_sid = "child-no-updates";
-            let mut app = make_app_with_agent("sess-parent");
-            spawn_subagent_with_optional_updates(&mut app, child_sid, None);
-
-            let agent = app.agents.get(&AgentId(0)).unwrap();
-            assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 0);
-            assert_eq!(
-                agent
-                    .subagent_views
-                    .get(child_sid)
-                    .unwrap()
-                    .scrollback
-                    .len(),
-                0
-            );
-            // Nothing on disk proves nothing: the transcript stays
-            // NeedsReplay so a later open retries the (cheap, no-op) replay
-            // once the child's persistence catches up.
-            assert!(
-                agent
-                    .subagent_sessions
-                    .get(child_sid)
-                    .is_some_and(|i| i.transcript.needs_replay())
-            );
-        });
+                let agent = app.agents.get(&AgentId(0)).unwrap();
+                let injected = usize::from(*injects);
+                assert_eq!(
+                    child_scrollback_matching_prompt_count(agent, &child_sid, meta.unwrap_or("")),
+                    injected,
+                    "prompt injection for {meta:?}"
+                );
+                assert_eq!(
+                    agent.subagent_views.get(&child_sid).unwrap().scrollback.len(),
+                    injected,
+                    "scrollback holds only the injected prompt, if any, for {meta:?}"
+                );
+                assert_eq!(child_scrollback_tool_call_count(agent, &child_sid), 0);
+                assert_eq!(
+                    child_tracker_expects_user_echo(agent, &child_sid),
+                    *injects,
+                    "echo dedup for {meta:?}"
+                );
+                assert!(
+                    agent
+                        .subagent_sessions
+                        .get(&child_sid)
+                        .is_some_and(|i| i.transcript.needs_replay()),
+                    "nothing read on spawn: the transcript stays NeedsReplay for {meta:?}"
+                );
+            });
+        }
     }
 
     #[test]
@@ -2290,18 +1897,24 @@
             );
 
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert_eq!(
+                child_scrollback_tool_call_count(agent, child_sid),
+                0,
+                "spawn must defer the replay to first open"
+            );
+            agent.open_subagent_fullscreen(child_sid.to_string());
             assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 1);
             agent.open_subagent_fullscreen(child_sid.to_string());
             assert_eq!(
                 child_scrollback_tool_call_count(agent, child_sid),
                 1,
-                "open must not duplicate spawn replay once the transcript settled"
+                "re-opening must not duplicate the replay once the disk copy is recorded"
             );
         });
     }
 
     #[test]
-    fn subagent_spawn_live_foreign_cwd_does_not_hydrate() {
+    fn subagent_spawn_live_foreign_cwd_is_never_read() {
         with_replay_disk_home(|home| {
             let child_sid = "child-foreign-cwd";
             write_child_updates_jsonl_under_cwd(
@@ -2329,7 +1942,7 @@
             );
 
             // The retry on open stays hinted-only for a live child, so the
-            // foreign-cwd transcript is still not hydrated.
+            // foreign-cwd transcript is still not read.
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.open_subagent_fullscreen(child_sid.to_string());
             assert_eq!(
@@ -2341,7 +1954,7 @@
     }
 
     #[test]
-    fn subagent_spawn_live_resume_hydrates_foreign_cwd() {
+    fn subagent_open_resumed_child_reads_foreign_cwd_transcript() {
         with_replay_disk_home(|home| {
             let child_sid = "child-resume-foreign";
             write_child_updates_jsonl_under_cwd(
@@ -2367,63 +1980,31 @@
             );
 
             let agent = app.agents.get(&AgentId(0)).unwrap();
-            let tools = child_scrollback_tool_call_count(agent, child_sid);
-            let replayed = agent
-                .subagent_sessions
-                .get(child_sid)
-                .is_some_and(|i| !i.transcript.needs_replay());
-            if tools != 1 {
-                assert!(
-                    !replayed,
-                    "live resume must hydrate now or leave first-open able to scan"
-                );
-                let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-                agent.open_subagent_fullscreen(child_sid.to_string());
-                assert_eq!(
-                    child_scrollback_tool_call_count(agent, child_sid),
-                    1,
-                    "opening after live resume must hydrate the dest transcript"
-                );
-            }
-        });
-    }
-
-    #[test]
-    fn open_subagent_fullscreen_replays_when_needs_replay_and_prompt_only() {
-        with_replay_disk_home(|_| {
-            let child_sid = "child-open-replay";
-            let mut app = make_app_with_agent("sess-parent");
-            spawn_subagent_with_optional_updates(
-                &mut app,
-                child_sid,
-                Some(&(child_tool_line(child_sid) + "\n")),
+            assert_eq!(
+                child_scrollback_tool_call_count(agent, child_sid),
+                0,
+                "a resumed spawn must defer the replay like any other"
             );
-
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            if let Some(child) = agent.subagent_views.get_mut(child_sid) {
-                child.scrollback.clear();
-                child
-                    .scrollback
-                    .push_block(RenderBlock::user_prompt("task only"));
-            }
-            if let Some(info) = agent.subagent_sessions.get_mut(child_sid) {
-                info.transcript = crate::app::subagent::ChildTranscript::NeedsReplay;
-            }
-
-            agent.open_subagent_fullscreen(child_sid.to_string());
-
-            assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 1);
             assert!(
                 agent
                     .subagent_sessions
                     .get(child_sid)
-                    .is_some_and(|i| !i.transcript.needs_replay())
+                    .is_some_and(|i| i.transcript.needs_replay()),
+                "a resumed spawn must leave the transcript NeedsReplay"
+            );
+
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.open_subagent_fullscreen(child_sid.to_string());
+            assert_eq!(
+                child_scrollback_tool_call_count(agent, child_sid),
+                1,
+                "opening a resumed child must scan for the relocated transcript"
             );
         });
     }
 
     #[test]
-    fn ext_session_notification_and_update_equivalent_for_subagent_spawned() {
+    fn both_session_transports_produce_the_same_subagent_row() {
         let child_sid = "child-equiv";
         let (spawn_notif, finish_notif) =
             run_subagent_lifecycle_via_method("x.ai/session_notification", child_sid);
@@ -2468,7 +2049,7 @@
     }
 
     #[test]
-    fn ext_session_update_for_inactive_agent_registers_subagent_without_redraw() {
+    fn spawning_on_a_background_agent_registers_it_without_redrawing() {
         let mut app = make_app_with_agent("sess-A");
         insert_agent(&mut app, AgentId(1), Some("sess-B"));
         switch_active_to(&mut app, AgentId(1));
@@ -2531,7 +2112,7 @@
     }
 
     #[test]
-    fn ext_session_update_unknown_session_subagent_spawned_no_op() {
+    fn a_spawn_for_an_unknown_session_is_ignored() {
         let mut app = make_app_with_agent("sess-A");
         let affected = handle(
             make_ext_session_notification_with_method(
@@ -2555,10 +2136,10 @@
     }
 
     #[test]
-    fn ext_session_update_malformed_params_returns_false() {
+    fn a_malformed_session_notification_is_ignored() {
         let mut app = make_app_with_agent("sess-A");
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        // Valid JSON but not a SessionNotification — parse must fail quietly.
+        // Valid JSON but not a SessionNotification: parse must fail quietly.
         let raw =
             serde_json::value::to_raw_value(&serde_json::json!({"unexpected": true})).unwrap();
         let request = acp::ExtNotification::new("x.ai/session/update", raw.into());
@@ -2580,7 +2161,7 @@
     }
 
     #[test]
-    fn ext_session_notification_for_inactive_agent_updates_its_context_used() {
+    fn a_notification_reaches_its_target_agent_even_when_another_is_active() {
         // AutoCompactCompleted on the xAI ext path resets the context bar
         // numerator via refresh_context_used. That side effect must run on
         // the matched agent regardless of which view is currently active.

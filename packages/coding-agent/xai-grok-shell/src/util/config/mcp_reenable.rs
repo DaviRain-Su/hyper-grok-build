@@ -317,7 +317,7 @@ args = ["ok"]
 
     #[test]
     #[serial_test::serial]
-    fn toml_duplicate_url_last_wins_matches_merge() {
+    fn toml_duplicate_url_both_kept_matches_merge() {
         let (_home, _hg, _gg) = isolated_home();
         let repo = project_repo(
             r#"
@@ -342,10 +342,10 @@ url = "https://dup.example.com/mcp"
             .iter()
             .map(|s| mcp_server_name(s).to_string())
             .collect();
-        // Last TOML entry wins the URL key on both paths.
+        // Name is the identity: a shared URL never collapses entries (GB-5207).
+        assert!(discovered.contains_key("first"));
         assert!(discovered.contains_key("second"));
-        assert!(!discovered.contains_key("first"));
+        assert!(merged_names.contains("first"));
         assert!(merged_names.contains("second"));
-        assert!(!merged_names.contains("first"));
     }
 }

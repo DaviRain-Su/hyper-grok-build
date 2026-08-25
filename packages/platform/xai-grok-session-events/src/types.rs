@@ -364,6 +364,13 @@ pub enum Event {
         server_name: String,
         url: String,
     },
+    /// Verdict of the anonymous-access tie-break after an inconclusive OAuth probe:
+    /// `accepted`, `auth_challenged`, or `unreachable`.
+    #[serde(rename = "mcp_oauth_probe_resolved")]
+    McpOAuthProbeResolved {
+        server_name: String,
+        verdict: String,
+    },
     McpServerStarting {
         server_name: String,
         transport: String,

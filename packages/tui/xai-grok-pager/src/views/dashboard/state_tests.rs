@@ -4865,6 +4865,76 @@ fn ctrl_x_key_repeat_is_ignored() {
     ));
 }
 
+/// Cmd+X is SUPER, not CONTROL. DashboardStop is bound to Ctrl+X only,
+/// so a KKP Cmd+X must never arm/stop/delete — even with a highlight in
+/// the dispatch box or peek reply (wack setups / Ghostty).
+#[test]
+fn cmd_x_does_not_stop_or_delete_on_dashboard() {
+    let mut state = DashboardState::new();
+    let reg = crate::actions::ActionRegistry::defaults();
+    state.focus_row(DashboardRowId::TopLevel(AgentId(0)));
+    state.dispatch.set_text("hello world");
+    state.dispatch.textarea.set_selection(0, 5);
+    let cmd_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SUPER);
+    let outcome = state.handle_key(&cmd_x, &reg);
+    assert!(
+        !matches!(outcome, InputOutcome::Action(Action::DashboardStop)),
+        "Cmd+X must not resolve to DashboardStop, got {outcome:?}",
+    );
+    assert!(
+        state.delete_confirm.is_none(),
+        "Cmd+X must not arm a delete confirm",
+    );
+
+    // Peek open (the default selected-row surface): still not stop.
+    let mut peek = state_with_open_peek();
+    peek.peek_reply.set_text("reply draft");
+    peek.peek_reply.textarea.set_selection(0, 5);
+    let peek_outcome = peek.handle_key(&cmd_x, &reg);
+    assert!(
+        !matches!(peek_outcome, InputOutcome::Action(Action::DashboardStop)),
+        "Cmd+X with peek open must not stop, got {peek_outcome:?}",
+    );
+    assert!(peek.delete_confirm.is_none());
+}
+
+/// Ctrl+X still stops when the dispatch (or peek reply) has a highlight.
+/// The new cut path must not steal the registry stop chord.
+#[test]
+fn ctrl_x_still_stops_with_a_prompt_highlight() {
+    let mut state = DashboardState::new();
+    let reg = crate::actions::ActionRegistry::defaults();
+    state.focus_row(DashboardRowId::TopLevel(AgentId(0)));
+    state.dispatch.set_text("hello world");
+    state.dispatch.textarea.set_selection(0, 5);
+    let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+    assert!(
+        matches!(
+            state.handle_key(&ctrl_x, &reg),
+            InputOutcome::Action(Action::DashboardStop)
+        ),
+        "Ctrl+X must stay DashboardStop even with a dispatch highlight",
+    );
+    assert_eq!(
+        state.dispatch.text(),
+        "hello world",
+        "Ctrl+X must not cut the dispatch highlight",
+    );
+    assert_eq!(state.dispatch.textarea.selection_range(), Some(0..5));
+
+    let mut peek = state_with_open_peek();
+    peek.peek_reply.set_text("reply draft");
+    peek.peek_reply.textarea.set_selection(0, 5);
+    assert!(
+        matches!(
+            peek.handle_key(&ctrl_x, &reg),
+            InputOutcome::Action(Action::DashboardStop)
+        ),
+        "Ctrl+X with peek highlight must still stop",
+    );
+    assert_eq!(peek.peek_reply.text(), "reply draft");
+}
+
 /// `gc_stale_refs` dropping the selected row (session left the list)
 /// must also disarm delete, so a later `y` can't delete a phantom row.
 #[test]

@@ -39,7 +39,8 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use url::Url;
 use xai_computer_hub_sdk::{
-    AuthProvider, ClientError, HubConnectionPool, ToolServer, ToolServerBuilder, ToolServerHandler,
+    AuthProvider, CLOSE_CODE_SANDBOX_TERMINATED, ClientError, HubConnectionPool, ToolServer,
+    ToolServerBuilder, ToolServerHandler,
 };
 use xai_grok_diag_server::DiagHandle;
 use xai_grok_tools::registry::types::ToolConfig;
@@ -197,6 +198,22 @@ impl std::fmt::Debug for HubHandle {
             .finish()
     }
 }
+/// WS timing knobs forwarded from [`crate::StatusConfig`] into the SDK builder.
+#[derive(Clone)]
+pub(crate) struct HubWsTiming {
+    pub ping: std::time::Duration,
+    pub reconnect_backoff: Option<Vec<std::time::Duration>>,
+    pub liveness_deadline: Option<std::time::Duration>,
+}
+impl HubWsTiming {
+    pub(crate) fn from_status(cfg: &crate::StatusConfig) -> Self {
+        Self {
+            ping: cfg.ws_ping,
+            reconnect_backoff: cfg.ws_reconnect_backoff.clone(),
+            liveness_deadline: cfg.ws_liveness_deadline,
+        }
+    }
+}
 impl HubHandle {
     /// Build server connection pool, tool server, and return a handle.
     ///
@@ -207,8 +224,7 @@ impl HubHandle {
     /// [`Self::set_notification_task`] after spawning.
     pub(crate) async fn connect(
         config: &HubConfig,
-        ws_ping: std::time::Duration,
-        ws_reconnect_backoff: Option<Vec<std::time::Duration>>,
+        ws: HubWsTiming,
         tool_handlers: Vec<std::sync::Arc<dyn ToolServerHandler>>,
         server_metadata: Option<serde_json::Value>,
         session_handler_resolver: Option<xai_computer_hub_sdk::SessionHandlerResolver>,
@@ -226,9 +242,12 @@ impl HubHandle {
                     .wire()
                     .to_vec(),
             )
-            .with_ws_ping_interval(ws_ping);
-        if let Some(schedule) = ws_reconnect_backoff {
+            .with_ws_ping_interval(ws.ping);
+        if let Some(schedule) = ws.reconnect_backoff {
             server_builder = server_builder.with_reconnect_backoff(schedule);
+        }
+        if let Some(deadline) = ws.liveness_deadline {
+            server_builder = server_builder.with_ws_liveness_deadline(deadline);
         }
         let activity_tracker = config.activity_tracker.clone();
         if activity_tracker.is_some() {
@@ -243,10 +262,13 @@ impl HubHandle {
             let on_disconnect = diag.clone();
             let on_terminal_close = diag.clone();
             server_builder = server_builder
+                .reconnect_after_terminal_close_codes([CLOSE_CODE_SANDBOX_TERMINATED])
                 .on_connect(move || on_connect.set_connected())
                 .on_disconnect(move || on_disconnect.set_disconnected())
                 .on_terminal_close(move |code| on_terminal_close.set_terminal_close(code))
-                .on_reconnect_settled(move || diag.set_connected());
+                .on_reconnect_settled(move || {
+                    diag.revive_connected(&[CLOSE_CODE_SANDBOX_TERMINATED]);
+                });
         }
         if let Some(ref id) = config.server_id {
             server_builder = server_builder.server_id(parse_server_id(id)?);
@@ -536,6 +558,11 @@ impl ToolServerHandler for SessionRoutedToolHandler {
             "dispatching tool call"
         );
         tracker.tool_call_started(&call_id, self.name(), hub_session.as_deref());
+        let virt = session.path_virtualization().cloned();
+        let args = match &virt {
+            Some(v) => v.rewrite_json_inbound(args),
+            None => args,
+        };
         let inner = toolset.call_streaming(self.name(), args, &call_id, None);
         let tracker = self.workspace.shared.activity_tracker.clone();
         let name = self.name().to_owned();
@@ -551,14 +578,21 @@ impl ToolServerHandler for SessionRoutedToolHandler {
                 match item {
                     // Rollout gate lives downstream in the sampler.
                     ToolStreamItem::Progress(p) => {
+                        let p = match &virt {
+                            Some(v) => v.rewrite_progress(p),
+                            None => p,
+                        };
                         yield ToolStreamItem::Progress(p);
                     }
                     ToolStreamItem::Terminal(Ok(run_result)) => {
                         // Background-task accounting lives in the activity feed, not here.
                         _guard.set_outcome(xai_grok_session_events::ToolOutcome::Success);
-                        yield ToolStreamItem::Terminal(Ok(
-                            run_result.into_typed_tool_output(tool_id),
-                        ));
+                        let output = run_result.into_typed_tool_output(tool_id);
+                        let output = match &virt {
+                            Some(v) => v.rewrite_typed_output(output),
+                            None => output,
+                        };
+                        yield ToolStreamItem::Terminal(Ok(output));
                         return;
                     }
                     ToolStreamItem::Terminal(Err(e)) => {
@@ -570,9 +604,13 @@ impl ToolServerHandler for SessionRoutedToolHandler {
                             "tool call failed"
                         );
                         _guard.set_outcome(xai_grok_session_events::ToolOutcome::Error);
-                        // Forward the inner ToolError verbatim so the harness
-                        // and dashboards keep its kind + structured details
-                        // (e.g. invalid-argument vs crashed subprocess).
+                        let e = match &virt {
+                            Some(v) => v.rewrite_error(e),
+                            None => e,
+                        };
+                        // Forward the inner ToolError (after path rewrite) so
+                        // the harness and dashboards keep its kind + structured
+                        // details (e.g. invalid-argument vs crashed subprocess).
                         yield ToolStreamItem::Terminal(Err(e));
                         return;
                     }
@@ -1419,6 +1457,513 @@ mod tests {
         assert_eq!(
             busy.background_tasks, 1,
             "a bg task after re_resolve_all_sessions must still feed the tracker"
+        );
+    }
+    #[derive(Clone, Debug)]
+    struct PathEchoStub {
+        received: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    }
+    impl XaiToolMetadata for PathEchoStub {
+        fn kind(&self) -> ToolKind {
+            ToolKind::Other
+        }
+        fn tool_namespace(&self) -> xai_grok_tools::types::tool::ToolNamespace {
+            xai_grok_tools::types::tool::ToolNamespace::MCP
+        }
+        fn description_template(&self) -> &str {
+            "path echo stub"
+        }
+    }
+    impl xai_tool_runtime::Tool for PathEchoStub {
+        type Args = serde_json::Value;
+        type Output = serde_json::Value;
+        fn id(&self) -> xai_tool_protocol::ToolId {
+            xai_tool_protocol::ToolId::new("path_echo").expect("valid tool id")
+        }
+        fn description(
+            &self,
+            _ctx: &::xai_tool_runtime::ListToolsContext,
+        ) -> xai_tool_types::ToolDescription {
+            xai_tool_types::ToolDescription::new("path_echo", "path echo stub")
+        }
+        async fn run(
+            &self,
+            _ctx: xai_tool_runtime::ToolCallContext,
+            input: serde_json::Value,
+        ) -> Result<serde_json::Value, xai_tool_runtime::ToolError> {
+            *self.received.lock().expect("path echo lock") = Some(input.clone());
+            Ok(serde_json::json!({
+                "received": input.get("path").cloned().unwrap_or(serde_json::Value::Null),
+                "guest": "/workspace/conv-abc/out.txt",
+            }))
+        }
+        async fn execute(
+            &self,
+            ctx: xai_tool_runtime::ToolCallContext,
+            input: serde_json::Value,
+        ) -> xai_tool_runtime::ToolStream<serde_json::Value> {
+            use xai_tool_runtime::{ToolProgress, ToolStreamItem};
+            let value = self.run(ctx, input).await;
+            Box::pin(futures::stream::iter(vec![
+                ToolStreamItem::Progress(ToolProgress::Text {
+                    text: "wrote /workspace/conv-abc/out.txt".into(),
+                }),
+                ToolStreamItem::Terminal(value),
+            ]))
+        }
+    }
+    fn register_path_echo(
+        handle: &WorkspaceHandle,
+        session_id: &str,
+    ) -> Arc<std::sync::Mutex<Option<serde_json::Value>>> {
+        let received = Arc::new(std::sync::Mutex::new(None));
+        let session = handle.session(session_id).expect("session present");
+        session
+            .toolset()
+            .register_tool(
+                "path_echo".to_owned(),
+                PathEchoStub {
+                    received: received.clone(),
+                },
+                Some(serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                })),
+            )
+            .expect("register path_echo");
+        received
+    }
+    async fn drain_terminal(
+        stream: xai_tool_runtime::ToolStream<xai_tool_runtime::TypedToolOutput>,
+    ) -> (
+        Vec<xai_tool_runtime::ToolProgress>,
+        xai_tool_runtime::TypedToolOutput,
+    ) {
+        use futures::StreamExt;
+        let mut progress = Vec::new();
+        let mut inner = stream;
+        while let Some(item) = inner.next().await {
+            match item {
+                ToolStreamItem::Progress(p) => progress.push(p),
+                ToolStreamItem::Terminal(Ok(out)) => return (progress, out),
+                ToolStreamItem::Terminal(Err(e)) => {
+                    panic!("expected Ok terminal, got {e}")
+                }
+            }
+        }
+        panic!("tool stream ended without a terminal")
+    }
+    #[tokio::test]
+    async fn handle_call_virtualizes_inbound_outbound_and_progress() {
+        let handle = crate::handle::tests::make_handle();
+        let session = handle
+            .create_session_with_cwd("virt", None)
+            .expect("create virt session");
+        session.set_path_virtualization(
+            crate::path_virtualization::PathVirtualization::try_from_session_root(
+                "/workspace/conv-abc",
+            )
+            .expect("valid session root"),
+        );
+        let received = register_path_echo(&handle, "virt");
+        let handler = make_handler(&handle, "path_echo");
+        let (ctx, _call_id) = make_ctx("virt");
+        let (progress, out) = drain_terminal(
+            handler
+                .handle_call(ctx, serde_json::json!({ "path": "/workspace/foo.txt" }))
+                .await,
+        )
+        .await;
+        let inbound = received.lock().expect("lock");
+        assert_eq!(
+            inbound.as_ref().and_then(|v| v.get("path")),
+            Some(&serde_json::json!("/workspace/conv-abc/foo.txt")),
+            "inbound /workspace must resolve to the session root"
+        );
+        let dumped = out.value.to_string();
+        assert!(
+            dumped.contains("/workspace/out.txt"),
+            "outbound must rewrite the guest path: {dumped}"
+        );
+        assert!(
+            !dumped.contains("/workspace/conv-abc/"),
+            "outbound must not leak the real root: {dumped}"
+        );
+        match progress.first() {
+            Some(xai_tool_runtime::ToolProgress::Text { text }) => {
+                assert_eq!(text, "wrote /workspace/out.txt");
+            }
+            other => panic!("expected rewritten progress, got {other:?}"),
+        }
+    }
+    #[tokio::test]
+    async fn handle_call_virtualizes_inbound_artifacts_alias() {
+        let handle = crate::handle::tests::make_handle();
+        let session = handle
+            .create_session_with_cwd("virt-art", None)
+            .expect("create session");
+        session.set_path_virtualization(
+            crate::path_virtualization::PathVirtualization::try_from_session_root(
+                "/workspace/conv-abc",
+            )
+            .expect("valid session root"),
+        );
+        let received = register_path_echo(&handle, "virt-art");
+        let handler = make_handler(&handle, "path_echo");
+        let (ctx, _call_id) = make_ctx("virt-art");
+        let (_progress, _out) = drain_terminal(
+            handler
+                .handle_call(
+                    ctx,
+                    serde_json::json!({ "path": "/workspace/artifacts/legacy.rs" }),
+                )
+                .await,
+        )
+        .await;
+        assert_eq!(
+            received
+                .lock()
+                .expect("lock")
+                .as_ref()
+                .and_then(|v| v.get("path")),
+            Some(&serde_json::json!("/workspace/conv-abc/legacy.rs")),
+            "inbound /workspace/artifacts must alias the session root"
+        );
+    }
+    #[tokio::test]
+    async fn handle_call_leaves_outside_paths_unchanged() {
+        let handle = crate::handle::tests::make_handle();
+        let session = handle
+            .create_session_with_cwd("virt-out", None)
+            .expect("create session");
+        session.set_path_virtualization(
+            crate::path_virtualization::PathVirtualization::try_from_session_root(
+                "/workspace/conv-abc",
+            )
+            .expect("valid session root"),
+        );
+        let received = register_path_echo(&handle, "virt-out");
+        let handler = make_handler(&handle, "path_echo");
+        let (ctx, _call_id) = make_ctx("virt-out");
+        let (_progress, out) = drain_terminal(
+            handler
+                .handle_call(ctx, serde_json::json!({ "path": "/tmp/secret" }))
+                .await,
+        )
+        .await;
+        assert_eq!(
+            received
+                .lock()
+                .expect("lock")
+                .as_ref()
+                .and_then(|v| v.get("path")),
+            Some(&serde_json::json!("/tmp/secret")),
+            "paths outside the session root must not be rewritten inbound"
+        );
+        let dumped = out.value.to_string();
+        assert!(
+            dumped.contains("/workspace/out.txt"),
+            "outbound still rewrites the in-root guest path: {dumped}"
+        );
+        assert!(
+            !dumped.contains("/workspace/conv-abc/"),
+            "outbound must not leak the real root: {dumped}"
+        );
+    }
+    #[tokio::test]
+    async fn handle_call_without_session_root_is_identity() {
+        let handle = crate::handle::tests::make_handle();
+        let received = register_path_echo(&handle, "main");
+        let handler = make_handler(&handle, "path_echo");
+        let (ctx, _call_id) = make_ctx("main");
+        let (_progress, out) = drain_terminal(
+            handler
+                .handle_call(ctx, serde_json::json!({ "path": "/workspace/foo.txt" }))
+                .await,
+        )
+        .await;
+        assert_eq!(
+            received
+                .lock()
+                .expect("lock")
+                .as_ref()
+                .and_then(|v| v.get("path")),
+            Some(&serde_json::json!("/workspace/foo.txt")),
+            "no session_root must not rewrite inbound"
+        );
+        let dumped = out.value.to_string();
+        assert!(
+            dumped.contains("/workspace/conv-abc/out.txt"),
+            "no session_root must not rewrite outbound: {dumped}"
+        );
+    }
+    #[tokio::test]
+    async fn handle_call_clips_inbound_walk_outs_and_leaves_tmp() {
+        let handle = crate::handle::tests::make_handle();
+        let session = handle
+            .create_session_with_cwd("virt-walk", None)
+            .expect("create session");
+        session.set_path_virtualization(
+            crate::path_virtualization::PathVirtualization::try_from_session_root(
+                "/workspace/conv-abc",
+            )
+            .expect("valid session root"),
+        );
+        let received = register_path_echo(&handle, "virt-walk");
+        let handler = make_handler(&handle, "path_echo");
+        for (inbound, expected, why) in [
+            (
+                "/workspace/artifacts/../other-conv/secret",
+                "/workspace/conv-abc",
+                "artifacts .. walk-out must clip to real_root",
+            ),
+            (
+                "/workspace/conv-abc/../other",
+                "/workspace/conv-abc",
+                "already-guest .. walk-out must clip to real_root",
+            ),
+            (
+                "/workspace/../other-conv/secret",
+                "/workspace/conv-abc",
+                "visible-root .. walk-out must clip to real_root",
+            ),
+            (
+                "/tmp/../etc/passwd",
+                "/tmp/../etc/passwd",
+                "/tmp identity must stay unchanged",
+            ),
+            (
+                "/home/user/../other",
+                "/home/user/../other",
+                "/home identity must stay unchanged",
+            ),
+        ] {
+            let (ctx, _call_id) = make_ctx("virt-walk");
+            let (_progress, _out) = drain_terminal(
+                handler
+                    .handle_call(ctx, serde_json::json!({ "path": inbound }))
+                    .await,
+            )
+            .await;
+            assert_eq!(
+                received
+                    .lock()
+                    .expect("lock")
+                    .as_ref()
+                    .and_then(|v| v.get("path")),
+                Some(&serde_json::json!(expected)),
+                "{why}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn handle_call_virtualizes_inbound_other_conv_under_visible_root() {
+        let handle = crate::handle::tests::make_handle();
+        let session = handle
+            .create_session_with_cwd("virt-other", None)
+            .expect("create session");
+        session.set_path_virtualization(
+            crate::path_virtualization::PathVirtualization::try_from_session_root(
+                "/workspace/conv-abc",
+            )
+            .expect("valid session root"),
+        );
+        let received = register_path_echo(&handle, "virt-other");
+        let handler = make_handler(&handle, "path_echo");
+        let (ctx, _call_id) = make_ctx("virt-other");
+        let (_progress, _out) = drain_terminal(
+            handler
+                .handle_call(
+                    ctx,
+                    serde_json::json!({ "path": "/workspace/other-conv/file" }),
+                )
+                .await,
+        )
+        .await;
+        assert_eq!(
+            received
+                .lock()
+                .expect("lock")
+                .as_ref()
+                .and_then(|v| v.get("path")),
+            Some(&serde_json::json!("/workspace/conv-abc/other-conv/file")),
+            "inbound /workspace/other-conv must map into this session root"
+        );
+    }
+    #[derive(Debug)]
+    struct PathErrorStub;
+    impl XaiToolMetadata for PathErrorStub {
+        fn kind(&self) -> ToolKind {
+            ToolKind::Other
+        }
+        fn tool_namespace(&self) -> xai_grok_tools::types::tool::ToolNamespace {
+            xai_grok_tools::types::tool::ToolNamespace::MCP
+        }
+        fn description_template(&self) -> &str {
+            "path error stub"
+        }
+    }
+    impl xai_tool_runtime::Tool for PathErrorStub {
+        type Args = serde_json::Value;
+        type Output = serde_json::Value;
+        fn id(&self) -> xai_tool_protocol::ToolId {
+            xai_tool_protocol::ToolId::new("path_error").expect("valid tool id")
+        }
+        fn description(
+            &self,
+            _ctx: &::xai_tool_runtime::ListToolsContext,
+        ) -> xai_tool_types::ToolDescription {
+            xai_tool_types::ToolDescription::new("path_error", "path error stub")
+        }
+        async fn run(
+            &self,
+            _ctx: xai_tool_runtime::ToolCallContext,
+            _input: serde_json::Value,
+        ) -> Result<serde_json::Value, xai_tool_runtime::ToolError> {
+            Err(xai_tool_runtime::ToolError::new(
+                xai_tool_runtime::ToolErrorKind::Execution,
+                "missing /workspace/conv-abc/gone.txt",
+            )
+            .with_details(serde_json::json!({
+                "path": "/workspace/conv-abc/gone.txt"
+            })))
+        }
+    }
+    #[tokio::test]
+    async fn handle_call_rewrites_tool_error_paths() {
+        use futures::StreamExt;
+        let handle = crate::handle::tests::make_handle();
+        let session = handle
+            .create_session_with_cwd("virt-err", None)
+            .expect("create session");
+        session.set_path_virtualization(
+            crate::path_virtualization::PathVirtualization::try_from_session_root(
+                "/workspace/conv-abc",
+            )
+            .expect("valid session root"),
+        );
+        session
+            .toolset()
+            .register_tool(
+                "path_error".to_owned(),
+                PathErrorStub,
+                Some(serde_json::json!({"type": "object", "properties": {}})),
+            )
+            .expect("register path_error");
+        let handler = make_handler(&handle, "path_error");
+        let (ctx, _call_id) = make_ctx("virt-err");
+        let stream = handler.handle_call(ctx, serde_json::json!({})).await;
+        let mut inner = stream;
+        let err = loop {
+            match inner.next().await {
+                Some(ToolStreamItem::Terminal(Err(e))) => break e,
+                Some(ToolStreamItem::Progress(_)) => {}
+                Some(ToolStreamItem::Terminal(Ok(_))) => {
+                    panic!("expected error terminal")
+                }
+                None => panic!("stream ended"),
+            }
+        };
+        assert_eq!(err.detail, "missing /workspace/gone.txt");
+        assert_eq!(
+            err.details.as_ref().and_then(|d| d.get("path")),
+            Some(&serde_json::json!("/workspace/gone.txt"))
+        );
+    }
+    #[derive(Debug)]
+    struct BashCcoPathStub;
+    impl XaiToolMetadata for BashCcoPathStub {
+        fn kind(&self) -> ToolKind {
+            ToolKind::Execute
+        }
+        fn tool_namespace(&self) -> xai_grok_tools::types::tool::ToolNamespace {
+            xai_grok_tools::types::tool::ToolNamespace::MCP
+        }
+        fn description_template(&self) -> &str {
+            "bash cco path stub"
+        }
+    }
+    impl xai_tool_runtime::Tool for BashCcoPathStub {
+        type Args = serde_json::Value;
+        type Output = xai_grok_tools::types::output::ToolOutput;
+        fn id(&self) -> xai_tool_protocol::ToolId {
+            xai_tool_protocol::ToolId::new("bash_cco_path").expect("valid tool id")
+        }
+        fn description(
+            &self,
+            _ctx: &::xai_tool_runtime::ListToolsContext,
+        ) -> xai_tool_types::ToolDescription {
+            xai_tool_types::ToolDescription::new("bash_cco_path", "bash cco path stub")
+        }
+        async fn run(
+            &self,
+            _ctx: xai_tool_runtime::ToolCallContext,
+            _input: serde_json::Value,
+        ) -> Result<xai_grok_tools::types::output::ToolOutput, xai_tool_runtime::ToolError>
+        {
+            let stdout = "/workspace/conv-abc/out.txt";
+            Ok(xai_grok_tools::types::output::ToolOutput::Bash(
+                xai_grok_tools::types::output::BashOutput {
+                    output: stdout.as_bytes().to_vec(),
+                    output_for_prompt:
+                        xai_grok_tools::types::output::BashOutput::make_output_for_prompt(stdout),
+                    exit_code: 0,
+                    command: "cat /workspace/conv-abc/out.txt".into(),
+                    truncated: false,
+                    signal: None,
+                    timed_out: false,
+                    description: None,
+                    current_dir: "/workspace/conv-abc".into(),
+                    output_file: String::new(),
+                    total_bytes: stdout.len(),
+                    output_delta: None,
+                    was_bare_echo: false,
+                },
+            ))
+        }
+    }
+    #[tokio::test]
+    async fn handle_call_rewrites_bash_cco_paths() {
+        let handle = crate::handle::tests::make_handle();
+        let session = handle
+            .create_session_with_cwd("virt-cco", None)
+            .expect("create session");
+        session.set_path_virtualization(
+            crate::path_virtualization::PathVirtualization::try_from_session_root(
+                "/workspace/conv-abc",
+            )
+            .expect("valid session root"),
+        );
+        session
+            .toolset()
+            .register_tool(
+                "bash_cco_path".to_owned(),
+                BashCcoPathStub,
+                Some(serde_json::json!({"type": "object", "properties": {}})),
+            )
+            .expect("register bash_cco_path");
+        let handler = make_handler(&handle, "bash_cco_path");
+        let (ctx, _call_id) = make_ctx("virt-cco");
+        let stream = handler.handle_call(ctx, serde_json::json!({})).await;
+        let typed = crate::handle::tests::drain_terminal_ok(stream).await;
+        let resp = typed
+            .chat_completion_output
+            .as_ref()
+            .expect("bash CCO must be present");
+        let cer = resp
+            .result
+            .as_ref()
+            .and_then(|r| r.code_execution_result.as_ref())
+            .expect("code_execution_result");
+        assert_eq!(cer.stdout, "/workspace/out.txt");
+        assert!(
+            !cer.stdout.contains("/workspace/conv-abc"),
+            "CCO stdout must not leak the real root"
+        );
+        let dumped = typed.value.to_string();
+        assert!(
+            !dumped.contains("/workspace/conv-abc"),
+            "CCO value JSON must not leak the real root: {dumped}"
         );
     }
 }

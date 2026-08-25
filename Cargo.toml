@@ -64,6 +64,8 @@ members = [
     "packages/coding-agent/xai-grok-shell",
     "packages/coding-agent/xai-grok-shell-base",
     "packages/coding-agent/xai-grok-shell-session-support",
+    "packages/coding-agent/xai-grok-shell-terminal",
+    "packages/tui/xai-grok-status-line",
     "packages/agent/xai-grok-subagent-resolution",
     "packages/platform/xai-grok-telemetry",
     "packages/platform/xai-grok-test-support",
@@ -155,7 +157,7 @@ crossterm = "0.28"
 cryptify = "3.2"
 ctor = "0.4"
 dashmap = "6"
-derive_more = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "into", "into_iterator", "try_into"] }
+derive_more = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "into", "into_iterator", "as_ref", "try_into"] }
 dhat = "0.3"
 dirs = "5.0"
 documented = "0.9"
@@ -203,6 +205,7 @@ libc = "0.2"
 linkify = "0.10"
 lipsum = "0.9"
 log = { version = "0.4", features = ["kv", "kv_unstable"] }
+loom = "0.7"
 md5 = "0.8"
 mermaid-to-svg = { path = "third_party/mermaid-to-svg" }
 minijinja = "2.9"
@@ -252,6 +255,7 @@ rsa = "0.9"
 runfiles = "0.1"
 rustc-hash = "2"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
+rustls-native-certs = "0.8"
 schemars = "1"
 scraper = "0.23"
 semver = "1"
@@ -364,6 +368,8 @@ xai-grok-shared = { path = "packages/coding-agent/xai-grok-shared" }
 xai-grok-shell = { path = "packages/coding-agent/xai-grok-shell" }
 xai-grok-shell-base = { path = "packages/coding-agent/xai-grok-shell-base" }
 xai-grok-shell-session-support = { path = "packages/coding-agent/xai-grok-shell-session-support" }
+xai-grok-shell-terminal = { path = "packages/coding-agent/xai-grok-shell-terminal" }
+xai-grok-status-line = { path = "packages/tui/xai-grok-status-line" }
 xai-grok-telemetry = { path = "packages/platform/xai-grok-telemetry" }
 xai-grok-test-support = { path = "packages/platform/xai-grok-test-support" }
 xai-grok-tools = { path = "packages/tools/xai-grok-tools" }
@@ -436,6 +442,14 @@ panic = "unwind"
 inherits = "release-dist"
 # All settings now match the parent — this is an intentional alias.
 
+# Size-optimized profile for prod-admin-cli distribution builds. Cargo ignores
+# profiles in non-root manifests, so this lives here instead of the CLI crate.
+[profile.admin-cli-dist]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
 
 [profile.dev]
 panic = "abort"

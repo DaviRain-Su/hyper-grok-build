@@ -235,8 +235,8 @@ mod partition_rules_by_scope_tests {
         assert!(rules.contains("name=\"/repo/AGENTS.md\""));
         assert!(rules.contains("name=\"/repo/CLAUDE.md\""));
         assert!(rules.contains("name=\"/repo/.grok/rules/x.md\""));
-        assert!(rules.contains("<user_rule>home-grok-body</user_rule>"));
-        assert!(rules.contains("<user_rule>home-claude-body</user_rule>"));
+        assert!(rules.contains("<user_rule>\nhome-grok-body\n</user_rule>"));
+        assert!(rules.contains("<user_rule>\nhome-claude-body\n</user_rule>"));
         assert!(!rules.contains("## From:"));
         assert!(!rules.contains("<system-reminder>"));
     }

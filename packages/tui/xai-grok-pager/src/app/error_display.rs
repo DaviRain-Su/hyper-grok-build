@@ -57,13 +57,13 @@ pub(crate) struct FormattedRequestFailure {
     pub detail: String,
 }
 
-/// `Headline — detail` (headline alone when there is no detail). Shared with
+/// `Headline: detail` (headline alone when there is no detail). Shared with
 /// the scrollback block so the two renderings can't drift.
 pub(crate) fn banner_message(headline: &str, detail: &str) -> String {
     if detail.is_empty() {
         headline.to_string()
     } else {
-        format!("{headline} \u{2014} {detail}")
+        format!("{headline}: {detail}")
     }
 }
 
@@ -86,7 +86,7 @@ impl FormattedRequestFailure {
 /// `status` is preferred when the caller already parsed it (ACP `http_status`
 /// field). Otherwise the status is recovered from the message text.
 ///
-/// Shape: `Headline (code) — optional why. What to do.` Server text is kept
+/// Shape: `Headline (code): optional why. What to do.` Server text is kept
 /// only when it adds information: never for server faults (5xx bodies are
 /// internal detail like "upstream exploded") and never as a headline echo.
 /// A status-level next step is always kept when we have one.
@@ -295,7 +295,7 @@ fn normalize_phrase(s: &str) -> String {
 /// Pull an HTTP error status (4xx/5xx only — prose like "status 200" or a
 /// year must never classify a failure) out of a raw dump
 /// (`API error (status 500): …`, `Unauthorized (401)`, or an
-/// already-formatted `Server error (500) — …`).
+/// already-formatted `Server error (500): …`).
 pub(crate) fn parse_http_status(raw: &str) -> Option<u16> {
     // Every "status " occurrence, so "status unknown; … status 503" still
     // finds the code.
@@ -560,7 +560,7 @@ mod tests {
         );
         assert_eq!(
             formatted.message(),
-            "Server error (500) \u{2014} Something went wrong on our side. Wait a minute and send again."
+            "Server error (500): Something went wrong on our side. Wait a minute and send again."
         );
         assert!(!formatted.message().contains("exploded"));
     }
@@ -598,7 +598,7 @@ mod tests {
         );
         assert_eq!(
             formatted.message(),
-            "Rate limited (429) \u{2014} Plan limit reached, try again later"
+            "Rate limited (429): Plan limit reached, try again later"
         );
     }
 
@@ -611,7 +611,7 @@ mod tests {
         );
         assert_eq!(
             formatted.message(),
-            "Request denied (403) \u{2014} Access to the chat endpoint is denied"
+            "Request denied (403): Access to the chat endpoint is denied"
         );
     }
 
@@ -638,7 +638,7 @@ mod tests {
         );
         assert_eq!(
             formatted.message(),
-            "Request too large (413) \u{2014} Try a smaller prompt or run /compact."
+            "Request too large (413): Try a smaller prompt or run /compact."
         );
     }
 
@@ -651,7 +651,7 @@ mod tests {
         );
         assert_eq!(
             formatted.message(),
-            "Bad request (400) \u{2014} model does not support tools"
+            "Bad request (400): model does not support tools"
         );
     }
 
@@ -665,7 +665,7 @@ mod tests {
         assert_eq!(formatted.status, None);
         assert_eq!(
             formatted.message(),
-            "No response from the model \u{2014} inference idle timeout after 90s with no chunks. \
+            "No response from the model: inference idle timeout after 90s with no chunks. \
              Try sending again."
         );
     }
@@ -697,7 +697,7 @@ mod tests {
         );
         assert_eq!(
             formatted.message(),
-            "Service unavailable (503) \u{2014} The service is busy. Wait a minute and send again."
+            "Service unavailable (503): The service is busy. Wait a minute and send again."
         );
     }
 
@@ -710,7 +710,7 @@ mod tests {
         );
         assert_eq!(
             formatted.message(),
-            "Not found (404) \u{2014} This model isn't available. Run /model to pick another."
+            "Not found (404): This model isn't available. Run /model to pick another."
         );
     }
 
@@ -724,7 +724,7 @@ mod tests {
         assert_eq!(formatted.status, Some(404));
         assert_eq!(
             formatted.message(),
-            "Not found (404) \u{2014} 'grok-foo' is not in your available models. \
+            "Not found (404): 'grok-foo' is not in your available models. \
              Run /model to pick another."
         );
         assert!(!formatted.message().contains("Available:"));
@@ -737,11 +737,11 @@ mod tests {
         // the already-formatted error text when the http_status field is
         // absent — our own headlines must parse.
         assert_eq!(
-            parse_http_status("Request failed (402) \u{2014} usage balance exhausted"),
+            parse_http_status("Request failed (402): usage balance exhausted"),
             Some(402)
         );
         assert_eq!(
-            parse_http_status("Server error (500) \u{2014} Something went wrong on our side."),
+            parse_http_status("Server error (500): Something went wrong on our side."),
             Some(500)
         );
     }
@@ -760,7 +760,7 @@ mod tests {
         );
         assert_eq!(
             formatted.message(),
-            "Connection failed \u{2014} error sending request. \
+            "Connection failed: error sending request. \
              Check your network and try again."
         );
     }
@@ -772,10 +772,7 @@ mod tests {
             Some("api"),
             r#"API error (status 400 Bad Request): {"error":"fetch from https://example.com: connection refused"}"#,
         );
-        assert_eq!(
-            formatted.message(),
-            "Bad request (400) \u{2014} connection refused"
-        );
+        assert_eq!(formatted.message(), "Bad request (400): connection refused");
     }
 
     #[test]
@@ -827,10 +824,7 @@ mod tests {
             parse_http_status("Unauthorized (401) from https://x"),
             Some(401)
         );
-        assert_eq!(
-            parse_http_status("Server error (500) \u{2014} boom"),
-            Some(500)
-        );
+        assert_eq!(parse_http_status("Server error (500): boom"), Some(500));
         assert_eq!(parse_http_status("connection reset"), None);
     }
 }

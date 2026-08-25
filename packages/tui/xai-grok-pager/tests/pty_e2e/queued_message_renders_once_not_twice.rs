@@ -104,10 +104,10 @@ async fn queued_message_renders_once_not_twice() {
     std::fs::write(&id_ready_flag, b"ready").expect("release id-extraction hold");
 
     // The wait parks the turn with the row HELD: the status row explains the
-    // hold ("1 queued — Enter to send now"; the top row is a sendable server
+    // hold ("1 queued, Enter to send now"; the top row is a sendable server
     // row), the park writes no marker, and the row renders exactly once.
     harness
-        .wait_for_text("1 queued \u{2014} Enter to send now", Duration::from_secs(60))
+        .wait_for_text("1 queued, Enter to send now", Duration::from_secs(60))
         .unwrap_or_else(|_| {
             panic!(
                 "held-queue status hint never appeared; screen:\n{}\n--- non-system messages ---\n{}",

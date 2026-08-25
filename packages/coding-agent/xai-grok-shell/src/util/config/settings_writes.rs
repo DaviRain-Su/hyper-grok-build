@@ -215,6 +215,22 @@ pub async fn set_privacy_banner_acked(acked_at_rfc3339: String) -> Result<()> {
     .await
 }
 
+/// Persist `[telemetry].trace_upload`.
+pub async fn set_trace_upload(value: bool) -> Result<()> {
+    update_config(|cfg| {
+        cfg.telemetry.trace_upload = Some(value);
+    })
+    .await
+}
+
+/// Persist `[features].feedback_trace_card`.
+pub async fn set_feedback_trace_card(value: bool) -> Result<()> {
+    update_config(|cfg| {
+        cfg.features.feedback_trace_card = Some(value);
+    })
+    .await
+}
+
 /// Persist `[ui].fork_secondary_model` via `update_config`.
 ///
 /// Caller must validate against the model catalog. Empty string

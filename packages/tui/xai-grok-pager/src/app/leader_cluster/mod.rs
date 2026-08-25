@@ -176,7 +176,7 @@ impl ClusterClient {
                     .as_ref()
                     .is_some_and(|s| s.0.as_ref() == sid)
             })
-            .unwrap_or_else(|| panic!("no agent view for session {sid}"))
+            .unwrap_or_else(|| panic!("no agent view for session"))
     }
 
     /// Create a new session through the real dispatch → effect → agent path.
@@ -286,7 +286,7 @@ impl PagerLeaderCluster {
     /// Stand up the cluster. Callers MUST be `#[serial_test::serial(GROK_HOME)]`
     /// (env mutation) and run inside a current-thread `LocalSet`.
     async fn start() -> Self {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        xai_grok_extra_ca::ensure_default_crypto_provider();
 
         let server = MockInferenceServer::start().await.expect("mock server");
         let grok_home = TempDir::new().unwrap();

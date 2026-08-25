@@ -18,6 +18,7 @@ use xai_grok_sampling_types::{
     TokenUsage, rs,
 };
 
+use crate::doom_loop_recovery::FailedResponseCapture;
 use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::{RequestId, ResponsesStreamItem};
@@ -231,6 +232,97 @@ pub(crate) fn responses_event_may_have_output(event: &rs::ResponseStreamEvent) -
         && responses_event_has_meaningful_content(event)
 }
 
+/// Copy everything the Doom-loop capture needs out of a frame.
+///
+/// This is the single observation point: it runs for every frame *before* the
+/// abort gate, so the frame a confident signal aborts on is observed exactly
+/// like any other. Two things matter — a completed item is the authoritative
+/// copy of what the deltas approximated, and any frame that names tool
+/// activity or compaction state vetoes the replay, since reasoning must never
+/// be retried without the item it is bound to.
+fn observe_for_recovery(capture: &FailedResponseCapture, event: &rs::ResponseStreamEvent) {
+    use rs::ResponseStreamEvent as Event;
+    if !capture.is_armed() {
+        return;
+    }
+    match event {
+        Event::ResponseOutputTextDelta(text) => capture.record_output_delta(
+            text.output_index,
+            text.content_index,
+            text.item_id.clone(),
+            &text.delta,
+        ),
+        Event::ResponseOutputTextDone(text) => capture.record_output_done(
+            text.output_index,
+            text.content_index,
+            text.item_id.clone(),
+            text.text.clone(),
+        ),
+        Event::ResponseReasoningTextDelta(reasoning) => capture.record_reasoning_delta(
+            reasoning.output_index,
+            reasoning.content_index,
+            reasoning.item_id.clone(),
+            &reasoning.delta,
+        ),
+        Event::ResponseReasoningTextDone(reasoning) => capture.record_reasoning_done(
+            reasoning.output_index,
+            reasoning.content_index,
+            reasoning.item_id.clone(),
+            reasoning.text.clone(),
+        ),
+        Event::ResponseReasoningSummaryTextDelta(summary) => capture
+            .record_reasoning_summary_delta(
+                summary.output_index,
+                summary.summary_index,
+                summary.item_id.clone(),
+                &summary.delta,
+            ),
+        Event::ResponseReasoningSummaryTextDone(summary) => capture.record_reasoning_summary_done(
+            summary.output_index,
+            summary.summary_index,
+            summary.item_id.clone(),
+            summary.text.clone(),
+        ),
+        Event::ResponseOutputItemAdded(added) => capture.record_item_start(&added.item),
+        Event::ResponseOutputItemDone(done) => {
+            capture.record_output_item(done.output_index, &done.item);
+        }
+        Event::ResponseCompleted(completed) => {
+            capture.record_terminal_output(&completed.response.output);
+        }
+        Event::ResponseIncomplete(incomplete) => {
+            capture.record_terminal_output(&incomplete.response.output);
+        }
+        // Frames that only name in-flight tool work. The item they belong to
+        // may never complete on this attempt, so the frame itself is the
+        // notice that a call was in flight.
+        Event::ResponseFunctionCallArgumentsDelta(_)
+        | Event::ResponseFunctionCallArgumentsDone(_)
+        | Event::ResponseCustomToolCallInputDelta(_)
+        | Event::ResponseCustomToolCallInputDone(_)
+        | Event::ResponseCodeInterpreterCallCodeDelta(_)
+        | Event::ResponseCodeInterpreterCallCodeDone(_)
+        | Event::ResponseCodeInterpreterCallInProgress(_)
+        | Event::ResponseCodeInterpreterCallInterpreting(_)
+        | Event::ResponseCodeInterpreterCallCompleted(_)
+        | Event::ResponseFileSearchCallInProgress(_)
+        | Event::ResponseFileSearchCallSearching(_)
+        | Event::ResponseFileSearchCallCompleted(_)
+        | Event::ResponseWebSearchCallInProgress(_)
+        | Event::ResponseWebSearchCallSearching(_)
+        | Event::ResponseWebSearchCallCompleted(_)
+        | Event::ResponseImageGenerationCallInProgress(_)
+        | Event::ResponseImageGenerationCallGenerating(_)
+        | Event::ResponseImageGenerationCallCompleted(_)
+        | Event::ResponseMCPCallInProgress(_)
+        | Event::ResponseMCPCallCompleted(_)
+        | Event::ResponseMCPCallFailed(_)
+        | Event::ResponseMCPCallArgumentsDelta(_)
+        | Event::ResponseMCPCallArgumentsDone(_) => capture.record_unreplayable(),
+        _ => {}
+    }
+}
+
 /// Transform a raw Responses API event stream into a stream of
 /// [`SamplingEvent`]s.
 ///
@@ -264,6 +356,7 @@ pub fn stream_responses<'a>(
         idle_timeout,
         doom_loop,
         Arc::new(AtomicBool::new(false)),
+        FailedResponseCapture::default(),
     )
 }
 
@@ -274,6 +367,7 @@ pub(crate) fn stream_responses_tracked<'a>(
     idle_timeout: Duration,
     doom_loop: Option<crate::doom_loop::DoomLoopSignalCollector>,
     output_observed: Arc<AtomicBool>,
+    failed_response: FailedResponseCapture,
 ) -> impl Stream<Item = SamplingEvent> + Send + 'a {
     async_stream::stream! {
         use rs::{ResponseStreamEvent, Status};
@@ -379,12 +473,23 @@ pub(crate) fn stream_responses_tracked<'a>(
                 output_observed.store(true, Ordering::Relaxed);
             }
 
-            // A confident server-detected loop aborts the attempt (dropping
-            // the SSE connection) so the retry loop can resample instead of
-            // streaming the burning tail. Checked before the event is
-            // processed so a terminal frame carrying the signal never
-            // becomes the accepted response while the abort is armed.
-            if let Some(triggers) = doom_loop.as_ref().and_then(|c| c.abort_triggers()) {
+            // A confident midstream signal aborts the attempt immediately.
+            // Terminal frames are processed so their complete response items
+            // remain available to the retry loop; `drive_l2` rejects the
+            // completed response before it can be accepted.
+            let is_terminal_response = matches!(
+                &event,
+                ResponseStreamEvent::ResponseCompleted(_)
+                    | ResponseStreamEvent::ResponseIncomplete(_)
+            );
+            // Observed before the abort gate so the aborting frame lands in
+            // the capture like any other; the attempt is discarded either
+            // way, so nothing here is surfaced downstream.
+            observe_for_recovery(&failed_response, &event);
+
+            if !is_terminal_response
+                && let Some(triggers) = doom_loop.as_ref().and_then(|c| c.abort_triggers())
+            {
                 let err = SamplingError::DoomLoopDetected {
                     triggers,
                     aborted_at_chunk: Some(chunk_index),
@@ -1314,6 +1419,68 @@ mod tests {
         out
     }
 
+    /// A confident signal that aborts on a custom-tool input frame still
+    /// vetoes the replay: the frame is the only notice that a call was in
+    /// flight, and reasoning must never be retried without it. The same holds
+    /// for the code-interpreter code frames.
+    #[tokio::test]
+    async fn an_abort_on_a_tool_input_frame_vetoes_the_replay() {
+        for tool_frame in [
+            rs::ResponseStreamEvent::ResponseCustomToolCallInputDelta(
+                rs_types::ResponseCustomToolCallInputDeltaEvent {
+                    sequence_number: 1,
+                    output_index: 1,
+                    item_id: "custom-1".into(),
+                    delta: "{\"q\":".into(),
+                },
+            ),
+            rs::ResponseStreamEvent::ResponseCodeInterpreterCallCodeDelta(
+                rs_types::ResponseCodeInterpreterCallCodeDeltaEvent {
+                    sequence_number: 1,
+                    output_index: 1,
+                    item_id: "ci-1".into(),
+                    delta: "print(".into(),
+                },
+            ),
+        ] {
+            let capture = FailedResponseCapture::armed();
+            // A collector that has already seen a confident trigger: the next
+            // non-terminal frame aborts the attempt.
+            let collector = crate::doom_loop::DoomLoopSignalCollector::new(
+                xai_grok_sampling_types::DoomLoopRecoveryPolicy::default(),
+            );
+            collector.absorb(
+                xai_grok_sampling_types::doom_loop::DOOM_LOOP_CHECK_EVENT_TYPE,
+                r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:8@thinking"]}}"#,
+            );
+
+            // Reasoning already captured, so an intact replay would carry it:
+            // only the veto can empty the capture. The collector is armed
+            // before the stream runs, so the abort lands on the tool frame.
+            capture.record_reasoning_delta(0, 0, "reasoning-1".into(), "looping thought");
+            let raw = stream::iter(vec![Ok(tool_frame), Ok(completed_event())]).boxed();
+            let events = collect(stream_responses_tracked(
+                raw,
+                None,
+                rid(),
+                Duration::from_secs(60),
+                Some(collector),
+                Arc::new(AtomicBool::new(false)),
+                capture.clone(),
+            ))
+            .await;
+
+            assert!(
+                matches!(events.last(), Some(SamplingEvent::Failed { .. })),
+                "the confident signal aborts the attempt"
+            );
+            assert!(
+                capture.take_items().is_empty(),
+                "a turn with a call in flight replays nothing"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn missing_completed_event_yields_failed() {
         let raw = raw_events(Vec::new());
@@ -1648,6 +1815,7 @@ mod tests {
             Duration::from_secs(60),
             None,
             Arc::clone(&output_observed),
+            FailedResponseCapture::default(),
         ))
         .await;
 

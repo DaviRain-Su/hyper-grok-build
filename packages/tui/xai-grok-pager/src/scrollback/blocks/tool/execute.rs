@@ -41,7 +41,7 @@ impl ExecuteToolCallBlock {
     ///
     /// `started_at` defaults to `None`. For streaming blocks, timing begins
     /// when the block enters running UI state (via `start_timing()`).
-    /// Pre-completed blocks never get timing — they show `"—"`.
+    /// Pre-completed blocks never get timing — they show `"-"`.
     pub fn new(command: impl Into<String>) -> Self {
         Self {
             command: command.into(),

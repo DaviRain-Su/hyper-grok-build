@@ -505,7 +505,7 @@ pub fn render_persona_detail(
                         y += 1;
                         if y < max_y {
                             let hint = format!(
-                                "  ... ({} more lines \u{2014} e to expand, j/k to scroll)",
+                                "  ... ({} more lines: e to expand, j/k to scroll)",
                                 total - max_collapsed
                             );
                             buf.set_string(
@@ -561,7 +561,7 @@ pub fn render_persona_detail(
             } else {
                 Style::default().fg(theme.gray_dim)
             };
-            buf.set_string(value_x, y, "\u{2014}", empty_style);
+            buf.set_string(value_x, y, "-", empty_style);
         } else if value.width() <= value_w {
             // Fits on one line.
             let val_style = if let Some(bg) = row_bg {

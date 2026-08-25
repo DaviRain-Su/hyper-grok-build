@@ -355,9 +355,8 @@ fn grpc_tls_candidates(
     let mut base =
         ClientTlsConfig::new().trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     // Process-wide `GROK_EXTRA_CA_BUNDLE` roots (fail-open by that crate's
-    // contract), matching what the HTTP transport applies via
-    // `with_extra_root_certificates_blocking` — the same corporate/MITM CA
-    // must work on both transports.
+    // contract), matching the HTTP transport's client policy — the same
+    // corporate CA must work on both transports.
     if let Some(extra_pem) = ders_to_pem_bundle(xai_grok_extra_ca::extra_root_ders()) {
         base = base.ca_certificate(Certificate::from_pem(extra_pem));
     }

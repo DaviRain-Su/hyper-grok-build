@@ -194,7 +194,7 @@ impl CategoryStats {
     /// Format total time as human-readable string (Phase 2).
     pub fn format_time(&self) -> String {
         if self.total_time_ms == 0 {
-            return "—".to_string();
+            return "-".to_string();
         }
         let secs = self.total_time_ms / 1000;
         let ms = self.total_time_ms % 1000;

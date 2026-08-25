@@ -365,6 +365,48 @@ fn the_bar_follows_the_router_when_two_cards_are_open() {
 }
 
 #[test]
+fn elicitation_shares_the_question_layer_under_cancel_turn() {
+    let mut agent = make_agent();
+    open_elicitation(&mut agent);
+    assert_eq!(agent.blocking_card(), Some(BlockingCard::McpElicitation));
+    assert_eq!(agent.focused_card(), Some(BlockingCard::McpElicitation));
+
+    open_question(&mut agent);
+    assert_eq!(
+        agent.blocking_card(),
+        Some(BlockingCard::Question),
+        "question and elicitation share a layer; the painted question keeps the keys"
+    );
+    assert_eq!(agent.focused_card(), Some(BlockingCard::Question));
+    let labels = hint_labels(&agent);
+    assert!(
+        labels.contains(&"next answer".to_string()),
+        "the bar must name the question the user can see, got {labels:?}"
+    );
+
+    open_cancel_turn(&mut agent);
+    assert_eq!(
+        agent.blocking_card(),
+        Some(BlockingCard::CancelTurn),
+        "cancel-turn outranks both question-style cards"
+    );
+    assert_eq!(agent.focused_card(), Some(BlockingCard::CancelTurn));
+    let labels = hint_labels(&agent);
+    assert!(
+        labels.contains(&"next choice".to_string()) && !labels.contains(&"next answer".to_string()),
+        "the cancel-turn panel takes the keys, so it takes the bar too, got {labels:?}"
+    );
+
+    agent.question_view = None;
+    assert_eq!(
+        agent.blocking_card(),
+        Some(BlockingCard::CancelTurn),
+        "cancel-turn still occupies the slot over a leftover elicitation"
+    );
+    assert_eq!(agent.focused_card(), Some(BlockingCard::CancelTurn));
+}
+
+#[test]
 fn the_esc_hint_names_the_rung_the_key_takes() {
     let mut agent = make_agent();
     open_question(&mut agent);
@@ -409,6 +451,7 @@ fn a_parked_card_does_not_hand_esc_to_the_turn_cancel() {
     for open in [
         open_permission as fn(&mut AgentView),
         open_question as fn(&mut AgentView),
+        open_elicitation as fn(&mut AgentView),
     ] {
         let mut agent = make_agent();
         open(&mut agent);
@@ -532,6 +575,7 @@ fn esc_parks_even_under_a_latent_queued_edit() {
     for open in [
         open_permission as fn(&mut AgentView),
         open_question as fn(&mut AgentView),
+        open_elicitation as fn(&mut AgentView),
     ] {
         let mut agent = make_agent();
         agent.prompt_mode = crate::app::queue_edit::PromptMode::EditingQueued {
@@ -671,6 +715,7 @@ fn anything_parked_in_the_overlay_keeps_an_esc_route_to_the_dashboard() {
     for (label, setup) in [
         ("permission", open_permission as fn(&mut AgentView)),
         ("question", open_question as fn(&mut AgentView)),
+        ("elicitation", open_elicitation as fn(&mut AgentView)),
         ("plan approval", open_plan as fn(&mut AgentView)),
         (
             "plan approval over a parked question",
@@ -1008,4 +1053,281 @@ fn vim_mode_permission_tab_and_esc_match_default() {
     press(&mut agent, KeyCode::Tab, KeyModifiers::NONE);
     assert_eq!(agent.active_pane, AgentPane::Prompt);
     assert_eq!(agent.key_owner(), KeyOwner::Card(BlockingCard::Permission));
+}
+
+fn open_elicitation(agent: &mut AgentView) {
+    use crate::views::elicitation_view::ElicitationViewState;
+    use xai_grok_tools::mcp_elicitation::{McpElicitExtRequest, McpElicitModeFields};
+    agent.elicitation_view = Some(ElicitationViewState::from_request(
+        McpElicitExtRequest {
+            session_id: "s".into(),
+            tool_call_id: "mcp-elicit-1".into(),
+            server_name: "demo".into(),
+            message: "Fill in".into(),
+            mode: McpElicitModeFields::Form {
+                requested_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "email": { "type": "string", "format": "email" }
+                    },
+                    "required": ["email"]
+                })),
+            },
+        },
+        Some(StashedPrompt::default()),
+        None,
+    ));
+}
+
+#[test]
+fn question_keys_win_over_rewind() {
+    use crate::views::rewind::RewindState;
+    use crossterm::event::Event;
+    let mut agent = make_agent();
+    open_question(&mut agent);
+    agent.rewind_state = Some(RewindState::new_cancel_offer(0, None, None));
+    let registry = ActionRegistry::defaults();
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        &registry,
+    );
+    let qv = agent.question_view.as_ref().expect("question stays open");
+    assert_eq!(qv.cursor(), 1, "the question card consumed the key");
+    assert!(
+        agent.rewind_state.is_some(),
+        "the cancel-offer stays parked behind the card"
+    );
+}
+
+#[test]
+fn elicitation_keys_win_over_rewind() {
+    use crate::views::elicitation_view::ElicitationFocus;
+    use crate::views::rewind::RewindState;
+    use crossterm::event::Event;
+    let mut agent = make_agent();
+    open_elicitation(&mut agent);
+    agent.rewind_state = Some(RewindState::new_cancel_offer(0, None, None));
+    let registry = ActionRegistry::defaults();
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+        &registry,
+    );
+    let ev = agent.elicitation_view.as_ref().unwrap();
+    assert_eq!(ev.focus, ElicitationFocus::Editing);
+    assert_eq!(ev.form().unwrap().fields[0].draft(), "y");
+    assert!(agent.rewind_state.is_some());
+}
+
+#[test]
+fn elicitation_esc_leaves_edit_then_parks() {
+    use crate::views::elicitation_view::ElicitationFocus;
+    let mut agent = make_agent();
+    open_elicitation(&mut agent);
+
+    agent.elicitation_view.as_mut().unwrap().focus = ElicitationFocus::Editing;
+    assert_eq!(agent.card_esc(), Some(EscStep::LeaveTextInput));
+    assert!(hint_labels(&agent).contains(&"back".to_string()));
+    let _ = agent.handle_elicitation_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(
+        agent.elicitation_view.as_ref().unwrap().focus,
+        ElicitationFocus::Fields
+    );
+    assert!(
+        agent.elicitation_view.is_some(),
+        "leaving edit must not cancel the request"
+    );
+
+    assert_eq!(agent.card_esc(), Some(EscStep::ParkFocus));
+    assert!(hint_labels(&agent).contains(&"scrollback".to_string()));
+    let _ = agent.handle_elicitation_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(agent.active_pane, AgentPane::Scrollback);
+    assert!(
+        agent.elicitation_view.is_some(),
+        "park must not cancel the request"
+    );
+}
+
+#[test]
+fn elicitation_form_printable_keys_enter_edit() {
+    use crate::views::elicitation_view::ElicitationFocus;
+    let mut agent = make_agent();
+    open_elicitation(&mut agent);
+    assert_eq!(
+        agent.elicitation_view.as_ref().unwrap().focus,
+        ElicitationFocus::Fields
+    );
+    let _ = agent.handle_elicitation_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    let ev = agent.elicitation_view.as_ref().unwrap();
+    assert_eq!(ev.focus, ElicitationFocus::Editing);
+    assert_eq!(ev.form().unwrap().fields[0].draft(), "y");
+    let _ = agent.handle_elicitation_key(&KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+    let ev = agent.elicitation_view.as_ref().unwrap();
+    assert_eq!(ev.focus, ElicitationFocus::Editing);
+    assert_eq!(ev.form().unwrap().fields[0].draft(), "yd");
+}
+
+#[test]
+fn elicitation_paste_on_fields_enters_edit() {
+    use crate::views::elicitation_view::ElicitationFocus;
+    let mut agent = make_agent();
+    open_elicitation(&mut agent);
+    assert_eq!(
+        agent.elicitation_view.as_ref().unwrap().focus,
+        ElicitationFocus::Fields
+    );
+    let _ = agent.handle_elicitation_paste("user@example.com");
+    let ev = agent.elicitation_view.as_ref().unwrap();
+    assert_eq!(ev.focus, ElicitationFocus::Editing);
+    assert_eq!(ev.form().unwrap().fields[0].draft(), "user@example.com");
+}
+
+#[test]
+fn elicitation_paste_strips_control_chars() {
+    let mut agent = make_agent();
+    open_elicitation(&mut agent);
+    let _ = agent.handle_elicitation_paste("user\x1b]52;c;c3RvbGVu\x07@example.com");
+    let draft = agent
+        .elicitation_view
+        .as_ref()
+        .unwrap()
+        .form()
+        .unwrap()
+        .fields[0]
+        .draft();
+    assert!(
+        !draft.chars().any(char::is_control),
+        "pasted escapes must not reach the draft: {draft:?}"
+    );
+    assert_eq!(draft, "user]52;c;c3RvbGVu@example.com");
+}
+
+#[test]
+fn elicitation_draft_stops_at_named_cap() {
+    use xai_grok_tools::mcp_elicitation::MAX_ELICIT_DRAFT_CHARS;
+    let mut agent = make_agent();
+    open_elicitation(&mut agent);
+    let over = "a".repeat(MAX_ELICIT_DRAFT_CHARS + 32);
+    let _ = agent.handle_elicitation_paste(&over);
+    let draft = agent
+        .elicitation_view
+        .as_ref()
+        .unwrap()
+        .form()
+        .unwrap()
+        .fields[0]
+        .draft();
+    assert_eq!(draft.chars().count(), MAX_ELICIT_DRAFT_CHARS);
+}
+
+fn open_url_elicitation(
+    agent: &mut AgentView,
+    response_tx: Option<crate::views::elicitation_view::ElicitResponseTx>,
+) {
+    use crate::views::elicitation_view::ElicitationViewState;
+    use xai_grok_tools::mcp_elicitation::{McpElicitExtRequest, McpElicitModeFields};
+    agent.elicitation_view = Some(ElicitationViewState::from_request(
+        McpElicitExtRequest {
+            session_id: "s".into(),
+            tool_call_id: "mcp-elicit-url".into(),
+            server_name: "demo".into(),
+            message: "Open".into(),
+            mode: McpElicitModeFields::Url {
+                url: format!("https://example.com/{}", "a/".repeat(200)),
+                elicitation_id: "eid-1".into(),
+            },
+        },
+        Some(StashedPrompt::default()),
+        response_tx,
+    ));
+}
+
+#[test]
+fn url_accept_on_dead_request_dismisses_without_waiting() {
+    let mut agent = make_agent();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    drop(rx);
+    open_url_elicitation(&mut agent, Some(tx));
+    let _ = agent.handle_elicitation_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert!(
+        agent.elicitation_view.is_none(),
+        "an accept the MCP side can no longer hear must dismiss the card, \
+         not park it in waiting"
+    );
+}
+
+#[test]
+fn url_walk_keys_scroll_the_viewport() {
+    let mut agent = make_agent();
+    open_url_elicitation(&mut agent, None);
+    let scroll = |agent: &AgentView| agent.elicitation_view.as_ref().unwrap().scroll;
+    assert_eq!(scroll(&agent), 0);
+    let _ = agent.handle_elicitation_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(scroll(&agent), 1);
+    let _ = agent.handle_elicitation_key(&KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+    assert_eq!(scroll(&agent), 5);
+    let _ = agent.handle_elicitation_key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(scroll(&agent), 4);
+    let _ = agent.handle_elicitation_key(&KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+    assert_eq!(scroll(&agent), 0);
+}
+
+fn open_two_field_elicitation(agent: &mut AgentView) {
+    use crate::views::elicitation_view::ElicitationViewState;
+    use xai_grok_tools::mcp_elicitation::{McpElicitExtRequest, McpElicitModeFields};
+    agent.elicitation_view = Some(ElicitationViewState::from_request(
+        McpElicitExtRequest {
+            session_id: "s".into(),
+            tool_call_id: "mcp-elicit-2".into(),
+            server_name: "demo".into(),
+            message: "Fill in".into(),
+            mode: McpElicitModeFields::Form {
+                requested_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "email": { "type": "string" },
+                        "name": { "type": "string" }
+                    },
+                    "required": ["email", "name"]
+                })),
+            },
+        },
+        Some(StashedPrompt::default()),
+        None,
+    ));
+}
+
+#[test]
+fn elicitation_shift_tab_walks_fields_backwards() {
+    use crate::views::elicitation_view::{ElicitationActionFocus, ElicitationFocus};
+    for (code, modifiers) in SHIFT_TAB {
+        let mut agent = make_agent();
+        open_two_field_elicitation(&mut agent);
+        let ev = agent.elicitation_view.as_ref().unwrap();
+        assert_eq!(ev.focus, ElicitationFocus::Fields);
+        assert_eq!(ev.field_cursor(), 0);
+
+        let _ = agent.handle_elicitation_key(&KeyEvent::new(code, modifiers));
+        let ev = agent.elicitation_view.as_ref().unwrap();
+        assert_eq!(ev.focus, ElicitationFocus::Actions);
+        assert_eq!(
+            ev.action_focus,
+            ElicitationActionFocus::Decline,
+            "Shift+Tab from the first field wraps to Decline ({code:?})"
+        );
+
+        let _ = agent.handle_elicitation_key(&KeyEvent::new(code, modifiers));
+        let ev = agent.elicitation_view.as_ref().unwrap();
+        assert_eq!(ev.focus, ElicitationFocus::Actions);
+        assert_eq!(ev.action_focus, ElicitationActionFocus::Accept);
+
+        let _ = agent.handle_elicitation_key(&KeyEvent::new(code, modifiers));
+        let ev = agent.elicitation_view.as_ref().unwrap();
+        assert_eq!(ev.focus, ElicitationFocus::Fields);
+        assert_eq!(ev.field_cursor(), 1);
+
+        let _ = agent.handle_elicitation_key(&KeyEvent::new(code, modifiers));
+        let ev = agent.elicitation_view.as_ref().unwrap();
+        assert_eq!(ev.focus, ElicitationFocus::Fields);
+        assert_eq!(ev.field_cursor(), 0);
+    }
 }

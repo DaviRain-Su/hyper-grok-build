@@ -632,6 +632,9 @@ pub enum SessionUpdate {
         /// List of (plugin_name, old_version, new_version).
         updates: Vec<(String, String, String)>,
     },
+    /// Status snapshot for client status lines. Send-only: never persisted,
+    /// since the next emit supersedes it.
+    SessionStatus(Box<xai_grok_status_line::StatusLineContext>),
     /// Session summary was generated for a new session.
     /// Sent after the first user prompt when the LLM generates a title.
     SessionSummaryGenerated {
@@ -1502,9 +1505,8 @@ pub struct RecapRequestFile {
     pub x_grok_req_id: String,
     /// Sampling conversation id (`recap-{uuid}`).
     pub x_grok_conv_id: String,
-    /// Whether reasoning/thinking blocks were stripped from the prefix
-    /// (Anthropic Messages backend only; other backends keep reasoning
-    /// verbatim for prompt-cache warmth).
+    /// Whether the side-call requested reasoning/thinking removal before
+    /// budgeting. The over-budget path removes reasoning independently.
     pub strip_reasoning: bool,
     /// Reminder tag used in the recap instruction (`system-reminder` or
     /// the alternate `system_reminder` form).

@@ -12,29 +12,11 @@ async fn minimal_external_editor_round_trip() {
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} edited prompt received."));
 
     let dir = tempfile::tempdir().expect("temp editor dir");
-    let editor = if cfg!(windows) {
-        let script = dir.path().join("local-editor.cmd");
-        std::fs::write(
-            &script,
-            "@echo off\r\n>\"%~1\" echo|set /p=edited draft from external editor\r\n",
-        )
-        .expect("write Windows editor script");
-        format!("cmd /C '{}'", script.display())
-    } else {
-        let script = dir.path().join("local-editor.sh");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nprintf 'edited draft from external editor' > \"$1\"\n",
-        )
-        .expect("write Unix editor script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
-                .expect("make editor executable");
-        }
-        format!("'{}'", script.display())
-    };
+    let editor = fake_editor_command(
+        dir.path(),
+        "#!/bin/sh\nprintf 'edited draft from external editor' > \"$1\"\n",
+        "@echo off\r\n>\"%~1\" echo|set /p=edited draft from external editor\r\n",
+    );
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness = PtyHarness::spawn_with_content_env_ops(

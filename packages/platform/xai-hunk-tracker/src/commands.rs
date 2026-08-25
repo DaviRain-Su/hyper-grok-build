@@ -40,6 +40,14 @@ pub enum HunkTrackerCommand {
     /// Set tracking mode
     SetMode { mode: TrackingMode },
 
+    /// Re-root the actor after a session cwd remount (path virtualization).
+    /// Reply fires after `file_states` keys have been rewritten so callers
+    /// can wait before recording writes under the new cwd.
+    SetWorkingDir {
+        working_dir: PathBuf,
+        reply: oneshot::Sender<()>,
+    },
+
     // === Action Commands (accept/reject hunks) ===
     /// Apply action (accept/reject) to a specific hunk
     HunkAction {

@@ -204,8 +204,16 @@ pub fn emit_event<T: Serialize + Send + 'static>(event_suffix: impl Into<String>
 /// exiting right after emitting drops the event — see [`drain_pending`].
 static PENDING_EVENTS: AtomicUsize = AtomicUsize::new(0);
 
-/// Decrement on every exit path, including a panicking or cancelled post.
+/// Decrement on every exit path, including a panicking, cancelled, or
+/// never-polled post.
 struct PendingEventGuard;
+
+impl PendingEventGuard {
+    fn register() -> Self {
+        PENDING_EVENTS.fetch_add(1, Ordering::Release);
+        Self
+    }
+}
 
 impl Drop for PendingEventGuard {
     fn drop(&mut self) {
@@ -216,6 +224,28 @@ impl Drop for PendingEventGuard {
 /// Drain bound for one-shot CLI commands. Returns once the post lands
 /// (~1.7s cold); the bound only bites on a black-holed network.
 pub const CLI_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+const SESSION_EXIT_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+pub(crate) fn drains_at_session_exit(entrypoint: Option<crate::process_info::Entrypoint>) -> bool {
+    use crate::process_info::Entrypoint;
+    matches!(
+        entrypoint,
+        None | Some(Entrypoint::Headless | Entrypoint::Cli)
+    )
+}
+
+/// Session end is process end only for one-shot flows; every other
+/// process drains at [`drain_at_process_exit`].
+pub async fn drain_at_session_exit() {
+    if drains_at_session_exit(crate::process_info::entrypoint()) {
+        drain_pending(SESSION_EXIT_DRAIN).await;
+    }
+}
+
+pub async fn drain_at_process_exit() {
+    drain_pending(SESSION_EXIT_DRAIN).await;
+}
 
 /// Wait (up to `timeout`) for in-flight event posts to finish. For commands
 /// that exit as soon as their work is done; the agent runs long enough that
@@ -249,6 +279,8 @@ pub fn emit_event_with_origin<T: Serialize + Send + 'static>(
             )
         })
         .ok();
+    // Read here, not in the spawned post: boundary events see their moment.
+    let activity = crate::activity::ActivitySnapshot::read();
 
     if tokio::runtime::Handle::try_current().is_err() {
         // `spawn` below panics without a runtime; counting first would pin the
@@ -256,9 +288,9 @@ pub fn emit_event_with_origin<T: Serialize + Send + 'static>(
         tracing::debug!(event = %event_name, "telemetry: no runtime, dropping event");
         return;
     }
-    PENDING_EVENTS.fetch_add(1, Ordering::Release);
+    let pending = PendingEventGuard::register();
     tokio::spawn(async move {
-        let _pending = PendingEventGuard;
+        let _pending = pending;
         let user_ctx = UserContext::collect();
         let request_id = format!("{}-{}", event_name, uuid::Uuid::new_v4());
 
@@ -279,12 +311,38 @@ pub fn emit_event_with_origin<T: Serialize + Send + 'static>(
             }
         }
 
+        if let Ok(serde_json::Value::Object(gauges)) = serde_json::to_value(activity) {
+            for (key, value) in gauges {
+                metadata.entry(key).or_insert(value);
+            }
+        }
+
         client::track(&event_name, &request_id, &user_ctx, metadata).await;
     });
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_one_shot_flows_drain_at_session_exit() {
+        use crate::process_info::Entrypoint;
+        use crate::session_ctx::drains_at_session_exit;
+        assert!(drains_at_session_exit(None), "undeclared stays fail-open");
+        assert!(drains_at_session_exit(Some(Entrypoint::Headless)));
+        assert!(drains_at_session_exit(Some(Entrypoint::Cli)));
+        for outlives in [
+            Entrypoint::Embedded,
+            Entrypoint::Pager,
+            Entrypoint::Leader,
+            Entrypoint::Workspace,
+        ] {
+            assert!(
+                !drains_at_session_exit(Some(outlives)),
+                "{outlives:?} outlives its sessions and must not block teardown"
+            );
+        }
+    }
+
     use super::*;
 
     /// The debug-log firehose router (`debug_log`) finds the session span by its

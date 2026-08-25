@@ -265,7 +265,7 @@ fn ambient_mint_endpoints() -> Vec<String> {
 
 #[test]
 fn expired_external_credential_routes_to_the_provider_login_flow() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    xai_grok_extra_ca::ensure_default_crypto_provider();
 
     let mock_rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)

@@ -294,6 +294,44 @@ fn classify_covers_expiry_guards_and_kind_ttls() {
             Eligibility::Guarded,
         ),
         (
+            "grove dest cwd inside dest must guard without canonicalize",
+            {
+                let mut rec = rec_at("/tmp/nfs-wt", 1);
+                rec.creation_mode = "grove-fuse".into();
+                rec
+            },
+            vec![PathBuf::from("/tmp/nfs-wt/sub")],
+            expire_now(),
+            Eligibility::Guarded,
+        ),
+        #[cfg(target_os = "macos")]
+        (
+            "grove-fuse dest cwd via /tmp↔/private/tmp must guard without canonicalize",
+            {
+                let mut rec = rec_at("/tmp/nfs-wt", 1);
+                rec.creation_mode = "grove-fuse".into();
+                rec
+            },
+            vec![PathBuf::from("/private/tmp/nfs-wt/sub")],
+            expire_now(),
+            Eligibility::Guarded,
+        ),
+        #[cfg(target_os = "macos")]
+        (
+            "grove-nfs keep_worktrees_containing must not canonicalize the dest",
+            {
+                let mut rec = rec_at("/tmp/nfs-wt", 1);
+                rec.creation_mode = "grove-nfs".into();
+                rec
+            },
+            vec![],
+            GcOptions {
+                keep_worktrees_containing: vec![PathBuf::from("/private/tmp/nfs-wt/sub")],
+                ..expire_now()
+            },
+            Eligibility::Guarded,
+        ),
+        (
             "never-expire kind",
             rec_at("/no/such/wt", 1),
             vec![],
@@ -353,4 +391,88 @@ fn effective_max_age_precedence() {
         None,
         "None in max_age_by_kind means never-expire"
     );
+}
+
+#[test]
+fn run_pass_prunes_orphan_grove_pins_after_grace() {
+    xai_test_utils::require_git!();
+    use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+    let mut fx = crate::db::GrokHomeFixture::new();
+    let grove = fx.isolate_xdg_grove_data();
+    let repo = fx.home.join("src-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    std::fs::write(repo.join("f.txt"), "x").unwrap();
+    git_commit_all(&repo, "c");
+    let oid = {
+        let mut cmd = std::process::Command::new("git");
+        xai_tty_utils::detach_std_command(&mut cmd);
+        let out = cmd
+            .current_dir(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    let pin = "refs/grok/worktrees/wt-orphan";
+    let mut uref = std::process::Command::new("git");
+    xai_tty_utils::detach_std_command(&mut uref);
+    assert!(
+        uref.current_dir(&repo)
+            .args(["update-ref", pin, &oid])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let conn = rusqlite::Connection::open(grove.join("daemon.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS wt_create_state (
+            worktree_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            dest TEXT NOT NULL,
+            source TEXT NOT NULL,
+            orphan_seen_at INTEGER,
+            updated_at INTEGER NOT NULL
+        );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO wt_create_state(worktree_id, phase, dest, source, updated_at)
+         VALUES ('wt-orphan', 'aborted', '/gone', ?1, 1)",
+        rusqlite::params![repo.display().to_string()],
+    )
+    .unwrap();
+    std::fs::write(
+        grove.join("pin_gc_orphans.json"),
+        serde_json::json!({
+            "orphans": {
+                "wt-orphan": {
+                    "first_seen": 1,
+                    "cycles": 1,
+                    "source": repo,
+                    "pin_ref": pin,
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let db = WorktreeDb::open(&fx.home).unwrap();
+    let report = run_pass(&db, &GcOptions::default(), Pass::default(), None, None).unwrap();
+    assert!(
+        report.pin_gc_examined >= 1,
+        "production GC must invoke pin sweep: {report:?}"
+    );
+    assert_eq!(report.pin_gc_pruned, 1, "{report:?}");
+    let mut show = std::process::Command::new("git");
+    xai_tty_utils::detach_std_command(&mut show);
+    let shown = show
+        .current_dir(&repo)
+        .args(["show-ref", "--verify", pin])
+        .status()
+        .unwrap();
+    assert!(!shown.success(), "aged orphan pin must be deleted");
 }

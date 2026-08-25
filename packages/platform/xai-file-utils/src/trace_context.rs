@@ -117,6 +117,7 @@ fn extract_context(traceparent: &str) -> Option<opentelemetry::Context> {
     ctx.span().span_context().is_valid().then_some(ctx)
 }
 
+#[allow(clippy::disallowed_methods)] // test clients hit localhost mocks
 #[cfg(test)]
 mod tests {
     use super::*;

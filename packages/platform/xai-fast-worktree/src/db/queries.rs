@@ -209,17 +209,46 @@ pub fn stats(conn: &Connection) -> Result<DbStats> {
 }
 
 pub fn sweep_dead(conn: &Connection) -> Result<u64> {
-    let alive_paths: Vec<(String, String)> = {
-        let mut stmt = conn.prepare("SELECT id, path FROM worktrees WHERE status = 'alive'")?;
+    let alive_paths: Vec<(String, String, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT id, path, creation_mode FROM worktrees WHERE status = 'alive'")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?;
         rows.filter_map(|r| r.ok()).collect()
     };
 
     let mut marked = 0u64;
-    for (id, path_str) in alive_paths {
-        if !Path::new(&path_str).exists() {
+    for (id, path_str, mode) in alive_paths {
+        // Grove dests can be a leftover mountpoint dir or a wedged mount.
+        // `exists()` follows the mount and can hang; nfs_row_is_dead is
+        // the only liveness probe for those rows.
+        if crate::worktree::is_grove_strategy(&mode) {
+            if crate::nfs::nfs_record_is_dead(Path::new(&path_str), None) {
+                conn.execute(
+                    "UPDATE worktrees SET status = 'dead' WHERE id = ?1",
+                    params![id],
+                )?;
+                marked += 1;
+            }
+            continue;
+        }
+        // Linked/copy rows on a live grove dest: exists() hangs.
+        let dest = Path::new(&path_str);
+        if crate::nfs::dest_is_nfs_mount(dest)
+            || crate::nfs::dest_is_mountpoint(dest)
+            || !crate::nfs::dest_is_known_unmounted(dest)
+        {
+            continue;
+        }
+        // `exists()` follows the dest. A dangling worktree symlink still
+        // occupies the path and must be unlinked by the age pass, not marked
+        // dead and forgotten.
+        if std::fs::symlink_metadata(dest).is_err() {
             conn.execute(
                 "UPDATE worktrees SET status = 'dead' WHERE id = ?1",
                 params![id],

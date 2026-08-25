@@ -46,7 +46,7 @@ pub mod trace_donate;
 pub mod oidc_provider;
 
 pub use auth::{AuthCredential, AuthIdentity, AuthProvider, PrincipalKey, SharedAuthProvider};
-pub use connection::{ConnKey, HubConnection, ReconnectEvent};
+pub use connection::{CLOSE_CODE_SANDBOX_TERMINATED, ConnKey, HubConnection, ReconnectEvent};
 pub use error::ClientError;
 pub use harness::{
     CancelOnDrop, LocalRegistry, ModelOutputExtractor, SessionBindReport, ToolHarness,

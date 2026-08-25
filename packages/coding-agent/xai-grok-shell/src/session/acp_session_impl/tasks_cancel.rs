@@ -274,11 +274,8 @@ impl SessionActor {
         self.turn_report.release_aborted(epoch);
     }
 
-    /// Cancel the running turn for a send-now prompt: Ctrl+C parity (kills the
-    /// turn's foreground command; background tasks, subagents, and the queue
-    /// survive). Flushes the replay buffer before teardown so streamed chunks
-    /// persist; the caller's `maybe_start_running_task` then promotes the new
-    /// front (a flushed interjection fallback runs ahead of the send-now prompt).
+    /// The Ctrl+C teardown, except the running command moves to the background instead of being killed.
+    /// Background tasks, subagents, and the queue are untouched.
     pub(super) async fn cancel_turn_for_send_now(
         &self,
         replay_buffer: &mut crate::agent::update_chunk_merge::ReplayBuffer,
@@ -552,7 +549,10 @@ impl SessionActor {
             self.signals_handle().record_cancellation();
         }
 
-        // Kill all running foreground terminal processes before aborting the task.
+        // A send-now redirect is the user continuing, not stopping, so it never kills an in-flight command.
+        let send_now = matches!(trigger, Some(crate::session::CancelTrigger::SendNow));
+
+        // Kill all running foreground terminal processes before aborting the task. Send-now skips this and backgrounds them after the abort.
         // Each TerminalBackend implementation knows how to kill its own processes.
         // Background tasks are left alive for interactive sessions but killed
         // during subagent teardown (kill_background_tasks = true).
@@ -560,20 +560,8 @@ impl SessionActor {
         // Note: a narrow TOCTOU window exists — the running task could spawn a
         // new terminal between this call and the abort() below. In practice this
         // is negligible; abort() drops the future and any child handle it owns.
-        if self.startup_hints.is_subagent {
-            // Subagent: only kill foreground processes owned by this session,
-            // not the parent's or sibling's on the shared backend.
-            self.agent
-                .borrow()
-                .tool_bridge()
-                .kill_foreground_commands_by_owner(&self.session_info.id.0)
-                .await;
-        } else {
-            self.agent
-                .borrow()
-                .tool_bridge()
-                .kill_foreground_commands()
-                .await;
+        if !send_now {
+            self.kill_foreground_commands_for_cancel().await;
         }
 
         if kill_background_tasks {
@@ -831,7 +819,6 @@ impl SessionActor {
             // not aborting, so it must not arm the interrupt category or the
             // interrupt envelope for its own continuation turn
             // (mirrors the cancel-rate skip above).
-            let send_now = matches!(trigger, Some(crate::session::CancelTrigger::SendNow));
             if !send_now {
                 self.events.set_prior_interrupt_category(
                     crate::session::events::CancellationCategory::MidTurnAbort,
@@ -857,6 +844,11 @@ impl SessionActor {
                 } else {
                     crate::session::events::RedirectKind::CancelThenSend
                 });
+        }
+
+        // After the abort, so the turn no longer owns the commands it started.
+        if send_now {
+            self.background_foreground_commands_for_send_now().await;
         }
 
         if let Some(is_turn_active) = &self.tool_context.is_turn_active {
@@ -980,6 +972,56 @@ impl SessionActor {
                 WakeBarrier::Clear
             },
             turn_stopped,
+        }
+    }
+
+    /// The user sent a message mid-turn: move any running command to the background instead of killing it.
+    /// Each one's tool call gets an honest answer saying the command is still running.
+    async fn background_foreground_commands_for_send_now(&self) {
+        // This session and its subagents share one terminal, so move only this session's own commands.
+        // Replying to another session's command would put an answer in this session's history for a question it never asked.
+        let owner = Some(self.session_info.id.0.as_ref());
+        let backgrounded = {
+            self.agent
+                .borrow()
+                .tool_bridge()
+                .background_foreground_commands(owner)
+                .await
+        };
+
+        // Empty can mean nothing was running, or that this backend cannot background at all. Kill, so the command does not outlive its turn.
+        // A kill does not report which commands it stopped, so `repair_dangling_tool_calls` answers the tool call before the next request.
+        if backgrounded.is_empty() {
+            self.kill_foreground_commands_for_cancel().await;
+        }
+
+        for bg in backgrounded {
+            // No command text: the model already has it in the tool call this answers.
+            let message = format!(
+                "Command was moved to the background because the user sent a new message. \
+                 The process is still running, not cancelled. Retrieve its output later \
+                 with {} (task_id: {}).",
+                self.tool_context.task_output_tool_name, bg.tool_call_id
+            );
+            self.chat_state_handle
+                .push_tool_result(ConversationItem::tool_result(bg.tool_call_id, message));
+        }
+    }
+
+    /// Kill the foreground commands this cancel owns. A subagent kills only its own, never the parent's or a sibling's on the shared backend.
+    async fn kill_foreground_commands_for_cancel(&self) {
+        if self.startup_hints.is_subagent {
+            self.agent
+                .borrow()
+                .tool_bridge()
+                .kill_foreground_commands_by_owner(&self.session_info.id.0)
+                .await;
+        } else {
+            self.agent
+                .borrow()
+                .tool_bridge()
+                .kill_foreground_commands()
+                .await;
         }
     }
 }

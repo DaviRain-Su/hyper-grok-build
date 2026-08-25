@@ -43,30 +43,54 @@ pub(super) fn cta_settle_installed(
     effects
 }
 
+/// Not-installed CTA candidates from the catalog scan, plus the selected
+/// source's URL/path — the install target the shell resolves sources by;
+/// `None` means no CTA source was present. One source wins so the candidates
+/// and the install target always come from it. With `cta_marketplace` set
+/// (the `[marketplace].plugin_cta_marketplace` override), the first source
+/// whose name exactly equals it wins — the xAI Official source is excluded
+/// unless it is the named one. Unset (the default) is two-tier: a URL-verified
+/// official source beats any name-only "xAI Official" match regardless of
+/// order (anti-spoofing: the scanned URL is the install root), then a
+/// name-only match keeps mirrors registered under the official name working;
+/// first registered wins within a tier.
 pub(super) fn plugin_cta_candidates(
     response: xai_hooks_plugins_types::MarketplaceListResponse,
-) -> (Vec<xai_hooks_plugins_types::MarketplacePluginEntry>, bool) {
-    let mut candidates = Vec::new();
-    let mut official_source_present = false;
-    for source in response.sources {
-        let is_official = source.source_name == xai_grok_plugin_marketplace::OFFICIAL_SOURCE_NAME
-            || xai_grok_plugin_marketplace::is_official_source_url(&source.source_url_or_path);
-        if !is_official {
-            continue;
-        }
-        official_source_present = true;
-        for plugin in source.plugins {
-            if plugin.install_status == "not_installed" {
-                candidates.push(plugin);
-            }
-        }
-    }
-    (candidates, official_source_present)
+    cta_marketplace: Option<&str>,
+) -> (
+    Vec<xai_hooks_plugins_types::MarketplacePluginEntry>,
+    Option<String>,
+) {
+    let mut sources = response.sources;
+    let winner = match cta_marketplace {
+        Some(name) => sources.iter().position(|s| s.source_name == name),
+        None => sources
+            .iter()
+            .position(|s| {
+                xai_grok_plugin_marketplace::is_official_source_url(&s.source_url_or_path)
+            })
+            .or_else(|| {
+                sources.iter().position(|s| {
+                    s.source_name == xai_grok_plugin_marketplace::OFFICIAL_SOURCE_NAME
+                })
+            }),
+    };
+    let Some(idx) = winner else {
+        return (Vec::new(), None);
+    };
+    let source = sources.swap_remove(idx);
+    let candidates = source
+        .plugins
+        .into_iter()
+        .filter(|plugin| plugin.install_status == "not_installed")
+        .collect();
+    (candidates, Some(source.source_url_or_path))
 }
 
 /// Resolve the marketplace-relative path for a CTA plugin by name, used to
 /// rebuild a retryable `CtaPhase::Error` after a post-install hop fails. Prefers
-/// the still-cached candidate entry; falls back to the official-source layout.
+/// the still-cached candidate entry; the `plugins/{name}` fallback assumes the
+/// conventional marketplace layout (a guess for a configured override source).
 pub(super) fn cta_install_relative_path(
     candidates: &[xai_hooks_plugins_types::MarketplacePluginEntry],
     name: &str,
@@ -97,12 +121,13 @@ pub(super) fn cta_install_error_category(
 
 /// Recompute the plugin-CTA phase from the current prompt draft.
 ///
-/// Gating order: feature flag + official source present, keyword match,
-/// then per-plugin dismissal (`is_dismissed` injects the config lookup so
-/// the matcher logic stays unit-testable).
+/// Gating order: feature flag + CTA source present (official, or the
+/// configured `plugin_cta_marketplace`), keyword match, then per-plugin
+/// dismissal (`is_dismissed` injects the config lookup so the matcher logic
+/// stays unit-testable).
 pub(super) fn plugin_cta_phase_for(
     enabled: bool,
-    official_source_present: bool,
+    cta_source_present: bool,
     candidates: &[xai_hooks_plugins_types::MarketplacePluginEntry],
     prompt_text: &str,
     is_dismissed: impl Fn(&str) -> bool,
@@ -110,7 +135,7 @@ pub(super) fn plugin_cta_phase_for(
     use crate::app::agent_view::CtaPhase;
     use xai_grok_plugin_marketplace::matcher::{KeywordCandidate, match_plugin_keyword};
 
-    if !(enabled && official_source_present) {
+    if !(enabled && cta_source_present) {
         return CtaPhase::Hidden;
     }
     let cands: Vec<KeywordCandidate<'_>> = candidates
@@ -432,10 +457,12 @@ pub(super) fn handle_plugin_cta_catalog_loaded(
         Ok(mut response) => {
             response.sanitize();
             let enabled = app.plugin_cta_enabled;
+            let cta_marketplace = app.plugin_cta_marketplace.as_deref();
             if let Some(agent) = app.agents.get_mut(&agent_id) {
-                let (candidates, official_source_present) = plugin_cta_candidates(response);
+                let (candidates, source_url_or_path) =
+                    plugin_cta_candidates(response, cta_marketplace);
                 agent.plugin_cta.candidates = candidates;
-                agent.plugin_cta.official_source_present = official_source_present;
+                agent.plugin_cta.source_url_or_path = source_url_or_path;
                 // Cache the dismissed set once here so the matched-debounce
                 // recompute never reads config.toml from the UI thread.
                 // Only needed when enabled (the matcher short-circuits to
@@ -456,7 +483,7 @@ pub(super) fn handle_plugin_cta_catalog_loaded(
                     let prompt_text = agent.prompt.text().to_string();
                     let new_phase = plugin_cta_phase_for(
                         enabled,
-                        agent.plugin_cta.official_source_present,
+                        agent.plugin_cta.source_url_or_path.is_some(),
                         &agent.plugin_cta.candidates,
                         &prompt_text,
                         |name| agent.plugin_cta.dismissed.contains(name),
@@ -515,7 +542,7 @@ pub(super) fn handle_plugin_cta_debounce_expired(
     let prompt_text = agent.prompt.text().to_string();
     let new_phase = plugin_cta_phase_for(
         enabled,
-        agent.plugin_cta.official_source_present,
+        agent.plugin_cta.source_url_or_path.is_some(),
         &agent.plugin_cta.candidates,
         &prompt_text,
         |name| agent.plugin_cta.dismissed.contains(name),

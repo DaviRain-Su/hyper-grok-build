@@ -566,7 +566,7 @@ pub(super) fn handle_credit_limit_recheck_complete(
     drain.effects.push(Effect::FetchBilling {
         agent_id,
         silent: true,
-        nonce: 0,
+        nonce: Default::default(),
     });
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     drain.effects

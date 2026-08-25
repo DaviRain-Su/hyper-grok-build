@@ -1,11 +1,15 @@
 //! Rebuild process argv and re-exec the pager into a different screen mode.
 //!
-//! Used by `/minimal` and `/fullscreen`: the event loop quits, the terminal is
-//! restored, then this module replaces the process image with the same binary
-//! pointed at the active session under the requested render mode. Unix `exec`
-//! keeps the PTY/fd identity so PTY harness tests can observe the transition
-//! without re-spawning; Windows emulates exec by spawning the child on the
-//! inherited console and parking the parent in `wait` (see
+//! Fallback only — `/minimal`/`/fullscreen` switch in process by default
+//! (`super::mode_switch`); this remains for the startup env override, the
+//! `GROK_SCREEN_MODE_SWITCH=exec` escape hatch, and unrecoverable transitions.
+//!
+//! On the exec path the event loop quits, the terminal is restored, then this
+//! module replaces the process image with the same binary pointed at the
+//! active session under the requested render mode. Unix `exec` keeps the
+//! PTY/fd identity so PTY harness tests can observe the transition without
+//! re-spawning; Windows emulates exec by spawning the child on the inherited
+//! console and parking the parent in `wait` (see
 //! [`exec_screen_mode_relaunch`]) so the launching shell never gets the
 //! console back mid-session.
 
@@ -191,6 +195,13 @@ pub(crate) fn build_screen_mode_relaunch_args(
         out.push(OsString::from("--fullscreen"));
     }
     out
+}
+
+/// `GROK_SCREEN_MODE_SWITCH=exec` forces the legacy re-exec switch.
+pub(crate) const SCREEN_MODE_SWITCH_ENV: &str = "GROK_SCREEN_MODE_SWITCH";
+
+pub(crate) fn exec_switch_forced() -> bool {
+    std::env::var(SCREEN_MODE_SWITCH_ENV).is_ok_and(|v| v.trim().eq_ignore_ascii_case("exec"))
 }
 
 /// Env value written for a screen-mode relaunch (`minimal` / `fullscreen`).

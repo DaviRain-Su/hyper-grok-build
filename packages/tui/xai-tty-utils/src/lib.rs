@@ -56,7 +56,10 @@ mod child_wait;
 pub use child_wait::{is_child_wait_identity_uncertain, spawn_child_reaper, wait_child_bounded};
 
 mod process_resources;
-pub use process_resources::{ProcessResources, sample_process_memory, sample_process_resources};
+pub use process_resources::{
+    ProcessCpu, ProcessResources, process_memory_limit, process_start_time, sample_process_cpu,
+    sample_process_memory, sample_process_resources,
+};
 
 mod process_scope;
 pub use process_scope::{ProcessScope, global_process_scope};

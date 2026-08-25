@@ -57,12 +57,86 @@ impl TryFrom<&str> for PermissionPromptOutcome {
             | "allow_always_mcp_tool"
             | "allow_always_mcp_server"
             | "allow_edits_for_session" => Ok(Self::Allow),
-            "reject_once" | "reject_always_bash" => Ok(Self::Reject),
+            "reject_once"
+            | "reject_always_bash"
+            | "reject_always_mcp_tool"
+            | "reject_always_domain" => Ok(Self::Reject),
             "cancelled" => Ok(Self::Cancel),
             "followup" => Ok(Self::Followup),
             "error" => Ok(Self::Error),
             _ => Err(()),
         }
+    }
+}
+
+/// Granular prompt outcome, preserving the per-row detail that
+/// [`PermissionPromptOutcome`] collapses — measures "Always allow …" /
+/// "Never allow" adoption separately from allow-once clicks. Additive; the
+/// KPI denominator stays on the normalized enum.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionPromptOutcomeDetail {
+    AllowOnce,
+    AllowAlways,
+    AllowEditsForSession,
+    AllowAlwaysBash,
+    AllowAlwaysBashGlob,
+    AllowAlwaysDomain,
+    AllowAlwaysMcpTool,
+    AllowAlwaysMcpServer,
+    RejectOnce,
+    RejectAlwaysBash,
+    RejectAlwaysMcpTool,
+    RejectAlwaysDomain,
+    Cancelled,
+    Followup,
+    Error,
+}
+
+impl PermissionPromptOutcomeDetail {
+    /// Every variant, in declaration order. The shell drift test asserts a
+    /// bijection with the manager's `PromptOutcomeKind::ALL`.
+    pub const ALL: &'static [Self] = &[
+        Self::AllowOnce,
+        Self::AllowAlways,
+        Self::AllowEditsForSession,
+        Self::AllowAlwaysBash,
+        Self::AllowAlwaysBashGlob,
+        Self::AllowAlwaysDomain,
+        Self::AllowAlwaysMcpTool,
+        Self::AllowAlwaysMcpServer,
+        Self::RejectOnce,
+        Self::RejectAlwaysBash,
+        Self::RejectAlwaysMcpTool,
+        Self::RejectAlwaysDomain,
+        Self::Cancelled,
+        Self::Followup,
+        Self::Error,
+    ];
+}
+
+impl TryFrom<&str> for PermissionPromptOutcomeDetail {
+    type Error = ();
+    /// Inverse of the manager's `PromptOutcomeKind::wire_str` vocabulary.
+    fn try_from(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "allow_once" => Self::AllowOnce,
+            "allow_always" => Self::AllowAlways,
+            "allow_edits_for_session" => Self::AllowEditsForSession,
+            "allow_always_bash" => Self::AllowAlwaysBash,
+            "allow_always_bash_glob" => Self::AllowAlwaysBashGlob,
+            "allow_always_domain" => Self::AllowAlwaysDomain,
+            "allow_always_mcp_tool" => Self::AllowAlwaysMcpTool,
+            "allow_always_mcp_server" => Self::AllowAlwaysMcpServer,
+            "reject_once" => Self::RejectOnce,
+            "reject_always_bash" => Self::RejectAlwaysBash,
+            "reject_always_mcp_tool" => Self::RejectAlwaysMcpTool,
+            "reject_always_domain" => Self::RejectAlwaysDomain,
+            "cancelled" => Self::Cancelled,
+            "followup" => Self::Followup,
+            "error" => Self::Error,
+            _ => return Err(()),
+        })
     }
 }
 
@@ -350,6 +424,13 @@ pub struct PermissionDecisionPayload {
     /// Normalized human prompt outcome; `None` unless the request was prompted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_outcome: Option<PermissionPromptOutcome>,
+    /// Granular prompt outcome (per-row detail); `None` unless prompted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_outcome_detail: Option<PermissionPromptOutcomeDetail>,
+    /// Whether the `remember_tool_approvals` gate was on for this decision;
+    /// `None` on legacy manager events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remember_tool_approvals: Option<bool>,
     /// Canonical decision-reason trigger.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision_reason: Option<PermissionDecisionReason>,
@@ -413,6 +494,14 @@ mod permission_analytics_tests {
             Ok(O::Reject)
         );
         assert_eq!(
+            PermissionPromptOutcome::try_from("reject_always_mcp_tool"),
+            Ok(O::Reject)
+        );
+        assert_eq!(
+            PermissionPromptOutcome::try_from("reject_always_domain"),
+            Ok(O::Reject)
+        );
+        assert_eq!(
             PermissionPromptOutcome::try_from("cancelled"),
             Ok(O::Cancel)
         );
@@ -422,6 +511,22 @@ mod permission_analytics_tests {
         );
         assert_eq!(PermissionPromptOutcome::try_from("error"), Ok(O::Error));
         assert!(PermissionPromptOutcome::try_from("mystery").is_err());
+    }
+
+    /// Enum↔wire round-trip for every detail variant. The cross-crate
+    /// bijection lives in the shell drift test.
+    #[test]
+    fn prompt_outcome_detail_round_trips_every_variant() {
+        for &variant in PermissionPromptOutcomeDetail::ALL {
+            let wire = serde_json::to_value(variant).unwrap();
+            let s = wire.as_str().expect("detail serializes to a string");
+            assert_eq!(
+                PermissionPromptOutcomeDetail::try_from(s),
+                Ok(variant),
+                "detail {s} must round-trip"
+            );
+        }
+        assert!(PermissionPromptOutcomeDetail::try_from("mystery").is_err());
     }
 
     /// Enum↔wire self-consistency for the symmetric analytics enums: every
@@ -467,6 +572,8 @@ mod permission_analytics_tests {
             subagent_type: None,
             manager_prompt_attempted: Some(true),
             prompt_outcome: outcome,
+            prompt_outcome_detail: None,
+            remember_tool_approvals: Some(true),
             decision_reason: reason,
             classifier_source: Some(PermissionClassifierSource::Llm),
             classifier_verdict: verdict,

@@ -9,7 +9,7 @@
 //! with no in-band recovery.
 //!
 //! The concrete injector that first hit this was the action-stationarity
-//! nudge (8 consecutive identical tool calls). The invariant is broader:
+//! nudge (consecutive identical tool calls). The invariant is broader:
 //! **no mid-turn user injection may leave duplicate results for one id.**
 //! The nudge is only the driver that reaches the vulnerable window.
 //!
@@ -29,11 +29,16 @@ use xai_grok_test_support::sse::{
 };
 use xai_grok_test_support::{MockInferenceServer, ScriptedResponse};
 
-/// Product threshold at which the stationarity nudge fires. Kept as a local
-/// literal so this suite does not couple to the private latch constants;
-/// changing the threshold still trips the same history invariant as long as
-/// a nudge is delivered mid-turn after identical calls.
-const IDENTICAL_CALLS_TO_TRIP_NUDGE: usize = 8;
+/// Derived from the harness's own thresholds so retuning them retunes this suite instead
+/// of breaking it. The scripted tool is `todo_write`, which is in the
+/// problematically-repeating tier, so this tracks that tier's constants. Script two more
+/// calls than the hard stop allows, so the run always ends because the harness stopped it
+/// rather than because the script ran dry.
+const SCRIPTED_IDENTICAL_CALLS: usize =
+    super::turn::MAX_CONSECUTIVE_IDENTICAL_PROBLEMATIC_TOOL_CALLS as usize + 2;
+/// A run only reaches the injection window under test once the nudge fires.
+const MIN_EXECUTED_IDENTICAL_CALLS: usize =
+    super::turn::NUDGE_AFTER_IDENTICAL_PROBLEMATIC_TOOL_CALLS as usize;
 
 const TODO_ARGS: &str = r#"{"todos":[{"id":"t1","content":"poll","status":"completed"}]}"#;
 
@@ -101,7 +106,7 @@ async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_us
     local
         .run_until(async {
             let server = MockInferenceServer::start().await.expect("mock inference server");
-            for i in 1..=IDENTICAL_CALLS_TO_TRIP_NUDGE {
+            for i in 1..=SCRIPTED_IDENTICAL_CALLS {
                 server.enqueue_response(
                     "/v1/responses",
                     tool_call_sse(&format!("stat-call-{i}")),
@@ -212,8 +217,22 @@ async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_us
             let by_id = tool_results_by_call_id(&conv);
 
             assert!(
-                by_id.len() >= IDENTICAL_CALLS_TO_TRIP_NUDGE,
-                "expected at least {IDENTICAL_CALLS_TO_TRIP_NUDGE} executed tool calls to trip the nudge; got {} distinct tool_call_ids. conversation={conv:#?}",
+                by_id.len() >= MIN_EXECUTED_IDENTICAL_CALLS,
+                "expected at least {MIN_EXECUTED_IDENTICAL_CALLS} executed tool calls so the \
+                 identical-call run trips the nudge; got {} distinct tool_call_ids. \
+                 conversation={conv:#?}",
+                by_id.len()
+            );
+
+            // Fewer executed than scripted proves the harness stopped the run at the
+            // tight tier's limit, i.e. `todo_write` resolved to a problematically
+            // repeating kind rather than falling through to the looser thresholds.
+            assert!(
+                by_id.len() <= super::turn::MAX_CONSECUTIVE_IDENTICAL_PROBLEMATIC_TOOL_CALLS
+                    as usize,
+                "`todo_write` must be classified in the problematically-repeating tier, so \
+                 the run stops at its hard limit; executed {} of {SCRIPTED_IDENTICAL_CALLS} \
+                 scripted calls",
                 by_id.len()
             );
 

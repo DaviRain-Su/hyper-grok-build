@@ -25,10 +25,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run() -> anyhow::Result<()> {
-    // Standalone binary: install the process-level rustls provider (the pager
-    // does this in its own main), or the first TLS/WSS connect panics with
-    // "Could not automatically determine the process-level CryptoProvider".
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    xai_grok_extra_ca::ensure_default_crypto_provider();
 
     tracing_subscriber::fmt()
         .with_env_filter(

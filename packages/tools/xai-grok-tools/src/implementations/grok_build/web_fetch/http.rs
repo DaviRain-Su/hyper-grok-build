@@ -28,9 +28,14 @@ pub(crate) struct HttpClient {
 
 impl HttpClient {
     pub(crate) fn new(params: &WebFetchParams) -> Result<Self, WebFetchError> {
-        let client = Self::build(params)?;
+        // Validate the proxy eagerly; the transport builds lazily
+        // (`invalidate()` promises a fresh pool).
+        if let Some(ref endpoint) = params.proxy_endpoint {
+            reqwest::Proxy::all(endpoint)
+                .map_err(|e| WebFetchError::ProxyConfigError(e.to_string()))?;
+        }
         Ok(Self {
-            inner: Arc::new(ArcSwapOption::from(Some(Arc::new(client)))),
+            inner: Arc::new(ArcSwapOption::from(None)),
             params: params.clone(),
         })
     }
@@ -54,8 +59,15 @@ impl HttpClient {
     }
 
     fn build(params: &WebFetchParams) -> Result<reqwest::Client, WebFetchError> {
-        let mut builder = xai_grok_extra_ca::with_extra_root_certificates(
-            reqwest::Client::builder()
+        // Route all traffic through the egress proxy when configured.
+        let proxy = params
+            .proxy_endpoint
+            .as_ref()
+            .map(reqwest::Proxy::all)
+            .transpose()
+            .map_err(|e| WebFetchError::ProxyConfigError(e.to_string()))?;
+        xai_grok_extra_ca::build_reqwest_client(|builder| {
+            let mut builder = builder
                 .timeout(params.timeout_secs())
                 .connect_timeout(std::time::Duration::from_secs(10))
                 // We manage redirects for SSRF.
@@ -66,17 +78,13 @@ impl HttpClient {
                 // Reduce size of incoming payloads.
                 .gzip(true)
                 .brotli(true)
-                .deflate(true),
-        );
-
-        // Route all traffic through the egress proxy when configured.
-        if let Some(ref endpoint) = params.proxy_endpoint {
-            let proxy = reqwest::Proxy::all(endpoint)
-                .map_err(|e| WebFetchError::ProxyConfigError(e.to_string()))?;
-            builder = builder.proxy(proxy);
-        }
-
-        builder.build().map_err(WebFetchError::ClientBuildError)
+                .deflate(true);
+            if let Some(proxy) = proxy.clone() {
+                builder = builder.proxy(proxy);
+            }
+            builder
+        })
+        .map_err(WebFetchError::ClientBuildError)
     }
 }
 

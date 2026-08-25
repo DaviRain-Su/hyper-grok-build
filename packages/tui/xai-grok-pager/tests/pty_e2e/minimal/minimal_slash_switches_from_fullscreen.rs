@@ -2,10 +2,8 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// `/minimal` from a fullscreen session re-execs the pager with `--minimal
-/// --resume <id>` so the same conversation reopens under scrollback-native
-/// rendering. Proves the end-to-end screen-mode switch path (slash command →
-/// quit → exec → resume in minimal) that unit tests cannot cover.
+/// `/minimal` from a fullscreen session switches in process: no re-exec, no
+/// resume replay; history commits into native scrollback plus a seam marker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_slash_switches_from_fullscreen() {
@@ -13,14 +11,10 @@ async fn minimal_slash_switches_from_fullscreen() {
     let sentinel = turn_sentinel(1);
     content.set_response(format!("{sentinel} fullscreen payload."));
 
-    // Stable project dir so the resumed session is findable by id after re-exec.
     let project = tempfile::tempdir().expect("create project dir");
     std::fs::create_dir_all(project.path().join(".git")).expect("create .git");
 
     let binary = pager_binary().expect("resolve pager binary");
-    // Start fullscreen (default), standalone. Enable query responses *before*
-    // the re-exec so the post-switch minimal probe does not silently downgrade
-    // to full-height inline.
     let mut harness = PtyHarness::spawn_with_content_in_dir(
         &binary,
         DEFAULT_ROWS,
@@ -30,13 +24,13 @@ async fn minimal_slash_switches_from_fullscreen() {
         Some(project.path()),
     )
     .expect("spawn fullscreen pager");
+    // Unanswered CPR probes abort the in-process switch to minimal.
     harness.set_respond_to_queries(true);
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
 
-    // Establish a real session with content so `--resume` has history to load.
     harness
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit turn");
@@ -44,29 +38,21 @@ async fn minimal_slash_switches_from_fullscreen() {
         .wait_for_text(&sentinel, Duration::from_secs(30))
         .expect("mock response in fullscreen");
 
-    // Switch: `/minimal` should re-exec into scrollback-native mode with the
-    // same session. Pace keystrokes so the slash dropdown opens rather than
-    // paste-coalescing, then confirm once the description row is visible.
     inject_keys_paced(&mut harness, b"/minimal");
     harness
         .wait_for_text(
-            "Reopen this session in minimal (scrollback-native) mode",
+            "Switch this session to minimal (scrollback-native) mode",
             Duration::from_secs(5),
         )
         .expect("slash dropdown offers /minimal");
     harness.update(Duration::from_millis(150));
     harness.inject_keys(b"\r").expect("submit /minimal");
 
-    // After the relaunch the PTY stays live (Unix: same process via `exec`;
-    // Windows: child on the same console with the parent parked in `wait`);
-    // wait for minimal's idle status. A `/minimal` re-exec shows the
-    // switch-back form (`… /fullscreen to go back · /help`), not the cold-start
-    // `minimal · /help` sentinel alone.
     harness
         .wait_for_text(MINIMAL_SWITCH_BACK_IDLE_SENTINEL, Duration::from_secs(45))
         .unwrap_or_else(|e| {
             panic!(
-                "/minimal did not reopen session in minimal mode: {e}\nscreen:\n{}",
+                "/minimal did not switch this session to minimal mode: {e}\nscreen:\n{}",
                 harness.screen_contents()
             )
         });
@@ -74,22 +60,24 @@ async fn minimal_slash_switches_from_fullscreen() {
         .wait_for_full_text(&sentinel, Duration::from_secs(30))
         .unwrap_or_else(|e| {
             panic!(
-                "prior turn must be present after /minimal resume: {e}\nfull:\n{}",
+                "prior turn must be committed after the in-process /minimal switch: {e}\nfull:\n{}",
+                harness.full_text()
+            )
+        });
+    harness
+        .wait_for_full_text("Switched to minimal mode", Duration::from_secs(15))
+        .unwrap_or_else(|e| {
+            panic!(
+                "switch marker block missing: {e}\nfull:\n{}",
                 harness.full_text()
             )
         });
 
-    // Main-screen clear on relaunch: "Reopening session…" was printed just
-    // before exec and must not remain above the resumed UI (the clear wipes
-    // residual main-buffer detritus so the welcome card sits at the top).
-    let screen = harness.screen_contents();
+    // "Reopening session…" only prints on the legacy exec path.
     assert!(
-        !screen.contains("Reopening session"),
-        "main screen should be cleared on /minimal relaunch; leftover reopen text:\n{screen}"
-    );
-    assert!(
-        screen.contains("Grok Build") || harness.full_text().contains("Grok Build"),
-        "welcome card should re-anchor at top after /minimal relaunch\nscreen:\n{screen}"
+        !harness.full_text().contains("Reopening session"),
+        "in-process /minimal must not re-exec; found reopen text:\n{}",
+        harness.full_text()
     );
 
     assert!(

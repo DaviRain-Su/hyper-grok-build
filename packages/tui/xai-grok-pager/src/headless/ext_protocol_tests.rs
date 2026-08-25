@@ -417,7 +417,7 @@ fn headless_version_mismatch_logs_warn_with_both_versions() {
         "log names the method: {logs}"
     );
     let banner = crate::glyphs::sanitize_toast_message(
-        "⚠ Version mismatch: client 0.1.157, leader 0.1.150 — restart grok to match",
+        "⚠ Version mismatch: client 0.1.157, leader 0.1.150. Restart grok to match",
     );
     assert!(
         logs.contains(banner.as_ref()),
@@ -441,7 +441,7 @@ fn headless_version_mismatch_without_message_still_warns() {
     assert!(is_none);
     assert!(logs.contains("WARN"), "logged at warn level: {logs}");
     let banner = crate::glyphs::sanitize_toast_message(
-        "⚠ Version mismatch: client 0.1.157, leader 0.1.150 — restart grok to match",
+        "⚠ Version mismatch: client 0.1.157, leader 0.1.150. Restart grok to match",
     );
     assert!(
         logs.contains(banner.as_ref()),
@@ -533,6 +533,15 @@ fn ext_method_reply(
 
 /// `x.ai/ask_user_question` gets a typed `cancelled` reply on the wire;
 /// malformed params are still answered (known methods do not parse params).
+#[test]
+fn mcp_elicit_replies_cancelled() {
+    use xai_grok_tools::mcp_elicitation::McpElicitExtResponse;
+    let raw = ext_method_reply("x.ai/mcp/elicit", serde_json::json!({}))
+        .expect("policy reply, not an error");
+    let typed: McpElicitExtResponse = serde_json::from_str(raw.0.get()).expect("typed cancel");
+    assert!(matches!(typed, McpElicitExtResponse::Cancel));
+}
+
 #[test]
 fn ask_user_question_replies_cancelled() {
     use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse;

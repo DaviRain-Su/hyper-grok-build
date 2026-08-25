@@ -70,22 +70,21 @@ pub fn permission_mode_from_ui_if_set(ui: &TomlValue) -> Option<PermissionMode> 
     Some(PermissionMode::Ask)
 }
 
-/// Pure resolver: effective TOML `[ui]` permission keys (if any) >
-/// remote `permission_mode` > `Ask`. CLI is applied above this by the launch
+/// The explicitly selected mode, if any: effective TOML `[ui]` permission
+/// keys (if any) > remote `permission_mode`. `None` when neither source set
+/// one, so callers pick their own fallback (headless keeps Ask; interactive
+/// launches soft-default to auto). CLI is applied above this by the launch
 /// helpers. Managed/requirements TOML already deep-merge into effective config.
-pub fn resolve_permission_mode(
+pub fn selected_permission_mode(
     effective_ui: Option<&TomlValue>,
     remote_permission_mode: Option<&str>,
-) -> PermissionMode {
+) -> Option<PermissionMode> {
     if let Some(ui) = effective_ui
         && let Some(mode) = permission_mode_from_ui_if_set(ui)
     {
-        return mode;
+        return Some(mode);
     }
-    if let Some(mode_str) = remote_permission_mode {
-        return parse_permission_mode_canonical(mode_str);
-    }
-    PermissionMode::Ask
+    remote_permission_mode.map(parse_permission_mode_canonical)
 }
 
 /// Display projection for a selected mode that did NOT win yolo/auto
@@ -115,17 +114,17 @@ pub fn resolved_display_permission_mode(
     if toml_spelling == Some("default") {
         return "default";
     }
-    let mode = resolve_permission_mode(effective_ui, remote_permission_mode);
+    let mode = selected_permission_mode(effective_ui, remote_permission_mode)
+        .unwrap_or(PermissionMode::Ask);
     clamped_display_permission_mode(mode)
 }
 
+#[cfg(test)]
 fn permission_mode_from_layers(
     layers: &crate::config::ConfigLayers,
     remote: Option<&str>,
 ) -> PermissionMode {
-    let merged = layers.effective_config_base_without_overlay();
-    let ui = merged.as_table().and_then(|t| t.get("ui"));
-    resolve_permission_mode(ui, remote)
+    selected_permission_mode_from_layers(layers, remote).unwrap_or(PermissionMode::Ask)
 }
 
 /// Load selected permission mode for launch (overlay-free TOML + explicit remote).
@@ -141,11 +140,28 @@ fn permission_mode_from_layers(
 ///   approval_mode = "always-approve"   (legacy)
 ///   yolo = true                        (legacy)
 pub fn load_permission_mode(remote_permission_mode: Option<&str>) -> PermissionMode {
+    load_selected_permission_mode(remote_permission_mode).unwrap_or(PermissionMode::Ask)
+}
+
+/// Disk form of [`selected_permission_mode`]: `None` when no TOML `[ui]`
+/// permission key and no remote `permission_mode` chose a mode. A config that
+/// fails to load counts as an explicit `Ask` (fail-safe: a broken config must
+/// not soft-default into auto).
+fn load_selected_permission_mode(remote_permission_mode: Option<&str>) -> Option<PermissionMode> {
     let layers = match crate::config::ConfigLayers::load() {
         Ok(l) => l,
-        Err(_) => return PermissionMode::Ask,
+        Err(_) => return Some(PermissionMode::Ask),
     };
-    permission_mode_from_layers(&layers, remote_permission_mode)
+    selected_permission_mode_from_layers(&layers, remote_permission_mode)
+}
+
+fn selected_permission_mode_from_layers(
+    layers: &crate::config::ConfigLayers,
+    remote: Option<&str>,
+) -> Option<PermissionMode> {
+    let merged = layers.effective_config_base_without_overlay();
+    let ui = merged.as_table().and_then(|t| t.get("ui"));
+    selected_permission_mode(ui, remote)
 }
 
 /// Result of [`effective_yolo_for_launch`].
@@ -181,10 +197,48 @@ pub fn effective_yolo_for_launch(
 /// Mutually exclusive with effective yolo (yolo / `--yolo` wins if both requested).
 ///
 /// `remote_permission_mode` same contract as [`effective_yolo_for_launch`].
+/// When nothing selects a mode the launch is NOT auto — this is the resolver
+/// for headless / stdio / leader agents, whose prompts are auto-cancelled, so
+/// auto's escalations could never be answered and scripted `--allow` recipes
+/// keep ask-mode semantics.
 pub fn effective_auto_for_launch(
     cli_always_approve: bool,
     cli_permission_mode: Option<&str>,
     remote_permission_mode: Option<&str>,
+) -> bool {
+    effective_auto_for_launch_impl(
+        cli_always_approve,
+        cli_permission_mode,
+        remote_permission_mode,
+        false,
+    )
+}
+
+/// [`effective_auto_for_launch`] for interactive (TUI) launches: identical
+/// precedence, except that when nothing selects a mode — no CLI flag, no
+/// effective TOML `[ui]` permission key, no remote `permission_mode` — the
+/// launch soft-defaults to **auto** instead of ask. Every explicit choice
+/// still wins (including an explicit `"ask"` from any source), the feature
+/// gate's remote kill-switch makes the default inert, and yolo precedence is
+/// unchanged.
+pub fn effective_auto_for_launch_interactive(
+    cli_always_approve: bool,
+    cli_permission_mode: Option<&str>,
+    remote_permission_mode: Option<&str>,
+) -> bool {
+    effective_auto_for_launch_impl(
+        cli_always_approve,
+        cli_permission_mode,
+        remote_permission_mode,
+        true,
+    )
+}
+
+fn effective_auto_for_launch_impl(
+    cli_always_approve: bool,
+    cli_permission_mode: Option<&str>,
+    remote_permission_mode: Option<&str>,
+    unset_defaults_auto: bool,
 ) -> bool {
     // Feature gate (default ON): when the auto permission-mode feature is
     // disabled, Auto is inert — never launch into it regardless of CLI/config,
@@ -211,7 +265,10 @@ pub fn effective_auto_for_launch(
     if let Some(mode) = cli_permission_mode {
         return mode == "auto";
     }
-    load_permission_mode(remote_permission_mode).is_auto()
+    match load_selected_permission_mode(remote_permission_mode) {
+        Some(mode) => mode.is_auto(),
+        None => unset_defaults_auto,
+    }
 }
 
 /// Whether a session should activate the **auto** permission mode: the feature
@@ -286,6 +343,12 @@ pub fn load_require_plan_approval() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Ask-fallback composition production callers inline (display path,
+    /// `load_permission_mode`).
+    fn resolve_permission_mode(ui: Option<&TomlValue>, remote: Option<&str>) -> PermissionMode {
+        selected_permission_mode(ui, remote).unwrap_or(PermissionMode::Ask)
+    }
 
     #[test]
     fn resolve_permission_mode_none_is_ask() {
@@ -703,6 +766,78 @@ mod tests {
         assert!(
             !effective_auto_for_launch(false, None, None),
             "gate OFF: config-driven auto must not activate auto"
+        );
+        assert!(
+            !effective_auto_for_launch_interactive(false, None, None),
+            "gate OFF: the interactive soft default must be inert (remote kill-switch)"
+        );
+        unsafe { std::env::remove_var("GROK_AUTO_PERMISSION_MODE") };
+    }
+
+    /// The seam the interactive auto soft-default hangs on: `None` only when
+    /// no source chose a mode; every explicit choice — including `"ask"` and
+    /// unknown strings (safe Ask) — is `Some` and therefore beats the default.
+    #[test]
+    fn selected_permission_mode_none_only_when_nothing_chooses() {
+        assert_eq!(selected_permission_mode(None, None), None);
+        let no_perm_keys: TomlValue = toml::from_str("[ui]\ntheme = \"dark\"\n").unwrap();
+        assert_eq!(
+            selected_permission_mode(no_perm_keys.get("ui"), None),
+            None,
+            "[ui] without a permission key selects nothing"
+        );
+        let ask: TomlValue = toml::from_str("[ui]\npermission_mode = \"ask\"\n").unwrap();
+        assert_eq!(
+            selected_permission_mode(ask.get("ui"), None),
+            Some(PermissionMode::Ask)
+        );
+        assert_eq!(
+            selected_permission_mode(None, Some("auto")),
+            Some(PermissionMode::Auto)
+        );
+        assert_eq!(
+            selected_permission_mode(None, Some("garbage")),
+            Some(PermissionMode::Ask),
+            "unknown remote strings are an explicit safe Ask, not a soft-default slot"
+        );
+    }
+
+    /// Layers form of the same seam (deterministic — no host config read).
+    #[test]
+    fn selected_permission_mode_from_layers_unset_is_none() {
+        let empty = crate::config::ConfigLayers::default();
+        assert_eq!(selected_permission_mode_from_layers(&empty, None), None);
+        let user_ask = crate::config::ConfigLayers {
+            user: ui_layer("permission_mode = \"ask\""),
+            ..Default::default()
+        };
+        assert_eq!(
+            selected_permission_mode_from_layers(&user_ask, Some("auto")),
+            Some(PermissionMode::Ask),
+            "user TOML beats remote"
+        );
+    }
+
+    /// Interactive resolver: explicit choices and yolo precedence are
+    /// identical to the strict resolver (CLI cases are host-independent).
+    #[test]
+    fn effective_auto_for_launch_interactive_explicit_choices_win() {
+        let _g = crate::util::config::resolve::AUTO_PERMISSION_MODE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("GROK_AUTO_PERMISSION_MODE", "1") };
+        assert!(effective_auto_for_launch_interactive(
+            false,
+            Some("auto"),
+            None
+        ));
+        assert!(
+            !effective_auto_for_launch_interactive(false, Some("ask"), None),
+            "explicit --permission-mode ask beats the soft default"
+        );
+        assert!(
+            !effective_auto_for_launch_interactive(true, None, None),
+            "--yolo beats the soft default"
         );
         unsafe { std::env::remove_var("GROK_AUTO_PERMISSION_MODE") };
     }

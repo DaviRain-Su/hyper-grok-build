@@ -22,7 +22,7 @@ impl SlashCommand for TranscriptCommand {
     }
 
     fn description(&self) -> &str {
-        "View the full conversation transcript in your pager ($PAGER)"
+        "View the conversation transcript in your pager ($PAGER)"
     }
 
     fn session_scoped(&self) -> bool {

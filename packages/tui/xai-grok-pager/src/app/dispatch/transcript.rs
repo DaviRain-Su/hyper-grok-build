@@ -63,7 +63,7 @@ pub(super) fn dispatch_copy_assistant_message(
             if let Some(entry) = agent.scrollback.entry(i)
                 && let RenderBlock::AgentMessage(msg) = &entry.block
             {
-                agent_messages.push(msg.copy_text(false));
+                agent_messages.push(msg.copy_text(true));
             }
         }
 
@@ -128,7 +128,7 @@ pub(super) fn dispatch_copy_assistant_message(
             }
             crate::clipboard::CopyDelivery::File { path } => {
                 agent.scrollback.push_block(RenderBlock::system(format!(
-                    "Clipboard unreachable — wrote {}{stats}",
+                    "Clipboard unreachable: wrote {}{stats}",
                     crate::clipboard::display_copy_path(path)
                 )));
             }
@@ -208,7 +208,7 @@ pub(super) fn dispatch_export_conversation(
                     None => format!("Conversation copied to clipboard{stats}"),
                 },
                 crate::clipboard::CopyDelivery::File { path } => format!(
-                    "Clipboard unreachable — conversation written to {}{stats}",
+                    "Clipboard unreachable: conversation written to {}{stats}",
                     crate::clipboard::display_copy_path(path)
                 ),
                 crate::clipboard::CopyDelivery::Failed { .. } => {
@@ -453,6 +453,7 @@ fn extensions_tab_slash_name(tab: crate::views::extensions_modal::ExtensionsTab)
         ExtensionsTab::Plugins => "plugins",
         ExtensionsTab::Marketplace => "marketplace",
         ExtensionsTab::Skills => "skills",
+        ExtensionsTab::Workflows => "workflows",
         ExtensionsTab::McpServers => "mcps",
     }
 }
@@ -557,12 +558,17 @@ pub(super) fn dispatch_open_config_agents_modal(
             .into_iter()
             .map(|(id, name)| crate::views::agents_modal::ModelChoice { id, name })
             .collect();
+    // One-shot plugin discovery (same gating as `/mcp doctor` and `inspect`)
+    // so plugin-provided agents are listed alongside native ones.
+    let plugin_registry = xai_grok_shell::util::config::load_cli_plugin_registry(&cwd);
+    let plugin_registry = (!plugin_registry.is_empty()).then_some(plugin_registry);
     let mut modal = AgentsModalState::new(
         &cwd,
         &toggle,
         &bundle,
         model_agent_type.as_deref(),
         active_agent,
+        plugin_registry,
         available_models,
     );
     if let Some(tab) = initial_tab {

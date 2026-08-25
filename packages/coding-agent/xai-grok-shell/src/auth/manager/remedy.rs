@@ -2,9 +2,12 @@
 //! bounded unattended attempt the startup paths make before asking the user.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use super::AuthManager;
+use super::{AuthManager, RefreshReason};
+use crate::auth::error::AuthError;
 use crate::auth::model::GrokAuth;
+use crate::auth::token_type::TokenType;
 
 /// The way back to a usable credential, as of right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +63,21 @@ impl AuthRemedy {
     }
 }
 
+/// Outcome of a bounded best-effort mint, for callers that must distinguish
+/// "the deadline elapsed with the exchange still in flight" (spawn-don't-drop)
+/// from a refresh that actually resolved: forcing a second mint after a
+/// deadline only queues behind the detached exchange for up to another full
+/// budget.
+pub(crate) enum BoundedRefresh {
+    /// The chain finished inside the budget with this result. Boxed like
+    /// [`SilentRefresh::Renewed`]: `GrokAuth` is large and the other variant
+    /// is unit-sized.
+    Resolved(Box<Result<GrokAuth, AuthError>>),
+    /// The spawned chain outlived the budget and continues in the background
+    /// (persisting and hot-swapping any minted token when it lands).
+    DeadlineElapsed,
+}
+
 /// What a [`AuthManager::silent_refresh`] attempt leaves the caller holding.
 #[derive(Debug, Clone)]
 pub(crate) enum SilentRefresh {
@@ -103,6 +121,99 @@ impl AuthManager {
             Some(serde_json::json!({ "outcome": logged })),
         );
         outcome
+    }
+
+    /// Bounded best-effort mint for RPC paths that must answer promptly.
+    /// Thin wrapper over [`AuthManager::refresh_chain_bounded_outcome`] for
+    /// callers that treat a deadline like any other retryable failure.
+    pub(crate) async fn refresh_chain_bounded(
+        self: &Arc<Self>,
+        token_type: TokenType,
+        reason: RefreshReason,
+        budget: Duration,
+    ) -> Result<GrokAuth, AuthError> {
+        match self
+            .refresh_chain_bounded_outcome(token_type, reason, budget)
+            .await
+        {
+            BoundedRefresh::Resolved(result) => *result,
+            BoundedRefresh::DeadlineElapsed => Err(AuthError::transient(
+                "bounded refresh deadline elapsed; refresh continues in background",
+            )),
+        }
+    }
+
+    /// Bounded best-effort mint, deadline distinguished (see
+    /// [`BoundedRefresh`]).
+    ///
+    /// Spawned rather than awaited inline, like [`AuthManager::silent_refresh`]:
+    /// dropping the future at the deadline abandons an IdP exchange whose
+    /// rotated refresh token the server may already have burned. On deadline
+    /// the spawned chain runs to completion (persisting and hot-swapping any
+    /// minted token) while the caller gets [`BoundedRefresh::DeadlineElapsed`].
+    pub(crate) async fn refresh_chain_bounded_outcome(
+        self: &Arc<Self>,
+        token_type: TokenType,
+        reason: RefreshReason,
+        budget: Duration,
+    ) -> BoundedRefresh {
+        let manager = Arc::clone(self);
+        let attempt = tokio::spawn(async move { manager.refresh_chain(token_type, reason).await });
+        let (result, outcome) = match tokio::time::timeout(budget, attempt).await {
+            Ok(Ok(Ok(auth))) => (BoundedRefresh::Resolved(Box::new(Ok(auth))), "ok"),
+            Ok(Ok(Err(err))) => (BoundedRefresh::Resolved(Box::new(Err(err))), "err"),
+            Ok(Err(join_error)) => {
+                // A JoinError here means the chain panicked (the handle is
+                // never aborted), possibly after the IdP rotated the refresh
+                // token but before persistence — an indeterminate credential
+                // state. Non-retryable: a transient would invite an immediate
+                // re-mint that could re-spend the rotated token.
+                tracing::error!(
+                    is_panic = join_error.is_panic(),
+                    "bounded refresh task failed"
+                );
+                xai_grok_telemetry::unified_log::error(
+                    "auth: bounded refresh task failed",
+                    None,
+                    Some(serde_json::json!({
+                        "reason": format!("{reason:?}"),
+                        "is_panic": join_error.is_panic(),
+                    })),
+                );
+                // Record the verdict, not just the returned error: the ad-hoc
+                // permanent below reaches only THIS caller, while any other
+                // path (the spawned post-unblock retry's forced
+                // `ServerRejected` chain included) would walk straight back
+                // into `refresh_chain` and could re-spend the possibly-rotated
+                // RT. A recorded verdict short-circuits every re-attempt at
+                // step 1b for the TTL; `Other` is non-sticky, so a later
+                // login / sibling adopt clears it, and a rotated key landing
+                // on disk falls outside the verdict's key scope.
+                if let Some(key) = self.attempted_verdict_key(reason) {
+                    self.record_permanent_failure(
+                        key,
+                        crate::auth::error::RefreshTokenFailedReason::Other.into(),
+                    );
+                }
+                (
+                    BoundedRefresh::Resolved(Box::new(Err(AuthError::permanent(
+                        crate::auth::error::RefreshTokenFailedReason::Other,
+                    )))),
+                    "join_error",
+                )
+            }
+            Err(_) => (BoundedRefresh::DeadlineElapsed, "timeout"),
+        };
+        // The variant, not the outcome: the `Ok` payload is a credential.
+        xai_grok_telemetry::unified_log::info(
+            "auth: bounded refresh",
+            None,
+            Some(serde_json::json!({
+                "reason": format!("{reason:?}"),
+                "outcome": outcome,
+            })),
+        );
+        result
     }
 
     /// Classify the current credential's way back.
@@ -294,6 +405,58 @@ mod tests {
         assert!(
             manager.auth_remedy().is_self_healing(),
             "and the other arm would have accepted the same credential",
+        );
+    }
+
+    /// A panicked mint is an indeterminate credential state: the bounded
+    /// wrapper must both return a permanent error AND record the verdict, so
+    /// later paths (the spawned post-unblock retry's forced `ServerRejected`
+    /// chain included) short-circuit at step 1b instead of walking back into
+    /// the IdP and re-spending a possibly-rotated refresh token.
+    #[tokio::test]
+    async fn panicked_bounded_refresh_records_the_verdict() {
+        struct PanickingRefresher;
+        #[async_trait::async_trait]
+        impl TokenRefresher for PanickingRefresher {
+            async fn refresh(
+                &self,
+                _reason: crate::auth::manager::RefreshReason,
+            ) -> RefreshOutcome {
+                panic!("mint died mid-exchange");
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+        manager.hot_swap(GrokAuth {
+            key: "expired-oidc".into(),
+            auth_mode: AuthMode::Oidc,
+            refresh_token: Some("rt-live".into()),
+            expires_at: Some(Utc::now() - Duration::hours(1)),
+            ..GrokAuth::test_default()
+        });
+        manager.set_refresher(Arc::new(PanickingRefresher));
+        assert!(!manager.has_permanent_failure());
+
+        let err = manager
+            .refresh_chain_bounded(
+                TokenType::OidcSession,
+                RefreshReason::ServerRejected,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect_err("a panicked mint is a failure");
+        assert!(
+            matches!(
+                err,
+                AuthError::Refresh(crate::auth::error::RefreshTokenError::Permanent(_))
+            ),
+            "non-retryable for the caller, got: {err:?}"
+        );
+        assert!(
+            manager.has_permanent_failure(),
+            "and recorded, so a follow-up chain short-circuits at step 1b \
+             instead of re-spending the possibly-rotated refresh token"
         );
     }
 

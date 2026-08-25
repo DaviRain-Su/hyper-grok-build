@@ -5416,6 +5416,106 @@ fn baseline_updates(events: &[HunkEvent]) -> usize {
 // Scoped (pathspec-limited) dirty-cache scans
 // =========================================================================
 
+#[tokio::test]
+async fn set_working_dir_rebases_file_state_keys() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let old = temp.path().join("workspace");
+    let new = temp.path().join("workspace").join("conv-abc");
+    std::fs::create_dir_all(&new).unwrap();
+    std::fs::write(old.join("foo.rs"), "fn main() {}\n").unwrap();
+
+    let mut actor = direct_actor(&old, TrackingMode::AgentOnly);
+    actor
+        .record_agent_write(old.join("foo.rs"), "fn main() { 1 }\n".into(), 0, None)
+        .await;
+    assert!(
+        actor.file_states.contains_key(&old.join("foo.rs")),
+        "pre-remount state must be keyed at the original cwd"
+    );
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    actor
+        .handle_command(crate::commands::HunkTrackerCommand::SetWorkingDir {
+            working_dir: new.clone(),
+            reply: reply_tx,
+        })
+        .await;
+    reply_rx
+        .await
+        .expect("set_working_dir must ack after rekey");
+    assert!(
+        !actor.file_states.contains_key(&old.join("foo.rs")),
+        "old cwd keys must not survive remount"
+    );
+    let remounted = actor
+        .file_states
+        .get(&new.join("foo.rs"))
+        .expect("file state must move onto the new guest root");
+    assert!(
+        remounted.hunks.iter().all(|h| h.path == new.join("foo.rs")),
+        "hunk.path must follow the remounted file key"
+    );
+
+    actor
+        .record_agent_write(new.join("bar.rs"), "fn bar() {}\n".into(), 0, None)
+        .await;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    actor
+        .handle_command(crate::commands::HunkTrackerCommand::SetWorkingDir {
+            working_dir: new.clone(),
+            reply: reply_tx,
+        })
+        .await;
+    reply_rx.await.expect("idempotent remount must ack");
+    assert!(
+        actor.file_states.contains_key(&new.join("bar.rs")),
+        "keys already under the guest root must not be double-prefixed"
+    );
+    assert!(
+        !actor
+            .file_states
+            .contains_key(&new.join("conv-abc").join("bar.rs")),
+        "rekey must not nest an already-guest path"
+    );
+}
+
+#[tokio::test]
+async fn set_working_dir_merges_colliding_guest_and_old_cwd_keys() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let old = temp.path().join("workspace");
+    let new = temp.path().join("workspace").join("conv-abc");
+    std::fs::create_dir_all(&new).unwrap();
+    std::fs::write(old.join("foo.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(new.join("foo.rs"), "fn main() { guest }\n").unwrap();
+
+    let mut actor = direct_actor(&old, TrackingMode::AgentOnly);
+    actor
+        .record_agent_write(old.join("foo.rs"), "fn main() { old }\n".into(), 0, None)
+        .await;
+    actor
+        .record_agent_write(new.join("foo.rs"), "fn main() { guest }\n".into(), 0, None)
+        .await;
+    assert_eq!(actor.file_states.len(), 2);
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    actor
+        .handle_command(crate::commands::HunkTrackerCommand::SetWorkingDir {
+            working_dir: new.clone(),
+            reply: reply_tx,
+        })
+        .await;
+    reply_rx.await.expect("set_working_dir must ack");
+    let remounted = actor
+        .file_states
+        .get(&new.join("foo.rs"))
+        .expect("collision must keep a single guest-root key");
+    assert_eq!(actor.file_states.len(), 1);
+    assert!(
+        !remounted.hunks.is_empty(),
+        "merged state must keep hunks from both keys"
+    );
+}
+
 /// Construct an actor directly (not spawned, via the production constructor)
 /// so tests can call `pub(super)` methods like `refresh_git_dirty_cache` and
 /// inspect the caches in place.

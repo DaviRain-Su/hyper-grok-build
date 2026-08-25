@@ -214,6 +214,61 @@ fn sweep_dead_marks_missing_paths() {
     assert_eq!(exists_rec.status, WorktreeStatus::Alive);
 }
 
+#[cfg(unix)]
+#[test]
+fn sweep_dead_does_not_mark_dangling_symlink() {
+    let db = WorktreeDb::open_in_memory().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let link = tmp.path().join("dangling");
+    std::os::unix::fs::symlink(tmp.path().join("gone"), &link).unwrap();
+    db.register(&make_record(
+        "dangling",
+        &link.to_string_lossy(),
+        WorktreeKind::Session,
+    ))
+    .unwrap();
+    assert_eq!(db.sweep_dead().unwrap(), 0);
+    let rec = db.get("dangling").unwrap().unwrap();
+    assert_eq!(rec.status, WorktreeStatus::Alive);
+}
+
+#[test]
+fn sweep_dead_skips_live_grove_dests() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = WorktreeDb::open_in_memory().unwrap();
+    for (id, mode) in [
+        ("nfs-legacy", "nfs"),
+        ("grove-nfs", "grove-nfs"),
+        ("grove-fuse", "grove-fuse"),
+    ] {
+        let dest = tmp.path().join(id);
+        std::fs::create_dir(&dest).unwrap();
+        let mut rec = make_record(id, dest.to_str().unwrap(), WorktreeKind::Session);
+        rec.creation_mode = mode.into();
+        db.register(&rec).unwrap();
+    }
+    assert_eq!(db.sweep_dead().unwrap(), 0);
+    for id in ["nfs-legacy", "grove-nfs", "grove-fuse"] {
+        let fetched = db.get(id).unwrap().unwrap();
+        assert_eq!(fetched.status, WorktreeStatus::Alive, "{id}");
+    }
+}
+
+#[test]
+fn sweep_dead_marks_missing_grove_dest() {
+    let db = WorktreeDb::open_in_memory().unwrap();
+    let mut rec = make_record(
+        "grove-gone",
+        "/nonexistent/grove-fuse/dest",
+        WorktreeKind::Session,
+    );
+    rec.creation_mode = "grove-fuse".into();
+    db.register(&rec).unwrap();
+    assert_eq!(db.sweep_dead().unwrap(), 1);
+    let fetched = db.get("grove-gone").unwrap().unwrap();
+    assert_eq!(fetched.status, WorktreeStatus::Dead);
+}
+
 #[test]
 fn register_upsert_overwrites() {
     let db = WorktreeDb::open_in_memory().unwrap();
@@ -272,8 +327,8 @@ fn id_from_path_strips_worktree_prefix_and_hashes_full_path() {
         "a1b2c3",
     );
     assert_id_shape(&id_from_path(Path::new("/tmp/my-worktree")), "my-worktree");
-    // No file name → empty basename, still suffixed with a hash.
-    assert!(id_from_path(Path::new("/")).starts_with('-'));
+    // No file name → sanitizer uses `wt`, still suffixed with a hash.
+    assert_id_shape(&id_from_path(Path::new("/")), "wt");
     // Deterministic.
     assert_eq!(id_from_path(p), id_from_path(p));
 }

@@ -96,6 +96,7 @@ pub enum ToolKind {
     ImageToVideo,
     ReferenceToVideo,
     DeployApp,
+    InitOrUpdateApp,
     SearchTool,
     UseTool,
     Monitor,

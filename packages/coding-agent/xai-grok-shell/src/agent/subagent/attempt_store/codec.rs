@@ -6,8 +6,14 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 
 pub(super) const MAX_MESSAGE_RAW_BYTES: usize = 32 * 1024;
+pub(super) const MAX_SEGMENTS: u8 = 33;
+pub(super) const MAX_ACCEPTED_ROWS: u8 = 32;
+pub(super) const MAX_ACCEPTED_RAW_BYTES: u64 = 256 * 1024;
+pub(super) const MAX_ACCEPTED_CONTENT_BYTES: u64 = 384 * 1024;
+pub(super) const MAX_JOURNAL_LOGICAL_BYTES: u64 = 512 * 1024;
+pub(super) const MAX_JOURNAL_PHYSICAL_BYTES: u64 = 1024 * 1024;
+pub(super) const MAX_COMPLETION_DIRECTORY_BYTES: u64 = 768 * 1024;
 const MAX_TIMESTAMP: u64 = 9_999_999_999_999;
-const MAX_SEGMENTS: u8 = 33;
 
 pub(super) type Result<T> = std::result::Result<T, CodecError>;
 
@@ -33,17 +39,44 @@ pub(super) enum SegmentKindV1 {
     AgentMessage = 2,
     AttachedHuman = 3,
 }
+impl SegmentKindV1 {
+    pub(super) fn try_from_ordinal(value: u8) -> Result<Self> {
+        match value {
+            0 => Ok(Self::InitialOriginalTask),
+            1 => Ok(Self::InitialAgentMessage),
+            2 => Ok(Self::AgentMessage),
+            3 => Ok(Self::AttachedHuman),
+            _ => Err(CodecError::Invalid("segment kind")),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(super) enum AgentSenderRelationV1 {
     ParentToOwnedDescendant = 0,
 }
+impl AgentSenderRelationV1 {
+    pub(super) fn try_from_ordinal(value: u8) -> Result<Self> {
+        match value {
+            0 => Ok(Self::ParentToOwnedDescendant),
+            _ => Err(CodecError::Invalid("sender relation")),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(super) enum AgentAuthorityV1 {
     ModelAuthoredUntrusted = 0,
+}
+impl AgentAuthorityV1 {
+    pub(super) fn try_from_ordinal(value: u8) -> Result<Self> {
+        match value {
+            0 => Ok(Self::ModelAuthoredUntrusted),
+            _ => Err(CodecError::Invalid("agent authority")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +86,16 @@ pub(super) enum TurnResolutionV1 {
     Failed = 1,
     Cancelled = 2,
 }
+impl TurnResolutionV1 {
+    pub(super) fn try_from_ordinal(value: u8) -> Result<Self> {
+        match value {
+            0 => Ok(Self::Delivered),
+            1 => Ok(Self::Failed),
+            2 => Ok(Self::Cancelled),
+            _ => Err(CodecError::Invalid("turn resolution")),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -61,6 +104,17 @@ pub(super) enum AdmissionCloseReasonV1 {
     RuntimeFailure = 1,
     Cancellation = 2,
     Corruption = 3,
+}
+impl AdmissionCloseReasonV1 {
+    pub(super) fn try_from_ordinal(value: u8) -> Result<Self> {
+        match value {
+            0 => Ok(Self::Drained),
+            1 => Ok(Self::RuntimeFailure),
+            2 => Ok(Self::Cancellation),
+            3 => Ok(Self::Corruption),
+            _ => Err(CodecError::Invalid("admission close reason")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +131,16 @@ impl InputDispositionV1 {
             Self::Delivered => (1, 0),
             Self::Failed => (2, 1),
             Self::Cancelled => (3, 2),
+        }
+    }
+
+    pub(super) fn try_from_ordinals(outcome: u8, reason: u8) -> Result<Self> {
+        match (outcome, reason) {
+            (0, 0) => Ok(Self::Queued),
+            (1, 0) => Ok(Self::Delivered),
+            (2, 1) => Ok(Self::Failed),
+            (3, 2) => Ok(Self::Cancelled),
+            _ => Err(CodecError::Invalid("input disposition product")),
         }
     }
 }
@@ -97,6 +161,16 @@ impl AttemptOutcomeV1 {
             Self::Quarantined => (3, 3),
         }
     }
+
+    pub(super) fn try_from_ordinals(outcome: u8, reason: u8) -> Result<Self> {
+        match (outcome, reason) {
+            (0, 0) => Ok(Self::Completed),
+            (1, 1) => Ok(Self::Failed),
+            (2, 2) => Ok(Self::Cancelled),
+            (3, 3) => Ok(Self::Quarantined),
+            _ => Err(CodecError::Invalid("attempt outcome product")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +179,7 @@ impl<const N: usize, K> DomainBytes<N, K> {
     pub(super) fn new(bytes: [u8; N]) -> Self {
         Self(bytes, PhantomData)
     }
-    fn as_bytes(&self) -> &[u8; N] {
+    pub(super) fn as_bytes(&self) -> &[u8; N] {
         &self.0
     }
 }
@@ -114,6 +188,9 @@ macro_rules! domains {
     ($($name:ident: $marker:ident[$width:expr]),+ $(,)?) => {$(
         #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub(super) enum $marker {}
         pub(super) type $name = DomainBytes<$width, $marker>;
+        impl $marker {
+            pub(super) const ENCODED_HEX_WIDTH: usize = $width * 2;
+        }
     )+};
 }
 domains! {
@@ -122,6 +199,8 @@ domains! {
     ConstructorDigest: Constructor[32], PayloadHash: Payload[32], ProjectionSetHash: ProjectionSet[32],
     CompletionCoreHash: CompletionCore[32], RewindRefHash: RewindRef[32],
 }
+
+pub(super) const ACCEPTED_SOURCE_FIELD_OVERHEAD_BYTES: usize = 7;
 
 macro_rules! scalar {
     ($name:ident($ty:ty)) => {
@@ -162,6 +241,9 @@ impl SegmentGeneration {
     pub(super) fn index(self) -> u8 {
         self.0 - 1
     }
+    pub(super) fn value(self) -> u8 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +267,9 @@ impl Timestamp {
         } else {
             Ok(Self(value))
         }
+    }
+    pub(super) fn value(self) -> u64 {
+        self.0
     }
 }
 
@@ -213,13 +298,37 @@ pub(super) struct CapacityProfile {
 impl CapacityProfile {
     fn validate(&self) -> Result<()> {
         for (field, actual, max) in [
-            ("segments", u64::from(self.segments), 33),
-            ("messages", u64::from(self.messages), 32),
-            ("raw bytes", self.raw_bytes, 262_144),
-            ("content bytes", self.content_bytes, 393_216),
-            ("logical bytes", self.logical_bytes, 524_288),
-            ("physical bytes", self.physical_bytes, 1_048_576),
-            ("directory bytes", self.directory_bytes, 786_432),
+            (
+                "segments",
+                u64::from(self.segments),
+                u64::from(MAX_SEGMENTS),
+            ),
+            (
+                "messages",
+                u64::from(self.messages),
+                u64::from(MAX_ACCEPTED_ROWS),
+            ),
+            ("raw bytes", self.raw_bytes, MAX_ACCEPTED_RAW_BYTES),
+            (
+                "content bytes",
+                self.content_bytes,
+                MAX_ACCEPTED_CONTENT_BYTES,
+            ),
+            (
+                "logical bytes",
+                self.logical_bytes,
+                MAX_JOURNAL_LOGICAL_BYTES,
+            ),
+            (
+                "physical bytes",
+                self.physical_bytes,
+                MAX_JOURNAL_PHYSICAL_BYTES,
+            ),
+            (
+                "directory bytes",
+                self.directory_bytes,
+                MAX_COMPLETION_DIRECTORY_BYTES,
+            ),
         ] {
             if actual > max {
                 return Err(CodecError::Invalid(field));
@@ -262,7 +371,7 @@ pub(super) enum RecordV1 {
     AdmissionClosed(AdmissionClosedRecord),
     AttemptOutcome(AttemptOutcomeRecord),
 }
-const ROW_LIMITS: [(usize, usize); 11] = [
+pub(super) const ROW_LIMITS: [(usize, usize); 11] = [
     (212, 224),
     (102, 128),
     (43_871, 49_152),
@@ -275,6 +384,7 @@ const ROW_LIMITS: [(usize, usize); 11] = [
     (63, 64),
     (52, 64),
 ];
+pub(super) const MAX_ENCODED_RECORD_BYTES: usize = ROW_LIMITS[2].1;
 impl RecordV1 {
     pub(super) fn limits(&self) -> (usize, usize) {
         ROW_LIMITS[usize::from(self.event())]
@@ -362,7 +472,7 @@ fn validate(record: &RecordV1) -> Result<()> {
 }
 
 fn wire(record: &RecordV1) -> Value {
-    let x = |value: &[u8]| hex(value);
+    let x = |value: &[u8]| encode_hex(value);
     match record {
         RecordV1::AttemptHeader(v) => {
             json!({"v":1,"e":0,"a":x(v.attempt.as_bytes()),"r":x(v.owner_root.as_bytes()),"g":v.generation.0,"k":v.initial as u8,"h":x(v.constructor_digest.as_bytes()),"t":v.timestamp.0})
@@ -414,7 +524,7 @@ fn wire(record: &RecordV1) -> Value {
 fn limit(field: &'static str, actual: usize, max: usize) -> CodecError {
     CodecError::Limit { field, actual, max }
 }
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn encode_hex(bytes: &[u8]) -> String {
     const D: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

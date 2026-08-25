@@ -179,7 +179,9 @@ impl SessionActor {
         // Note: Auto-compact is now handled inline during process_conversation_turn,
         // so we no longer need to check for queued auto-compact here.
 
-        // Drop stale workflow-completion synthetic fronts (already reported).
+        // Drop stale synthetic fronts before promoting: already-reported workflow completions, and
+        // goal continuations whose goal is no longer Active. An Active goal re-arms a fresh
+        // continuation at turn end, so a leftover one here would jump ahead of the user's queue.
         loop {
             let stale = match state
                 .pending_inputs
@@ -202,6 +204,9 @@ impl SessionActor {
                         None => true,
                     }
                 }
+                Some(
+                    super::PromptOrigin::GoalSummary | super::PromptOrigin::GoalClassifierNudge,
+                ) => !self.goal_loop_active(),
                 _ => false,
             };
             if !stale {

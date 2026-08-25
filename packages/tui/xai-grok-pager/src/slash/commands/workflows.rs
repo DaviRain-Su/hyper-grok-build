@@ -1,7 +1,11 @@
+//! `/workflows` -- browse the workflow catalog in the extensions modal.
+
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
-use crate::slash::{ModeSupport, Remedy};
+use crate::views::extensions_modal::ExtensionsTab;
+use xai_grok_telemetry::events::ExtensionsModalTrigger;
 
+/// Open the extensions modal on the Workflows catalog tab.
 pub struct WorkflowsCommand;
 
 impl SlashCommand for WorkflowsCommand {
@@ -10,28 +14,18 @@ impl SlashCommand for WorkflowsCommand {
     }
 
     fn description(&self) -> &str {
-        "Show workflow runs (phases, agents, progress)"
+        "Browse installed workflows"
     }
 
     fn usage(&self) -> &str {
         "/workflows"
     }
 
-    fn visible(&self, _ctx: &crate::slash::command::AppCtx) -> bool {
-        true
-    }
-
-    /// The run pane is drawn from `AgentView::show_workflows` on the full-TUI
-    /// path only; minimal never reads it, so the toggle would flip a flag
-    /// nothing renders.
-    fn mode_support(&self) -> ModeSupport {
-        ModeSupport::FullscreenOnly(Remedy::SwitchMode {
-            why: "the workflow run pane needs fullscreen",
-        })
-    }
-
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        CommandResult::Action(Action::ToggleWorkflows)
+        CommandResult::Action(Action::OpenExtensionsModal {
+            tab: ExtensionsTab::Workflows,
+            trigger: ExtensionsModalTrigger::SlashCommand,
+        })
     }
 }
 
@@ -41,6 +35,7 @@ mod tests {
     use crate::acp::model_state::ModelState;
     use crate::app::bundle::BundleState;
     use crate::settings::PagerLocalSnapshot;
+    use crate::slash::ModeSupport;
 
     static DEFAULT_BUNDLE_STATE: BundleState = BundleState {
         has_cache: false,
@@ -64,6 +59,8 @@ mod tests {
                 billing_surface_visible: true,
                 usage_command_visible: true,
                 workflows_available: available,
+                saved_workflows: &[],
+                workflow_runs: &[],
                 screen_mode: crate::app::ScreenMode::Fullscreen,
                 current_title: None,
             };
@@ -72,7 +69,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_toggle_workflows() {
+    fn workflows_opens_catalog_tab_in_both_modes() {
         let models = ModelState::default();
         let mut ctx = CommandExecCtx {
             models: &models,
@@ -85,7 +82,12 @@ mod tests {
         };
         assert!(matches!(
             WorkflowsCommand.run(&mut ctx, ""),
-            CommandResult::Action(Action::ToggleWorkflows)
+            CommandResult::Action(Action::OpenExtensionsModal {
+                tab: ExtensionsTab::Workflows,
+                trigger: ExtensionsModalTrigger::SlashCommand,
+            })
         ));
+        // Parity with /skills: the modal renders in minimal mode too.
+        assert!(matches!(WorkflowsCommand.mode_support(), ModeSupport::Both));
     }
 }

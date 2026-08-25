@@ -3,6 +3,23 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 
+/// Roots are skipped for plain HTTP targets: reqwest loads the OS store at
+/// build time regardless of scheme, and a broken store must not fail the CLI.
+fn builder_for(url: &str) -> reqwest::ClientBuilder {
+    if url.starts_with("https://") {
+        Client::builder()
+    } else {
+        Client::builder().tls_built_in_root_certs(false)
+    }
+}
+
+#[allow(clippy::disallowed_methods)] // scheme-aware builder above; loopback skips roots by construction
+fn client_for(url: &str) -> Result<Client> {
+    builder_for(url)
+        .build()
+        .context("failed to build HTTP client")
+}
+
 /// Send keystrokes to a session.
 pub async fn send(url: &str, keys: &str, enter: bool) -> Result<()> {
     let mut keys = keys.to_string();
@@ -10,7 +27,7 @@ pub async fn send(url: &str, keys: &str, enter: bool) -> Result<()> {
         keys.push_str("<CR>");
     }
 
-    let client = Client::new();
+    let client = client_for(url)?;
     let resp = client
         .post(format!("{url}/control/send"))
         .json(&serde_json::json!({"keys": keys}))
@@ -35,7 +52,7 @@ pub async fn screen(
     full: bool,
     line_numbers: bool,
 ) -> Result<()> {
-    let client = Client::new();
+    let client = client_for(url)?;
     let mut req = client.get(format!("{url}/query/screen"));
 
     if let Some(r) = rows {
@@ -83,7 +100,7 @@ pub async fn screen(
 
 /// Query cursor position.
 pub async fn cursor(url: &str) -> Result<()> {
-    let client = Client::new();
+    let client = client_for(url)?;
     let resp = client
         .get(format!("{url}/query/cursor"))
         .send()
@@ -96,7 +113,7 @@ pub async fn cursor(url: &str) -> Result<()> {
 
 /// Query session status.
 pub async fn status(url: &str) -> Result<()> {
-    let client = Client::new();
+    let client = client_for(url)?;
     let resp = client
         .get(format!("{url}/query/status"))
         .send()
@@ -115,7 +132,7 @@ pub async fn resize(url: &str, size: &str) -> Result<()> {
     let cols: u16 = cols.parse().context("invalid cols")?;
     let rows: u16 = rows.parse().context("invalid rows")?;
 
-    let client = Client::new();
+    let client = client_for(url)?;
     let resp = client
         .post(format!("{url}/control/resize"))
         .json(&serde_json::json!({"cols": cols, "rows": rows}))
@@ -141,7 +158,9 @@ pub async fn wait(
     timeout_secs: u64,
 ) -> Result<bool> {
     // The HTTP timeout outlasts the wait so the server, not the client, decides the outcome.
-    let client = Client::builder()
+    #[allow(clippy::disallowed_methods)]
+    // scheme-aware builder above; loopback skips roots by construction
+    let client = builder_for(url)
         .timeout(std::time::Duration::from_secs(
             timeout_secs.saturating_add(5),
         ))
@@ -180,7 +199,7 @@ pub async fn wait(
 
 /// Stop a session.
 pub async fn stop(url: &str) -> Result<()> {
-    let client = Client::new();
+    let client = client_for(url)?;
     let resp = client
         .post(format!("{url}/control/stop"))
         .send()

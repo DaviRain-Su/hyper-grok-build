@@ -51,6 +51,9 @@ use xai_grok_sampling_types::{SamplingError, is_retryable_api_status};
 /// no point burning a long backoff just to be rate-limited again.
 pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = 2;
 
+/// `rate_limit_retry_threshold` that disables the sampler's own 429 retry; `1`, not `0` (which means unset).
+pub const RATE_LIMIT_RETRY_DISABLED: u32 = 1;
+
 /// Default retry budget when no env or model override is set: at most 14
 /// retries (the attempt reaching this count is fatal). With the 30s cap:
 /// retries 1-4 exponential (2+4+8+16s ≈ 30s), 5-14 flat ~30s (≈ 5 min) —
@@ -107,12 +110,11 @@ pub fn retry_backoff_with_jitter(retry_count: u32) -> Duration {
         .checked_shl(shift)
         .unwrap_or(u64::MAX)
         .min(MAX_RETRY_BACKOFF.as_millis() as u64);
-    jittered(Duration::from_millis(base_ms))
+    jitter_backoff(Duration::from_millis(base_ms))
 }
 
-/// +/-20% jitter around `base`, de-syncing clients that failed at the
-/// same instant (e.g. a mass Cloudflare 52x event during an origin outage).
-fn jittered(base: Duration) -> Duration {
+/// +/-20% jitter around `base`, de-syncing clients that failed at the same instant.
+pub fn jitter_backoff(base: Duration) -> Duration {
     use std::hash::{Hash, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -125,6 +127,13 @@ fn jittered(base: Duration) -> Duration {
     std::thread::current().id().hash(&mut hasher);
     let jitter = hasher.finish() % (jitter_range * 2 + 1);
     Duration::from_millis(base_ms - jitter_range + jitter)
+}
+
+pub fn retry_after_or_backoff(attempt: u32, retry_after_secs: Option<u64>) -> Duration {
+    match retry_after_secs.filter(|secs| *secs > 0) {
+        Some(secs) => jitter_backoff(Duration::from_secs(secs).min(MAX_RETRY_BACKOFF)),
+        None => retry_backoff_with_jitter(attempt),
+    }
 }
 
 /// What the actor should do next given a sampling error and retry context.
@@ -264,10 +273,7 @@ pub fn classify_error(
         if next_attempt >= max_retries {
             return RetryDecision::Fatal(clone_error(err));
         }
-        let backoff = err
-            .retry_after()
-            .map(|secs| jittered(Duration::from_secs(secs).min(MAX_RETRY_BACKOFF)))
-            .unwrap_or_else(|| retry_backoff_with_jitter(next_attempt));
+        let backoff = retry_after_or_backoff(next_attempt, err.retry_after());
         if next_attempt == 1 {
             return RetryDecision::RetryWithClientRebuild { backoff };
         }
@@ -701,6 +707,28 @@ mod tests {
             }
             other => panic!("expected RetryWithBackoff, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rate_limit_retry_layer_splits_by_threshold() {
+        let err = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 5);
+        assert!(
+            matches!(
+                classify_error(&err, 0, 15, RATE_LIMIT_RETRY_DISABLED),
+                RetryDecision::Fatal(_)
+            ),
+            "disabled threshold must surface the first 429, not wait internally"
+        );
+        assert!(
+            matches!(
+                classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
+                RetryDecision::RetryWithBackoff {
+                    is_rate_limited: true,
+                    ..
+                }
+            ),
+            "default threshold keeps the sampler's own 429 retry"
+        );
     }
 
     #[test]

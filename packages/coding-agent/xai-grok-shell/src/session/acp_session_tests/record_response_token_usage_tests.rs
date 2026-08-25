@@ -1,6 +1,8 @@
 use super::support::*;
 use super::*;
-use xai_grok_sampling_types::{ConversationItem, ConversationResponse, TokenUsage};
+use xai_grok_sampling_types::{
+    BackendToolCallItem, BackendToolKind, ConversationItem, ConversationResponse, TokenUsage, rs,
+};
 
 fn response_with_usage(total_tokens: u32) -> ConversationResponse {
     ConversationResponse {
@@ -38,6 +40,160 @@ fn response_without_usage() -> ConversationResponse {
         raw_stop_reason: None,
         stop_sequence: None,
     }
+}
+
+/// A reasoning-capable Responses turn reports the live context after its output
+/// has already been included. Persisting that output must not add it again to
+/// the context sent to the pager or the pre-sampling compaction gate.
+#[tokio::test(flavor = "current_thread")]
+async fn response_reasoning_does_not_inflate_model_reported_context() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (actor, mut event_rx) =
+                create_test_actor_ex(0, 500_000, 95, gateway_tx, persistence_tx).await;
+            let response = ConversationResponse {
+                items: vec![
+                    ConversationItem::Reasoning(rs::ReasoningItem {
+                        id: "reasoning-1".to_string(),
+                        summary: vec![],
+                        content: None,
+                        encrypted_content: Some("r".repeat(984_000)),
+                        status: None,
+                    }),
+                    ConversationItem::BackendToolCall(BackendToolCallItem {
+                        kind: BackendToolKind::WebSearch(rs::WebSearchToolCall {
+                            id: "search-1".to_string(),
+                            status: rs::WebSearchToolCallStatus::Completed,
+                            action: rs::WebSearchToolCallAction::Search(
+                                rs::WebSearchActionSearch {
+                                    query: "context accounting".to_string(),
+                                    sources: Some(vec![]),
+                                },
+                            ),
+                        }),
+                    }),
+                    ConversationItem::assistant("ok"),
+                ],
+                usage: Some(TokenUsage {
+                    prompt_tokens: 400_000,
+                    completion_tokens: 40_000,
+                    total_tokens: 440_000,
+                    reasoning_tokens: 39_999,
+                    cached_prompt_tokens: 0,
+                    cache_creation_prompt_tokens: 0,
+                }),
+                stop_reason: None,
+                cost_usd_ticks: None,
+                message_chunks_emitted: 1,
+                doom_loop_signals: Vec::new(),
+                stop_message: None,
+                message_id: None,
+                raw_stop_reason: None,
+                stop_sequence: None,
+            };
+
+            actor.record_response_token_usage(&response, None);
+            let usage_reported = response.usage.is_some();
+            actor
+                .record_response_items(response.items, usage_reported)
+                .await;
+
+            assert_eq!(actor.chat_state_handle.get_total_tokens().await, 440_000);
+            assert_eq!(
+                actor.chat_state_handle.get_estimated_total_tokens().await,
+                440_000,
+                "pager metadata must not become 686K by adding 246K of already-counted reasoning",
+            );
+
+            actor
+                .send_update(
+                    acp::SessionUpdate::AvailableCommandsUpdate(acp::AvailableCommandsUpdate::new(
+                        vec![],
+                    )),
+                    None,
+                )
+                .await;
+            let notification = event_rx.recv().await.expect("notification queued");
+            let SessionEvent::Notification(SessionNotification::Acp(notification)) = notification
+            else {
+                panic!("expected ACP notification");
+            };
+            assert_eq!(
+                notification
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("totalTokens"))
+                    .and_then(serde_json::Value::as_u64),
+                Some(440_000),
+                "the pager reads this metadata as its displayed context",
+            );
+
+            assert!(
+                actor.check_auto_compact_needed().await.is_none(),
+                "440K is below a 95% threshold for a 500K context window",
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn response_without_usage_keeps_model_output_as_estimated_growth() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(100_000, 500_000, 95, gateway_tx, persistence_tx).await;
+            let response = ConversationResponse {
+                items: vec![
+                    ConversationItem::Reasoning(rs::ReasoningItem {
+                        id: "reasoning-1".to_string(),
+                        summary: vec![],
+                        content: None,
+                        encrypted_content: Some("r".repeat(4_000)),
+                        status: None,
+                    }),
+                    ConversationItem::assistant("a".repeat(4_000)),
+                ],
+                usage: None,
+                stop_reason: None,
+                cost_usd_ticks: None,
+                message_chunks_emitted: 1,
+                doom_loop_signals: Vec::new(),
+                stop_message: None,
+                message_id: None,
+                raw_stop_reason: None,
+                stop_sequence: None,
+            };
+
+            actor.record_response_token_usage(&response, None);
+            let usage_reported = response.usage.is_some();
+            actor
+                .record_response_items(response.items, usage_reported)
+                .await;
+
+            assert_eq!(actor.chat_state_handle.get_total_tokens().await, 100_000);
+            assert!(
+                actor
+                    .chat_state_handle
+                    .get_conversation()
+                    .await
+                    .iter()
+                    .any(|item| matches!(item, ConversationItem::Reasoning(_))),
+                "reasoning must still be persisted",
+            );
+            assert_eq!(
+                actor.chat_state_handle.get_estimated_total_tokens().await,
+                102_000,
+                "without provider usage, reasoning and assistant text remain estimated growth",
+            );
+        })
+        .await;
 }
 
 /// `record_response_token_usage` must update `chat_state.total_tokens`

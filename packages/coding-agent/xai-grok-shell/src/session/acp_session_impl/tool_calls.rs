@@ -242,7 +242,9 @@ pub(super) fn plan_mode_edit_gate(
     if !tracker.is_active() {
         return PlanEditGate::Allow;
     }
-    let _ = tool_input;
+    if matches!(tool_input, ToolInput::Task(_)) {
+        return PlanEditGate::Allow;
+    }
     match access_kind {
         AccessKind::Edit(path) if !tracker.should_auto_approve_edit(Path::new(path)) => {
             PlanEditGate::RejectNonPlanFile
@@ -747,9 +749,9 @@ impl SessionActor {
             // Shared preview for WASM post_tool_use (success result JSON or error text).
             // Assigned in both Ok/Err arms below before the wasm dispatch reads it.
             let wasm_post_tool_preview;
-            let tool_result_size_bytes = match &result {
-                Ok(tool_result) => tool_result.prompt_text.len() as i64,
-                Err(_) => 0,
+            let tool_result_size_bytes: Option<u64> = match &result {
+                Ok(tool_result) => Some(tool_result.prompt_text.len() as u64),
+                Err(_) => None,
             };
             let tool_failed = match &result {
                 Ok(tool_result) => tool_result.output.is_error(),
@@ -963,6 +965,7 @@ impl SessionActor {
                     tool_name: prepared.tool_name.clone(),
                     outcome: tool_outcome,
                     duration_ms,
+                    tool_result_size_bytes,
                     file_path: ext_file_path,
                     parameters: ext_parameters,
                 },
@@ -977,7 +980,7 @@ impl SessionActor {
                     segment_index = artifact.segment_index().map(|i| i as i64),
                     success = matches!(tool_outcome, crate::session::events::ToolOutcome::Success),
                     duration_ms = duration_ms as i64,
-                    tool_result_size_bytes = tool_result_size_bytes,
+                    tool_result_size_bytes = tool_result_size_bytes.map_or(0, |n| n as i64),
                 )
                 .in_scope(|| {});
             }
@@ -2289,11 +2292,14 @@ impl SessionActor {
         );
         self.signals_handle().record_tool_failure(function_name);
         let message = build_tool_parse_error_message(function_name, &err, raw_arguments);
+        let title = (err.kind == xai_tool_runtime::ToolErrorKind::NotFound)
+            .then(|| format!("Agent tried calling a tool that doesn't exist: {function_name}"));
         self.send_update(
             acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
                 tool_call_id.clone(),
                 acp::ToolCallUpdateFields::new()
                     .status(Some(acp::ToolCallStatus::Failed))
+                    .title(title)
                     .content(Some(vec![acp::ToolCallContent::from(
                         acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
                     )])),
@@ -3412,6 +3418,29 @@ mod plan_mode_edit_gate_tests {
                 })
             ),
             PlanEditGate::RejectNonPlanFile
+        );
+    }
+    #[test]
+    fn task_not_gated_in_plan_mode() {
+        use xai_tool_types::TaskToolInput;
+        let t = active_tracker();
+        assert_eq!(
+            gate(
+                &t,
+                &ToolInput::Task(TaskToolInput {
+                    prompt: "p".into(),
+                    description: "d".into(),
+                    subagent_type: "general-purpose".into(),
+                    run_in_background: false,
+                    capability_mode: None,
+                    isolation: None,
+                    resume_from: None,
+                    cwd: None,
+                    model: None,
+                    task_id: None,
+                })
+            ),
+            PlanEditGate::Allow
         );
     }
     /// Non-edit tools are never gated — they flow to the normal permission

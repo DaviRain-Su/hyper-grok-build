@@ -1120,6 +1120,8 @@ pub struct ModelsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inference_idle_timeout_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_rate_limit_max_attempts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_tool_calls: Option<bool>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1276,6 +1278,9 @@ pub struct MarketplaceConfig {
     /// Written/read out-of-band by `extensions::marketplace`, opaque so a wrong-typed value can't fail load.
     #[serde(default)]
     pub official_marketplace_auto_installed: Option<toml::Value>,
+    /// Read out-of-band by the pager (plugin-CTA marketplace override), opaque so a wrong-typed value can't fail load.
+    #[serde(default)]
+    pub plugin_cta_marketplace: Option<toml::Value>,
     /// Written/read out-of-band by `extensions::marketplace`, opaque so a wrong-typed value can't fail load.
     #[serde(default)]
     pub default_skills_installs_purged: Option<toml::Value>,
@@ -1552,6 +1557,10 @@ pub struct Config {
     pub subagents_max_depth: u32,
     #[serde(skip)]
     pub subagents_max_concurrent: usize,
+    /// Resolved concurrent subagent turn-sampling limit feeding the shared
+    /// semaphore. See [`crate::config::SubagentsConfig::resolve_sampling_limit`].
+    #[serde(skip)]
+    pub subagents_sampling_limit: usize,
     #[serde(skip)]
     pub subagents_limit_behavior:
         xai_grok_tools::implementations::grok_build::task::admission::LimitBehavior,
@@ -1890,6 +1899,8 @@ impl Default for Config {
             subagents_max_depth: crate::config::SubagentsConfig::DEFAULT_MAX_DEPTH,
             subagents_max_concurrent:
                 xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_CONCURRENT,
+            subagents_sampling_limit:
+                xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_CONCURRENT,
             subagents_limit_behavior: Default::default(),
             workflow_max_concurrent_agents:
                 crate::session::workflow::host_service::DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS,
@@ -1930,7 +1941,7 @@ impl Default for Config {
 /// costs a visible false alarm, not a silent hole in the check. `image_edit` is
 /// left out on purpose, because only a pin sets it, so a plain entry in a
 /// user's config stays an unrecognized key.
-const UNMIRRORED_BOOLEAN_FEATURES: &[&str] = &[
+pub(crate) const UNMIRRORED_BOOLEAN_FEATURES: &[&str] = &[
     "campaigns",
     "remember_mode",
     "remote_fetch",
@@ -2236,6 +2247,24 @@ impl Config {
                 );
             }
         }
+        if let Some(problem) = config.ui.status_line.problem() {
+            config.config_warnings.push(
+                super::config_model_override_parse::ConfigWarning::config_key(
+                    "ui.status_line".to_owned(),
+                    super::config_model_override_parse::ConfigWarningKind::InvalidValue,
+                    problem.to_string(),
+                ),
+            );
+        }
+        for key in config.ui.status_line.unknown_keys() {
+            config.config_warnings.push(
+                super::config_model_override_parse::ConfigWarning::config_key(
+                    format!("ui.status_line.{key}"),
+                    super::config_model_override_parse::ConfigWarningKind::UnknownField,
+                    "unrecognized config key".to_owned(),
+                ),
+            );
+        }
         super::config_model_override_parse::log_config_warnings(&config.config_warnings);
         config.platforms.warn_unknown_platforms();
         if config.grok_com_config.oidc.is_none() {
@@ -2290,6 +2319,12 @@ impl Config {
             env(SubagentsConfig::ENV_MAX_CONCURRENT).as_deref(),
             sa.max_concurrent,
             remote.and_then(|r| r.subagents_max_concurrent),
+        );
+        self.subagents_sampling_limit = SubagentsConfig::resolve_sampling_limit(
+            env(SubagentsConfig::ENV_SAMPLING_LIMIT).as_deref(),
+            sa.sampling_limit,
+            remote.and_then(|r| r.subagents_sampling_limit),
+            self.subagents_max_concurrent,
         );
         self.subagents_limit_behavior = SubagentsConfig::resolve_limit_behavior(
             env(SubagentsConfig::ENV_LIMIT_BEHAVIOR).as_deref(),
@@ -2665,8 +2700,8 @@ impl Config {
     }
     /// Automatic worktree GC policy. Precedence: env kill/dry-run >
     /// `[worktree.auto_gc]` TOML > remote `worktree_auto_gc` > defaults.
-    /// Platform age-expiry (dead-only where no process-CWD scan exists) is
-    /// enforced inside `xai_fast_worktree::maybe_auto_gc`, not here.
+    /// Platform age-expiry (`process_cwd_scan_available`: linux+macos) is enforced
+    /// inside `xai_fast_worktree::maybe_auto_gc`, not here.
     pub(crate) fn resolve_worktree_auto_gc(&self) -> xai_fast_worktree::ResolvedWorktreeAutoGc {
         crate::util::config::resolve_worktree_auto_gc_from_settings(
             Some(&self.worktree.auto_gc),
@@ -4526,6 +4561,9 @@ fn apply_global_scalar_defaults(
         if let Some(v) = models.inference_idle_timeout_secs {
             info.inference_idle_timeout_secs.get_or_insert(v);
         }
+        if let Some(v) = models.subagent_rate_limit_max_attempts {
+            info.subagent_rate_limit_max_attempts.get_or_insert(v);
+        }
         if let Some(v) = models.stream_tool_calls {
             info.stream_tool_calls.get_or_insert(v);
         }
@@ -4647,6 +4685,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 agent_type: m.agent_type,
                 inference_idle_timeout_secs: m.inference_idle_timeout_secs,
                 max_retries: None,
+                subagent_rate_limit_max_attempts: None,
                 api_key: None,
                 env_key: None,
                 extra_headers: IndexMap::new(),
@@ -4771,6 +4810,8 @@ pub struct ModelEntryConfig {
     /// Can also be set via the `GROK_MAX_RETRIES` environment variable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_rate_limit_max_attempts: Option<u32>,
     /// Exclude from the client model picker; still usable internally (web_search, etc.).
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
@@ -4857,6 +4898,7 @@ pub struct ConfigModelOverride {
     pub agent_type: Option<String>,
     pub inference_idle_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
+    pub subagent_rate_limit_max_attempts: Option<u32>,
     pub hidden: Option<bool>,
     pub supported_in_api: Option<bool>,
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -4938,6 +4980,9 @@ impl ConfigModelOverride {
         }
         if self.max_retries.is_some() {
             entry.info.max_retries = self.max_retries;
+        }
+        if self.subagent_rate_limit_max_attempts.is_some() {
+            entry.info.subagent_rate_limit_max_attempts = self.subagent_rate_limit_max_attempts;
         }
         if let Some(v) = self.hidden {
             entry.info.hidden = v;
@@ -5047,6 +5092,7 @@ pub struct ModelInfo {
     /// Per-chunk idle timeout for inference streaming (see `ModelEntryConfig`).
     pub inference_idle_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
+    pub subagent_rate_limit_max_attempts: Option<u32>,
     /// Never show in picker (any auth). See also `supported_in_api`.
     pub hidden: bool,
     /// May the user select this model for normal chat? Derived from
@@ -5106,6 +5152,7 @@ impl ModelInfo {
             agent_type: default_agent_type(),
             inference_idle_timeout_secs: None,
             max_retries: None,
+            subagent_rate_limit_max_attempts: None,
             hidden: false,
             supported_in_api: true,
             reasoning_effort: None,
@@ -5146,6 +5193,7 @@ impl ModelInfo {
             agent_type: entry.agent_type.clone(),
             inference_idle_timeout_secs: entry.inference_idle_timeout_secs,
             max_retries: entry.max_retries,
+            subagent_rate_limit_max_attempts: entry.subagent_rate_limit_max_attempts,
             hidden: entry.hidden,
             supported_in_api: entry.supported_in_api,
             reasoning_effort: entry.reasoning_effort,
@@ -6077,6 +6125,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
                 agent_type: default_agent_type(),
                 inference_idle_timeout_secs: None,
                 max_retries: None,
+                subagent_rate_limit_max_attempts: None,
                 hidden: true,
                 supported_in_api: true,
                 reasoning_effort: None,
@@ -6837,6 +6886,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             agent_type: default_agent_type(),
             inference_idle_timeout_secs: None,
             max_retries: None,
+            subagent_rate_limit_max_attempts: None,
             hidden: true,
             user_selectable: true,
             supported_in_api: true,

@@ -80,7 +80,7 @@ pub static TUTORIAL_TOPICS: &[TutorialTopic] = &[
     topic!(
         "08-make-it-yours.md",
         "Make It Yours",
-        "just ask — AGENTS.md, memory, themes",
+        "just ask: AGENTS.md, memory, themes",
         Some("Project Rules (AGENTS.md)")
     ),
     topic!(

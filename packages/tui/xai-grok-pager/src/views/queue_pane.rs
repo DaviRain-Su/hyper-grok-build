@@ -563,6 +563,18 @@ impl QueuePane {
             pos += 1;
         }
 
+        // A server row leaves the list the moment it starts running, is sent now, or gets
+        // painted. Nothing else re-points the selection, and `selected_id` is returned without
+        // checking it still exists, so a focused pane would keep acting on a row that is gone.
+        if let Some(selected) = self.list_state.selected_id()
+            && !self.entries.iter().any(|e| e.id == selected)
+        {
+            match self.entries.last() {
+                Some(last) => self.list_state.select_by_id(last.id),
+                None => self.list_state.clear_selection(),
+            }
+        }
+
         let new_len = self.entries.len();
 
         // Auto-show when hidden and queue grew, or empty→non-empty (after external hide reset).
@@ -1191,6 +1203,58 @@ mod tests {
 
     /// Server-authoritative rows render as interim queue rows, and the
     /// in-flight (running) prompt is excluded from the list.
+    /// A running server row leaves the list, so a selection on it must not survive: every
+    /// queue key reads `selected_id` and would act on a row that is gone.
+    #[test]
+    fn sync_repoints_a_selection_whose_row_stopped_being_visible() {
+        let mut pane = QueuePane::default();
+        let server = vec![wire("p1", "first", 0), wire("p2", "second", 1)];
+        pane.sync_from_merged(
+            &Default::default(),
+            &server,
+            None,
+            None,
+            &Default::default(),
+        );
+        let ids = pane.entry_ids();
+        pane.list_state.select_by_id(ids[0]);
+
+        // "p1" starts running, so its row disappears.
+        pane.sync_from_merged(
+            &Default::default(),
+            &server,
+            Some("p1"),
+            None,
+            &Default::default(),
+        );
+
+        assert_eq!(pane.entry_ids().len(), 1, "the running row is excluded");
+        assert_eq!(
+            pane.selected_id(),
+            pane.entry_ids().last().copied(),
+            "selection moved to a row that still exists"
+        );
+    }
+
+    /// With every row gone the selection goes too, rather than pointing into an empty list.
+    #[test]
+    fn sync_clears_the_selection_when_the_queue_empties() {
+        let mut pane = QueuePane::default();
+        let server = vec![wire("p1", "first", 0)];
+        pane.sync_from_merged(
+            &Default::default(),
+            &server,
+            None,
+            None,
+            &Default::default(),
+        );
+        pane.list_state.select_by_id(pane.entry_ids()[0]);
+
+        pane.sync_from_merged(&Default::default(), &[], None, None, &Default::default());
+
+        assert_eq!(pane.selected_id(), None);
+    }
+
     #[test]
     fn sync_from_merged_renders_server_rows_and_excludes_running() {
         let mut pane = QueuePane::new();

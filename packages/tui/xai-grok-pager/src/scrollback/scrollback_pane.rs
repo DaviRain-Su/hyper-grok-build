@@ -839,8 +839,6 @@ impl ScrollbackPane {
         let output = entry.block.output(ctx);
         let block_has_vpad = entry.block.has_vpad(ctx);
 
-        // Get accent background preference and block background
-        let accent_has_bg = entry.block.accent_background(ctx);
         let block_bg = entry.block.background(ctx);
 
         // Resolve the background color from block_bg
@@ -960,39 +958,13 @@ impl ScrollbackPane {
 
         // vpad bottom is just empty space - no need to track y further
 
-        // Draw accent line if entry has one, otherwise clear the accent column
-        // so stale content from previous frames doesn't bleed through.
-        if let Some(accent) = entry.block.accent(ctx) {
-            let color = accent.color;
-            let accent_area = layout.accent;
-
-            // Determine accent background color based on accent_has_bg and block_bg
-            let accent_bg = if accent_has_bg {
-                match block_bg {
-                    BlockBackground::None => theme.bg_base,
-                    BlockBackground::Light => theme.bg_light,
-                    BlockBackground::Dark => theme.bg_dark,
-                }
-            } else {
-                theme.bg_base
-            };
-
-            for y in accent_area.y..accent_area.y + total_height.min(area.height) {
-                if let Some(cell) = buf.cell_mut((accent_area.x, y)) {
-                    cell.set_char('┃');
-                    cell.set_style(ratatui::style::Style::default().fg(color).bg(accent_bg));
-                }
-            }
-        } else {
-            // No accent: clear the column with the block's bg so it matches.
-            let accent_area = layout.accent;
-            let clear_bg = bg_color.unwrap_or(theme.bg_base);
-            let clear_style = ratatui::style::Style::default().bg(clear_bg);
-            for y in accent_area.y..accent_area.y + total_height.min(area.height) {
-                if let Some(cell) = buf.cell_mut((accent_area.x, y)) {
-                    cell.set_char(' ');
-                    cell.set_style(clear_style);
-                }
+        // The accent column is kept for alignment but never painted. Clear it so content from a previous frame cannot bleed through.
+        let accent_area = layout.accent;
+        let clear_style = ratatui::style::Style::default().bg(bg_color.unwrap_or(theme.bg_base));
+        for y in accent_area.y..accent_area.y + total_height.min(area.height) {
+            if let Some(cell) = buf.cell_mut((accent_area.x, y)) {
+                cell.set_char(' ');
+                cell.set_style(clear_style);
             }
         }
 

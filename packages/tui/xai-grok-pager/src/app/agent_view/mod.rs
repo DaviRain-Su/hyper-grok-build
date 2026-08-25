@@ -126,6 +126,7 @@ pub(crate) struct InlineVideoState {
 use super::actions::Action;
 use super::agent::AgentSession;
 use super::app_view::InputOutcome;
+use super::cancel_latency::CancelLatency;
 use crate::scrollback::EntryId;
 use crate::scrollback::ScrollbackSearchState;
 use crate::scrollback::state::ScrollbackState;
@@ -137,6 +138,7 @@ use crate::scrollback::text_selection::{
 use crate::theme::Theme;
 pub use crate::views::agent::{ActivePane, AgentViewLayout, InputMode, PaneAreas};
 use crate::views::block_viewer::BlockViewerPane;
+use crate::views::elicitation_view::ElicitationViewState;
 use crate::views::extensions_modal::ExtensionsModalState;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::modal::{self, ActiveModal, ModalButtonHit};
@@ -156,6 +158,7 @@ use ratatui::widgets::Widget;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 mod cta;
+mod elicitation;
 mod input;
 pub(crate) use input::ExternalPromptEditorAccess;
 mod interactions;
@@ -170,6 +173,9 @@ mod panes;
 mod paste;
 mod plan;
 mod prompt;
+mod prompt_stash;
+pub(in crate::app) use prompt_stash::prompt_history_text;
+pub use prompt_stash::{PromptStashEntry, StashCause};
 mod queue;
 mod render;
 pub use render::AppRenderParams;
@@ -177,6 +183,8 @@ mod rewind;
 mod selection;
 mod session;
 mod shell_completion;
+#[cfg(test)]
+mod task_status_tests;
 mod viewer;
 mod workflows_overlay;
 use super::actions;
@@ -744,10 +752,15 @@ impl CtaPhase {
 }
 #[derive(Default)]
 pub struct PluginCtaState {
-    /// Official-source, not-installed candidate plugins for CTA matching.
+    /// Not-installed candidate plugins for CTA matching, from the CTA source
+    /// (xAI Official, or the configured `plugin_cta_marketplace` override).
     pub candidates: Vec<xai_hooks_plugins_types::MarketplacePluginEntry>,
-    /// Whether the official marketplace source was present in the last catalog scan.
-    pub official_source_present: bool,
+    /// URL/path of the CTA source the candidates came from — the install
+    /// target (the shell resolves marketplace sources by URL/path identity).
+    /// `None` = no CTA source (official by default, the
+    /// `plugin_cta_marketplace` source when configured) in the last catalog
+    /// scan, which keeps the CTA hidden and blocks installs.
+    pub source_url_or_path: Option<String>,
     /// Current CTA phase (recomputed when the prompt debounce expires).
     pub phase: CtaPhase,
     /// Generation counter for prompt-change debouncing (mirrors suggestions).
@@ -780,17 +793,19 @@ pub(crate) struct FollowUps {
     /// `AgentView::follow_ups` is `Some`.
     pub(crate) suggestions: Vec<String>,
 }
-/// A prompt submit stashed while a clipboard attachment probe is off-thread.
+/// A composer action held back while a clipboard attachment probe is off-thread.
 ///
-/// Kind-only: the payload is re-derived from the live widget when the send is
-/// re-issued (see [`AgentView::build_deferred_send_action`]), so the freshly
-/// attached image chip (and its aligned chip range) travels with it.
+/// Kind-only: the payload is re-derived at resume (see [`AgentView::resume_deferred_send`]), so the freshly attached image chip travels with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentDeferredSend {
-    /// Enter — a normal prompt send.
+    /// Enter: a normal prompt send.
     SendPrompt,
-    /// Ctrl+Enter — a mid-turn interjection.
+    /// Ctrl+Enter: a mid-turn interjection.
     Interject,
+    /// Enter on the `/feedback` pane — a feedback submit.
+    SubmitFeedback,
+    /// Ctrl+S / Alt+S: set the draft aside once its image lands.
+    Stash,
 }
 pub struct AgentView {
     pub session: AgentSession,
@@ -931,6 +946,10 @@ pub struct AgentView {
     /// Stashed normal prompt state while editing a queued prompt.
     /// Restored when editing ends.
     pub stashed_prompt: Option<StashedPrompt>,
+    /// One draft set aside for later; see [`prompt_stash`].
+    pub prompt_stash: Option<PromptStashEntry>,
+    /// Set by the send that consumed the user's draft this dispatch; see `note_draft_consumed`.
+    pub(crate) draft_consumed: bool,
     /// Complete prompt stashed from a credit-limit-blocked turn. Used by
     /// `CreditLimitRecheckComplete` to retry the prompt after a tier
     /// upgrade instead of showing a stale upsell.
@@ -948,6 +967,10 @@ pub struct AgentView {
     pub(crate) modal_hovered_key: Option<char>,
     /// Cached server-reported context state.
     pub context_state: Option<xai_grok_shell::session::ContextInfo>,
+    pub status_context: Option<xai_grok_status_line::StatusLineContext>,
+    /// Held across a frame that clamps the row away, so a script keeps the size
+    /// it last painted at.
+    pub last_status_line_size: Option<crate::views::status_line::RowSize>,
     /// Gateway light-frontend session (`kind: "chat"` / `--chat` / conversation
     /// resume). Suppresses Build credits / local sampler context telemetry so the
     /// status bar and prompt never imply remote usage from wrong metrics.
@@ -1356,6 +1379,15 @@ pub struct AgentView {
     /// Active question view (from `AskUserQuestion` tool). When `Some`, the
     /// prompt area shows a structured question UI and input is modal.
     pub(crate) question_view: Option<QuestionViewState>,
+    pub(crate) elicitation_view: Option<ElicitationViewState>,
+    pub(crate) pending_elicitation: Option<(
+        xai_grok_tools::mcp_elicitation::McpElicitExtRequest,
+        tokio::sync::oneshot::Sender<xai_acp_lib::AcpResult<agent_client_protocol::ExtResponse>>,
+    )>,
+    pub(crate) elicit_hits: Vec<(
+        crate::views::elicitation_view::ElicitHit,
+        ratatui::layout::Rect,
+    )>,
     /// Scrollbar hit area for the question view (set during render).
     pub(crate) hit_question_scrollbar: HitArea,
     /// Hovered question item index (visual highlight only).
@@ -1619,6 +1651,7 @@ pub struct AgentView {
     /// event loop re-sends the idempotent cancel after
     /// [`super::dispatch::CANCEL_RESEND_GRACE`] while still cancelling.
     pub(crate) pending_cancel_resend: Option<PendingCancelResend>,
+    pub(crate) cancel_latency: Option<CancelLatency>,
     /// Send-now cancel expectation: the client-minted id of an explicit
     /// cancel-and-send this client dispatched into a running turn (send-now
     /// chord / `SendPromptNow`, or queue-row "Send now"). The running turn's
@@ -1791,6 +1824,13 @@ fn translate_local_submit(
         return InputOutcome::Changed;
     }
     let Some(QuestionSelection::Single(Some(idx))) = qv.selections.first() else {
+        if let LocalQuestionKind::FeedbackTrace { report, images } = kind {
+            return InputOutcome::Action(Action::SendFeedback {
+                text: report,
+                images,
+                trace: Some(crate::app::actions::FeedbackTraceChoice::NoUpload),
+            });
+        }
         return InputOutcome::Changed;
     };
     match kind {
@@ -1875,7 +1915,35 @@ fn translate_local_submit(
             })
         }
         LocalQuestionKind::Feedback => {
-            unreachable!("feedback submits through submit_feedback_pane, which returns first")
+            unreachable!(
+                "feedback report submits through submit_feedback_pane, which returns first"
+            )
+        }
+        LocalQuestionKind::FeedbackTrace { report, images } => {
+            use crate::app::actions::FeedbackTraceChoice;
+            use crate::views::question_view::{
+                FEEDBACK_TRACE_OPTION_NEVER_ASK, FEEDBACK_TRACE_OPTION_OPT_IN,
+                FEEDBACK_TRACE_OPTION_OPT_OUT,
+            };
+            let id = qv
+                .questions
+                .first()
+                .and_then(|q| q.options.get(*idx))
+                .and_then(|o| o.id.as_deref());
+            let trace = match id {
+                Some(FEEDBACK_TRACE_OPTION_OPT_IN) => FeedbackTraceChoice::AlwaysUpload,
+                Some(FEEDBACK_TRACE_OPTION_NEVER_ASK) => FeedbackTraceChoice::NeverAsk,
+                Some(FEEDBACK_TRACE_OPTION_OPT_OUT) => FeedbackTraceChoice::NoUpload,
+                other => {
+                    debug_assert!(false, "trace-consent option without a known id: {other:?}");
+                    FeedbackTraceChoice::NoUpload
+                }
+            };
+            InputOutcome::Action(Action::SendFeedback {
+                text: report,
+                images,
+                trace: Some(trace),
+            })
         }
     }
 }
@@ -1991,7 +2059,7 @@ pub(crate) fn render_dropdown_chrome(
             buf.set_line_safe(hint_x, top_border_y, &hint_line, hint_w);
         }
     }
-    let content_inset = dropdown_content_inset(layout_cfg, compact);
+    let content_inset = dropdown_content_inset();
     let items_x = layout_prompt.x + content_inset;
     let items_width = layout_prompt.width.saturating_sub(content_inset);
     Some(DropdownChrome {
@@ -2006,23 +2074,17 @@ pub(crate) fn render_dropdown_chrome(
 }
 /// Left inset of dropdown item rows inside the panel (see the comment in
 /// [`render_dropdown_chrome`]).
-fn dropdown_content_inset(layout_cfg: &crate::appearance::LayoutConfig, compact: bool) -> u16 {
+pub(crate) fn dropdown_content_inset() -> u16 {
     if crate::views::modal_window::embedded() {
         0
     } else {
-        1 + layout_cfg.eff_hpad_left(compact)
+        2
     }
 }
 /// Width of the dropdown item rows [`render_dropdown_chrome`] will produce for
 /// `layout_prompt` — for sizing the row count *before* drawing the chrome.
-pub(crate) fn dropdown_items_width(
-    layout_prompt: Rect,
-    layout_cfg: &crate::appearance::LayoutConfig,
-    compact: bool,
-) -> u16 {
-    layout_prompt
-        .width
-        .saturating_sub(dropdown_content_inset(layout_cfg, compact))
+pub(crate) fn dropdown_items_width(layout_prompt: Rect) -> u16 {
+    layout_prompt.width.saturating_sub(dropdown_content_inset())
 }
 /// Geometry returned by [`render_dropdown_chrome`]: the inset `items` area for
 /// rendering rows and the full `panel` rect (borders + padding) used as an
@@ -2167,6 +2229,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::ToggleYolo => return None,
         ActionId::ToggleMultiline => return None,
         ActionId::InterjectPrompt => return None,
+        ActionId::StashPrompt => return None,
         ActionId::EnableVoiceMode => Action::EnableVoiceMode,
         ActionId::VoiceToggle => {
             if !crate::app::voice_keybind_enabled() {

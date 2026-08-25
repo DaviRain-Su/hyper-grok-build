@@ -1151,8 +1151,8 @@ pub fn map_agent_connect(ev: &events::AgentConnect) -> Option<ExternalRecord> {
     Some(rec)
 }
 
-/// `StartupComplete` → the total histogram (no external log event).
-pub fn map_startup_complete(ev: &events::StartupComplete) -> Option<ExternalRecord> {
+/// `StartupCompleted` → the total histogram (no external log event).
+pub fn map_startup_completed(ev: &events::StartupCompleted) -> Option<ExternalRecord> {
     Some(
         ExternalRecord::default().metric(MetricIncrement::StartupTotal {
             duration_ms: ev.total_ms,

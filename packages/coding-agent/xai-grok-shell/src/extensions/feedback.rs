@@ -7,12 +7,6 @@
 //!   `SessionCommand::SideQuestion` and return the answer.
 //! - `review/comment` and `review/comment/delete`: record inline code review
 //!   events to cloud storage.
-
-use std::sync::Arc;
-
-use agent_client_protocol as acp;
-use tokio::sync::oneshot;
-
 use super::{ExtResult, parse_params};
 use crate::agent::MvpAgent;
 use crate::session::persistence::{LocalFeedbackEntry, UserFeedbackEntry};
@@ -21,9 +15,11 @@ use crate::session::{
     CommentResponse, FeedbackRequestDismiss, FeedbackResponse, SessionCommand, SideQuestionError,
 };
 use crate::upload::gcs::WithAuth as _;
+use agent_client_protocol as acp;
+use std::sync::Arc;
+use tokio::sync::oneshot;
 use xai_file_utils::gcs::upload_bytes;
 use xai_grok_telemetry::id::agent_id;
-
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
@@ -35,6 +31,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             tracing::info!("handling user feedback");
             handle_feedback(agent, args).await
         }
+        "x.ai/feedback/upload-trace" => handle_upload_trace(agent, args).await,
         m if m.starts_with("x.ai/review") => {
             tracing::info!("handling review comment");
             handle_review(agent, args).await
@@ -42,7 +39,6 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         _ => Err(acp::Error::method_not_found()),
     }
 }
-
 /// Handle `x.ai/btw` -- a side question that doesn't interrupt the current turn.
 async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     #[derive(serde::Deserialize)]
@@ -51,7 +47,6 @@ async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         session_id: String,
         question: String,
     }
-
     let req: BtwRequest = parse_params(args)?;
     let sid: acp::SessionId = req.session_id.clone().into();
     let session_handle = agent.resident_handle(&sid);
@@ -72,23 +67,15 @@ async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         Ok(answer) => super::to_ext_response(Ok(serde_json::json!({
             "answer": answer,
         }))),
-        // Model errors take the canonical mapping: overload gets its short
-        // display copy there, rate limits keep the typed code + upgrade
-        // copy, auth failures surface as auth_required.
         Err(SideQuestionError::Sampling(e)) => {
             Err(crate::sampling::error::map_sampling_err_to_acp(e))
         }
-        // Non-model failures are already readable sentences. Set `message`
-        // and leave `data` unset — `Display` appends JSON-encoded `data`,
-        // and `internal_error().data(e)` rendered as `Internal error: "…"`,
-        // which made capacity failures look like client bugs in the TUI.
         Err(e) => Err(acp::Error::new(
             acp::ErrorCode::InternalError.into(),
             e.to_string(),
         )),
     }
 }
-
 async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     if !agent.cfg.borrow().is_feedback_enabled() {
         return Err(acp::Error::internal_error().data(
@@ -96,17 +83,12 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
              [features] feedback = true in config.toml.",
         ));
     }
-
     match args.method.as_ref() {
         "x.ai/feedback" => {
-            // Parse the input -- try the full ClientFeedbackInput first,
-            // then fall back to the simple FeedbackRequest (from /feedback slash command)
-            // which only has {session_id, feedback_text} and no client_type.
-            let feedback_input: ClientFeedbackInput =
+            let mut feedback_input: ClientFeedbackInput =
                 match serde_json::from_str::<ClientFeedbackInput>(args.params.get()) {
                     Ok(input) => input,
                     Err(_) => {
-                        // Fallback: parse simple FeedbackRequest from /feedback command
                         let simple: crate::session::FeedbackRequest = parse_params(args)?;
                         ClientFeedbackInput {
                             session_id: simple.session_id,
@@ -115,6 +97,7 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                             rating_type: None,
                             rating_value: None,
                             feedback_text: Some(simple.feedback_text),
+                            images: vec![],
                             feedback_categories: vec![],
                             context_type: None,
                             turn_number: None,
@@ -125,40 +108,37 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                         }
                     }
                 };
-
+            if let Err(e) = prod_mc_cli_chat_proxy_types::feedback_types::validate_feedback_images(
+                &feedback_input.images,
+            ) {
+                return Err(acp::Error::invalid_params().data(format!("feedback images: {e}")));
+            }
             let session_id = acp::SessionId::new(feedback_input.session_id.clone());
             let session_handle = agent.resident_handle(&session_id);
-
             let (model_id, model_metadata) = if let Some(ref session) = session_handle {
                 let (tx1, rx1) = tokio::sync::oneshot::channel();
                 let _ = session
                     .cmd_tx
                     .send(SessionCommand::GetCurrentModel { responds_to: tx1 });
                 let model_id = rx1.await.ok();
-
                 let model_metadata = session.get_model_metadata().await;
-
                 (model_id, model_metadata)
             } else {
                 let sampling_config = agent.sampling_config.borrow().clone();
                 (Some(sampling_config.model.clone()), Default::default())
             };
-
             let turn_number = feedback_input.turn_number.or_else(|| {
                 agent
                     .session_turn_number(&session_id)
                     .map(|t| t.saturating_sub(1) as i64)
             });
-
-            let mut submission = feedback_input.to_submission(
+            let mut submission = feedback_input.take_submission(
                 model_id.clone(),
                 model_metadata.resolved_model_id,
                 model_metadata.model_fingerprint,
                 turn_number,
             );
             let turn_number = submission.turn_number;
-
-            // Enrich with session context for Slack notifications (best-effort).
             if let Some(ref session_handle) = session_handle {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 let _ = session_handle
@@ -176,18 +156,13 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                     submission.context_window_tokens = Some(ctx.context_window_tokens);
                 }
             }
-
-            // Track rating in session signals
             if let (Some(session_handle), Some(rating_value)) =
                 (&session_handle, feedback_input.rating_value)
             {
                 use prod_mc_cli_chat_proxy_types::feedback_types::RatingType;
                 let (is_positive, is_negative) = match feedback_input.rating_type {
-                    // Thumbs: -1 = down, 0 = neutral, 1 = up
                     Some(RatingType::Thumbs) | None => (rating_value > 0, rating_value < 0),
-                    // Stars (1-5): >= 4 positive, <= 2 negative, 3 neutral
                     Some(RatingType::Stars) => (rating_value >= 4, rating_value <= 2),
-                    // NPS (0-10): 9-10 promoter, 0-6 detractor, 7-8 passive
                     Some(RatingType::Nps) => (rating_value >= 9, rating_value <= 6),
                 };
                 if is_positive {
@@ -196,8 +171,6 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                     session_handle.signals_handle.record_negative_rating();
                 }
             }
-
-            // Log feedback type for debugging
             if feedback_input.is_solicited() {
                 tracing::info!(
                     session_id = %feedback_input.session_id,
@@ -212,7 +185,6 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                     "Spontaneous user feedback received"
                 );
             }
-
             let telemetry_enabled = {
                 let cfg = agent.cfg.borrow();
                 cfg.is_telemetry_enabled()
@@ -227,10 +199,6 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                     "no feedback client available (missing proxy credentials); feedback saved locally only"
                 );
             }
-            // Read the live feedback.user config (the session-actor path uses its
-            // spawn-time snapshot); both dedupe through the same process-wide
-            // identity cache, so a stable config resolves identically either way.
-            // Clone out so the RefCell borrow doesn't span an await.
             let user_cfg = agent.cfg.borrow().feedback.user.clone();
             let author_identity =
                 crate::util::user_identity::cached_identity(user_cfg.as_ref()).await;
@@ -245,7 +213,6 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                 },
             )
             .await;
-
             match &outcome {
                 crate::session::feedback_manager::SubmitOutcome::Submitted => {
                     tracing::info!("feedback submitted to proxy successfully");
@@ -259,7 +226,6 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                         .data(format!("Feedback submission failed: {e}")));
                 }
             }
-
             let value = serde_json::to_value(FeedbackResponse { success: true })
                 .map(|value| serde_json::value::to_raw_value(&value).map(Arc::from))
                 .expect("to work")
@@ -268,16 +234,11 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
         }
         "x.ai/feedback/dismiss" => {
             let dismiss_input: FeedbackRequestDismiss = parse_params(args)?;
-
             tracing::info!(
                 session_id = %dismiss_input.session_id,
                 request_id = %dismiss_input.request_id,
                 "Feedback request dismissed by user"
             );
-
-            // Count dismissals too (else event_type is always "responded" and
-            // response-rate is unknowable), gated like the responded path so a
-            // ZDR team emits no survey data and the ratio stays comparable.
             let telemetry_enabled = {
                 let cfg = agent.cfg.borrow();
                 cfg.is_telemetry_enabled()
@@ -297,8 +258,6 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                 )
                 .in_scope(|| {});
             }
-
-            // Persist dismiss locally; flushed before storage CopyFile by the persistence actor.
             {
                 let session_id = acp::SessionId::new(dismiss_input.session_id.clone());
                 if let Some(session_handle) = agent.resident_handle(&session_id) {
@@ -315,7 +274,6 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                     ));
                 }
             }
-
             let request_id = dismiss_input.request_id.clone();
             let client = agent
                 .feedback_client()
@@ -350,7 +308,76 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
         _ => Err(acp::Error::method_not_found()),
     }
 }
-
+/// Bounds the one-shot GCS upload so a stalled connection can't hang the ACP
+/// handler; sized for the 50 MiB archive cap on a slow uplink.
+const FEEDBACK_TRACE_UPLOAD_TIMEOUT_SECS: u64 = 120;
+async fn handle_upload_trace(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct UploadTraceRequest {
+        session_id: String,
+    }
+    let req: UploadTraceRequest = parse_params(args)?;
+    if !agent.cfg.borrow().is_feedback_enabled()
+        || agent
+            .auth_manager
+            .current_or_expired()
+            .is_some_and(|a| a.is_zdr_team())
+        || agent.team_blocks_one_shot_trace_upload()
+    {
+        return Err(acp::Error::internal_error().data("trace upload is not available"));
+    }
+    if !agent.feedback_trace_offer() && !agent.cfg.borrow().is_trace_upload_enabled() {
+        return Err(acp::Error::internal_error().data("trace upload is not available"));
+    }
+    let sid: acp::SessionId = req.session_id.clone().into();
+    if agent.resident_handle(&sid).is_none() {
+        return Err(
+            acp::Error::invalid_params().data(format!("session not found: {}", req.session_id))
+        );
+    }
+    let Some(session_dir) = crate::session::persistence::find_session_dir_by_id(&req.session_id)
+    else {
+        return Err(acp::Error::invalid_params().data("session directory not found"));
+    };
+    let session_id = req.session_id.clone();
+    let archive = tokio::task::spawn_blocking({
+        let session_dir = session_dir.clone();
+        move || crate::upload::feedback_archive::build_session_archive(&session_dir, &session_id)
+    })
+    .await
+    .map_err(|e| acp::Error::internal_error().data(format!("couldn't build session archive: {e}")))?
+    .map_err(|e| {
+        acp::Error::internal_error().data(format!("couldn't build session archive: {e}"))
+    })?;
+    let Some(gcs_config) = agent
+        .one_shot_feedback_gcs_config(req.session_id.clone())
+        .await
+    else {
+        return Err(acp::Error::internal_error().data("trace upload is not available"));
+    };
+    let object_path = format!("{}/feedback_trace.tar.gz", req.session_id);
+    use crate::upload::gcs::WithAuth as _;
+    let auth_manager = Some(agent.auth_manager.clone());
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(FEEDBACK_TRACE_UPLOAD_TIMEOUT_SECS),
+        xai_file_utils::gcs::upload_bytes(
+            &gcs_config.with_auth(auth_manager),
+            &object_path,
+            &archive,
+            "application/gzip",
+        ),
+    )
+    .await
+    {
+        Ok(Ok(_)) => super::to_ext_response(Ok(serde_json::json!({
+            "uploaded": true,
+            "objectPath": object_path,
+        }))),
+        Ok(Err(e)) => Err(acp::Error::internal_error().data(format!("trace upload failed: {e:#}"))),
+        Err(_) => Err(acp::Error::internal_error().data("trace upload timed out")),
+    }
+}
 /// Record inline code review events.
 ///
 /// Methods:
@@ -360,9 +387,7 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "x.ai/review/comment" => {
             let request: CommentRequest = parse_params(args)?;
-
             let comment_id = uuid::Uuid::now_v7().to_string();
-
             tracing::info!(
                 comment_id = %comment_id,
                 session_id = %request.session_id,
@@ -371,7 +396,6 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 lines = %format!("{}-{}", request.citation.start_line, request.citation.end_line),
                 "Comment received"
             );
-
             let record = serde_json::json!({
                 "event": "create",
                 "commentId": comment_id,
@@ -383,7 +407,6 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 "clientType": format!("{:?}", agent.client_type()),
                 "timestamp": chrono::Utc::now().to_rfc3339(),
             });
-
             if let Some(gcs_config) = agent
                 .build_gcs_config(format!("{}/comments", request.session_id))
                 .await
@@ -395,7 +418,6 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                     gcs_config.gcs_prefix.as_deref().unwrap_or("comments"),
                     comment_id
                 );
-
                 let auth_manager = Some(agent.auth_manager.clone());
                 tokio::spawn(async move {
                     match upload_bytes(
@@ -415,7 +437,6 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                     }
                 });
             }
-
             let value = serde_json::to_value(CommentResponse {
                 comment_id,
                 recorded: true,
@@ -427,13 +448,11 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         }
         "x.ai/review/comment/delete" => {
             let request: CommentDeleteRequest = parse_params(args)?;
-
             tracing::info!(
                 comment_id = %request.comment_id,
                 session_id = %request.session_id,
                 "Comment delete received"
             );
-
             let record = serde_json::json!({
                 "event": "delete",
                 "commentId": request.comment_id,
@@ -442,7 +461,6 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 "clientType": format!("{:?}", agent.client_type()),
                 "timestamp": chrono::Utc::now().to_rfc3339(),
             });
-
             if let Some(gcs_config) = agent
                 .build_gcs_config(format!("{}/comments", request.session_id))
                 .await
@@ -455,7 +473,6 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                     gcs_config.gcs_prefix.as_deref().unwrap_or("comments"),
                     event_id
                 );
-
                 let auth_manager = Some(agent.auth_manager.clone());
                 tokio::spawn(async move {
                     match upload_bytes(
@@ -475,7 +492,6 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                     }
                 });
             }
-
             let value = serde_json::to_value(CommentDeleteResponse {
                 comment_id: request.comment_id,
                 deleted: true,

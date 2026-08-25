@@ -1,12 +1,9 @@
 //! Telemetry event structs. Every struct needs a `telemetry_event!` binding.
-//! `session_id` and `turn_number` are auto-injected by `log_event` (which
-//! lives in shell's integration layer).
+//! `log_event` auto-injects `session_id`/`turn_number` and reserves every key in `client::RESERVED_EVENT_KEYS`.
 //!
 //! These structs were extracted from `xai-grok-shell` so they can be
 //! reused across binaries (TUI, sampler) without dragging the shell HTTP /
-//! product-analytics client along. The `CompactionScope` helper that drives paired
-//! `compaction_triggered`/`compaction_completed` emission stays in shell --
-//! it calls `super::log_event` directly.
+//! product-analytics client along.
 
 use serde::Serialize;
 
@@ -224,6 +221,26 @@ pub enum CompactionTrigger {
     Auto,
 }
 
+/// Mixpanel mode label. Detail is omitted so `segments` never includes it.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionModeLabel {
+    Summary,
+    Transcript,
+    Segments,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TwoPassOutcome {
+    /// Policy or product-exception off (cursor, subagents).
+    Disabled,
+    /// Armed, fell back to single-pass.
+    Miss,
+    /// Pass-2 summary applied.
+    Used,
+}
+
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
@@ -395,6 +412,10 @@ pub enum LoginFailureKind {
     /// `is_connect`: a dead TCP connect *or* a TLS handshake killed
     /// mid-flight. `os_error` tells them apart.
     TransportConnect,
+    /// TLS certificate rejected for an untrusted issuer (e.g. an uninstalled proxy root).
+    CertificateUntrusted,
+    /// TLS certificate otherwise invalid (expired, wrong hostname).
+    CertificateInvalid,
     /// In-flight request cut short: reset, close, timeout, body phase.
     TransportInterrupted,
     /// Client-side request construction / redirect policy defect.
@@ -518,6 +539,9 @@ pub struct CompactionTriggered {
     pub model_id: String,
     pub user_context_provided: bool,
     pub compaction_id: String,
+    pub compaction_mode: CompactionModeLabel,
+    pub two_pass_enabled: bool,
+    pub is_subagent: bool,
 }
 
 #[derive(Serialize)]
@@ -528,27 +552,87 @@ pub struct CompactionCompleted {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
     pub compaction_id: String,
+    pub compaction_mode: CompactionModeLabel,
+    pub two_pass: TwoPassOutcome,
+    pub segments_written: u32,
+    pub degenerate_retries: u32,
+    pub input_overflow_retries: u32,
+    pub is_subagent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_wait_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_compaction_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_compaction_ms: Option<u64>,
 }
 
-/// Emits paired `compaction_triggered` + `compaction_completed` events with
-/// a shared `compaction_id`. Guarantees both events fire and correlate.
+pub struct CompactionBeginParams {
+    pub trigger: CompactionTrigger,
+    pub tokens_used: u64,
+    pub context_window: u64,
+    pub model_id: String,
+    pub user_context_provided: bool,
+    pub compaction_mode: CompactionModeLabel,
+    pub two_pass_enabled: bool,
+    pub is_subagent: bool,
+}
+
+pub struct CompactionCompleteStats {
+    pub tokens_after: u64,
+    pub two_pass_used: bool,
+    pub segments_written: u32,
+    pub degenerate_retries: u32,
+    pub input_overflow_retries: u32,
+}
+
+#[derive(Clone, Copy)]
+pub struct CompactionTiming {
+    pub model_wait_ms: Option<u64>,
+    pub pre_compaction_ms: Option<u64>,
+    pub post_compaction_ms: Option<u64>,
+}
+
+fn resolve_two_pass(enabled: bool, used: bool) -> TwoPassOutcome {
+    match (enabled, used) {
+        (false, _) => TwoPassOutcome::Disabled,
+        (true, true) => TwoPassOutcome::Used,
+        (true, false) => TwoPassOutcome::Miss,
+    }
+}
+
+/// Emits `compaction_triggered` on `begin` and `compaction_completed` on
+/// `complete`, correlated by a shared `compaction_id`. A scope dropped
+/// without `complete` (error or cancel) emits no completion.
 pub struct CompactionScope {
     pub compaction_id: String,
     pub tokens_before: u64,
     pub model_id: String,
     start: std::time::Instant,
+    _active: crate::activity::ActivityGaugeGuard,
+    compaction_mode: CompactionModeLabel,
+    two_pass_enabled: bool,
+    is_subagent: bool,
 }
 
 impl CompactionScope {
-    pub fn begin(
-        trigger: CompactionTrigger,
-        tokens_used: u64,
-        context_window: u64,
-        model_id: String,
-        user_context_provided: bool,
-    ) -> Self {
+    pub fn begin(params: CompactionBeginParams) -> Self {
+        let CompactionBeginParams {
+            trigger,
+            tokens_used,
+            context_window,
+            model_id,
+            user_context_provided,
+            compaction_mode,
+            two_pass_enabled,
+            is_subagent,
+        } = params;
         let compaction_id = uuid::Uuid::new_v4().to_string();
         let percentage = xai_token_estimation::usage_percentage_u8(tokens_used, context_window);
+        let active = crate::activity::COMPACTIONS_ACTIVE.enter();
+        debug_assert!(
+            crate::activity::COMPACTIONS_ACTIVE.get() >= 1,
+            "CompactionTriggered must stamp a self-inclusive count"
+        );
         crate::session_ctx::log_event(CompactionTriggered {
             trigger,
             tokens_used,
@@ -557,22 +641,39 @@ impl CompactionScope {
             model_id: model_id.clone(),
             user_context_provided,
             compaction_id: compaction_id.clone(),
+            compaction_mode,
+            two_pass_enabled,
+            is_subagent,
         });
         Self {
             compaction_id,
             tokens_before: tokens_used,
             model_id,
             start: std::time::Instant::now(),
+            _active: active,
+            compaction_mode,
+            two_pass_enabled,
+            is_subagent,
         }
     }
 
-    pub fn complete(self, tokens_after: u64) {
+    pub fn complete(self, stats: CompactionCompleteStats, timing: CompactionTiming) {
+        let two_pass = resolve_two_pass(self.two_pass_enabled, stats.two_pass_used);
         crate::session_ctx::log_event(CompactionCompleted {
             duration_ms: self.start.elapsed().as_millis() as u64,
             tokens_before: self.tokens_before,
-            tokens_after,
+            tokens_after: stats.tokens_after,
             model_id: Some(self.model_id),
             compaction_id: self.compaction_id,
+            compaction_mode: self.compaction_mode,
+            two_pass,
+            segments_written: stats.segments_written,
+            degenerate_retries: stats.degenerate_retries,
+            input_overflow_retries: stats.input_overflow_retries,
+            is_subagent: self.is_subagent,
+            model_wait_ms: timing.model_wait_ms,
+            pre_compaction_ms: timing.pre_compaction_ms,
+            post_compaction_ms: timing.post_compaction_ms,
         });
     }
 }
@@ -668,6 +769,24 @@ pub struct SubagentCompleted {
     pub tool_calls: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_used: Option<u64>,
+    // Spawn-phase durations (`crate::subagent_spawn`, the
+    // `grok_code_subagent_spawn_*` taxonomy); absent when a phase did not run.
+    // Populated through `SubagentSpawnTimer::write_event_phases`' single match,
+    // which fails to compile until a new phase is given a field below.
+    // Phases are hierarchical (agent_build + tool_setup nest in
+    // session_bootstrap); summing all of them double-counts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_wait_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawn_prepare_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_bootstrap_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_build_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_setup_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_to_first_turn_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -726,6 +845,26 @@ impl SubagentLimitHit {
             workflow_run_id: Some(workflow_run_id),
         }
     }
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitWaitOutcome {
+    Recovered,
+    BudgetSpent,
+    Unresolved,
+}
+
+/// Emitted once per inner `process_conversation_turn`, so one `turn_number`
+/// can carry several rows; do not blindly GROUP BY turn_number.
+#[derive(Serialize)]
+pub struct SubagentRateLimitWaited {
+    /// Resubmits (waits) this turn, excluding the initial send.
+    pub attempts: u32,
+    pub max_attempts: u32,
+    pub waited_ms: u64,
+    pub budget_ms: u64,
+    pub outcome: RateLimitWaitOutcome,
 }
 
 /// Where a workflow script came from.
@@ -914,6 +1053,7 @@ pub enum ExtensionsModalTab {
     Plugins,
     Marketplace,
     Skills,
+    Workflows,
     McpServers,
 }
 
@@ -1321,6 +1461,8 @@ pub struct ProcessResourceUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub footprint_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub allocated_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub threads: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub open_files: Option<u64>,
@@ -1340,6 +1482,12 @@ pub struct PromptLatency {
     pub mcp_tools_registered: u32,
     pub mcp_strategy: McpStrategy,
     pub model_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+    pub ttlb_ms: u64,
+    pub attempts: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1358,9 +1506,36 @@ pub struct TurnCompleted {
     pub error_category: Option<String>,
 }
 
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum CancellationScope {
+    Turn,
+    Compaction,
+}
+
+#[derive(Serialize, Clone, Copy)]
+pub struct CancellationCompleted {
+    pub latency_ms: u64,
+    pub scope: CancellationScope,
+}
+
 /// Model issued a shell tool call whose command is `true` (keepalive thrash signal).
 #[derive(Serialize)]
 pub struct ShellTrueNoop {
+    pub tool_name: String,
+}
+
+/// Harness nudged the model to break a run of identical tool calls. Pairs with
+/// [`ActionStationarityStop`]: the nudge fires first and once per run, the stop only
+/// if the run continues to the hard limit.
+///
+/// `problematically_repeating` splits the two threshold tiers (tools whose identical
+/// repeats are never productive versus everything else), so nudge and stop each break
+/// down by tier.
+#[derive(Serialize)]
+pub struct ActionStationarityNudge {
+    pub problematically_repeating: bool,
+    pub run_len: u32,
     pub tool_name: String,
 }
 
@@ -1368,6 +1543,7 @@ pub struct ShellTrueNoop {
 #[derive(Serialize)]
 pub struct ActionStationarityStop {
     pub true_noop: bool,
+    pub problematically_repeating: bool,
     pub run_len: u32,
     pub tool_name: String,
 }
@@ -1381,6 +1557,8 @@ pub struct ToolCallCompleted {
     pub tool_name: String,
     pub outcome: xai_grok_session_events::types::ToolOutcome,
     pub duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_result_size_bytes: Option<u64>,
     /// Primary file path of the call, for the external stream only
     /// (`#[serde(skip)]`: never serialized to product events/analytics). Always reduced to
     /// `file_extension`; the full path rides the `OTEL_LOG_TOOL_DETAILS` gate.
@@ -1450,6 +1628,37 @@ pub struct SessionEnded {
 }
 
 // ---------------------------------------------------------------------------
+// Auth lock contention (aggregate layer; unified_log carries the forensics)
+// ---------------------------------------------------------------------------
+
+/// A contended `auth.json.lock` acquisition; instant acquisitions stay silent.
+#[derive(Serialize)]
+pub struct AuthLockWait {
+    pub wait_ms: u64,
+    pub budget_ms: u64,
+}
+
+/// An `auth.json.lock` wait that exhausted its budget.
+#[derive(Serialize)]
+pub struct AuthLockTimeout {
+    pub budget_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_state: Option<&'static str>,
+}
+
+/// A held lock's file was replaced out from under it: an unlink-recovery
+/// binary is still active in the fleet. The holder fields describe the replacer.
+#[derive(Serialize)]
+pub struct AuthLockReplacedOutFromUnder {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_state: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_age_secs: Option<u64>,
+}
+
+// ---------------------------------------------------------------------------
 // Pager events (called from xai-grok-pager via log_event)
 // ---------------------------------------------------------------------------
 
@@ -1469,14 +1678,24 @@ pub struct AgentConnect {
     pub auth_mode: crate::startup::AuthMode,
 }
 
-/// End to end startup: process start to a usable session, with the phase
-/// breakdown that accounts for it.
 #[derive(Serialize)]
-pub struct StartupComplete {
+pub struct StartupCompleted {
     pub total_ms: u64,
     pub outcome: crate::startup::StartupOutcome,
     pub phases: String,
     pub auth_mode: crate::startup::AuthMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefetch_wait_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_load_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_replay_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_git_scan_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_spawn_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_to_first_frame_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -1488,6 +1707,16 @@ pub struct PagerSlashCommand {
 #[derive(Serialize)]
 pub struct PlanSubmit {
     pub action: String,
+}
+
+#[derive(Serialize)]
+pub struct EventLoopStall {
+    pub max_stall_ms: u64,
+    pub window_ms: u64,
+    pub events_handled: u32,
+    pub stall_compaction_active: bool,
+    pub stall_subagents_active: u32,
+    pub stall_mcp_servers_connected: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -1565,6 +1794,9 @@ pub struct AnnouncementCtaClicked {
 pub enum CodingDataConsentSource {
     PrivacyBanner,
     Settings,
+    /// "Opt in" on the `/feedback` trace-consent card
+    /// while individually opted out.
+    FeedbackTraceCard,
 }
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -1586,6 +1818,34 @@ pub struct CodingDataConsentSelected {
     pub choice: CodingDataConsentChoice,
     pub previous_choice: CodingDataConsentChoice,
     pub changed: bool,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackTraceConsentChoice {
+    /// "Opt in".
+    TurnOn,
+    /// "Opt out this time" — also the Esc/skip outcome.
+    NoUpload,
+    /// "Opt out and don't ask again".
+    NeverAsk,
+}
+
+/// The `/feedback` trace-consent card was shown (funnel denominator for
+/// [`FeedbackTraceConsentSelected`]).
+#[derive(Serialize)]
+pub struct FeedbackTraceCardShown {
+    /// The "yes" option disclosed that it re-enables coding-data sharing.
+    pub reenables_sharing: bool,
+}
+
+/// Outcome of the `/feedback` trace-consent card (only emitted when the card
+/// was shown).
+#[derive(Serialize)]
+pub struct FeedbackTraceConsentSelected {
+    pub choice: FeedbackTraceConsentChoice,
+    /// The "yes" option disclosed that it re-enables coding-data sharing.
+    pub reenables_sharing: bool,
 }
 
 /// Flat snapshot of the terminal environment for telemetry.
@@ -1866,6 +2126,34 @@ pub struct ExternalOtelExportHealth {
     pub export_successes: u64,
 }
 
+/// Once per session. Carries no `command` string or script output.
+#[derive(Serialize)]
+pub struct StatusLineConfigured {
+    /// `unset` when the config named no mode, which is adoption's denominator.
+    pub kind: &'static str,
+    /// Always `false` once the user wrote `type = "disabled"`, and reported even
+    /// by a client that draws no row.
+    pub row_shows_a_problem: bool,
+    pub items: String,
+    pub custom_items: bool,
+}
+
+/// How the status line fared, at shutdown, for every session that enabled it.
+#[derive(Serialize)]
+pub struct StatusLineHealth {
+    pub kind: &'static str,
+    /// A run's error text counts, a config diagnostic does not, so `false` can
+    /// still mean a bar that showed one all session.
+    pub had_content: bool,
+    pub runs_ok: u64,
+    /// Shown on the row as `[status line: …]`.
+    pub runs_failed: u64,
+    pub runs_timed_out: u64,
+    /// Given up on; counted again under its outcome if it ever lands.
+    pub runs_abandoned: u64,
+    pub slowest_ms: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Credit limit
 // ---------------------------------------------------------------------------
@@ -2047,6 +2335,12 @@ pub struct CliUpdate {
 // ─────────────────────────────────────────────────────────────────────────────
 
 telemetry_event!(ManualAuth, "manual_auth");
+telemetry_event!(AuthLockWait, "auth_lock_wait");
+telemetry_event!(AuthLockTimeout, "auth_lock_timeout");
+telemetry_event!(
+    AuthLockReplacedOutFromUnder,
+    "auth_lock_replaced_out_from_under"
+);
 telemetry_event!(CliUpdate, "cli_update");
 
 telemetry_event!(Login, "login", external = crate::external::schema::map_auth);
@@ -2099,6 +2393,7 @@ telemetry_event!(
     external = crate::external::schema::map_subagent_completed
 );
 telemetry_event!(SubagentLimitHit, "subagent_limit_hit");
+telemetry_event!(SubagentRateLimitWaited, "subagent_rate_limit_waited");
 telemetry_event!(WorkflowRunStarted, "workflow_run_started");
 telemetry_event!(WorkflowRunEnded, "workflow_run_ended");
 telemetry_event!(
@@ -2179,6 +2474,7 @@ telemetry_event!(MultiAgentDiscard, "multi_agent_discard");
 telemetry_event!(RepoChanges, "repo_changes");
 telemetry_event!(NonGitDecisionEvent, "non_git_decision");
 telemetry_event!(PromptLatency, "prompt_latency");
+telemetry_event!(CancellationCompleted, "cancellation_completed");
 telemetry_event!(HeapThresholdCrossed, "heap_threshold_crossed");
 telemetry_event!(ProcessResourceUsage, "process_resource_usage");
 telemetry_event!(ProcessResourceLimits, "process_resource_limits");
@@ -2188,6 +2484,7 @@ telemetry_event!(
     external = crate::external::schema::map_turn_completed
 );
 telemetry_event!(ShellTrueNoop, "shell_true_noop");
+telemetry_event!(ActionStationarityNudge, "action_stationarity_nudge");
 telemetry_event!(ActionStationarityStop, "action_stationarity_stop");
 telemetry_event!(
     ToolCallCompleted,
@@ -2212,17 +2509,23 @@ telemetry_event!(
     external = crate::external::schema::map_agent_connect
 );
 telemetry_event!(
-    StartupComplete,
-    "startup_complete",
-    external = crate::external::schema::map_startup_complete
+    StartupCompleted,
+    "startup_completed",
+    external = crate::external::schema::map_startup_completed
 );
 telemetry_event!(PagerSlashCommand, "pager_slash_command");
 telemetry_event!(PlanSubmit, "plan_submit");
+telemetry_event!(EventLoopStall, "event_loop_stall");
 telemetry_event!(SuperGrokUpsellShown, "supergrok_upsell_shown");
 telemetry_event!(SuperGrokUpsellClicked, "supergrok_upsell_clicked");
 telemetry_event!(AnnouncementCtaShown, "announcement_cta_shown");
 telemetry_event!(AnnouncementCtaClicked, "announcement_cta_clicked");
 telemetry_event!(CodingDataConsentSelected, "coding_data_consent_selected");
+telemetry_event!(FeedbackTraceCardShown, "feedback_trace_card_shown");
+telemetry_event!(
+    FeedbackTraceConsentSelected,
+    "feedback_trace_consent_selected"
+);
 telemetry_event!(TerminalTelemetry, "terminal_context");
 telemetry_event!(DisplayRefreshProbe, "display_refresh_probe");
 telemetry_event!(BackspaceNoEffect, "backspace_no_effect");
@@ -2244,6 +2547,8 @@ telemetry_event!(CreditLimitHit, "credit_limit_hit");
 telemetry_event!(CreditLimitUpsellShown, "credit_limit_upsell_shown");
 telemetry_event!(CreditLimitUpsellClicked, "credit_limit_upsell_clicked");
 telemetry_event!(SubscriptionActivated, "subscription_activated");
+telemetry_event!(StatusLineConfigured, "status_line_configured");
+telemetry_event!(StatusLineHealth, "status_line_health");
 telemetry_event!(
     ApiError,
     "api_error",
@@ -2316,7 +2621,262 @@ telemetry_event!(
 
 #[cfg(test)]
 mod tests {
+    /// Reserved keys insert only-if-absent, so an event field that collides
+    /// intentionally wins over the enrichment. Walk every registered event's
+    /// fields from source and pin the intentional shadows, so a new event
+    /// cannot silently shadow a reserved key.
+    #[test]
+    fn event_fields_shadow_reserved_keys_only_on_the_allowlist() {
+        const SOURCES: &[&str] = &[
+            include_str!("mod.rs"),
+            include_str!("permission_analytics.rs"),
+            include_str!("../session_metrics.rs"),
+            include_str!("../memory_telemetry.rs"),
+        ];
+
+        let mut registry: Vec<&str> = Vec::new();
+        for src in SOURCES {
+            for chunk in src.split("telemetry_event!(").skip(1) {
+                let path = chunk
+                    .trim_start()
+                    .split(',')
+                    .next()
+                    .unwrap_or_default()
+                    .trim();
+                let name = path.rsplit("::").next().unwrap_or(path);
+                if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    registry.push(name);
+                }
+            }
+        }
+
+        let mut fields: std::collections::BTreeMap<&str, Vec<String>> = Default::default();
+        for src in SOURCES {
+            let mut lines = src.lines();
+            while let Some(line) = lines.next() {
+                let Some(decl) = line.trim_start().strip_prefix("pub struct ") else {
+                    continue;
+                };
+                let name = decl
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .next()
+                    .unwrap_or_default();
+                let entry = fields.entry(name).or_default();
+                if !decl.contains('{') || decl.contains('}') {
+                    continue;
+                }
+                for body in lines.by_ref() {
+                    if body == "}" {
+                        break;
+                    }
+                    let b = body.trim_start();
+                    if b.starts_with("//") || b.starts_with('#') {
+                        continue;
+                    }
+                    let b = b.strip_prefix("pub ").unwrap_or(b);
+                    if let Some((ident, _)) = b.split_once(':')
+                        && !ident.is_empty()
+                        && ident
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    {
+                        entry.push(ident.to_string());
+                    }
+                }
+            }
+        }
+
+        let reserved: std::collections::BTreeSet<&str> =
+            crate::client::RESERVED_EVENT_KEYS.iter().copied().collect();
+        let mut shadows: std::collections::BTreeSet<(String, String)> = Default::default();
+        let mut seen = std::collections::BTreeSet::new();
+        for event in registry {
+            assert!(seen.insert(event), "event {event} registered twice");
+            let event_fields = fields
+                .get(event)
+                .unwrap_or_else(|| panic!("registered event {event} has no parsed struct"));
+            for field in event_fields {
+                if reserved.contains(field.as_str()) {
+                    shadows.insert((event.to_string(), field.clone()));
+                }
+            }
+        }
+        assert!(
+            seen.len() > 100,
+            "the registry walk collapsed: {}",
+            seen.len()
+        );
+
+        const ALLOWED: &[(&str, &str)] = &[
+            ("DoomLoopRecovery", "session_id"),
+            ("DoomLoopRecovery", "turn_number"),
+            ("MemoryFlushComplete", "session_id"),
+            ("MemoryFlushStart", "session_id"),
+            ("MemoryInjection", "session_id"),
+            ("MemoryReindex", "session_id"),
+            ("MemorySearch", "session_id"),
+            ("MemorySessionInit", "session_id"),
+            ("MemorySessionSummary", "session_id"),
+            ("MemoryWatcherSync", "session_id"),
+            ("ModelSwitched", "session_id"),
+            ("NonGitDecisionEvent", "session_id"),
+            ("ProcessResourceUsage", "footprint_bytes"),
+            ("ProcessResourceUsage", "rss_bytes"),
+            ("RolloutSurvey", "session_id"),
+            ("SessionHarness", "session_id"),
+            ("SessionLoad", "session_id"),
+            ("SessionNew", "session_id"),
+            ("SessionStarted", "session_id"),
+            ("TraceUploadAttempted", "session_id"),
+            ("TraceUploadAttempted", "turn_number"),
+            ("TraceUploadFailed", "session_id"),
+            ("TraceUploadFailed", "turn_number"),
+            ("TraceUploadSkipped", "session_id"),
+            ("TraceUploadSkipped", "turn_number"),
+            ("TraceUploadSucceeded", "session_id"),
+            ("TraceUploadSucceeded", "turn_number"),
+            ("Turn", "session_id"),
+            ("Turn", "turn_number"),
+            ("TurnCompletedLifecycle", "session_id"),
+            ("TurnCompletedLifecycle", "turn_number"),
+            ("UserFeedback", "session_id"),
+        ];
+        let allowed: std::collections::BTreeSet<(String, String)> = ALLOWED
+            .iter()
+            .map(|(s, f)| (s.to_string(), f.to_string()))
+            .collect();
+        assert_eq!(
+            shadows, allowed,
+            "reserved-key shadows changed; extend the allowlist only for intentional event-owned values"
+        );
+    }
+
     use super::*;
+
+    #[test]
+    fn process_resource_usage_omits_allocated_bytes_when_unavailable() {
+        assert_eq!(
+            serde_json::to_value(ProcessResourceUsage {
+                trigger: ResourceReportTrigger::Periodic,
+                rss_bytes: None,
+                peak_rss_bytes: None,
+                footprint_bytes: None,
+                allocated_bytes: Some(4_096),
+                threads: None,
+                open_files: None,
+                resident_sessions: 2,
+                session_threads: 3,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "trigger": "periodic",
+                "allocated_bytes": 4_096,
+                "resident_sessions": 2,
+                "session_threads": 3,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(ProcessResourceUsage {
+                trigger: ResourceReportTrigger::Periodic,
+                rss_bytes: None,
+                peak_rss_bytes: None,
+                footprint_bytes: None,
+                allocated_bytes: None,
+                threads: None,
+                open_files: None,
+                resident_sessions: 2,
+                session_threads: 3,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "trigger": "periodic",
+                "resident_sessions": 2,
+                "session_threads": 3,
+            })
+        );
+    }
+
+    #[test]
+    fn tool_call_completed_omits_tool_result_size_bytes_when_absent() {
+        assert_eq!(
+            serde_json::to_value(ToolCallCompleted {
+                tool_name: "bash".into(),
+                outcome: xai_grok_session_events::types::ToolOutcome::Success,
+                duration_ms: 7,
+                tool_result_size_bytes: Some(2_048),
+                file_path: None,
+                parameters: None,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "tool_name": "bash",
+                "outcome": "success",
+                "duration_ms": 7,
+                "tool_result_size_bytes": 2_048,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(ToolCallCompleted {
+                tool_name: "bash".into(),
+                outcome: xai_grok_session_events::types::ToolOutcome::Success,
+                duration_ms: 7,
+                tool_result_size_bytes: None,
+                file_path: None,
+                parameters: None,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "tool_name": "bash",
+                "outcome": "success",
+                "duration_ms": 7,
+            })
+        );
+    }
+
+    #[test]
+    fn auth_lock_wait_event_carries_wait_and_budget() {
+        assert_eq!(
+            serde_json::to_value(AuthLockWait {
+                wait_ms: 4321,
+                budget_ms: 25_000,
+            })
+            .unwrap(),
+            serde_json::json!({ "wait_ms": 4321, "budget_ms": 25_000 })
+        );
+    }
+
+    #[test]
+    fn auth_lock_timeout_event_omits_an_unknown_holder_state() {
+        assert_eq!(
+            serde_json::to_value(AuthLockTimeout {
+                budget_ms: 25_000,
+                holder_state: Some("stuck_live"),
+            })
+            .unwrap(),
+            serde_json::json!({ "budget_ms": 25_000, "holder_state": "stuck_live" })
+        );
+        assert_eq!(
+            serde_json::to_value(AuthLockTimeout {
+                budget_ms: 10_000,
+                holder_state: None,
+            })
+            .unwrap(),
+            serde_json::json!({ "budget_ms": 10_000 })
+        );
+    }
+
+    #[test]
+    fn auth_lock_replaced_event_omits_unknown_holder_fields() {
+        assert_eq!(
+            serde_json::to_value(AuthLockReplacedOutFromUnder {
+                holder_pid: Some(42),
+                holder_state: Some("alive"),
+                holder_age_secs: None,
+            })
+            .unwrap(),
+            serde_json::json!({ "holder_pid": 42, "holder_state": "alive" })
+        );
+    }
 
     fn terminal_telemetry_fixture() -> TerminalTelemetry {
         TerminalTelemetry {
@@ -2553,6 +3113,214 @@ mod tests {
                 "compaction_id": "cid-2",
             })
         );
+    }
+
+    #[test]
+    fn compaction_triggered_name_and_shape() {
+        assert_eq!(CompactionTriggered::NAME, "compaction_triggered");
+        let event = serde_json::to_value(CompactionTriggered {
+            trigger: CompactionTrigger::Auto,
+            tokens_used: 100_000,
+            context_window: 128_000,
+            percentage: 78,
+            model_id: "grok-4".into(),
+            user_context_provided: false,
+            compaction_id: "cid-1".into(),
+            compaction_mode: CompactionModeLabel::Segments,
+            two_pass_enabled: true,
+            is_subagent: false,
+        })
+        .unwrap();
+        assert_eq!(
+            event,
+            serde_json::json!({
+                "trigger": "auto",
+                "tokens_used": 100_000,
+                "context_window": 128_000,
+                "percentage": 78,
+                "model_id": "grok-4",
+                "user_context_provided": false,
+                "compaction_id": "cid-1",
+                "compaction_mode": "segments",
+                "two_pass_enabled": true,
+                "is_subagent": false,
+            })
+        );
+
+        let disarmed = serde_json::to_value(CompactionTriggered {
+            trigger: CompactionTrigger::Manual,
+            tokens_used: 10_000,
+            context_window: 128_000,
+            percentage: 8,
+            model_id: "grok-4".into(),
+            user_context_provided: false,
+            compaction_id: "cid-2".into(),
+            compaction_mode: CompactionModeLabel::Summary,
+            two_pass_enabled: false,
+            is_subagent: false,
+        })
+        .unwrap();
+        assert_eq!(
+            disarmed,
+            serde_json::json!({
+                "trigger": "manual",
+                "tokens_used": 10_000,
+                "context_window": 128_000,
+                "percentage": 8,
+                "model_id": "grok-4",
+                "user_context_provided": false,
+                "compaction_id": "cid-2",
+                "compaction_mode": "summary",
+                "two_pass_enabled": false,
+                "is_subagent": false,
+            })
+        );
+    }
+
+    #[test]
+    fn compaction_completed_name_and_shape() {
+        assert_eq!(CompactionCompleted::NAME, "compaction_completed");
+        let with_model = serde_json::to_value(CompactionCompleted {
+            duration_ms: 63_000,
+            tokens_before: 399_000,
+            tokens_after: 15_000,
+            model_id: Some("grok-4".into()),
+            compaction_id: "cid-1".into(),
+            compaction_mode: CompactionModeLabel::Summary,
+            two_pass: TwoPassOutcome::Used,
+            segments_written: 0,
+            degenerate_retries: 1,
+            input_overflow_retries: 2,
+            is_subagent: false,
+            model_wait_ms: None,
+            pre_compaction_ms: None,
+            post_compaction_ms: None,
+        })
+        .unwrap();
+        assert_eq!(
+            with_model,
+            serde_json::json!({
+                "duration_ms": 63_000,
+                "tokens_before": 399_000,
+                "tokens_after": 15_000,
+                "model_id": "grok-4",
+                "compaction_id": "cid-1",
+                "compaction_mode": "summary",
+                "two_pass": "used",
+                "segments_written": 0,
+                "degenerate_retries": 1,
+                "input_overflow_retries": 2,
+                "is_subagent": false,
+            })
+        );
+
+        let no_model = serde_json::to_value(CompactionCompleted {
+            duration_ms: 1,
+            tokens_before: 1,
+            tokens_after: 1,
+            model_id: None,
+            compaction_id: "cid-2".into(),
+            compaction_mode: CompactionModeLabel::Transcript,
+            two_pass: TwoPassOutcome::Disabled,
+            segments_written: 0,
+            degenerate_retries: 0,
+            input_overflow_retries: 0,
+            is_subagent: true,
+            model_wait_ms: None,
+            pre_compaction_ms: None,
+            post_compaction_ms: None,
+        })
+        .unwrap();
+        assert_eq!(
+            no_model,
+            serde_json::json!({
+                "duration_ms": 1,
+                "tokens_before": 1,
+                "tokens_after": 1,
+                "compaction_id": "cid-2",
+                "compaction_mode": "transcript",
+                "two_pass": "disabled",
+                "segments_written": 0,
+                "degenerate_retries": 0,
+                "input_overflow_retries": 0,
+                "is_subagent": true,
+            })
+        );
+
+        let miss = serde_json::to_value(CompactionCompleted {
+            duration_ms: 2,
+            tokens_before: 2,
+            tokens_after: 2,
+            model_id: None,
+            compaction_id: "cid-3".into(),
+            compaction_mode: CompactionModeLabel::Segments,
+            two_pass: TwoPassOutcome::Miss,
+            segments_written: 1,
+            degenerate_retries: 0,
+            input_overflow_retries: 0,
+            is_subagent: false,
+            model_wait_ms: None,
+            pre_compaction_ms: None,
+            post_compaction_ms: None,
+        })
+        .unwrap();
+        assert_eq!(
+            miss,
+            serde_json::json!({
+                "duration_ms": 2,
+                "tokens_before": 2,
+                "tokens_after": 2,
+                "compaction_id": "cid-3",
+                "compaction_mode": "segments",
+                "two_pass": "miss",
+                "segments_written": 1,
+                "degenerate_retries": 0,
+                "input_overflow_retries": 0,
+                "is_subagent": false,
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_two_pass_covers_armed_and_used() {
+        assert_eq!(resolve_two_pass(false, false), TwoPassOutcome::Disabled);
+        assert_eq!(resolve_two_pass(false, true), TwoPassOutcome::Disabled);
+        assert_eq!(resolve_two_pass(true, false), TwoPassOutcome::Miss);
+        assert_eq!(resolve_two_pass(true, true), TwoPassOutcome::Used);
+    }
+
+    #[test]
+    fn two_pass_outcome_and_mode_label_serialize_snake_case() {
+        for outcome in [
+            TwoPassOutcome::Disabled,
+            TwoPassOutcome::Miss,
+            TwoPassOutcome::Used,
+        ] {
+            let expected = match outcome {
+                TwoPassOutcome::Disabled => "disabled",
+                TwoPassOutcome::Miss => "miss",
+                TwoPassOutcome::Used => "used",
+            };
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                serde_json::json!(expected)
+            );
+        }
+        for mode in [
+            CompactionModeLabel::Summary,
+            CompactionModeLabel::Transcript,
+            CompactionModeLabel::Segments,
+        ] {
+            let expected = match mode {
+                CompactionModeLabel::Summary => "summary",
+                CompactionModeLabel::Transcript => "transcript",
+                CompactionModeLabel::Segments => "segments",
+            };
+            assert_eq!(
+                serde_json::to_value(mode).unwrap(),
+                serde_json::json!(expected)
+            );
+        }
     }
 
     #[test]

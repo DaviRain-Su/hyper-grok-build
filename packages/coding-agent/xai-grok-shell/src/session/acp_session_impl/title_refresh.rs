@@ -183,6 +183,11 @@ impl SessionActor {
                 return None;
             }
         };
+        super::side_call::log_prompt_cache_usage(
+            "title_refresh",
+            setup.client.api_backend(),
+            &response,
+        );
         let title = session_summary::clean_title_text(&response.assistant_text());
         if title.is_empty() {
             tracing::debug!("title refresh: model returned empty title");

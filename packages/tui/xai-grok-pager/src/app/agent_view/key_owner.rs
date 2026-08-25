@@ -1,14 +1,6 @@
 //! Who the keyboard reaches, and what `Esc` means once it gets there.
 //!
-//! Three surfaces block the agent on an answer: the permission prompt, the
-//! cancel-turn panel and the question card. They share one contract —
-//! `Tab`/`Shift+Tab` walk the rows of whichever one holds the keyboard, `Esc`
-//! steps back out of it — and that contract is only honest if the shortcuts
-//! bar names the surface the input router actually feeds.
 //!
-//! [`AgentView::key_owner`] is the single ordered answer to "who has the
-//! keys". The router's intercepts and the bar's arms both derive from it, so
-//! neither can quietly rank itself above the other.
 
 use super::{AgentPane, AgentView};
 use crate::app::app_view::InputOutcome;
@@ -22,6 +14,7 @@ pub(crate) enum BlockingCard {
     Permission,
     CancelTurn,
     Question,
+    McpElicitation,
 }
 
 impl BlockingCard {
@@ -33,6 +26,7 @@ impl BlockingCard {
             Self::Permission => "permission",
             Self::CancelTurn => "cancel turn",
             Self::Question => "question",
+            Self::McpElicitation => "elicitation",
         };
         HintItem {
             keys: vec![crate::key!(Tab), crate::key!(' ')],
@@ -58,7 +52,6 @@ pub(crate) enum KeyOwner {
     LineViewer,
     BlockViewer,
     /// A blocking card with the keyboard. Permission outranks the line viewer
-    /// and plan approval; Question/CancelTurn rank under the line viewer.
     Card(BlockingCard),
     /// The plan-approval prompt with its preview closed.
     PlanApproval,
@@ -81,6 +74,8 @@ pub(crate) enum EscStep {
     LeaveTextInput,
     /// Close the bare `/feedback` pane, which has no rows to leave the input for.
     DismissFeedbackPane,
+    /// Skip the `/feedback` trace question (the report still sends).
+    SkipFeedbackTrace,
     /// Throw away an in-progress always-allow pattern edit.
     DiscardPatternEdit,
     /// Unmark this question's answer.
@@ -92,6 +87,7 @@ pub(crate) enum EscStep {
     ParkFocus,
     /// Dismiss the cancel-turn panel and leave the turn (and subagents) running.
     KeepRunning,
+    DismissElicitWaiting,
 }
 
 impl EscStep {
@@ -100,11 +96,13 @@ impl EscStep {
             Self::DismissFileSearch => "dismiss",
             Self::LeaveTextInput => "back",
             Self::DismissFeedbackPane => "dismiss",
+            Self::SkipFeedbackTrace => "skip",
             Self::DiscardPatternEdit => "cancel",
             Self::ClearSelection => "unselect",
             Self::BackOutOverlay => "dashboard",
             Self::ParkFocus => "scrollback",
             Self::KeepRunning => "keep running",
+            Self::DismissElicitWaiting => "dismiss",
         }
     }
 }
@@ -119,6 +117,8 @@ impl AgentView {
             Some(BlockingCard::CancelTurn)
         } else if self.question_view.is_some() {
             Some(BlockingCard::Question)
+        } else if self.elicitation_view.is_some() {
+            Some(BlockingCard::McpElicitation)
         } else {
             None
         }
@@ -208,12 +208,31 @@ impl AgentView {
                     } else {
                         EscStep::LeaveTextInput
                     }
+                } else if qv.is_feedback_trace() {
+                    // Defaults to a selection, so the generic ladder would
+                    // read Esc as unselect.
+                    EscStep::SkipFeedbackTrace
+                } else if qv.is_feedback_report() {
+                    // Safety net: the report stage stays in InputMode by
+                    // design, so this arm only fires if that ever changes.
+                    EscStep::DismissFeedbackPane
                 } else if qv.active_tab_has_selection() {
                     EscStep::ClearSelection
                 } else if self.in_dashboard_overlay && qv.active_tab == 0 {
                     // On later questions `Left` still walks back, so `Esc`
                     // stays in the card.
                     EscStep::BackOutOverlay
+                } else {
+                    EscStep::ParkFocus
+                }
+            }
+            BlockingCard::McpElicitation => {
+                use crate::views::elicitation_view::ElicitationFocus;
+                let ev = self.elicitation_view.as_ref()?;
+                if ev.focus == ElicitationFocus::Editing {
+                    EscStep::LeaveTextInput
+                } else if ev.is_url_waiting() {
+                    EscStep::DismissElicitWaiting
                 } else {
                     EscStep::ParkFocus
                 }
@@ -231,11 +250,17 @@ impl AgentView {
             EscStep::LeaveTextInput => {
                 if self.focused_card() == Some(BlockingCard::Permission) {
                     self.permission_back_to_options();
+                } else if self.focused_card() == Some(BlockingCard::McpElicitation) {
+                    if let Some(ev) = self.elicitation_view.as_mut() {
+                        ev.focus = crate::views::elicitation_view::ElicitationFocus::Fields;
+                    }
                 } else {
                     self.commit_question_freeform();
                 }
             }
-            EscStep::DismissFeedbackPane => return self.submit_question_answers(true),
+            EscStep::DismissFeedbackPane | EscStep::SkipFeedbackTrace => {
+                return self.submit_question_answers(true);
+            }
             EscStep::DiscardPatternEdit => {
                 self.permission_pattern_edit = None;
                 self.permission_back_to_options();
@@ -259,6 +284,7 @@ impl AgentView {
                 self.cancel_turn_view = None;
                 self.cancel_turn_buttons.clear();
             }
+            EscStep::DismissElicitWaiting => return self.resolve_elicitation_cancel(),
         }
         InputOutcome::Changed
     }

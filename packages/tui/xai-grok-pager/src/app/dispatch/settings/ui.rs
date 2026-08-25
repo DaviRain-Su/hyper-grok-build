@@ -980,7 +980,7 @@ pub(in crate::app::dispatch) fn action_for_reset(
 /// has no rollback arm. Kept as a const so `every_persisting_setting_has_rollback_arm`
 /// can't be silently defeated by a wording edit — it MUST match en.yml.
 pub(crate) const ROLLBACK_NO_ARM_TOAST: &str =
-    "Settings rolled back, but local state may be out of sync — restart to reload";
+    "Settings rolled back, but local state may be out of sync: restart to reload";
 
 /// Apply a rollback `SettingValue` to the in-memory cache. Does NOT
 /// re-emit `PersistSetting` (avoids infinite loop on persistent
@@ -1169,6 +1169,11 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 set_scroll_mode_inner(app, mode);
             }
         }
+        // No pager-side mirror to roll back; the failure toast is the whole story.
+        ("trace_upload", SettingValue::Bool(_)) => {}
+        // The in-session suppression latch deliberately stays set even when
+        // the disk write fails.
+        ("feedback_trace_card", SettingValue::Bool(_)) => {}
         // invert_scroll / scroll_lines: direct inner calls (clamp in inner).
         ("invert_scroll", SettingValue::Bool(b)) => set_invert_scroll_inner(app, *b),
         // Effective default is false → restore None (mirror stays disk-synced).

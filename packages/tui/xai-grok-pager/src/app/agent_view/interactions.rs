@@ -321,7 +321,7 @@ impl AgentView {
         } else if let Some(slot) = qv.per_question_freeform.get_mut(idx) {
             slot.clear();
         }
-        if !qv.is_feedback() {
+        if !qv.is_feedback_report() {
             qv.focus = QuestionFocus::Navigation;
         }
         self.last_prompt_click_ms = None;
@@ -352,17 +352,41 @@ impl AgentView {
                     return self.dismiss_question_view();
                 }
                 if key!('c', CONTROL).matches(key) {
-                    if qv.is_feedback() {
+                    if qv.is_feedback_report() {
                         return self.clear_feedback_then_dismiss();
                     }
                     qv.focus = QuestionFocus::Navigation;
                     self.last_prompt_click_ms = None;
                     return InputOutcome::Changed;
                 }
+                if qv.is_feedback_report() && crate::input::key::is_paste_key(key) {
+                    let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
+                        crate::clipboard::system_clipboard_read_text(),
+                    );
+                    return self.handle_paste_key_deferred(clipboard_text);
+                }
                 match self.prompt.route_enter(key) {
-                    EnterOutcome::NewlineInserted => return InputOutcome::Changed,
+                    EnterOutcome::NewlineInserted => {
+                        return InputOutcome::Changed;
+                    }
                     EnterOutcome::Submit => {
+                        if self.paste_probe_in_flight > 0
+                            && self.question_view.as_ref().is_some_and(
+                                crate::views::question_view::QuestionViewState::is_feedback_report,
+                            )
+                        {
+                            self.deferred_send =
+                                Some(crate::app::agent_view::AgentDeferredSend::SubmitFeedback);
+                            return InputOutcome::Changed;
+                        }
                         self.commit_question_freeform();
+                        if self
+                            .question_view
+                            .as_ref()
+                            .is_some_and(|qv| qv.is_feedback_report())
+                        {
+                            return self.submit_question_answers(false);
+                        }
                         let on_last = self
                             .question_view
                             .as_ref()
@@ -1044,13 +1068,14 @@ impl AgentView {
     /// view opened, so typed "additional context" doesn't leak into the
     /// main prompt. Also clears any stashed (tab-hidden) question view.
     fn dismiss_question_view(&mut self) -> InputOutcome {
-        let is_doctor_fix = self.question_view.as_ref().is_some_and(|qv| {
+        let follows_skip_submit = self.question_view.as_ref().is_some_and(|qv| {
             matches!(
                 qv.local_kind,
                 Some(crate::views::question_view::LocalQuestionKind::DoctorFix { .. })
+                    | Some(crate::views::question_view::LocalQuestionKind::FeedbackTrace { .. })
             )
         });
-        if is_doctor_fix {
+        if follows_skip_submit {
             return self.submit_question_answers(true);
         }
         if let Some(qv) = self.question_view.take() {
@@ -1079,6 +1104,28 @@ impl AgentView {
             .is_some_and(|qv| qv.tool_call_id == tool_call_id)
         {
             let _ = self.dismiss_question_view();
+            return true;
+        }
+        if let Some(ev) = self.elicitation_view.as_ref()
+            && ev.tool_call_id == tool_call_id
+        {
+            if ev.is_url_waiting() {
+                return false;
+            }
+            if let Some(mut ev) = self.elicitation_view.take() {
+                let _ = ev.take_response_tx();
+                self.restore_elicitation_prompt(ev.stashed_prompt);
+            }
+            return true;
+        }
+        if self
+            .pending_elicitation
+            .as_ref()
+            .is_some_and(|(req, _)| req.tool_call_id == tool_call_id)
+        {
+            if let Some((_, tx)) = self.pending_elicitation.take() {
+                drop(tx);
+            }
             return true;
         }
         if self
@@ -1131,40 +1178,91 @@ impl AgentView {
     }
     /// Give back the draft a card displaced when it opened.
     ///
-    /// Permission open: write into `permission_stashed_prompt`. Otherwise restore
-    /// the live composer (plan freeform when approval is parked; session draft is
-    /// only on `plan_approval_view.stashed_prompt`).
+    /// Permission open: write into `permission_stashed_prompt`. Question open:
+    /// write into its stash — the question owns the live composer as freeform,
+    /// and its close puts the stash back (writing through would first clobber
+    /// the freeform and then be clobbered by the question's own restore).
+    /// Otherwise restore the live composer (plan freeform when approval is
+    /// parked is deliberate; the session draft is already on
+    /// `plan_approval_view.stashed_prompt`).
     pub(crate) fn restore_card_prompt(
         &mut self,
         stashed: crate::views::prompt_widget::StashedPrompt,
     ) {
         if self.permission_stashed_prompt.is_some() {
             self.permission_stashed_prompt = Some(stashed);
+        } else if let Some(qv) = self.question_view.as_mut() {
+            qv.stashed_prompt = stashed;
         } else {
             self.prompt.restore(stashed);
         }
     }
-    /// Close out the bare `/feedback` pane: Enter sends the report, Esc drops it.
-    /// It never reaches the option-selection translation, having no options to translate.
+    /// Close out the `/feedback` report pane: Enter advances to the trace
+    /// question (when offered) or sends, Esc drops the report.
     fn submit_feedback_pane(
         &mut self,
         mut qv: crate::views::question_view::QuestionViewState,
         skipped: bool,
     ) -> InputOutcome {
         let report = qv.feedback_report();
-        if !skipped && report.is_empty() {
+        if !skipped && report.is_empty() && self.prompt.images.is_empty() {
+            crate::unified_log::info(
+                "feedback.submit",
+                None,
+                Some(serde_json::json!({"branch": "empty"})),
+            );
             let freeform = qv.activate_freeform_input();
             self.prompt.set_text_preserving(&freeform);
             self.question_view = Some(qv);
             return InputOutcome::Changed;
         }
+        if !skipped && qv.feedback_offer_trace {
+            let images = self.prompt.drain_images();
+            crate::unified_log::info(
+                "feedback.submit",
+                None,
+                Some(serde_json::json!({
+                    "branch": "trace_question",
+                    "chars": report.chars().count(),
+                    "images": images.len(),
+                })),
+            );
+            xai_grok_telemetry::session_ctx::log_event(
+                xai_grok_telemetry::events::FeedbackTraceCardShown {
+                    reenables_sharing: qv.feedback_offer_reenables_sharing,
+                },
+            );
+            qv.begin_feedback_trace_stage(report, images);
+            self.prompt.set_text_preserving("");
+            self.question_view = Some(qv);
+            return InputOutcome::Changed;
+        }
+        let images = if skipped {
+            Vec::new()
+        } else {
+            self.prompt.drain_images()
+        };
+        crate::unified_log::info(
+            "feedback.submit",
+            None,
+            Some(serde_json::json!({
+                "branch": "send",
+                "skipped": skipped,
+                "chars": report.chars().count(),
+                "images": images.len(),
+            })),
+        );
         self.record_question_pause(&qv);
         self.restore_card_prompt(qv.stashed_prompt);
         self.cleanup_question_state();
         if skipped {
             return InputOutcome::Changed;
         }
-        InputOutcome::Action(Action::SendFeedback(report))
+        InputOutcome::Action(Action::SendFeedback {
+            text: report,
+            images: images.into(),
+            trace: None,
+        })
     }
     pub(super) fn submit_question_answers(&mut self, skipped: bool) -> InputOutcome {
         use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse;
@@ -1172,7 +1270,7 @@ impl AgentView {
         let Some(mut qv) = self.question_view.take() else {
             return InputOutcome::Changed;
         };
-        if qv.is_feedback() {
+        if qv.is_feedback_report() {
             return self.submit_feedback_pane(qv, skipped);
         }
         self.record_question_pause(&qv);
@@ -1223,6 +1321,18 @@ impl AgentView {
                     unreachable!("doctor fix checked above")
                 };
                 InputOutcome::Action(Action::DoctorFixCancelled(target))
+            } else if skipped {
+                use crate::views::question_view::LocalQuestionKind;
+                match kind {
+                    LocalQuestionKind::FeedbackTrace { report, images } => {
+                        InputOutcome::Action(Action::SendFeedback {
+                            text: report,
+                            images,
+                            trace: Some(crate::app::actions::FeedbackTraceChoice::NoUpload),
+                        })
+                    }
+                    kind => translate_local_submit(&qv, kind, skipped),
+                }
             } else {
                 translate_local_submit(&qv, kind, skipped)
             };
@@ -1277,7 +1387,10 @@ impl AgentView {
     }
     /// Clean up question-related visual state after the question view is
     /// dismissed (submit, cancel, or replacement).
-    fn cleanup_question_state(&mut self) {
+    pub(crate) fn cleanup_question_state(&mut self) {
+        if self.deferred_send == Some(crate::app::agent_view::AgentDeferredSend::SubmitFeedback) {
+            self.deferred_send = None;
+        }
         self.hovered_question_item = None;
         self.question_scrollbar_dragging = false;
         self.hit_question_scrollbar.clear();

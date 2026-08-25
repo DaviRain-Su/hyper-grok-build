@@ -99,7 +99,7 @@ impl AgentView {
                 // The viewer's decoded/re-encoded overlay image (tens of MB
                 // for screenshots/renders) just dropped; input path, so a
                 // synchronous purge lands between interactions.
-                crate::memory_release::release_retained_memory_with("image-viewer-close");
+                crate::memory_release::release_retained_memory("image-viewer-close");
             }
             _ => {}
         }
@@ -419,7 +419,7 @@ impl AgentView {
     pub(super) fn stop_inline_playback(&mut self) -> bool {
         let had_video = self.inline_video.take().is_some();
         if had_video {
-            crate::memory_release::request_release_after_draw_with("inline-video-stop");
+            crate::memory_release::request_release_after_draw("inline-video-stop");
         }
         had_video
     }
@@ -430,7 +430,7 @@ impl AgentView {
     pub(crate) fn replace_inline_video(&mut self, video: crate::app::agent_view::InlineVideoState) {
         if self.inline_video.replace(video).is_some() {
             // Switching videos: the previous frame set just dropped.
-            crate::memory_release::request_release_after_draw_with("inline-video-replace");
+            crate::memory_release::request_release_after_draw("inline-video-replace");
         }
     }
 
@@ -654,7 +654,7 @@ impl AgentView {
                 self.video_viewer = None;
                 // The viewer's pre-extracted frame set (~50–300 MB for a
                 // typical clip) just dropped; return the pages to the OS.
-                crate::memory_release::release_retained_memory_with("video-viewer-close");
+                crate::memory_release::release_retained_memory("video-viewer-close");
             }
             KeyCode::Char(' ') => {
                 viewer.toggle_play_pause();

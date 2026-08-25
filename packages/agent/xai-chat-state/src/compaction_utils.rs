@@ -38,8 +38,8 @@ impl ModelRequestHistory {
         self.0
     }
 }
-/// Drops tool results and flattens assistant `tool_calls` into
-/// `[Called tools: ...]` text annotations.
+/// Drops tool results and backend tool calls, and flattens assistant
+/// `tool_calls` into `[Called tools: ...]` text annotations.
 ///
 /// Mutates assistant text in place; do NOT use this directly when sending
 /// to a provider that validates signed `reasoning` blocks against the
@@ -52,6 +52,7 @@ pub(crate) fn strip_tool_messages_for_conversation_item(
         .into_iter()
         .filter_map(|item| match item {
             ConversationItem::ToolResult(_) => None,
+            ConversationItem::BackendToolCall(_) => None,
             ConversationItem::Assistant(mut a) => {
                 if !a.tool_calls.is_empty() {
                     let tool_names: Vec<String> =

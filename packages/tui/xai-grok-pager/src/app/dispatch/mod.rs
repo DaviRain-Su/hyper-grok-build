@@ -25,7 +25,7 @@ mod jump;
 #[cfg(feature = "codex-live")]
 mod live;
 mod modes;
-mod notes;
+pub(crate) mod notes;
 mod permissions;
 mod prompt;
 mod queue;
@@ -52,6 +52,7 @@ pub(crate) use live::{enforce_live_session_bound, resume_pending_live};
 pub(crate) use modes::{downgrade_displayed_auto_if_gated, effective_auto};
 #[cfg(test)]
 pub(crate) use notes::FEEDBACK_QUESTION_LABEL;
+pub(crate) use notes::FEEDBACK_TRACE_UPLOAD_TIMEOUT_MS;
 pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
 pub(crate) use permissions::resolve_permission_queue_transition;
 pub(crate) use prompt::dispatch_initial_prompt;

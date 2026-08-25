@@ -543,6 +543,8 @@ impl xai_tool_runtime::Tool for TaskTool {
                 model_override_provenance: ModelOverrideProvenance::Tool,
                 reasoning_effort: None,
                 persona: None,
+                // JSON cannot set this field. Compat-harness adapters still
+                // populate it in-process; model-facing spawns stay `None`.
                 capability_mode: input.capability_mode,
                 isolation: input.isolation,
                 // Model-issued `task` spawns never override the harness; the
@@ -1702,7 +1704,7 @@ mod tests {
     // ── Runtime overrides serde tests ─────────────────
 
     #[test]
-    fn runtime_overrides_parse() {
+    fn capability_mode_in_json_is_ignored() {
         let input: TaskToolInput = serde_json::from_str(
             r#"{
                 "description": "d",
@@ -1711,20 +1713,20 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert_eq!(
-            input.capability_mode,
-            Some(SubagentCapabilityMode::ReadOnly)
+        assert!(
+            input.capability_mode.is_none(),
+            "model-facing JSON must not set capability_mode"
         );
     }
 
     #[test]
     fn partial_overrides_leave_rest_none() {
-        let input: TaskToolInput = serde_json::from_str(
-            r#"{"description": "d", "prompt": "p", "capability_mode": "execute"}"#,
-        )
-        .unwrap();
-        assert_eq!(input.capability_mode, Some(SubagentCapabilityMode::Execute));
+        let input: TaskToolInput =
+            serde_json::from_str(r#"{"description": "d", "prompt": "p", "isolation": "worktree"}"#)
+                .unwrap();
+        assert_eq!(input.isolation, Some(SubagentIsolationMode::Worktree));
         assert!(input.model.is_none());
+        assert!(input.capability_mode.is_none());
     }
 
     #[test]
@@ -1738,6 +1740,15 @@ mod tests {
              is set (the source model will be used). To apply a changed model pin, start a fresh \
              child without resume_from and omit this field. Only choose an explicit model when \
              the user directly requests it."
+        );
+    }
+
+    #[test]
+    fn task_tool_input_schema_omits_capability_mode() {
+        let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
+        assert!(
+            schema["properties"].get("capability_mode").is_none(),
+            "capability_mode must not be advertised on the model-facing schema"
         );
     }
 
@@ -1767,9 +1778,9 @@ mod tests {
         let json = serde_json::to_string(&input).unwrap();
         let parsed: TaskToolInput = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.description, "find bugs");
-        assert_eq!(
-            parsed.capability_mode,
-            Some(SubagentCapabilityMode::ReadOnly)
+        assert!(
+            parsed.capability_mode.is_none(),
+            "capability_mode is harness-only and must not round-trip through JSON"
         );
         assert_eq!(parsed.model.as_deref(), Some("test-model"));
     }
@@ -1782,17 +1793,16 @@ mod tests {
             ("execute", SubagentCapabilityMode::Execute),
             ("all", SubagentCapabilityMode::All),
         ] {
-            let json =
-                format!(r#"{{"description":"d","prompt":"p","capability_mode":"{json_val}"}}"#);
-            let input: TaskToolInput = serde_json::from_str(&json).unwrap();
-            assert_eq!(input.capability_mode, Some(expected), "for {json_val}");
+            let parsed: SubagentCapabilityMode =
+                serde_json::from_value(serde_json::json!(json_val)).unwrap();
+            assert_eq!(parsed, expected, "for {json_val}");
         }
     }
 
     #[test]
     fn capability_mode_rejects_invalid_value() {
-        let json = r#"{"description":"d","prompt":"p","capability_mode":"invalid_mode"}"#;
-        let result = serde_json::from_str::<TaskToolInput>(json);
+        let result =
+            serde_json::from_value::<SubagentCapabilityMode>(serde_json::json!("invalid_mode"));
         assert!(result.is_err(), "unknown value should be rejected");
     }
 
@@ -1816,10 +1826,9 @@ mod tests {
             ("All", SubagentCapabilityMode::All, "all"),
             ("ALL", SubagentCapabilityMode::All, "all"),
         ] {
-            let json = format!(r#"{{"description":"d","prompt":"p","capability_mode":"{alias}"}}"#);
-            let input: TaskToolInput = serde_json::from_str(&json)
+            let parsed: SubagentCapabilityMode = serde_json::from_value(serde_json::json!(alias))
                 .unwrap_or_else(|e| panic!("alias {alias:?} should parse: {e}"));
-            assert_eq!(input.capability_mode, Some(expected), "parse {alias:?}");
+            assert_eq!(parsed, expected, "parse {alias:?}");
             assert_eq!(
                 serde_json::to_value(expected).unwrap(),
                 canonical,

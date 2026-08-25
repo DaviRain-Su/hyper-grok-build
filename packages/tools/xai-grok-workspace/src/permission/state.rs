@@ -30,6 +30,14 @@ pub struct PermissionState {
     /// for which the user has granted "always allow" to every tool. Lookup
     /// validates and parses the complete qualified ID before matching.
     pub allowed_mcp_servers: HashSet<String>,
+    /// Exact MCP tool names the user has denied with "never allow". Checked
+    /// before every MCP grant (deny wins). Always tool-scoped — there is
+    /// deliberately no server-scope deny.
+    pub disallowed_mcp_tools: HashSet<String>,
+    /// Host keys the user has denied for `web_fetch` (lowercased, `www.` kept
+    /// — never collapsed to a parent domain). Checked before every web-fetch
+    /// grant (deny wins); a deny also covers subdomains of the entry.
+    pub disallowed_web_fetch_domains: HashSet<String>,
     /// Version proving server-wide grants were minted from validated qualified IDs.
     /// Missing or malformed markers are legacy; future integer versions are preserved.
     #[serde(
@@ -65,6 +73,8 @@ impl Default for PermissionState {
             allowed_web_fetch_domains: HashSet::new(),
             allowed_mcp_tools: HashSet::new(),
             allowed_mcp_servers: HashSet::new(),
+            disallowed_mcp_tools: HashSet::new(),
+            disallowed_web_fetch_domains: HashSet::new(),
             validated_mcp_server_grants_version: VALIDATED_MCP_SERVER_GRANTS_VERSION,
         }
     }
@@ -95,6 +105,8 @@ impl PermissionState {
             allowed_web_fetch_domains,
             allowed_mcp_tools,
             allowed_mcp_servers,
+            disallowed_mcp_tools,
+            disallowed_web_fetch_domains,
             validated_mcp_server_grants_version: _,
         } = other;
         self.allow_bash_execute |= allow_bash_execute;
@@ -106,6 +118,9 @@ impl PermissionState {
             .extend(allowed_web_fetch_domains);
         self.allowed_mcp_tools.extend(allowed_mcp_tools);
         self.allowed_mcp_servers.extend(allowed_mcp_servers);
+        self.disallowed_mcp_tools.extend(disallowed_mcp_tools);
+        self.disallowed_web_fetch_domains
+            .extend(disallowed_web_fetch_domains);
     }
 }
 
@@ -455,6 +470,21 @@ mod tests {
         assert!(denied.contains("rm -rf"));
         assert!(denied.contains("git push --force"));
         assert_eq!(denied.len(), 2);
+    }
+
+    /// Pre-deny stores (no `disallowed_mcp_tools` / `disallowed_web_fetch_domains`
+    /// keys on disk) must load with empty deny sets.
+    #[test]
+    fn missing_deny_fields_default_empty() {
+        let restored: PermissionState = toml::from_str(
+            r#"
+allowed_mcp_tools = ["linear__list"]
+"#,
+        )
+        .unwrap();
+        assert!(restored.allowed_mcp_tools.contains("linear__list"));
+        assert!(restored.disallowed_mcp_tools.is_empty());
+        assert!(restored.disallowed_web_fetch_domains.is_empty());
     }
 
     #[test]
@@ -1067,6 +1097,36 @@ allowed_mcp_servers = ["a"]
         assert!(a.allow_bash_execute);
         // Scalar policy keeps the in-memory session's value.
         assert_eq!(a.edit_policy, EditPolicy::Ask);
+    }
+
+    /// The MCP/domain deny sets merge additively in both directions, like
+    /// `disallowed_bash_commands`: a deny persisted by another session
+    /// survives a merge with this session's state and vice versa.
+    #[test]
+    fn merge_grants_unions_mcp_and_domain_denies_both_directions() {
+        let mut a = PermissionState::default();
+        a.disallowed_mcp_tools.insert("linear__delete".to_string());
+        a.disallowed_web_fetch_domains
+            .insert("tracker.example".to_string());
+
+        let mut b = PermissionState::default();
+        b.disallowed_mcp_tools.insert("notion__purge".to_string());
+        b.disallowed_web_fetch_domains
+            .insert("evil.example".to_string());
+
+        let mut a2 = a.clone();
+        a2.merge_grants_from(b.clone());
+        assert!(a2.disallowed_mcp_tools.contains("linear__delete"));
+        assert!(a2.disallowed_mcp_tools.contains("notion__purge"));
+        assert!(a2.disallowed_web_fetch_domains.contains("tracker.example"));
+        assert!(a2.disallowed_web_fetch_domains.contains("evil.example"));
+
+        let mut b2 = b;
+        b2.merge_grants_from(a);
+        assert!(b2.disallowed_mcp_tools.contains("linear__delete"));
+        assert!(b2.disallowed_mcp_tools.contains("notion__purge"));
+        assert!(b2.disallowed_web_fetch_domains.contains("tracker.example"));
+        assert!(b2.disallowed_web_fetch_domains.contains("evil.example"));
     }
 
     // ── repo-root store keying ───────────────────────────────────

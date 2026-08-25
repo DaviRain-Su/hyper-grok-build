@@ -64,6 +64,7 @@ impl ToolKind {
             ToolKind::ImageToVideo => "Generate Video",
             ToolKind::ReferenceToVideo => "Generate Video",
             ToolKind::DeployApp => "Deploy App",
+            ToolKind::InitOrUpdateApp => "Init or Update App",
             ToolKind::SearchTool => "Search Tools",
             ToolKind::UseTool => "Use Tool",
             ToolKind::Monitor => "Monitor",
@@ -106,6 +107,7 @@ impl ToolKind {
             | ToolKind::ImageToVideo
             | ToolKind::ReferenceToVideo
             | ToolKind::DeployApp
+            | ToolKind::InitOrUpdateApp
             | ToolKind::SearchTool
             | ToolKind::UseTool
             | ToolKind::Monitor

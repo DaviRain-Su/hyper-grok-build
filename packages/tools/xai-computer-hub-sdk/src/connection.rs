@@ -96,6 +96,17 @@ const RECONNECT_ATTEMPT_MIN_BUDGET: Duration = Duration::from_secs(30);
 fn reconnect_attempt_budget(liveness_deadline: Duration) -> Duration {
     liveness_deadline.max(RECONNECT_ATTEMPT_MIN_BUDGET)
 }
+/// Per-attempt budget for the initial connect (WebSocket upgrade +
+/// hello/hello_ack). Neither `connect_async` nor the hello_ack wait is
+/// otherwise bounded, so a peer that accepts the socket but never answers
+/// (e.g. a hub instance draining mid-roll) would hang the caller
+/// indefinitely, burning the embedder's own readiness budget on one dead
+/// attempt.
+const INITIAL_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Initial-connect attempts before the error surfaces to the caller. Waits
+/// between attempts come from the reconnect backoff schedule (jittered), so
+/// a fleet cold-starting into a degraded hub de-phases its retries.
+const INITIAL_CONNECT_MAX_ATTEMPTS: u32 = 3;
 /// Default WebSocket keepalive ping cadence when a connection does not
 /// override [`ConnectionTuning::ws_ping_interval`].
 const DEFAULT_WS_PING_INTERVAL: Duration = Duration::from_secs(30);
@@ -328,6 +339,23 @@ fn resolve_ws_ping_interval(configured: Option<Duration>) -> Duration {
         _ => DEFAULT_WS_PING_INTERVAL,
     }
 }
+/// Resolve the per-attempt initial-connect budget, clamping an unset *or
+/// zero* value to [`INITIAL_CONNECT_ATTEMPT_TIMEOUT`] — a zero budget would
+/// abort every attempt before the upgrade could complete.
+fn resolve_initial_connect_attempt_timeout(configured: Option<Duration>) -> Duration {
+    match configured {
+        Some(timeout) if !timeout.is_zero() => timeout,
+        _ => INITIAL_CONNECT_ATTEMPT_TIMEOUT,
+    }
+}
+/// Whether an initial-connect failure is worth another attempt. Transport
+/// failures (including the per-attempt timeout, which surfaces as
+/// `NetworkError`) and server closes are transient; auth, config, protocol,
+/// and insecure-scheme failures are deterministic and must surface
+/// immediately.
+fn initial_connect_retryable(err: &ClientError) -> bool {
+    matches!(err, ClientError::NetworkError(_) | ClientError::Closed(_))
+}
 /// Resolve the inbound-liveness deadline, clamping an unset *or zero* value
 /// to `min(4× ping, 120s)` — 120s at the default 30s ping, still under the
 /// hub's ~150s idle timeout.
@@ -371,6 +399,19 @@ pub struct ConnectionTuning {
     /// default cap period). `Some`, including zero, is honored verbatim
     /// (`Some(ZERO)` resets on every outage; tests use this).
     pub reconnect_attempt_reset_after: Option<Duration>,
+    /// Allowlist of 4100–4199 close codes that fire
+    /// [`ConnectionConfig::on_terminal_close`] then re-enter the reconnect
+    /// loop instead of permanently stopping the actor. Empty (default)
+    /// keeps the protocol contract: every terminal close is a one-way door.
+    /// Only codes for a still-restorable session (e.g.
+    /// [`CLOSE_CODE_SANDBOX_TERMINATED`]) belong here; one-way codes
+    /// (force eviction, session expiry, admin disconnect, supersession)
+    /// must not.
+    pub reconnect_after_terminal_close_codes: Vec<u16>,
+    /// Per-attempt budget for the initial connect (WebSocket upgrade +
+    /// hello/hello_ack). `None` (or zero) ⇒
+    /// [`INITIAL_CONNECT_ATTEMPT_TIMEOUT`].
+    pub initial_connect_attempt_timeout: Option<Duration>,
 }
 /// Pool dedup key. Two connections are pooled together iff their
 /// `(url, principal)` match.
@@ -411,8 +452,10 @@ pub type ReconnectCallback = Box<dyn Fn(ReconnectEvent) + Send + Sync + 'static>
 /// reconnect attempt) and on a terminal close.
 pub type DisconnectCallback = Box<dyn Fn() + Send + Sync + 'static>;
 /// Boxed terminal-close callback, fired with the WebSocket close code when
-/// the server ends the connection in the 4100–4199 range (no reconnect).
-/// Always followed by [`DisconnectCallback`] so readiness still flips.
+/// the server ends the connection in the 4100–4199 range. Default policy is
+/// no reconnect; [`ConnectionTuning::reconnect_after_terminal_close_codes`]
+/// opts the embedder into recovery after this callback. Always followed by
+/// [`DisconnectCallback`] so readiness still flips.
 pub type TerminalCloseCallback = Box<dyn Fn(u16) + Send + Sync + 'static>;
 /// Boxed connect callback, fired once on the initial successful connect
 /// after the writer keepalive loop has entered (so `/ready` cannot race
@@ -461,7 +504,9 @@ pub struct ConnectionConfig {
     /// server sends a terminal close.
     pub on_disconnect: Option<Arc<DisconnectCallback>>,
     /// Optional terminal-close callback, fired with the close code on a
-    /// 4100–4199 close, before [`Self::on_disconnect`].
+    /// 4100–4199 close, before [`Self::on_disconnect`]. The actor still
+    /// stops afterwards unless the code is in
+    /// [`ConnectionTuning::reconnect_after_terminal_close_codes`].
     pub on_terminal_close: Option<Arc<TerminalCloseCallback>>,
     /// Optional connect callback, fired once on the initial successful connect
     /// after the writer task enters its loop (happens-before reader start).
@@ -537,6 +582,9 @@ struct HubConnectionInner {
     reconnect_jitter_seed: u64,
     /// Resolved stability dwell before `attempt` resets on a new outage.
     attempt_reset_after: Duration,
+    /// Embedder opt-in: sorted allowlist of 4100–4199 close codes to
+    /// reconnect after instead of exiting. Empty ⇒ never reconnect.
+    reconnect_after_terminal_close_codes: Vec<u16>,
     /// Incremented at the start of each reconnect episode so jitter
     /// re-phases across outages of the same connection.
     outage_seq: AtomicU32,
@@ -577,7 +625,6 @@ impl HubConnection {
     /// The pool is the canonical caller; outside callers MAY use this
     /// for tests or one-shot programs but lose pool dedup.
     pub async fn connect(config: ConnectionConfig) -> Result<Arc<Self>, ClientError> {
-        let initial_cred = config.credential.current();
         let key = ConnKey {
             url: config.url.as_str().to_owned(),
             principal: config.credential.principal_key(),
@@ -603,24 +650,58 @@ impl HubConnection {
         let bound_sessions = Arc::new(RefCountedSet::<SessionId>::new());
         let connection_id = Arc::new(Mutex::new(None));
         let shutdown = CancellationToken::new();
-        let ws = open_socket(
-            &config.url,
-            &initial_cred,
-            config.kind,
-            config.alpha_test_key.as_deref(),
-            config.allow_insecure_ws,
-        )
-        .await?;
-        let (sink, stream) = ws.split();
-        let (sink, stream, ack) = run_handshake(
-            sink,
-            stream,
-            config.kind,
-            config.server_id.clone(),
-            config.server_description.clone(),
-            config.server_metadata.clone(),
-        )
-        .await?;
+        let budget =
+            resolve_initial_connect_attempt_timeout(config.tuning.initial_connect_attempt_timeout);
+        let initial_jitter_seed = new_reconnect_jitter_seed();
+        let mut attempt: u32 = 0;
+        let (sink, stream, ack) = loop {
+            attempt += 1;
+            let cred = config.credential.current();
+            let attempt_result = match tokio::time::timeout(budget, async {
+                let ws = open_socket(
+                    &config.url,
+                    &cred,
+                    config.kind,
+                    config.alpha_test_key.as_deref(),
+                    config.allow_insecure_ws,
+                )
+                .await?;
+                let (sink, stream) = ws.split();
+                run_handshake(
+                    sink,
+                    stream,
+                    config.kind,
+                    config.server_id.clone(),
+                    config.server_description.clone(),
+                    config.server_metadata.clone(),
+                )
+                .await
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(ClientError::NetworkError(format!(
+                    "initial connect attempt timed out after {budget:?}"
+                ))),
+            };
+            match attempt_result {
+                Ok(parts) => break parts,
+                Err(err) => {
+                    if attempt >= INITIAL_CONNECT_MAX_ATTEMPTS || !initial_connect_retryable(&err) {
+                        return Err(err);
+                    }
+                    let wait = backoff_for(attempt, &reconnect_backoff, initial_jitter_seed, 0);
+                    warn!(
+                        url = %config.url,
+                        attempt,
+                        ?wait,
+                        error = %err,
+                        "initial connect attempt failed; retrying"
+                    );
+                    tokio::time::sleep(wait).await;
+                }
+            }
+        };
         *connection_id.lock().await = Some(ack.connection_id.clone());
         info!(
             url = %config.url,
@@ -648,6 +729,12 @@ impl HubConnection {
             reconnect_backoff,
             reconnect_jitter_seed: new_reconnect_jitter_seed(),
             attempt_reset_after,
+            reconnect_after_terminal_close_codes: {
+                let mut codes = config.tuning.reconnect_after_terminal_close_codes.clone();
+                codes.sort_unstable();
+                codes.dedup();
+                codes
+            },
             outage_seq: AtomicU32::new(0),
             outbound_tx,
             demux: demux.clone(),
@@ -1107,9 +1194,15 @@ fn rearm_liveness(deadline: &mut std::pin::Pin<&mut tokio::time::Sleep>, livenes
         .unwrap_or_else(|| now + Duration::from_secs(86400 * 365 * 30));
     deadline.as_mut().reset(rearm);
 }
+/// Terminal close code for a hibernated-but-restorable sandbox the hub
+/// reaped; the only 4100–4199 code that is safe to reconnect after.
+pub const CLOSE_CODE_SANDBOX_TERMINATED: u16 = 4103;
 /// Map a websocket close frame's code to the connected-phase exit. Close
-/// codes 4100-4199 are terminal (the server intentionally ended the
-/// connection: eviction, session expiry, admin disconnect, rate limit).
+/// codes 4100-4199 are terminal by protocol contract (the server
+/// intentionally ended the connection: eviction, session expiry, admin
+/// disconnect, rate limit). The actor still stops on these unless the
+/// embedder allowlisted the specific code via
+/// [`ConnectionTuning::reconnect_after_terminal_close_codes`].
 /// The range is deliberately wide so new terminal codes added server-side
 /// are recognised without a client update.
 fn exit_for_close_code(code: Option<u16>) -> ConnectedExit {
@@ -1481,7 +1574,12 @@ async fn run_reader_actor(
         .await
         {
             ConnectedExit::Stop => break,
-            ConnectedExit::TerminalClose(code) => {
+            ConnectedExit::TerminalClose(code)
+                if inner
+                    .reconnect_after_terminal_close_codes
+                    .binary_search(&code)
+                    .is_err() =>
+            {
                 info!(code, url = %url, "server sent terminal close; not reconnecting");
                 fire_on_terminal_close(inner.as_ref(), code);
                 fire_on_disconnect(inner.as_ref());
@@ -1491,7 +1589,27 @@ async fn run_reader_actor(
                 inner.demux.drain_progress();
                 break;
             }
-            ConnectedExit::SocketClosed(cause) => {
+            exit => {
+                let (cause, already_notified) = match exit {
+                    ConnectedExit::Stop => {
+                        unreachable!("Stop is handled by the arm above")
+                    }
+                    ConnectedExit::TerminalClose(code) => {
+                        info!(
+                            code,
+                            url = %url,
+                            "server sent terminal close; reconnecting (embedder opt-in)"
+                        );
+                        fire_on_terminal_close(inner.as_ref(), code);
+                        fire_on_disconnect(inner.as_ref());
+                        inner.demux.drain_waiters_with(|| {
+                            ClientError::Closed(format!("server terminal close (code {code})"))
+                        });
+                        inner.demux.drain_progress();
+                        (DisconnectCause::CloseFrame(Some(code)), true)
+                    }
+                    ConnectedExit::SocketClosed(cause) => (cause, false),
+                };
                 let detected_at = Instant::now();
                 let prev_conn_age = detected_at.duration_since(connected_at);
                 let health = inner.health.snapshot();
@@ -1519,7 +1637,9 @@ async fn run_reader_actor(
                     clock_jump_ms = outage.clock_jump_ms,
                     "server connection lost; scheduling reconnect"
                 );
-                fire_on_disconnect(inner.as_ref());
+                if !already_notified {
+                    fire_on_disconnect(inner.as_ref());
+                }
                 if matches!(outage.cause, DisconnectCause::LivenessDeadline)
                     && writer_ctl_tx
                         .send(WriterControl::Close {

@@ -108,8 +108,8 @@ impl acp::Agent for MvpAgent {
                 );
             }
         }
-        if !self.tier_allowed.get() && let Some(auth) = self.auth_manager.current() {
-            self.enforce_grok_code_access(&auth).await;
+        if !self.tier_allowed.get() {
+            self.spawn_tier_recheck();
         }
         self.maybe_sync_bundle_in_background(false);
         let mut client_type = arguments
@@ -508,6 +508,7 @@ impl acp::Agent for MvpAgent {
                     // away-recap poll and the manual `/recap` on this so a
                     // disabled feature produces zero `x.ai/recap` traffic.
                     "sessionRecap": self.cfg.borrow().is_session_recap_enabled(),
+                    "feedbackTraceOffer": self.feedback_trace_offer(),
                     "voiceMode": self.cfg.borrow().is_voice_mode_enabled(),
                 })
                         .as_object()
@@ -2623,9 +2624,8 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "x.ai/interject" => crate::extensions::interject::handle(self, &args).await,
-            "x.ai/feedback" | "x.ai/feedback/dismiss" | "x.ai/btw" => {
-                crate::extensions::feedback::handle(self, &args).await
-            }
+            "x.ai/feedback" | "x.ai/feedback/dismiss" | "x.ai/feedback/upload-trace"
+            | "x.ai/btw" => crate::extensions::feedback::handle(self, &args).await,
             "x.ai/recap" => crate::extensions::recap::handle(self, &args).await,
             "x.ai/cloud/terminate" => {
                 crate::extensions::auth_gate::require_xai_auth(
@@ -2835,6 +2835,9 @@ impl acp::Agent for MvpAgent {
             "x.ai/share_session" => crate::extensions::share::handle(self, &args).await,
             "x.ai/privacy/setCodingDataRetention" => {
                 crate::extensions::privacy::handle(self, &args).await
+            }
+            "x.ai/consent/record" => {
+                crate::extensions::consent::handle(self, &args).await
             }
             "x.ai/rollout/survey" => {
                 crate::extensions::rollout::handle(self, &args).await

@@ -98,10 +98,339 @@ fn plugin_cta_catalog_keeps_official_not_installed_only() {
     assert!(effects.is_empty());
 
     let cta = &app.agents[&id].plugin_cta;
-    assert!(cta.official_source_present);
     let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, vec!["keep-me", "url-official"]);
+    // One source wins: both the first source and "Custom Mirror" are
+    // URL-verified official, so the first-registered one supplies the
+    // candidates and the install target.
+    assert_eq!(names, vec!["keep-me"]);
     assert_eq!(cta.candidates[0].install_status, "not_installed");
+    assert_eq!(
+        cta.source_url_or_path.as_deref(),
+        Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL),
+        "without an override the install target stays the official source"
+    );
+}
+
+#[test]
+fn plugin_cta_default_prefers_url_verified_official_over_impostor() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    // A first-listed source that merely calls itself "xAI Official" must not
+    // become the install root; the URL-verified official source wins even
+    // when registered later.
+    let response = xai_hooks_plugins_types::MarketplaceListResponse {
+        sources: vec![
+            xai_hooks_plugins_types::MarketplaceScanResult {
+                source_name: xai_grok_plugin_marketplace::OFFICIAL_SOURCE_NAME.into(),
+                source_kind: "path".into(),
+                source_url_or_path: "/srv/impostor-marketplace".into(),
+                plugins: vec![cta_entry("impostor", "not_installed")],
+                error: None,
+            },
+            xai_hooks_plugins_types::MarketplaceScanResult {
+                source_name: xai_grok_plugin_marketplace::OFFICIAL_SOURCE_NAME.into(),
+                source_kind: "git".into(),
+                source_url_or_path: xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into(),
+                plugins: vec![cta_entry("genuine", "not_installed")],
+                error: None,
+            },
+        ],
+    };
+    dispatch(
+        Action::TaskComplete(TaskResult::PluginCtaCatalogLoaded {
+            agent_id: id,
+            result: Ok(response),
+        }),
+        &mut app,
+    );
+
+    let cta = &app.agents[&id].plugin_cta;
+    let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["genuine"]);
+    assert_eq!(
+        cta.source_url_or_path.as_deref(),
+        Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL)
+    );
+}
+
+#[test]
+fn plugin_cta_default_name_only_official_mirror_selected() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    // No URL-verified official source in the scan: a mirror registered under
+    // the official name (e.g. an on-prem path source) still feeds the CTA.
+    let response = xai_hooks_plugins_types::MarketplaceListResponse {
+        sources: vec![xai_hooks_plugins_types::MarketplaceScanResult {
+            source_name: xai_grok_plugin_marketplace::OFFICIAL_SOURCE_NAME.into(),
+            source_kind: "path".into(),
+            source_url_or_path: "/srv/onprem-mirror".into(),
+            plugins: vec![cta_entry("mirrored", "not_installed")],
+            error: None,
+        }],
+    };
+    dispatch(
+        Action::TaskComplete(TaskResult::PluginCtaCatalogLoaded {
+            agent_id: id,
+            result: Ok(response),
+        }),
+        &mut app,
+    );
+
+    let cta = &app.agents[&id].plugin_cta;
+    let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["mirrored"]);
+    assert_eq!(
+        cta.source_url_or_path.as_deref(),
+        Some("/srv/onprem-mirror")
+    );
+}
+
+#[test]
+fn plugin_cta_marketplace_override_selects_named_source() {
+    let mut app = test_app_with_agent();
+    app.plugin_cta_marketplace = Some("SpaceX Marketplace".into());
+    let id = AgentId(0);
+
+    let response = xai_hooks_plugins_types::MarketplaceListResponse {
+        sources: vec![xai_hooks_plugins_types::MarketplaceScanResult {
+            source_name: "SpaceX Marketplace".into(),
+            source_kind: "path".into(),
+            source_url_or_path: "/srv/spacex-marketplace".into(),
+            plugins: vec![
+                cta_entry("starlink", "not_installed"),
+                cta_entry("dragon", "installed"),
+            ],
+            error: None,
+        }],
+    };
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PluginCtaCatalogLoaded {
+            agent_id: id,
+            result: Ok(response),
+        }),
+        &mut app,
+    );
+
+    let cta = &app.agents[&id].plugin_cta;
+    let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["starlink"]);
+    assert_eq!(
+        cta.source_url_or_path.as_deref(),
+        Some("/srv/spacex-marketplace"),
+        "named source counts as present"
+    );
+}
+
+#[test]
+fn plugin_cta_marketplace_duplicate_named_sources_first_wins() {
+    let mut app = test_app_with_agent();
+    app.plugin_cta_marketplace = Some("SpaceX Marketplace".into());
+    let id = AgentId(0);
+
+    // Two sources share the override name: candidates and install target must
+    // both come from the first, or a later source's candidate would install
+    // against the wrong URL.
+    let response = xai_hooks_plugins_types::MarketplaceListResponse {
+        sources: vec![
+            xai_hooks_plugins_types::MarketplaceScanResult {
+                source_name: "SpaceX Marketplace".into(),
+                source_kind: "path".into(),
+                source_url_or_path: "/srv/spacex-marketplace".into(),
+                plugins: vec![cta_entry("starlink", "not_installed")],
+                error: None,
+            },
+            xai_hooks_plugins_types::MarketplaceScanResult {
+                source_name: "SpaceX Marketplace".into(),
+                source_kind: "git".into(),
+                source_url_or_path: "https://github.com/impostor/spacex.git".into(),
+                plugins: vec![cta_entry("impostor", "not_installed")],
+                error: None,
+            },
+        ],
+    };
+    dispatch(
+        Action::TaskComplete(TaskResult::PluginCtaCatalogLoaded {
+            agent_id: id,
+            result: Ok(response),
+        }),
+        &mut app,
+    );
+
+    let cta = &app.agents[&id].plugin_cta;
+    let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["starlink"]);
+    assert_eq!(
+        cta.source_url_or_path.as_deref(),
+        Some("/srv/spacex-marketplace")
+    );
+}
+
+#[test]
+fn plugin_cta_marketplace_override_install_targets_named_source() {
+    use crate::app::agent_view::CtaPhase;
+    let mut app = test_app_with_agent();
+    app.plugin_cta_enabled = true;
+    app.plugin_cta_marketplace = Some("SpaceX Marketplace".into());
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some("sess-1".to_string().into());
+        // Unique name so a real config's dismissed set can't suppress the match.
+        agent.prompt.set_text("try zzspacexcta now");
+    }
+
+    let mut entry = cta_entry("zzspacexcta", "not_installed");
+    entry.keywords = vec!["zzspacexcta".into()];
+    let response = xai_hooks_plugins_types::MarketplaceListResponse {
+        sources: vec![xai_hooks_plugins_types::MarketplaceScanResult {
+            source_name: "SpaceX Marketplace".into(),
+            source_kind: "path".into(),
+            source_url_or_path: "/srv/spacex-marketplace".into(),
+            plugins: vec![entry],
+            error: None,
+        }],
+    };
+    dispatch(
+        Action::TaskComplete(TaskResult::PluginCtaCatalogLoaded {
+            agent_id: id,
+            result: Ok(response),
+        }),
+        &mut app,
+    );
+
+    let agent = app.agents.get_mut(&id).unwrap();
+    assert!(matches!(
+        &agent.plugin_cta.phase,
+        CtaPhase::Matched { name, .. } if name == "zzspacexcta"
+    ));
+    agent.connect_matched_plugin();
+    assert_eq!(agent.pending_effects.len(), 1);
+    match &agent.pending_effects[0] {
+        Effect::InstallPluginFromCta {
+            source_url_or_path,
+            plugin_relative_path,
+            ..
+        } => {
+            assert_eq!(source_url_or_path, "/srv/spacex-marketplace");
+            assert_eq!(plugin_relative_path, "plugins/zzspacexcta");
+        }
+        other => panic!("expected InstallPluginFromCta, got {other:?}"),
+    }
+}
+
+#[test]
+fn plugin_cta_marketplace_override_naming_official_selects_it() {
+    let mut app = test_app_with_agent();
+    app.plugin_cta_marketplace =
+        Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_NAME.to_string());
+    let id = AgentId(0);
+
+    let response = xai_hooks_plugins_types::MarketplaceListResponse {
+        sources: vec![xai_hooks_plugins_types::MarketplaceScanResult {
+            source_name: xai_grok_plugin_marketplace::OFFICIAL_SOURCE_NAME.into(),
+            source_kind: "git".into(),
+            source_url_or_path: xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into(),
+            plugins: vec![cta_entry("official-plugin", "not_installed")],
+            error: None,
+        }],
+    };
+    dispatch(
+        Action::TaskComplete(TaskResult::PluginCtaCatalogLoaded {
+            agent_id: id,
+            result: Ok(response),
+        }),
+        &mut app,
+    );
+
+    let cta = &app.agents[&id].plugin_cta;
+    assert!(cta.source_url_or_path.is_some());
+    let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["official-plugin"]);
+    assert_eq!(
+        cta.source_url_or_path.as_deref(),
+        Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL)
+    );
+}
+
+#[test]
+fn plugin_cta_marketplace_override_excludes_official_source() {
+    let mut app = test_app_with_agent();
+    app.plugin_cta_marketplace = Some("SpaceX Marketplace".into());
+    let id = AgentId(0);
+
+    let response = xai_hooks_plugins_types::MarketplaceListResponse {
+        sources: vec![
+            xai_hooks_plugins_types::MarketplaceScanResult {
+                source_name: xai_grok_plugin_marketplace::OFFICIAL_SOURCE_NAME.into(),
+                source_kind: "git".into(),
+                source_url_or_path: xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into(),
+                plugins: vec![cta_entry("official-only", "not_installed")],
+                error: None,
+            },
+            xai_hooks_plugins_types::MarketplaceScanResult {
+                source_name: "SpaceX Marketplace".into(),
+                source_kind: "path".into(),
+                source_url_or_path: "/srv/spacex-marketplace".into(),
+                plugins: vec![cta_entry("starlink", "not_installed")],
+                error: None,
+            },
+        ],
+    };
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PluginCtaCatalogLoaded {
+            agent_id: id,
+            result: Ok(response),
+        }),
+        &mut app,
+    );
+
+    let cta = &app.agents[&id].plugin_cta;
+    assert!(cta.source_url_or_path.is_some());
+    let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["starlink"], "official plugins are excluded");
+}
+
+#[test]
+fn plugin_cta_marketplace_override_absent_source_hides_cta() {
+    use crate::app::agent_view::CtaPhase;
+    let mut app = test_app_with_agent();
+    app.plugin_cta_enabled = true;
+    app.plugin_cta_marketplace = Some("SpaceX Marketplace".into());
+    let id = AgentId(0);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .set_text("open figma now");
+
+    let mut entry = cta_entry("figma", "not_installed");
+    entry.keywords = vec!["figma".into()];
+    let response = xai_hooks_plugins_types::MarketplaceListResponse {
+        sources: vec![xai_hooks_plugins_types::MarketplaceScanResult {
+            source_name: xai_grok_plugin_marketplace::OFFICIAL_SOURCE_NAME.into(),
+            source_kind: "git".into(),
+            source_url_or_path: xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into(),
+            plugins: vec![entry],
+            error: None,
+        }],
+    };
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PluginCtaCatalogLoaded {
+            agent_id: id,
+            result: Ok(response),
+        }),
+        &mut app,
+    );
+
+    let cta = &app.agents[&id].plugin_cta;
+    assert!(cta.source_url_or_path.is_none());
+    assert!(cta.candidates.is_empty());
+    assert_eq!(cta.phase, CtaPhase::Hidden);
 }
 
 #[test]
@@ -110,7 +439,7 @@ fn plugin_cta_catalog_err_preserves_cache() {
     let id = AgentId(0);
     {
         let cta = &mut app.agents.get_mut(&id).unwrap().plugin_cta;
-        cta.official_source_present = true;
+        cta.source_url_or_path = Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         cta.candidates = vec![cta_entry("cached", "not_installed")];
     }
 
@@ -124,7 +453,7 @@ fn plugin_cta_catalog_err_preserves_cache() {
     assert!(effects.is_empty());
 
     let cta = &app.agents[&id].plugin_cta;
-    assert!(cta.official_source_present);
+    assert!(cta.source_url_or_path.is_some());
     assert_eq!(cta.candidates.len(), 1);
 }
 
@@ -139,7 +468,7 @@ fn plugin_cta_catalog_reload_empty_candidates_preserves_installed_checkmark() {
     let id = AgentId(0);
     {
         let cta = &mut app.agents.get_mut(&id).unwrap().plugin_cta;
-        cta.official_source_present = true;
+        cta.source_url_or_path = Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         cta.candidates = vec![cta_entry("figma", "not_installed")];
         cta.phase = CtaPhase::Installed {
             name: "figma".into(),
@@ -397,7 +726,7 @@ fn plugin_cta_debounce_sets_hidden_when_feature_disabled() {
     app.plugin_cta_enabled = false;
     {
         let cta = &mut app.agents.get_mut(&id).unwrap().plugin_cta;
-        cta.official_source_present = true;
+        cta.source_url_or_path = Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         cta.candidates = vec![cta_entry("figma", "not_installed")];
         cta.debounce_generation = 1;
         cta.phase = CtaPhase::Matched {
@@ -445,7 +774,8 @@ fn plugin_cta_debounce_preserves_in_flight_states() {
         let id = AgentId(0);
         {
             let cta = &mut app.agents.get_mut(&id).unwrap().plugin_cta;
-            cta.official_source_present = true;
+            cta.source_url_or_path =
+                Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
             cta.candidates = vec![cta_entry("figma", "not_installed")];
             cta.debounce_generation = 1;
             cta.phase = phase.clone();
@@ -1346,7 +1676,8 @@ mod cta_e2e {
         app.plugin_cta_enabled = true;
         {
             let cta = &mut app.agents.get_mut(&id).unwrap().plugin_cta;
-            cta.official_source_present = true;
+            cta.source_url_or_path =
+                Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
             cta.candidates = vec![figma_candidate()];
             cta.debounce_generation = 1;
         }
@@ -1729,7 +2060,8 @@ mod cta_e2e {
             app.plugin_cta_enabled = enabled;
             {
                 let cta = &mut app.agents.get_mut(&id).unwrap().plugin_cta;
-                cta.official_source_present = source_present;
+                cta.source_url_or_path = source_present
+                    .then(|| xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.to_string());
                 cta.candidates = vec![figma_candidate()];
                 cta.debounce_generation = 1;
                 cta.phase = CtaPhase::Matched {

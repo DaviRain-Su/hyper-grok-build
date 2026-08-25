@@ -41,13 +41,38 @@ pub(crate) fn make_handle_with_status_config(
 ) -> WorkspaceHandle {
     make_handle_inner(false, false, status_config, false)
 }
+/// [`make_handle`], but with the empty `state_path` that real sessions get.
+#[allow(dead_code)]
+pub(crate) fn make_handle_without_tool_state() -> WorkspaceHandle {
+    make_handle_with_factory(
+        Arc::new(TestSessionContextFactory::without_tool_state()),
+        false,
+        false,
+        Default::default(),
+        false,
+    )
+}
 fn make_handle_inner(
     rewind_all_outcomes: bool,
     require_explicit_toolset: bool,
     status_config: crate::StatusConfig,
     confine_fs_to_workspace_root: bool,
 ) -> WorkspaceHandle {
-    let factory = Arc::new(TestSessionContextFactory::new());
+    make_handle_with_factory(
+        Arc::new(TestSessionContextFactory::new()),
+        rewind_all_outcomes,
+        require_explicit_toolset,
+        status_config,
+        confine_fs_to_workspace_root,
+    )
+}
+fn make_handle_with_factory(
+    factory: Arc<TestSessionContextFactory>,
+    rewind_all_outcomes: bool,
+    require_explicit_toolset: bool,
+    status_config: crate::StatusConfig,
+    confine_fs_to_workspace_root: bool,
+) -> WorkspaceHandle {
     let cwd = factory.temp.path().to_path_buf();
     let config = WorkspaceConfig {
         root_cwd: cwd,
@@ -143,7 +168,10 @@ impl xai_tool_runtime::Tool for BashCcoStub {
     }
 }
 pub(crate) fn register_bash_cco_stub(handle: &WorkspaceHandle) {
-    let session = handle.session("main").expect("main session present");
+    register_bash_cco_stub_on(handle, "main");
+}
+pub(crate) fn register_bash_cco_stub_on(handle: &WorkspaceHandle, session_id: &str) {
+    let session = handle.session(session_id).expect("session present");
     session
         .toolset()
         .register_tool(
@@ -5472,4 +5500,435 @@ async fn two_phase_drain_producer_exceeding_budget_times_out() {
             > before,
         "the drain must classify as producers_timeout"
     );
+}
+#[tokio::test]
+async fn bind_session_root_sets_mapping_and_real_cwd() {
+    let handle = make_handle();
+    let resolver = bind_resolver_fixture(&handle);
+    resolver(
+        xai_tool_protocol::SessionId::new("conv-abc").unwrap(),
+        Some(serde_json::json!({
+            "cwd": "/workspace",
+            "metadata": { "session_root": "/workspace/conv-abc" },
+        })),
+    )
+    .await
+    .expect("bind");
+    let session = handle.session("conv-abc").expect("session created");
+    let virt = session
+        .path_virtualization()
+        .expect("session_root must enable virtualization");
+    assert_eq!(virt.real_root(), "/workspace/conv-abc");
+    assert_eq!(virt.visible_root(), "/workspace");
+    assert_eq!(
+        session.cwd(),
+        std::path::Path::new("/workspace/conv-abc"),
+        "bind cwd /workspace must resolve to the real session root"
+    );
+}
+#[tokio::test]
+async fn rebind_session_root_rewrites_existing_cwd() {
+    let handle = make_handle();
+    let resolver = bind_resolver_fixture(&handle);
+    resolver(
+        xai_tool_protocol::SessionId::new("rebind-virt").unwrap(),
+        Some(serde_json::json!({ "cwd": "/workspace" })),
+    )
+    .await
+    .expect("first bind without session_root");
+    let session = handle.session("rebind-virt").expect("session");
+    assert!(session.path_virtualization().is_none());
+    assert_eq!(session.cwd(), std::path::Path::new("/workspace"));
+    resolver(
+        xai_tool_protocol::SessionId::new("rebind-virt").unwrap(),
+        Some(serde_json::json!({
+            "cwd": "/workspace",
+            "metadata": { "session_root": "/workspace/conv-rebind" },
+        })),
+    )
+    .await
+    .expect("rebind with session_root");
+    let session = handle.session("rebind-virt").expect("session");
+    assert_eq!(
+        session
+            .path_virtualization()
+            .expect("rebind must enable virtualization")
+            .real_root(),
+        "/workspace/conv-rebind"
+    );
+    assert_eq!(
+        session.cwd(),
+        std::path::Path::new("/workspace/conv-rebind"),
+        "rebind must apply rewritten bind_cwd onto the existing session"
+    );
+    assert_eq!(
+        session.async_fs().root(),
+        std::path::Path::new("/workspace/conv-rebind"),
+        "rebind must remount LocalFs so relative reads follow the session tree"
+    );
+    let cwd_res = {
+        let toolset = session.toolset();
+        let res = toolset.resources.lock().await;
+        res.get::<xai_grok_tools::types::resources::Cwd>()
+            .expect("toolset Cwd")
+            .clone()
+    };
+    assert_eq!(
+        cwd_res.0.as_path(),
+        std::path::Path::new("/workspace/conv-rebind"),
+        "rebind must rewrite the reused toolset Cwd"
+    );
+}
+#[tokio::test]
+async fn bind_session_root_rewrites_artifacts_cwd() {
+    let handle = make_handle();
+    let resolver = bind_resolver_fixture(&handle);
+    resolver(
+        xai_tool_protocol::SessionId::new("conv-art").unwrap(),
+        Some(serde_json::json!({
+            "cwd": "/workspace/artifacts",
+            "metadata": { "session_root": "/workspace/conv-art" },
+        })),
+    )
+    .await
+    .expect("bind");
+    let session = handle.session("conv-art").expect("session");
+    assert_eq!(session.cwd(), std::path::Path::new("/workspace/conv-art"));
+}
+#[tokio::test]
+async fn bind_without_session_root_does_not_virtualize() {
+    let handle = make_handle();
+    let resolver = bind_resolver_fixture(&handle);
+    resolver(
+        xai_tool_protocol::SessionId::new("plain").unwrap(),
+        Some(serde_json::json!({ "cwd": "/tmp/plain" })),
+    )
+    .await
+    .expect("bind");
+    let session = handle.session("plain").expect("session");
+    assert!(
+        session.path_virtualization().is_none(),
+        "absent session_root must not enable virtualization"
+    );
+    assert_eq!(session.cwd(), std::path::Path::new("/tmp/plain"));
+}
+#[tokio::test]
+async fn malformed_session_root_does_not_virtualize() {
+    let handle = make_handle();
+    let resolver = bind_resolver_fixture(&handle);
+    resolver(
+        xai_tool_protocol::SessionId::new("bad-root").unwrap(),
+        Some(serde_json::json!({
+            "metadata": { "session_root": "/workspace/../etc" },
+        })),
+    )
+    .await
+    .expect("bind must still succeed");
+    let session = handle.session("bad-root").expect("session");
+    assert!(
+        session.path_virtualization().is_none(),
+        "malformed session_root must be ignored"
+    );
+}
+#[tokio::test]
+async fn bind_invokes_mount_hook_unbind_does_not_unmount() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let handle = make_handle();
+    let binds = Arc::new(AtomicUsize::new(0));
+    let unbinds = Arc::new(AtomicUsize::new(0));
+    let binds_c = binds.clone();
+    let unbinds_c = unbinds.clone();
+    handle.set_bind_mount_hook(
+        crate::path_virtualization::BindMountHook::probe_then_mount(
+            |_| false,
+            move |root| {
+                assert_eq!(root, std::path::Path::new("/workspace/hook-conv"));
+                binds_c.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .with_on_unbind(move |sid, root| {
+            assert_eq!(sid, "hook-conv");
+            assert_eq!(root, std::path::Path::new("/workspace/hook-conv"));
+            unbinds_c.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+    let resolver = bind_resolver_fixture(&handle);
+    resolver(
+        xai_tool_protocol::SessionId::new("hook-conv").unwrap(),
+        Some(serde_json::json!({
+            "metadata": { "session_root": "/workspace/hook-conv" },
+        })),
+    )
+    .await
+    .expect("bind");
+    assert_eq!(binds.load(Ordering::SeqCst), 1, "on_bind must mount");
+    assert_eq!(unbinds.load(Ordering::SeqCst), 0, "bind must not unbind");
+    handle.drop_session("hook-conv", "hook-conv").expect("drop");
+    assert_eq!(
+        binds.load(Ordering::SeqCst),
+        1,
+        "unbind/drop must not remount"
+    );
+    assert_eq!(unbinds.load(Ordering::SeqCst), 1, "drop must notify unbind");
+}
+#[tokio::test]
+async fn bind_mount_error_fails_bind() {
+    let handle = make_handle();
+    handle.set_bind_mount_hook(crate::path_virtualization::BindMountHook::probe_then_mount(
+        |_| false,
+        |_| {
+            Err(crate::path_virtualization::BindMountError(
+                "fuse down".into(),
+            ))
+        },
+    ));
+    let resolver = bind_resolver_fixture(&handle);
+    let err = match resolver(
+        xai_tool_protocol::SessionId::new("fail-mount").unwrap(),
+        Some(serde_json::json!({
+            "metadata": { "session_root": "/workspace/fail-mount" },
+        })),
+    )
+    .await
+    {
+        Ok(_) => panic!("mount failure must fail the bind"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("bind mount hook failed"),
+        "got: {err}"
+    );
+    assert!(
+        handle.session("fail-mount").is_none(),
+        "failed bind must not leave a leftover session"
+    );
+}
+#[tokio::test]
+async fn rebind_mount_error_fails_bind_and_drops_leftover() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let handle = make_handle();
+    let mounts = Arc::new(AtomicUsize::new(0));
+    let mounts_c = mounts.clone();
+    handle.set_bind_mount_hook(crate::path_virtualization::BindMountHook::probe_then_mount(
+        |_| false,
+        move |_| {
+            mounts_c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        },
+    ));
+    let resolver = bind_resolver_fixture(&handle);
+    resolver(
+        xai_tool_protocol::SessionId::new("rebind-fail-mount").unwrap(),
+        Some(serde_json::json!({
+            "metadata": { "session_root": "/workspace/rebind-fail-mount" },
+        })),
+    )
+    .await
+    .expect("first bind");
+    assert!(
+        handle.session("rebind-fail-mount").is_some(),
+        "first bind must leave a live session"
+    );
+    assert_eq!(mounts.load(Ordering::SeqCst), 1);
+    let unbinds = Arc::new(AtomicUsize::new(0));
+    let unbinds_c = unbinds.clone();
+    handle.set_bind_mount_hook(
+        crate::path_virtualization::BindMountHook::probe_then_mount(
+            |_| false,
+            |_| {
+                Err(crate::path_virtualization::BindMountError(
+                    "fuse down".into(),
+                ))
+            },
+        )
+        .with_on_unbind(move |_, _| {
+            unbinds_c.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+    let err = match resolver(
+        xai_tool_protocol::SessionId::new("rebind-fail-mount").unwrap(),
+        Some(serde_json::json!({
+            "metadata": { "session_root": "/workspace/rebind-fail-mount" },
+        })),
+    )
+    .await
+    {
+        Ok(_) => panic!("mount failure on rebind must fail the bind"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("bind mount hook failed"),
+        "got: {err}"
+    );
+    assert!(
+        handle.session("rebind-fail-mount").is_none(),
+        "failed rebind must not leave a leftover session"
+    );
+    assert_eq!(
+        unbinds.load(Ordering::SeqCst),
+        1,
+        "failed rebind must notify unbind while dropping the leftover"
+    );
+}
+#[tokio::test]
+async fn bind_probe_hit_skips_mount() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let handle = make_handle();
+    let mounts = Arc::new(AtomicUsize::new(0));
+    let mounts_c = mounts.clone();
+    handle.set_bind_mount_hook(crate::path_virtualization::BindMountHook::probe_then_mount(
+        |_| true,
+        move |_| {
+            mounts_c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        },
+    ));
+    bind_resolver_fixture(&handle)(
+        xai_tool_protocol::SessionId::new("probed").unwrap(),
+        Some(serde_json::json!({
+            "metadata": { "session_root": "/workspace/probed" },
+        })),
+    )
+    .await
+    .expect("bind");
+    assert_eq!(mounts.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn bind_without_session_root_skips_mount_hook() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let handle = make_handle();
+    let mounts = Arc::new(AtomicUsize::new(0));
+    let mounts_c = mounts.clone();
+    handle.set_bind_mount_hook(crate::path_virtualization::BindMountHook::probe_then_mount(
+        |_| false,
+        move |_| {
+            mounts_c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        },
+    ));
+    bind_resolver_fixture(&handle)(
+        xai_tool_protocol::SessionId::new("no-root").unwrap(),
+        Some(serde_json::json!({ "cwd": "/tmp/plain" })),
+    )
+    .await
+    .expect("bind");
+    assert_eq!(
+        mounts.load(Ordering::SeqCst),
+        0,
+        "mount hook must not run without a session_root mapping"
+    );
+}
+#[tokio::test]
+async fn local_harness_virtualizes_inbound_and_outbound() {
+    use xai_tool_runtime::ToolCallContext;
+    let handle = make_handle();
+    let session = handle
+        .create_session_with_cwd("virt-local", None)
+        .expect("create");
+    session.set_path_virtualization(
+        crate::path_virtualization::PathVirtualization::try_from_session_root(
+            "/workspace/conv-abc",
+        )
+        .expect("valid"),
+    );
+    let received = Arc::new(std::sync::Mutex::new(None));
+    let received_c = received.clone();
+    #[derive(Debug)]
+    struct LocalPathEcho(Arc<std::sync::Mutex<Option<serde_json::Value>>>);
+    impl xai_grok_tools::types::tool_metadata::ToolMetadata for LocalPathEcho {
+        fn kind(&self) -> ToolKind {
+            ToolKind::Other
+        }
+        fn tool_namespace(&self) -> xai_grok_tools::types::tool::ToolNamespace {
+            xai_grok_tools::types::tool::ToolNamespace::MCP
+        }
+        fn description_template(&self) -> &str {
+            "local path echo"
+        }
+    }
+    impl xai_tool_runtime::Tool for LocalPathEcho {
+        type Args = serde_json::Value;
+        type Output = serde_json::Value;
+        fn id(&self) -> xai_tool_protocol::ToolId {
+            xai_tool_protocol::ToolId::new("local_path_echo").expect("valid")
+        }
+        fn description(
+            &self,
+            _ctx: &::xai_tool_runtime::ListToolsContext,
+        ) -> xai_tool_types::ToolDescription {
+            xai_tool_types::ToolDescription::new("local_path_echo", "local path echo")
+        }
+        async fn run(
+            &self,
+            _ctx: xai_tool_runtime::ToolCallContext,
+            input: serde_json::Value,
+        ) -> Result<serde_json::Value, xai_tool_runtime::ToolError> {
+            *self.0.lock().expect("lock") = Some(input.clone());
+            Ok(serde_json::json!({
+                "guest": "/workspace/conv-abc/out.txt",
+            }))
+        }
+    }
+    session
+        .toolset()
+        .register_tool(
+            "local_path_echo".to_owned(),
+            LocalPathEcho(received_c),
+            Some(serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}})),
+        )
+        .expect("register");
+    let harness = handle
+        .create_local_harness("virt-local")
+        .expect("local harness");
+    let stream = harness
+        .call(
+            xai_tool_protocol::ToolId::new("local_path_echo").expect("valid"),
+            serde_json::json!({ "path": "/workspace/foo.txt" }),
+            ToolCallContext::default(),
+        )
+        .await;
+    let typed = drain_terminal_ok(stream).await;
+    assert_eq!(
+        received
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .and_then(|v| v.get("path")),
+        Some(&serde_json::json!("/workspace/conv-abc/foo.txt")),
+        "local harness must rewrite inbound /workspace"
+    );
+    let dumped = typed.value.to_string();
+    assert!(
+        dumped.contains("/workspace/out.txt"),
+        "local harness must rewrite outbound: {dumped}"
+    );
+    assert!(
+        !dumped.contains("/workspace/conv-abc/"),
+        "local harness must not leak the real root: {dumped}"
+    );
+}
+#[tokio::test]
+async fn fork_inherits_path_virtualization() {
+    let handle = make_handle();
+    handle
+        .session("main")
+        .expect("main")
+        .set_path_virtualization(
+            crate::path_virtualization::PathVirtualization::try_from_session_root(
+                "/workspace/conv-abc",
+            )
+            .expect("valid"),
+        );
+    let child = handle
+        .fork_session(crate::config::AgentSessionConfig {
+            parent_session_id: Some("main".into()),
+            ..crate::config::AgentSessionConfig::new("child-virt")
+        })
+        .await
+        .expect("fork");
+    let virt = child
+        .path_virtualization()
+        .expect("fork must inherit mapping");
+    assert_eq!(virt.real_root(), "/workspace/conv-abc");
 }

@@ -19,6 +19,8 @@ pub mod claude_import;
 pub mod claude_import_state;
 pub mod cli_models;
 pub mod config;
+#[cfg(all(test, feature = "config-docs"))]
+pub mod config_docs;
 pub use xai_grok_shell_base::cpu_profile;
 pub use xai_grok_shell_base::env;
 pub mod extensions;
@@ -39,10 +41,12 @@ pub mod relay;
 pub mod remote;
 pub mod sampling;
 pub mod session;
-pub mod terminal;
+pub use xai_grok_shell_terminal as terminal;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tier;
 pub mod tools;
 pub mod upload;
 pub mod util;
+#[doc(hidden)]
+pub mod waterfall;

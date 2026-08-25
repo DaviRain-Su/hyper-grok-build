@@ -1,4 +1,5 @@
-//! Extensions modal popup (Hooks, Plugins, Marketplace, Skills, MCP Servers).
+//! Extensions modal popup (Hooks, Plugins, Marketplace, Skills, Workflows,
+//! MCP Servers).
 //!
 //! A centered overlay using the shared [`ModalWindow`](super::modal_window)
 //! chrome, opened by the `/hooks` and `/plugins` slash commands.
@@ -17,6 +18,9 @@ use crate::views::modal_window::{
 };
 use crate::views::picker;
 use xai_grok_tools::implementations::skills::types::SkillInfo;
+
+mod workflows_picker_rows;
+use workflows_picker_rows::build_workflows_picker_rows;
 
 /// Check if a name fuzzy-matches the search query.
 /// Empty query matches everything.
@@ -175,9 +179,6 @@ pub(crate) fn ordered_marketplace_view(
         })
         .collect()
 }
-
-/// Collapse key for the Workflows block on the Skills tab.
-const SKILLS_WORKFLOWS_GROUP_KEY: &str = "Workflows";
 
 /// Group header for a skill scope/source.
 #[derive(Debug, Clone)]
@@ -493,6 +494,7 @@ pub enum ExtensionsTab {
     Plugins,
     Marketplace,
     Skills,
+    Workflows,
     McpServers,
 }
 
@@ -503,6 +505,7 @@ impl ExtensionsTab {
         Self::Plugins,
         Self::Marketplace,
         Self::Skills,
+        Self::Workflows,
         Self::McpServers,
     ];
 
@@ -513,6 +516,7 @@ impl ExtensionsTab {
             Self::Plugins => "Plugins",
             Self::Marketplace => "Marketplace",
             Self::Skills => "Skills",
+            Self::Workflows => "Workflows",
             Self::McpServers => "MCP Servers",
         }
     }
@@ -523,7 +527,8 @@ impl ExtensionsTab {
             Self::Hooks => Self::Plugins,
             Self::Plugins => Self::Marketplace,
             Self::Marketplace => Self::Skills,
-            Self::Skills => Self::McpServers,
+            Self::Skills => Self::Workflows,
+            Self::Workflows => Self::McpServers,
             Self::McpServers => Self::Hooks,
         }
     }
@@ -534,7 +539,8 @@ impl ExtensionsTab {
             Self::Plugins => Self::Hooks,
             Self::Marketplace => Self::Plugins,
             Self::Skills => Self::Marketplace,
-            Self::McpServers => Self::Skills,
+            Self::Workflows => Self::Skills,
+            Self::McpServers => Self::Workflows,
         }
     }
 
@@ -545,6 +551,7 @@ impl ExtensionsTab {
             Self::Plugins => ExtensionsModalTab::Plugins,
             Self::Marketplace => ExtensionsModalTab::Marketplace,
             Self::Skills => ExtensionsModalTab::Skills,
+            Self::Workflows => ExtensionsModalTab::Workflows,
             Self::McpServers => ExtensionsModalTab::McpServers,
         }
     }
@@ -1132,6 +1139,7 @@ pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
             ('x', "remove source"),
         ],
         ExtensionsTab::Skills => vec![(' ', "toggle"), ('f', "filter"), ('r', "reload")],
+        ExtensionsTab::Workflows => vec![('r', "reload")],
         ExtensionsTab::McpServers => MCP_SERVERS_ACTION_KEYS.to_vec(),
     }
 }
@@ -1295,6 +1303,7 @@ fn selected_item_enabled_at(
             _ => None,
         },
         ExtensionsTab::Marketplace => None,
+        ExtensionsTab::Workflows => None,
     }
 }
 
@@ -1402,6 +1411,8 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
         (ExtensionsTab::Skills, ' ') => Some(ButtonAction::ToggleSelectedSkill),
         (ExtensionsTab::Skills, 'r') => Some(ButtonAction::ReloadSkills),
         (ExtensionsTab::Skills, 'f') => Some(ButtonAction::CycleFilter),
+        // Shares ReloadSkills: its router arm refetches skills and workflows.
+        (ExtensionsTab::Workflows, 'r') => Some(ButtonAction::ReloadSkills),
         (ExtensionsTab::McpServers, 'a') => Some(ButtonAction::StartInput {
             command_prefix: "mcp_add".into(),
             // URL is required, Name is optional (auto-derived from URL),
@@ -1710,20 +1721,6 @@ pub struct WorkflowInfo {
     pub path: Option<String>,
 }
 
-impl WorkflowInfo {
-    fn has_usable_command_name(&self) -> bool {
-        let name = self.name.as_str();
-        !name.is_empty()
-            && name.len() <= 64
-            && !name.starts_with('-')
-            && !name.ends_with('-')
-            && !name.contains("--")
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    }
-}
-
 /// State for the hooks/plugins modal popup.
 pub struct ExtensionsModalState {
     /// Shared modal window chrome state (close button, tabs, footer
@@ -1809,12 +1806,10 @@ pub struct ExtensionsModalState {
     pub plugins_groups_seeded: bool,
     /// Collapsed marketplace sources (by source index). Default collapsed.
     pub marketplace_collapsed_sources: std::collections::HashSet<usize>,
-    /// Collapsed skill source groups (by [`SkillGroup::label`] / Workflows key).
+    /// Collapsed skill source groups (by [`SkillGroup::label`]).
     pub skills_collapsed_groups: std::collections::HashSet<String>,
     /// See [`Self::seed_skills_groups_once`].
     pub skills_groups_seeded: bool,
-    /// See [`Self::seed_workflows_group_once`].
-    pub workflows_group_seeded: bool,
     /// Expanded skill entries (by skill index). Skills start collapsed.
     pub skills_expanded: std::collections::HashSet<usize>,
     /// Status filter for the plugins tab.
@@ -1895,7 +1890,6 @@ impl ExtensionsModalState {
             skills_expanded: std::collections::HashSet::new(),
             skills_collapsed_groups: std::collections::HashSet::new(),
             skills_groups_seeded: false,
-            workflows_group_seeded: false,
             hooks_collapsed_groups: std::collections::HashSet::new(),
             plugins_collapsed_groups: std::collections::HashSet::new(),
             plugins_groups_seeded: false,
@@ -1970,9 +1964,8 @@ impl ExtensionsModalState {
 
     /// Seed default-collapsed skill source groups exactly once.
     ///
-    /// Unions [`SkillGroup::label`] keys into `skills_collapsed_groups` so a
-    /// prior Workflows expand/collapse (seeded independently) is preserved.
-    /// Later reloads leave the set alone.
+    /// Unions [`SkillGroup::label`] keys into `skills_collapsed_groups`;
+    /// later reloads leave the set alone so user expand state survives.
     pub fn seed_skills_groups_once(&mut self, skills: &[SkillInfo]) {
         if self.skills_groups_seeded {
             return;
@@ -1982,16 +1975,6 @@ impl ExtensionsModalState {
                 .insert(skill_group(skill).label);
         }
         self.skills_groups_seeded = true;
-    }
-
-    /// Seed default-collapsed Workflows header once (independent of skills load).
-    pub fn seed_workflows_group_once(&mut self) {
-        if self.workflows_group_seeded {
-            return;
-        }
-        self.skills_collapsed_groups
-            .insert(SKILLS_WORKFLOWS_GROUP_KEY.to_string());
-        self.workflows_group_seeded = true;
     }
 
     /// Whether a group header at picker index `sel` with the given
@@ -2007,6 +1990,8 @@ impl ExtensionsModalState {
                 searching || !self.plugins_collapsed_groups.contains(group_key)
             }
             ExtensionsTab::Skills => searching || !self.skills_collapsed_groups.contains(group_key),
+            // Workflows tab is a flat list without collapsible groups.
+            ExtensionsTab::Workflows => false,
             ExtensionsTab::Marketplace => {
                 let source_has_error = group_key
                     .parse::<usize>()
@@ -2676,6 +2661,7 @@ pub fn render_extensions_modal(
         ExtensionsTab::Plugins => matches!(state.plugins_data, TabDataState::Loading),
         ExtensionsTab::Marketplace => matches!(state.marketplace_data, TabDataState::Loading),
         ExtensionsTab::Skills => matches!(state.skills_data, TabDataState::Loading),
+        ExtensionsTab::Workflows => matches!(state.workflows_data, TabDataState::Loading),
         ExtensionsTab::McpServers => matches!(state.mcps_data, TabDataState::Loading),
     };
 
@@ -2807,86 +2793,25 @@ pub fn render_extensions_modal(
                     entry_badge_text.push(String::new());
                     entry_badge_color.push(None);
                 }
-                match state.workflows_data {
-                    TabDataState::Loaded(ref workflows) => {
-                        let query_lower = state.picker_state.query().to_lowercase();
-                        let mut visible: Vec<&WorkflowInfo> = workflows
-                            .iter()
-                            .filter(|workflow| workflow.has_usable_command_name())
-                            .filter(|w| {
-                                query_lower.is_empty()
-                                    || w.name.to_lowercase().contains(&query_lower)
-                                    || w.description.to_lowercase().contains(&query_lower)
-                            })
-                            .collect();
-                        visible.sort_by(|a, b| cmp_str_ci(&a.name, &b.name));
-                        if !visible.is_empty() {
-                            let searching = !state.picker_state.query().is_empty();
-                            let collapsed = !searching
-                                && state
-                                    .skills_collapsed_groups
-                                    .contains(SKILLS_WORKFLOWS_GROUP_KEY);
-                            let count = visible.len();
-                            entry_labels.push(if count == 1 {
-                                "Workflows (1 workflow)".to_string()
-                            } else {
-                                format!("Workflows ({count} workflows)")
-                            });
-                            entry_right_labels.push(String::new());
-                            entry_desc_lines.push(vec![]);
-                            entry_summary_lines.push(vec![]);
-                            entry_fields.push(vec![]);
-                            entry_is_header.push(false);
-                            entry_dimmed.push(false);
-                            entry_indent.push(0);
-                            entry_data_indices.push(None);
-                            entry_group_keys.push(Some(SKILLS_WORKFLOWS_GROUP_KEY.to_string()));
-                            entry_badge_text.push(String::new());
-                            entry_badge_color.push(None);
-                            if !collapsed {
-                                for wf in visible {
-                                    entry_labels.push(wf.name.clone());
-                                    entry_right_labels.push(format!("({})", wf.source));
-                                    if wf.description.is_empty() {
-                                        entry_desc_lines.push(vec![]);
-                                    } else {
-                                        entry_desc_lines.push(vec![wf.description.clone()]);
-                                    }
-                                    entry_summary_lines.push(vec![]);
-                                    let mut fields = Vec::new();
-                                    if let Some(ref p) = wf.path {
-                                        fields.push(("path".to_string(), p.clone()));
-                                    }
-                                    if let Some(ref w) = wf.when_to_use {
-                                        fields.push(("when to use".to_string(), w.clone()));
-                                    }
-                                    entry_fields.push(fields);
-                                    entry_is_header.push(false);
-                                    entry_dimmed.push(false);
-                                    entry_indent.push(1);
-                                    entry_data_indices.push(None);
-                                    entry_group_keys.push(None);
-                                    entry_badge_text.push(String::new());
-                                    entry_badge_color.push(None);
-                                }
-                            }
-                        }
-                    }
-                    TabDataState::Error(ref msg) => {
-                        entry_labels.push(format!("workflows: {}", msg));
-                        entry_right_labels.push(String::new());
-                        entry_desc_lines.push(vec![]);
-                        entry_summary_lines.push(vec![]);
-                        entry_fields.push(vec![]);
-                        entry_is_header.push(false);
-                        entry_dimmed.push(true);
-                        entry_indent.push(0);
-                        entry_data_indices.push(None);
-                        entry_group_keys.push(None);
-                        entry_badge_text.push(String::new());
-                        entry_badge_color.push(None);
-                    }
-                    TabDataState::Loading => {}
+            }
+            ExtensionsTab::Workflows => {
+                // The builder owns all data states (loaded/empty/error).
+                for row in
+                    build_workflows_picker_rows(&state.workflows_data, state.picker_state.query())
+                {
+                    entry_labels.push(row.label);
+                    entry_right_labels.push(row.right_label);
+                    entry_desc_lines.push(row.desc_lines);
+                    entry_summary_lines.push(vec![]);
+                    entry_fields.push(row.fields);
+                    entry_is_header.push(false);
+                    entry_dimmed.push(row.dimmed);
+                    entry_indent.push(0);
+                    // Browse-only rows: no data indices, no group keys.
+                    entry_data_indices.push(None);
+                    entry_group_keys.push(None);
+                    entry_badge_text.push(String::new());
+                    entry_badge_color.push(None);
                 }
             }
             ExtensionsTab::Plugins => {
@@ -3941,7 +3866,7 @@ fn render_mcp_setup_form(buf: &mut Buffer, area: Rect, setup: &McpSetupFormState
     let w = area.width.saturating_sub(h_inset * 2);
     let rows = (setup.field.options.len() as u16).saturating_add(4);
     let top = area.y + area.height.saturating_sub(rows) / 2;
-    let title = format!("{} — {}", setup.server_name, setup.field.label);
+    let title = format!("{} · {}", setup.server_name, setup.field.label);
     buf.set_string(
         x,
         top,
@@ -4295,6 +4220,7 @@ mod tests {
                 ExtensionsTab::Skills,
                 &[(' ', "toggle"), ('f', "filter"), ('r', "reload")],
             ),
+            (ExtensionsTab::Workflows, &[('r', "reload")]),
             (
                 ExtensionsTab::McpServers,
                 &[
@@ -5022,9 +4948,8 @@ mod tests {
     }
 
     #[test]
-    fn skills_tab_renders_workflows_group() {
-        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
-        state.skills_data = TabDataState::Loaded(vec![]);
+    fn workflows_tab_renders_catalog_flat() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Workflows);
         state.workflows_data = TabDataState::Loaded(vec![WorkflowInfo {
             name: "fix-ci".to_string(),
             description: "Fix failing CI on the current PR".to_string(),
@@ -5036,14 +4961,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
 
-        assert!(
-            buffer_count(&buf, "Workflows") >= 1,
-            "the Workflows group header must render on the Skills tab"
-        );
         assert_eq!(
             buffer_count(&buf, "fix-ci"),
             1,
-            "the workflow name must render as a row"
+            "the workflow name must render as a flat row"
         );
         assert_eq!(
             buffer_count(&buf, "(builtin)"),
@@ -5051,15 +4972,25 @@ mod tests {
             "the workflow source must render as the right label"
         );
         assert!(
+            !state
+                .entry_labels_cache
+                .iter()
+                .any(|l| l.starts_with("Workflows (")),
+            "the flat catalog must not render a group header"
+        );
+        assert!(
             state.entry_data_indices.iter().all(|d| d.is_none()),
-            "workflow rows (and the header) must not map to skill data indices"
+            "workflow rows are browse-only"
+        );
+        assert!(
+            state.entry_group_keys.iter().all(|k| k.is_none()),
+            "workflow rows are not collapsible groups"
         );
     }
 
     #[test]
-    fn skills_tab_hides_unusable_workflow_names() {
-        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
-        state.skills_data = TabDataState::Loaded(vec![]);
+    fn workflows_tab_shows_all_entries_without_unusable_name_badge() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Workflows);
         state.workflows_data = TabDataState::Loaded(vec![
             WorkflowInfo {
                 name: "valid-workflow".into(),
@@ -5080,7 +5011,69 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
         assert_eq!(buffer_count(&buf, "valid-workflow"), 1);
-        assert_eq!(buffer_count(&buf, "Not Launchable"), 0);
+        assert_eq!(
+            buffer_count(&buf, "Not Launchable"),
+            1,
+            "odd-named catalog entries still render"
+        );
+        assert_eq!(
+            buffer_count(&buf, "[no slash command]"),
+            0,
+            "no unusable-name badge"
+        );
+    }
+
+    #[test]
+    fn workflows_tab_empty_shows_placeholder() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Workflows);
+        state.workflows_data = TabDataState::Loaded(vec![]);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        assert_eq!(
+            state.entry_labels_cache,
+            [workflows_picker_rows::WORKFLOWS_EMPTY_PLACEHOLDER]
+        );
+        assert_eq!(
+            buffer_count(&buf, "No workflows available"),
+            1,
+            "empty catalog renders the dimmed placeholder row"
+        );
+    }
+
+    #[test]
+    fn workflows_tab_error_renders_dimmed_row() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Workflows);
+        state.workflows_data = TabDataState::Error("boom".into());
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        assert_eq!(buffer_count(&buf, "Error: boom"), 1);
+    }
+
+    #[test]
+    fn workflows_tab_loading_shows_spinner_not_placeholder() {
+        // `ExtensionsModalState::new` starts `workflows_data` at Loading.
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Workflows);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        assert!(state.entry_labels_cache.is_empty(), "no rows while loading");
+        assert_eq!(
+            buffer_count(&buf, "Loading"),
+            1,
+            "loading spinner shown instead of the empty placeholder"
+        );
+        assert_eq!(buffer_count(&buf, "No workflows available"), 0);
+    }
+
+    #[test]
+    fn workflows_reload_key_resolves_reload_skills() {
+        // resolve_key's match is non-exhaustive; pin the Workflows arm.
+        assert!(matches!(
+            resolve_key(ExtensionsTab::Workflows, 'r'),
+            Some(ButtonAction::ReloadSkills)
+        ));
     }
 
     // ── Plugin fixtures ─────────────────────────────────────────────
@@ -5199,6 +5192,7 @@ mod tests {
             ExtensionsTab::Hooks,
             ExtensionsTab::Plugins,
             ExtensionsTab::Skills,
+            ExtensionsTab::Workflows,
             ExtensionsTab::McpServers,
         ] {
             let keys = extensions_action_keys(tab);
@@ -5245,22 +5239,24 @@ mod tests {
         assert_eq!(ExtensionsTab::Hooks.next(), ExtensionsTab::Plugins);
         assert_eq!(ExtensionsTab::Plugins.next(), ExtensionsTab::Marketplace);
         assert_eq!(ExtensionsTab::Marketplace.next(), ExtensionsTab::Skills);
-        assert_eq!(ExtensionsTab::Skills.next(), ExtensionsTab::McpServers);
+        assert_eq!(ExtensionsTab::Skills.next(), ExtensionsTab::Workflows);
+        assert_eq!(ExtensionsTab::Workflows.next(), ExtensionsTab::McpServers);
         assert_eq!(ExtensionsTab::McpServers.next(), ExtensionsTab::Hooks);
     }
 
     #[test]
     fn tab_prev_wraps_around() {
         assert_eq!(ExtensionsTab::Hooks.prev(), ExtensionsTab::McpServers);
-        assert_eq!(ExtensionsTab::McpServers.prev(), ExtensionsTab::Skills);
+        assert_eq!(ExtensionsTab::McpServers.prev(), ExtensionsTab::Workflows);
+        assert_eq!(ExtensionsTab::Workflows.prev(), ExtensionsTab::Skills);
         assert_eq!(ExtensionsTab::Skills.prev(), ExtensionsTab::Marketplace);
         assert_eq!(ExtensionsTab::Marketplace.prev(), ExtensionsTab::Plugins);
         assert_eq!(ExtensionsTab::Plugins.prev(), ExtensionsTab::Hooks);
     }
 
     #[test]
-    fn tab_all_contains_five_tabs() {
-        assert_eq!(ExtensionsTab::ALL.len(), 5);
+    fn tab_all_contains_six_tabs() {
+        assert_eq!(ExtensionsTab::ALL.len(), 6);
     }
 
     // ── Modal state init ────────────────────────────────────────────
@@ -6950,7 +6946,6 @@ mod tests {
         let skills = vec![make_skill("alpha", "a"), make_skill("beta", "b")];
         state.seed_skills_groups_once(&skills);
         state.skills_data = TabDataState::Loaded(skills);
-        state.workflows_data = TabDataState::Loaded(vec![]);
         state.picker_state.selected = 0;
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
@@ -6990,67 +6985,40 @@ mod tests {
     }
 
     #[test]
-    fn workflows_default_collapsed_when_skills_loading_or_error() {
-        let mk_wf = || WorkflowInfo {
+    fn skills_tab_renders_no_workflows_rows() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.skills_data = TabDataState::Loaded(vec![make_skill("alpha", "a")]);
+        state.workflows_data = TabDataState::Loaded(vec![WorkflowInfo {
             name: "fix-ci".into(),
             description: "Fix CI".into(),
             when_to_use: None,
             source: "builtin".into(),
             path: None,
-        };
-        // Skills still loading: tab is a spinner (no list), but seed must still
-        // mark Workflows collapsed so the first paint after skills fails is collapsed.
-        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
-        state.seed_workflows_group_once();
-        state.skills_data = TabDataState::Loading;
-        state.workflows_data = TabDataState::Loaded(vec![mk_wf()]);
-        assert!(
-            state
-                .skills_collapsed_groups
-                .contains(SKILLS_WORKFLOWS_GROUP_KEY),
-            "workflows seed independent of skills load"
-        );
-
-        // Skills failed: list paints; workflows children stay hidden.
-        let mut state_err = ExtensionsModalState::new(ExtensionsTab::Skills);
-        state_err.seed_workflows_group_once();
-        state_err.skills_data = TabDataState::Error("boom".into());
-        state_err.workflows_data = TabDataState::Loaded(vec![mk_wf()]);
+        }]);
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
-        render_extensions_modal(&mut buf, area, &mut state_err, None, false, 0);
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
         assert!(
-            state_err
+            !state
                 .entry_labels_cache
                 .iter()
                 .any(|l| l.starts_with("Workflows (")),
-            "workflows header visible when skills Error"
+            "the Skills tab must not render a Workflows group header"
         );
         assert!(
-            !state_err.entry_labels_cache.iter().any(|l| l == "fix-ci"),
-            "workflows children hidden while collapsed (skills Error)"
+            !state.entry_labels_cache.iter().any(|l| l == "fix-ci"),
+            "workflow rows must not render on the Skills tab"
         );
     }
 
     #[test]
-    fn seed_skills_unions_without_wiping_workflows_expand() {
+    fn seed_skills_groups_collapses_source_groups() {
         let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
-        state.seed_workflows_group_once();
-        // User expanded Workflows before skills arrived.
-        state
-            .skills_collapsed_groups
-            .remove(SKILLS_WORKFLOWS_GROUP_KEY);
         let skills = vec![make_skill("alpha", "a")];
         state.seed_skills_groups_once(&skills);
         assert!(
-            !state
-                .skills_collapsed_groups
-                .contains(SKILLS_WORKFLOWS_GROUP_KEY),
-            "skills seed must not re-collapse a user-expanded Workflows group"
-        );
-        assert!(
             state.skills_collapsed_groups.contains("User"),
-            "skills seed still collapses skill source groups"
+            "skills seed collapses skill source groups"
         );
     }
 
@@ -7161,7 +7129,6 @@ mod tests {
         // Headers come from render; keep one check that they appear.
         let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
         state.skills_data = TabDataState::Loaded(skills);
-        state.workflows_data = TabDataState::Loaded(vec![]);
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
         render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
@@ -7198,8 +7165,7 @@ mod tests {
 
     #[test]
     fn workflows_sort_az_by_name() {
-        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
-        state.skills_data = TabDataState::Loaded(vec![]);
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Workflows);
         state.workflows_data = TabDataState::Loaded(vec![
             WorkflowInfo {
                 name: "zeta-wf".into(),
@@ -7219,10 +7185,7 @@ mod tests {
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
         render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
-        assert_eq!(
-            state.entry_labels_cache,
-            ["Workflows (2 workflows)", "alpha-wf", "zeta-wf"]
-        );
+        assert_eq!(state.entry_labels_cache, ["alpha-wf", "zeta-wf"]);
     }
 
     #[test]

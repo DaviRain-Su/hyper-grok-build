@@ -582,7 +582,7 @@ fn render_prompt_and_version(
             width: tip_centered.width.saturating_sub(inset * 2),
             height: tip_centered.height,
         };
-        crate::tips::render::render_tip(tip_inset, buf, tip_text);
+        crate::tips::render::render_tip(tip_inset, buf, tip_text, crate::tips::render::HINT_INSET);
     }
     let prompt_result =
         prompt::render_prompt(prompt_centered, buf, focus, prompt, info, 2, 2, compact);
@@ -1122,7 +1122,7 @@ fn push_auth_copy_block(
                 .alignment(Alignment::Center)
         }
         Some(crate::clipboard::ClipboardDelivery::Unverified) => Line::from(Span::styled(
-            "copy sent—verify paste",
+            "copy sent: verify paste",
             Style::default().fg(theme.gray),
         ))
         .alignment(Alignment::Center),
@@ -1797,9 +1797,9 @@ fn render_welcome_done(
         ];
         &gate_menu
     } else {
-        let (key_w, key_s, key_q, key_i_with_x) = (
+        let (key_w, key_resume, key_q, key_i_with_x) = (
             "ctrl+w",
-            "ctrl+s",
+            "f3",
             if in_vscode_family { "ctrl+d" } else { "ctrl+q" },
             "ctrl+i  [x]",
         );
@@ -2197,7 +2197,7 @@ fn render_welcome_done(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("v{ver} available \u{2014} press {key_name} to restart"),
+                    format!("v{ver} available, press {key_name} to restart"),
                     Style::default().fg(theme.accent_user),
                 ),
             ]);
@@ -2800,7 +2800,7 @@ mod tests {
             (crate::clipboard::ClipboardDelivery::Confirmed, "copied!"),
             (
                 crate::clipboard::ClipboardDelivery::Unverified,
-                "copy sent—verify paste",
+                "copy sent: verify paste",
             ),
             (crate::clipboard::ClipboardDelivery::Failed, "copy failed"),
         ] {

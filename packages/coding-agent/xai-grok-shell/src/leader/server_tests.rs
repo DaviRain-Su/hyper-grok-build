@@ -848,6 +848,7 @@ fn is_interaction_request_detects_only_interaction_methods() {
         "session/request_permission",
         "x.ai/ask_user_question",
         "x.ai/exit_plan_mode",
+        "x.ai/mcp/elicit",
     ] {
         let payload = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{m}","params":{{}}}}"#);
         assert!(
@@ -857,7 +858,11 @@ fn is_interaction_request_detects_only_interaction_methods() {
     }
     // Gateway-wrapped ext methods (the actual wire shape for ask_user_question
     // / exit_plan_mode): `_`-prefixed top-level method, real method nested.
-    for m in ["x.ai/ask_user_question", "x.ai/exit_plan_mode"] {
+    for m in [
+        "x.ai/ask_user_question",
+        "x.ai/exit_plan_mode",
+        "x.ai/mcp/elicit",
+    ] {
         let payload = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"_{m}","params":{{"method":"{m}","params":{{}}}}}}"#
         );
@@ -1379,6 +1384,32 @@ fn inject_capabilities_skips_when_yolo_mode_false() {
     ));
     // Should be unchanged
     assert_eq!(json, before);
+}
+
+#[test]
+fn inject_capabilities_adds_status_line_when_it_is_the_only_capability() {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
+        AGENT_METHOD_NAMES.session_new
+    );
+    let caps = ClientCapabilities {
+        status_line: true,
+        ..Default::default()
+    };
+
+    let mut json = pv(&payload);
+    assert!(inject_session_request_context(
+        &mut json,
+        &caps,
+        "",
+        ClientId(1)
+    ));
+    assert_eq!(
+        json["params"]["_meta"][xai_grok_status_line::CLIENT_STATUS_LINE_META],
+        true,
+        "a status-line client that states nothing else must still get its own capability, \
+         not the process-wide initialize one"
+    );
 }
 
 #[test]

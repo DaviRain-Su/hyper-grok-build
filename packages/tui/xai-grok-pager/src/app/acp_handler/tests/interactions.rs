@@ -217,6 +217,393 @@
     }
 
     #[test]
+    fn mcp_elicit_opens_elicitation_view_and_parks_response() {
+        let mut app = make_app_with_agent("sess-A");
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let raw = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "sess-A",
+            "toolCallId": "mcp-elicit-1",
+            "serverName": "demo-mcp",
+            "message": "Need your email",
+            "mode": "form",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "email": { "type": "string", "format": "email" }
+                },
+                "required": ["email"]
+            }
+        }))
+        .unwrap();
+        let msg = AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
+            request: acp::ExtRequest::new("x.ai/mcp/elicit", raw.into()),
+            response_tx: tx,
+        });
+
+        let affected = handle(msg, &mut app);
+        assert!(affected, "active session elicitation should request redraw");
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let ev = agent
+            .elicitation_view
+            .as_ref()
+            .expect("elicitation_view open");
+        assert_eq!(ev.server_name, "demo-mcp");
+        assert_eq!(ev.tool_call_id, "mcp-elicit-1");
+        assert!(
+            rx.try_recv().is_err(),
+            "response must wait for user Accept/Decline/Cancel"
+        );
+    }
+
+    #[test]
+    fn mcp_elicit_does_not_replace_url_waiting() {
+        let mut app = make_app_with_agent("sess-A");
+        let (tx1, mut rx1) = tokio::sync::oneshot::channel();
+        let raw1 = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "sess-A",
+            "toolCallId": "mcp-elicit-url",
+            "serverName": "demo-mcp",
+            "message": "Open login",
+            "mode": "url",
+            "url": "https://example.com/login",
+            "elicitationId": "eid-1"
+        }))
+        .unwrap();
+        handle(
+            AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
+                request: acp::ExtRequest::new("x.ai/mcp/elicit", raw1.into()),
+                response_tx: tx1,
+            }),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let ev = agent.elicitation_view.as_mut().unwrap();
+            assert!(ev.send_response(
+                xai_grok_tools::mcp_elicitation::McpElicitExtResponse::Accept { content: None },
+            ));
+            ev.begin_url_waiting();
+        }
+        assert!(rx1.try_recv().is_ok(), "URL accept must send ACP immediately");
+
+        let (tx2, mut rx2) = tokio::sync::oneshot::channel();
+        let raw2 = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "sess-A",
+            "toolCallId": "mcp-elicit-form",
+            "serverName": "demo-mcp",
+            "message": "Need email",
+            "mode": "form",
+            "requestedSchema": {
+                "type": "object",
+                "properties": { "email": { "type": "string" } }
+            }
+        }))
+        .unwrap();
+        handle(
+            AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
+                request: acp::ExtRequest::new("x.ai/mcp/elicit", raw2.into()),
+                response_tx: tx2,
+            }),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let ev = agent.elicitation_view.as_ref().unwrap();
+        assert!(ev.is_url_waiting());
+        assert_eq!(ev.elicitation_id(), Some("eid-1"));
+        assert!(agent.pending_elicitation.is_some());
+        assert!(
+            rx2.try_recv().is_err(),
+            "the next elicit must wait until Waiting chrome is dismissed"
+        );
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.dismiss_waiting_elicitation("eid-1", None));
+        let ev = agent.elicitation_view.as_ref().expect("parked form shown");
+        assert!(ev.form().is_some(), "promoted card is the parked form");
+        assert_eq!(ev.tool_call_id, "mcp-elicit-form");
+        assert!(rx2.try_recv().is_err());
+    }
+
+    /// The reverse layering of the test below: the elicitation opened FIRST
+    /// (so it holds the true session draft), a question arrived on top, and
+    /// then the elicitation is peer-resolved while the question still owns
+    /// the composer. The draft must be handed to the question's stash — not
+    /// written through the live composer, where the question's own close
+    /// would restore its empty stash over it.
+    #[test]
+    fn peer_resolved_elicitation_hands_draft_to_open_question() {
+        use crate::views::question_view::QuestionViewState;
+
+        let mut app = make_app_with_agent("sess-A");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.prompt.set_text("my precious draft");
+        }
+
+        // Elicitation opens first and stashes the session draft.
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let raw = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "sess-A",
+            "toolCallId": "mcp-elicit-1",
+            "serverName": "demo-mcp",
+            "message": "Need your email",
+            "mode": "form",
+            "requestedSchema": {
+                "type": "object",
+                "properties": { "email": { "type": "string" } }
+            }
+        }))
+        .unwrap();
+        handle(
+            AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
+                request: acp::ExtRequest::new("x.ai/mcp/elicit", raw.into()),
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+
+        // A question arrives on top and takes the (blank) composer.
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert_eq!(agent.prompt.text(), "", "elicitation displaced the draft");
+            let stashed = agent.prompt.stash();
+            agent.prompt.set_text("");
+            agent.question_view = Some(QuestionViewState::new("call-q".into(), vec![], stashed));
+        }
+
+        // A peer resolves the elicitation while the question is open.
+        handle_session_notification(&interaction_resolved_ext("sess-A", "mcp-elicit-1"), &mut app);
+        assert!(app.agents[&AgentId(0)].elicitation_view.is_none());
+        assert_eq!(
+            app.agents[&AgentId(0)].prompt.text(),
+            "",
+            "the question still owns the composer; the draft must not write through"
+        );
+
+        // The question closes: the handed-over draft comes back.
+        handle_session_notification(&interaction_resolved_ext("sess-A", "call-q"), &mut app);
+        assert_eq!(
+            app.agents[&AgentId(0)].prompt.text(),
+            "my precious draft",
+            "the question's close must restore the elicitation's session draft"
+        );
+    }
+
+    #[test]
+    fn elicitation_over_open_question_does_not_wipe_stashed_draft() {
+        use crate::views::question_view::QuestionViewState;
+
+        let mut app = make_app_with_agent("sess-A");
+        {
+            // A question card already displaced the user's draft: the real
+            // text lives in its stash and the live composer is blank.
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.prompt.set_text("my precious draft");
+            let stashed = agent.prompt.stash();
+            agent.prompt.set_text("");
+            agent.question_view =
+                Some(QuestionViewState::new("call-q".into(), vec![], stashed));
+        }
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let raw = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "sess-A",
+            "toolCallId": "mcp-elicit-1",
+            "serverName": "demo-mcp",
+            "message": "Need your email",
+            "mode": "form",
+            "requestedSchema": {
+                "type": "object",
+                "properties": { "email": { "type": "string" } }
+            }
+        }))
+        .unwrap();
+        handle(
+            AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
+                request: acp::ExtRequest::new("x.ai/mcp/elicit", raw.into()),
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let ev = agent.elicitation_view.as_ref().expect("elicitation open");
+            assert!(
+                ev.stashed_prompt.is_none(),
+                "the question already owns the draft; the elicitation must not stash the blank composer"
+            );
+        }
+
+        // The question resolves first and restores the draft…
+        handle_session_notification(&interaction_resolved_ext("sess-A", "call-q"), &mut app);
+        assert_eq!(
+            app.agents[&AgentId(0)].prompt.text(),
+            "my precious draft",
+            "question close must put the draft back"
+        );
+
+        // …then the elicitation resolves and must NOT clobber it.
+        handle_session_notification(&interaction_resolved_ext("sess-A", "mcp-elicit-1"), &mut app);
+        assert!(app.agents[&AgentId(0)].elicitation_view.is_none());
+        assert_eq!(
+            app.agents[&AgentId(0)].prompt.text(),
+            "my precious draft",
+            "elicitation close must not restore an empty stash over the draft"
+        );
+    }
+
+    #[test]
+    fn parked_elicit_is_dropped_when_peer_resolves_it() {
+        let mut app = make_app_with_agent("sess-A");
+        let (tx1, _rx1) = tokio::sync::oneshot::channel();
+        let raw1 = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "sess-A",
+            "toolCallId": "mcp-elicit-url",
+            "serverName": "demo-mcp",
+            "message": "Open login",
+            "mode": "url",
+            "url": "https://example.com/login",
+            "elicitationId": "eid-1"
+        }))
+        .unwrap();
+        handle(
+            AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
+                request: acp::ExtRequest::new("x.ai/mcp/elicit", raw1.into()),
+                response_tx: tx1,
+            }),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let ev = agent.elicitation_view.as_mut().unwrap();
+            assert!(ev.send_response(
+                xai_grok_tools::mcp_elicitation::McpElicitExtResponse::Accept { content: None },
+            ));
+            ev.begin_url_waiting();
+        }
+
+        let (tx2, mut rx2) = tokio::sync::oneshot::channel();
+        let raw2 = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "sess-A",
+            "toolCallId": "mcp-elicit-form",
+            "serverName": "demo-mcp",
+            "message": "Need email",
+            "mode": "form",
+            "requestedSchema": {
+                "type": "object",
+                "properties": { "email": { "type": "string" } }
+            }
+        }))
+        .unwrap();
+        handle(
+            AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
+                request: acp::ExtRequest::new("x.ai/mcp/elicit", raw2.into()),
+                response_tx: tx2,
+            }),
+            &mut app,
+        );
+        assert!(app.agents[&AgentId(0)].pending_elicitation.is_some());
+
+        let changed = handle_session_notification(
+            &interaction_resolved_ext("sess-A", "mcp-elicit-form"),
+            &mut app,
+        );
+        assert!(changed);
+        assert!(
+            app.agents[&AgentId(0)].pending_elicitation.is_none(),
+            "peer resolve must drop the parked form"
+        );
+        match rx2.try_recv() {
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {}
+            other => panic!("parked oneshot must be dropped, got {other:?}"),
+        }
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.dismiss_waiting_elicitation("eid-1", None));
+        assert!(
+            agent.elicitation_view.is_none(),
+            "must not promote a peer-resolved parked form"
+        );
+    }
+
+    #[test]
+    fn elicit_complete_requires_matching_server_name() {
+        let mut app = make_app_with_agent("sess-A");
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let raw = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "sess-A",
+            "toolCallId": "mcp-elicit-url",
+            "serverName": "demo-mcp",
+            "message": "Open login",
+            "mode": "url",
+            "url": "https://example.com/login",
+            "elicitationId": "eid-1"
+        }))
+        .unwrap();
+        handle(
+            AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
+                request: acp::ExtRequest::new("x.ai/mcp/elicit", raw.into()),
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let ev = agent.elicitation_view.as_mut().unwrap();
+            assert!(ev.send_response(
+                xai_grok_tools::mcp_elicitation::McpElicitExtResponse::Accept { content: None },
+            ));
+            ev.begin_url_waiting();
+        }
+
+        let complete = |server_name: &str| {
+            serde_json::value::to_raw_value(&serde_json::json!({
+                "sessionId": "sess-A",
+                "elicitationId": "eid-1",
+                "serverName": server_name,
+            }))
+            .unwrap()
+        };
+
+        // A different server guessing the id must not dismiss the card.
+        let (tx_bad, _rx_bad) = tokio::sync::oneshot::channel();
+        let changed = handle(
+            AcpClientMessage::ExtNotification(xai_acp_lib::AcpArgs {
+                request: acp::ExtNotification::new(
+                    "x.ai/mcp/elicit_complete",
+                    complete("evil-mcp").into(),
+                ),
+                response_tx: tx_bad,
+            }),
+            &mut app,
+        );
+        assert!(!changed);
+        assert!(
+            app.agents[&AgentId(0)].elicitation_view.is_some(),
+            "a mismatched serverName must not dismiss the waiting card"
+        );
+
+        // The emitting server's own complete dismisses it.
+        let (tx_ok, _rx_ok) = tokio::sync::oneshot::channel();
+        let changed = handle(
+            AcpClientMessage::ExtNotification(xai_acp_lib::AcpArgs {
+                request: acp::ExtNotification::new(
+                    "x.ai/mcp/elicit_complete",
+                    complete("demo-mcp").into(),
+                ),
+                response_tx: tx_ok,
+            }),
+            &mut app,
+        );
+        assert!(changed);
+        assert!(
+            app.agents[&AgentId(0)].elicitation_view.is_none(),
+            "the matching serverName must dismiss the waiting card"
+        );
+    }
+
+    #[test]
     fn ask_user_question_unknown_session_parks_without_error() {
         // No local view for the session, and the active agent HAS a session_id
         // (so the race-window fallback does not fire). The reverse-request must
@@ -465,6 +852,82 @@
         let raw = response.expect("should be Ok");
         let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).unwrap();
         assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// Delivers a status snapshot the way the agent does, and reports whether
+    /// the client repainted.
+    fn notify_status(app: &mut crate::app::app_view::AppView, cwd: &str) -> bool {
+        let notif = SessionNotification {
+            session_id: acp::SessionId::new("sess-1"),
+            update: XaiSessionUpdate::SessionStatus(Box::new(
+                crate::app::status_line::test_context(cwd),
+            )),
+            meta: None,
+        };
+        let raw = serde_json::value::to_raw_value(&notif).unwrap();
+        let ext = acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw));
+        handle_session_notification(&ext, app)
+    }
+
+    /// Storing the snapshot paints nothing when no row is configured, and the
+    /// agent pushes one at every turn end: reporting a change here would
+    /// repaint the whole fleet once per turn for a row nobody draws.
+    #[test]
+    fn a_status_snapshot_does_not_repaint_a_client_with_no_status_line() {
+        let mut app = make_app_with_agent("sess-1");
+        assert!(
+            !app.current_ui.status_line.reserves_a_row(),
+            "disabled is the default"
+        );
+
+        assert!(!notify_status(&mut app, "/tmp"), "no row, no repaint");
+        assert!(
+            app.agents[&AgentId(0)].status_context.is_some(),
+            "the payload is still stored for whenever a row is enabled"
+        );
+        assert!(app.status_line.display().is_none(), "and nothing is drawn");
+    }
+
+    /// The other half. An enabled row settles once it has drawn, and an idle
+    /// session asks for no ticks, so the snapshot's own repaint is the only
+    /// thing that moves the row until the next turn.
+    #[test]
+    fn a_status_snapshot_repaints_a_row_that_had_already_settled() {
+        let mut app = make_app_with_agent("sess-1");
+        app.current_ui.status_line =
+            xai_grok_status_line::test_support::StatusLineConfigFixture::from_kind(
+                xai_grok_status_line::StatusLineType::Builtin,
+            )
+            .with_items(vec![xai_grok_status_line::StatusLineItem::Cwd])
+            .into_config();
+
+        assert!(
+            notify_status(&mut app, "/tmp/first"),
+            "the first snapshot draws"
+        );
+        assert!(app.status_line.is_settled(), "a drawn row settles");
+        assert_eq!(
+            app.status_line_tick_demand(),
+            crate::app::app_view::TickDemand::None,
+            "an idle settled row asks for no ticks, so only the snapshot can move it"
+        );
+
+        // Inside the refresh floor the snapshot defers rather than repaints, so
+        // what it must leave behind is a row still asking to be recomputed.
+        notify_status(&mut app, "/tmp/second");
+        assert_ne!(
+            app.status_line_tick_demand(),
+            crate::app::app_view::TickDemand::None,
+            "the snapshot left the row settled and idle, so it will never redraw"
+        );
+
+        app.update_status_line_at(
+            std::time::Instant::now() + crate::app::status_line::MIN_REFRESH_INTERVAL_MS,
+        );
+        assert!(
+            app.status_line.take_changed(),
+            "the deferred recompute never happened"
+        );
     }
 
     #[test]

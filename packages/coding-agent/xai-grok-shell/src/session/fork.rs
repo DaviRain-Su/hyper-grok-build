@@ -217,8 +217,7 @@ mod tests {
         );
         assert!(
             uuid::Uuid::parse_str(&fork_id).is_ok(),
-            "Fork ID should be a valid UUID: {}",
-            fork_id
+            "Fork ID should be a valid UUID"
         );
     }
 

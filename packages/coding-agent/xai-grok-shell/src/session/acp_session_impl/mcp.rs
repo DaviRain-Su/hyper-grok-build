@@ -1,4 +1,15 @@
 use super::*;
+/// Wire the session's elicitation inbox into a freshly built client so its
+/// `elicitation/create` requests reach the coordinator. Takes the
+/// already-locked `McpState` so each caller keeps its own lock scope.
+fn attach_elicitation_tx(
+    state: &crate::session::mcp_servers::McpState,
+    client: &crate::session::mcp_servers::McpClient,
+) {
+    if let Some(tx) = state.elicitation_tx() {
+        client.set_elicitation_tx(Some(tx));
+    }
+}
 impl SessionActor {
     /// Wait for MCP tools to be initialized.
     /// If initialization is in progress by another task, this will poll until complete.
@@ -91,6 +102,7 @@ impl SessionActor {
             .strip_prefix(&prefix)
             .unwrap_or(&qualified_name)
             .to_string();
+        mcp_state.record_tool_icons(qualified_name.clone(), reg.icons.clone());
         if let Some(meta) = reg.meta.as_ref() {
             mcp_state
                 .mcp_tool_meta
@@ -108,6 +120,7 @@ impl SessionActor {
                         display_name: None,
                         description: Some(reg.description.clone()),
                         meta: Some(meta.clone()),
+                        icons: reg.icons.clone(),
                         enabled: !mcp_state.is_tool_disabled(server_name, &unqualified),
                     });
             }
@@ -280,6 +293,7 @@ impl SessionActor {
         if let Some(tx) = event_tx {
             new_client.set_event_tx(Some(tx));
         }
+        attach_elicitation_tx(&*self.mcp_state.lock().await, &new_client);
         let arc = std::sync::Arc::new(new_client);
         {
             let mut mcp_state = self.mcp_state.lock().await;
@@ -760,6 +774,7 @@ impl SessionActor {
         )
         .await
         .map_err(|e| e.to_string())?;
+        attach_elicitation_tx(&*self.mcp_state.lock().await, &new_client);
         new_client
             .ensure_initialized()
             .await
@@ -1181,6 +1196,7 @@ impl SessionActor {
                     if let Some(tx) = task_event_tx {
                         client.set_event_tx(Some(tx));
                     }
+                    attach_elicitation_tx(&*mcp_state.lock().await, client);
                     let init_budget = std::time::Duration::from_secs(
                         timeout_sec.saturating_mul(2).saturating_add(5),
                     );
@@ -1291,6 +1307,8 @@ impl SessionActor {
                                     .strip_prefix(&prefix)
                                     .unwrap_or(&qualified_name)
                                     .to_string();
+                                mcp_state
+                                    .record_tool_icons(qualified_name.clone(), reg.icons.clone());
                                 if let Some(meta) = reg.meta.as_ref() {
                                     mcp_state
                                         .mcp_tool_meta
@@ -1308,6 +1326,7 @@ impl SessionActor {
                                                 display_name: None,
                                                 description: Some(reg.description.clone()),
                                                 meta: Some(meta.clone()),
+                                                icons: reg.icons.clone(),
                                                 enabled: !mcp_state
                                                     .is_tool_disabled(&server_name, &unqualified),
                                             });
@@ -1363,6 +1382,10 @@ impl SessionActor {
                                 "sse" => xai_grok_telemetry::events::McpTransport::Sse,
                                 _ => xai_grok_telemetry::events::McpTransport::Http,
                             };
+                            debug_assert!(
+                                xai_grok_telemetry::activity::MCP_SERVERS_CONNECTED.get() >= 1,
+                                "McpServerConnected must stamp a self-inclusive count"
+                            );
                             xai_grok_telemetry::session_ctx::log_event(
                                 xai_grok_telemetry::events::McpServerConnected {
                                     server_name: server_name.clone(),
@@ -1532,6 +1555,7 @@ impl SessionActor {
                         .strip_prefix(&prefix)
                         .unwrap_or(&qualified_name)
                         .to_string();
+                    mcp_state.record_tool_icons(qualified_name.clone(), reg.icons.clone());
                     if let Some(meta) = reg.meta.as_ref() {
                         mcp_state
                             .mcp_tool_meta

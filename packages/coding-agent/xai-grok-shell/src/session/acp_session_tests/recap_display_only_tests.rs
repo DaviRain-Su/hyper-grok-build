@@ -49,6 +49,88 @@ fn assert_rides_parent_prefix(
     );
 }
 
+fn without_cache_control(mut value: serde_json::Value) -> serde_json::Value {
+    match &mut value {
+        serde_json::Value::Object(fields) => {
+            fields.remove("cache_control");
+            for value in fields.values_mut() {
+                *value = without_cache_control(value.take());
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                *value = without_cache_control(value.take());
+            }
+        }
+        _ => {}
+    }
+    value
+}
+
+fn assert_messages_rides_parent_prefix(
+    body: &serde_json::Value,
+    parent: Vec<ConversationItem>,
+    label: &str,
+) {
+    let request = xai_grok_sampling_types::ConversationRequest {
+        items: xai_chat_state::compaction_utils::ModelRequestHistory::from_raw(parent).into_items(),
+        model: Some("test".to_string()),
+        reasoning_effort: Some(xai_grok_sampling_types::ReasoningEffort::High),
+        ..Default::default()
+    };
+    let expected = serde_json::to_value(xai_grok_sampling_types::build_messages_request(&request))
+        .expect("main Messages request serializes");
+    let expected_messages = without_cache_control(expected["messages"].clone());
+    let actual_messages = without_cache_control(body["messages"].clone());
+    let expected = expected_messages
+        .as_array()
+        .expect("main Messages request has messages");
+    let actual = actual_messages
+        .as_array()
+        .expect("side-call Messages request has messages");
+
+    assert!(
+        actual.len() > expected.len(),
+        "{label}: side-call Messages request must extend the parent"
+    );
+    assert_eq!(
+        &actual[..expected.len()],
+        expected.as_slice(),
+        "{label}: Messages prefix diverges from the main turn"
+    );
+    assert_eq!(
+        actual.len(),
+        expected.len() + 1,
+        "{label}: exactly one instruction message must be appended"
+    );
+    assert_eq!(body["thinking"]["type"], "adaptive", "{label}: {body:#}");
+    assert_eq!(body["output_config"]["effort"], "high", "{label}: {body:#}");
+}
+
+fn assert_messages_reasoning_stripped(body: &serde_json::Value, label: &str) {
+    assert!(
+        body.get("thinking").is_none() || body["thinking"].is_null(),
+        "{label}: top-level thinking must be absent: {body:#}"
+    );
+    for message in body["messages"]
+        .as_array()
+        .expect("Messages request has messages")
+    {
+        let Some(blocks) = message["content"].as_array() else {
+            continue;
+        };
+        assert!(
+            blocks.iter().all(|block| {
+                !matches!(
+                    block["type"].as_str(),
+                    Some("thinking" | "redacted_thinking")
+                )
+            }),
+            "{label}: replayed thinking must be absent: {body:#}"
+        );
+    }
+}
+
 /// Reasoning effort sits ahead of the conversation in the prompt, so an auxiliary call that drops it diverges from the main turn right away.
 #[tokio::test(flavor = "current_thread")]
 async fn side_question_projects_agent_messages_without_mutating_history() {
@@ -1378,6 +1460,233 @@ async fn auxiliary_calls_keep_the_main_turn_prefix() {
                 .and_then(|r| r.body.as_ref())
                 .expect("recap body must be JSON");
             assert_rides_parent_prefix(recap_body, parent, "recap");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn messages_side_calls_preserve_completed_reasoning() {
+    use xai_grok_sampling_types::{ReasoningEffort, rs};
+    use xai_grok_test_support::MockInferenceServer;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _grx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.turn_summary_enabled = true;
+            actor.title_refresh_enabled = true;
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+            let actor = std::sync::Arc::new(actor);
+
+            let server = MockInferenceServer::start().await.unwrap();
+            server.set_response("a short summary");
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.base_url = server.url();
+            cfg.api_backend = xai_grok_sampling_types::ApiBackend::Messages;
+            cfg.reasoning_effort = Some(ReasoningEffort::High);
+            actor.chat_state_handle.update_sampling_config(cfg);
+
+            let reasoning = |turn: usize| {
+                ConversationItem::Reasoning(rs::ReasoningItem {
+                    id: String::new(),
+                    summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
+                        text: format!("thinking for turn {turn}"),
+                    })],
+                    content: None,
+                    encrypted_content: Some(format!("signature-{turn}")),
+                    status: None,
+                })
+            };
+            let parent = vec![
+                ConversationItem::system("you are a coding agent"),
+                ConversationItem::user("first question"),
+                reasoning(1),
+                ConversationItem::assistant("first answer"),
+                ConversationItem::user("second question"),
+                reasoning(2),
+                ConversationItem::assistant("second answer"),
+                ConversationItem::user("third question"),
+                reasoning(3),
+                ConversationItem::assistant("third answer"),
+            ];
+            actor.chat_state_handle.replace_conversation(parent.clone());
+
+            actor
+                .handle_side_question("what matters most?")
+                .await
+                .expect("side question must succeed");
+            let body = server
+                .requests()
+                .into_iter()
+                .rev()
+                .find(|request| request.path == "/v1/messages")
+                .and_then(|request| request.body)
+                .expect("/btw Messages body");
+            assert_messages_rides_parent_prefix(&body, parent.clone(), "/btw");
+
+            actor.handle_recap(false).await;
+            let body = server
+                .requests()
+                .into_iter()
+                .rev()
+                .find(|request| request.path == "/v1/messages")
+                .and_then(|request| request.body)
+                .expect("recap Messages body");
+            assert_messages_rides_parent_prefix(&body, parent.clone(), "recap");
+
+            actor.restart_turn_summary("prompt-3".to_string());
+            for _ in 0..200 {
+                if actor.turn_summary_task.borrow().is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                actor.turn_summary_task.borrow().is_none(),
+                "turn summary must finish"
+            );
+            let body = server
+                .requests()
+                .into_iter()
+                .rev()
+                .find(|request| request.path == "/v1/messages")
+                .and_then(|request| request.body)
+                .expect("turn-summary Messages body");
+            assert_messages_rides_parent_prefix(&body, parent.clone(), "turn summary");
+
+            actor.maybe_refresh_title();
+            for _ in 0..200 {
+                if actor.title_refresh_task.borrow().is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                actor.title_refresh_task.borrow().is_none(),
+                "title refresh must finish"
+            );
+            let body = server
+                .requests()
+                .into_iter()
+                .rev()
+                .find(|request| request.path == "/v1/messages")
+                .and_then(|request| request.body)
+                .expect("title-refresh Messages body");
+            assert_messages_rides_parent_prefix(&body, parent, "title refresh");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn messages_side_calls_strip_reasoning_without_supported_thinking_effort() {
+    use xai_grok_sampling_types::{ReasoningEffort, synthesized_reasoning_item};
+    use xai_grok_test_support::MockInferenceServer;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            for reasoning_effort in [
+                None,
+                Some(ReasoningEffort::None),
+                Some(ReasoningEffort::Minimal),
+            ] {
+                let (gateway_tx, _grx) =
+                    tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+                let (persistence_tx, _prx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                actor.turn_summary_enabled = true;
+                actor.title_refresh_enabled = true;
+                *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+                let actor = std::sync::Arc::new(actor);
+
+                let server = MockInferenceServer::start().await.unwrap();
+                server.set_response("a short summary");
+                let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                cfg.base_url = server.url();
+                cfg.api_backend = xai_grok_sampling_types::ApiBackend::Messages;
+                cfg.reasoning_effort = reasoning_effort;
+                actor.chat_state_handle.update_sampling_config(cfg);
+
+                let parent = vec![
+                    ConversationItem::system("you are a coding agent"),
+                    ConversationItem::user("first question"),
+                    ConversationItem::Reasoning(synthesized_reasoning_item("signed thinking")),
+                    ConversationItem::assistant("first answer"),
+                    ConversationItem::user("second question"),
+                    ConversationItem::Reasoning(synthesized_reasoning_item("more signed thinking")),
+                    ConversationItem::assistant("second answer"),
+                    ConversationItem::user("third question"),
+                    ConversationItem::assistant("third answer"),
+                ];
+                actor.chat_state_handle.replace_conversation(parent);
+
+                actor
+                    .handle_side_question("what matters most?")
+                    .await
+                    .expect("side question must succeed");
+                let body = server
+                    .requests()
+                    .into_iter()
+                    .rev()
+                    .find(|request| request.path == "/v1/messages")
+                    .and_then(|request| request.body)
+                    .expect("/btw Messages body");
+                assert_messages_reasoning_stripped(&body, "/btw");
+
+                actor.handle_recap(false).await;
+                let body = server
+                    .requests()
+                    .into_iter()
+                    .rev()
+                    .find(|request| request.path == "/v1/messages")
+                    .and_then(|request| request.body)
+                    .expect("recap Messages body");
+                assert_messages_reasoning_stripped(&body, "recap");
+
+                actor.restart_turn_summary("prompt-3".to_string());
+                for _ in 0..200 {
+                    if actor.turn_summary_task.borrow().is_none() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    actor.turn_summary_task.borrow().is_none(),
+                    "turn summary must finish"
+                );
+                let body = server
+                    .requests()
+                    .into_iter()
+                    .rev()
+                    .find(|request| request.path == "/v1/messages")
+                    .and_then(|request| request.body)
+                    .expect("turn-summary Messages body");
+                assert_messages_reasoning_stripped(&body, "turn summary");
+
+                actor.maybe_refresh_title();
+                for _ in 0..200 {
+                    if actor.title_refresh_task.borrow().is_none() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    actor.title_refresh_task.borrow().is_none(),
+                    "title refresh must finish"
+                );
+                let body = server
+                    .requests()
+                    .into_iter()
+                    .rev()
+                    .find(|request| request.path == "/v1/messages")
+                    .and_then(|request| request.body)
+                    .expect("title-refresh Messages body");
+                assert_messages_reasoning_stripped(&body, "title refresh");
+            }
         })
         .await;
 }

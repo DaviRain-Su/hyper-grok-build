@@ -633,7 +633,7 @@ impl HunkTrackerSnapshot {
 ///
 /// Returns `None` if the path cannot be made relative to `old_cwd`
 /// under any prefix variant.
-fn rewrite_single_path(
+pub(crate) fn rewrite_single_path(
     path: &std::path::Path,
     old_cwd: &std::path::Path,
     canonical_old: &std::path::Path,

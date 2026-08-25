@@ -47,7 +47,7 @@ Use `kill_command_or_subagent(task_id)` to terminate a running background task o
 
 ## Send a Running Task to the Background
 
-In the interactive TUI, press `Ctrl+B` to send the running foreground command to the background. This is the only backgrounding shortcut. Do this when:
+In the interactive TUI, press `Ctrl+B` to send the running foreground command to the background. It is the only backgrounding shortcut, though sending a new message mid-command also backgrounds that command instead of killing it. Do this when:
 
 - A command takes longer than expected.
 - You want to ask the agent something else while a command runs.

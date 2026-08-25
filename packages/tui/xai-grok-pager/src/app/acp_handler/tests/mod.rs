@@ -1562,12 +1562,16 @@ pub(super) fn write_subagent_meta_json(
     let json = format!(r#"{{"prompt":{}}}"#, serde_json::to_string(prompt).unwrap());
     std::fs::write(sessions_dir.join("meta.json"), json).unwrap();
 }
+/// The persisted echo of a task prompt wraps differently from the
+/// injected copy, so compare with internal whitespace collapsed.
+fn subagent_prompt_text_eq(a: &str, b: &str) -> bool {
+    a.split_whitespace().eq(b.split_whitespace())
+}
 pub(super) fn child_scrollback_matching_prompt_count(
     agent: &AgentView,
     child_sid: &str,
     prompt: &str,
 ) -> usize {
-    use crate::app::subagent::subagent_prompt_text_eq;
     let child = agent.subagent_views.get(child_sid).expect("child subagent view");
     if prompt.trim().is_empty() {
         return 0;

@@ -332,7 +332,7 @@ async fn fallback_client_plain_allow_always_persists_mcp_tool() {
 #[tokio::test]
 #[serial]
 async fn policy_ask_suppresses_mcp_tool_allowlist() {
-    // With `remember_tool_approvals` OFF (the default), a policy `Ask` rule on an
+    // With `remember_tool_approvals` OFF (explicitly disabled), a policy `Ask` rule on an
     // MCP tool overrides a session tool-scope grant: the actor must prompt rather
     // than auto-allow. (The gate-ON "grant satisfies ask" path is covered by the
     // `mcp_pre_decision` unit tests in `manager.rs`.)

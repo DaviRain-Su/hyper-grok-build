@@ -507,6 +507,8 @@ fn failure_kind(transport: TransportFailureKind, is_decode: bool) -> LoginFailur
     }
     match transport {
         TransportFailureKind::Unreachable => LoginFailureKind::TransportConnect,
+        TransportFailureKind::CertificateUntrusted => LoginFailureKind::CertificateUntrusted,
+        TransportFailureKind::CertificateInvalid => LoginFailureKind::CertificateInvalid,
         TransportFailureKind::Interrupted => LoginFailureKind::TransportInterrupted,
         TransportFailureKind::Permanent => LoginFailureKind::TransportPermanent,
     }
@@ -566,8 +568,12 @@ async fn run_auth_flow_steps(
         // two processes can send the same refresh_token simultaneously,
         // triggering IdP refresh-token-family revocation (reuse detection).
         let file_lock = auth_manager
-            .try_lock_auth_file_async(crate::auth::manager::AUTH_LOCK_TIMEOUT)
-            .await;
+            .try_lock_auth_file_async(
+                crate::auth::manager::AUTH_LOCK_TIMEOUT,
+                crate::auth::manager::lock::Heartbeat::Skip,
+            )
+            .await
+            .into_guard();
 
         // Read disk first — another process may have already refreshed.
         let disk_auth = auth_manager.read_disk_auth();
@@ -1342,6 +1348,8 @@ pub fn run_cli_logout_radius() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::auth::AuthMode;
     use crate::auth::config::XAI_OAUTH2_ISSUER;
@@ -1356,6 +1364,14 @@ mod tests {
         assert_eq!(
             failure_kind(TransportFailureKind::Unreachable, false),
             LoginFailureKind::TransportConnect
+        );
+        assert_eq!(
+            failure_kind(TransportFailureKind::CertificateUntrusted, false),
+            LoginFailureKind::CertificateUntrusted
+        );
+        assert_eq!(
+            failure_kind(TransportFailureKind::CertificateInvalid, false),
+            LoginFailureKind::CertificateInvalid
         );
         assert_eq!(
             failure_kind(TransportFailureKind::Interrupted, false),
@@ -2405,6 +2421,22 @@ mod tests {
         (base, handle)
     }
 
+    fn expired_oidc_manager(dir: &Path, issuer: &str) -> Arc<AuthManager> {
+        let cfg = GrokComConfig::default();
+        let am = Arc::new(AuthManager::new(dir, cfg.clone()));
+        am.configure_refresher(cfg.auth_provider_command.clone(), None);
+        am.hot_swap(GrokAuth {
+            key: "expired".into(),
+            auth_mode: AuthMode::Oidc,
+            oidc_issuer: Some(issuer.into()),
+            oidc_client_id: Some("test-client".into()),
+            refresh_token: Some("rt".into()),
+            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+            ..GrokAuth::test_default()
+        });
+        am
+    }
+
     /// The readiness-path `_no_mint` variant bounds the refresh (~5s) and never
     /// engages the cold-mint fallback, so leader readiness can't block on a
     /// provider command up to the 60s `STARTUP_AUTH_TIMEOUT` cap.
@@ -2413,18 +2445,7 @@ mod tests {
         let (idp_base, server) = start_hanging_oidc_idp().await;
 
         let dir = tempfile::tempdir().unwrap();
-        let cfg = GrokComConfig::default();
-        let am = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg.clone()));
-        am.configure_refresher(cfg.auth_provider_command.clone(), None);
-        am.hot_swap(GrokAuth {
-            key: "expired".into(),
-            auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(idp_base.clone()),
-            oidc_client_id: Some("test-client".into()),
-            refresh_token: Some("rt".into()),
-            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
-            ..GrokAuth::test_default()
-        });
+        let am = expired_oidc_manager(dir.path(), &idp_base);
 
         let started = std::time::Instant::now();
         let result = try_noninteractive_auth_no_mint_with(&am).await;
@@ -2436,13 +2457,58 @@ mod tests {
         );
         assert!(
             elapsed < crate::http::STARTUP_AUTH_TIMEOUT,
-            "no-mint readiness auth must not engage the 60s cold-mint cap              (elapsed {elapsed:?}); readiness would block on a provider command"
+            "no-mint readiness auth must not engage the 60s cold-mint cap (elapsed {elapsed:?}); readiness would block on a provider command"
         );
         assert!(
             result.is_none(),
-            "a non-xAI expired session is no first-party fallback and no mint              runs on this path, so no auth is produced"
+            "a non-xAI expired session is no first-party fallback and no mint runs on this path, so no auth is produced"
         );
 
         server.abort();
+    }
+
+    const _: () = assert!(
+        crate::http::STARTUP_AUTH_REFRESH_TIMEOUT.as_millis()
+            < crate::auth::manager::REFRESH_LOCK_TIMEOUT.as_millis(),
+        "the startup refresh bound must fire before the lock convoy budget"
+    );
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn readiness_auth_stays_bounded_when_auth_lock_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let am = expired_oidc_manager(dir.path(), "http://127.0.0.1:1/");
+
+        let auth_path = dir.path().join("auth.json");
+        let lock_path = auth_path.with_file_name(crate::auth::manager::lock::LOCK_FILE_NAME);
+        let _held_lock =
+            crate::auth::manager::lock::test_support::hold_backdated_stale_lock(&lock_path);
+        let holder_info = std::fs::read_to_string(&lock_path).unwrap();
+
+        let started = std::time::Instant::now();
+        let _ = try_noninteractive_auth_no_mint_with(&am).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
+            "refresh must block on the held lock, not fast-return (elapsed {elapsed:?})"
+        );
+        assert!(
+            elapsed < crate::auth::manager::REFRESH_LOCK_TIMEOUT,
+            "refresh must not fall through to the lock convoy (elapsed {elapsed:?})"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).unwrap(),
+            holder_info,
+            "the live stale lock must be left untouched, never broken"
+        );
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(
+            fs2::FileExt::try_lock_exclusive(&probe).is_err(),
+            "the flock must still be held exclusively after the bounded refresh"
+        );
     }
 }

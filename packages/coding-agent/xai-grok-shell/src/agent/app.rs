@@ -401,6 +401,7 @@ pub async fn run_stdio_agent(
     // The worker runs on the tokio runtime (not the LocalSet), so it continues
     // after the LocalSet drops. The channel closes when all senders drop (agent
     // exit), and the worker drains remaining items before exiting.
+    xai_grok_telemetry::session_ctx::drain_at_process_exit().await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     result

@@ -57,6 +57,86 @@ fn ask_user_question_merge_writes_subtable_without_splatting_toolset() {
         "scalar [toolset] must be replaced so the write lands"
     );
 }
+/// The `[telemetry]` write merges only `trace_upload`: hand-written sibling
+/// telemetry keys survive, and an all-None config leaves the section alone.
+#[test]
+fn telemetry_merge_writes_trace_upload_without_splatting_section() {
+    let root_val: TomlValue =
+        toml::from_str("[telemetry]\ncustom_telemetry_flag = true\n").unwrap();
+    let mut root = root_val.as_table().unwrap().clone();
+    let telemetry = super::super::mcp::TelemetryPersistConfig {
+        trace_upload: Some(true),
+    };
+    merge_section(&mut root, "telemetry", &telemetry);
+    let section = root.get("telemetry").and_then(|v| v.as_table()).unwrap();
+    assert_eq!(
+        section.get("trace_upload").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        section
+            .get("custom_telemetry_flag")
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "hand-written sibling keys must survive the merge"
+    );
+    let reparsed = load_config_from_toml(&TomlValue::Table(root.clone()));
+    assert_eq!(reparsed.telemetry.trace_upload, Some(true));
+    let untouched_val: TomlValue = toml::from_str("[telemetry]\nevents_url = \"x\"\n").unwrap();
+    let mut untouched = untouched_val.as_table().unwrap().clone();
+    merge_section(
+        &mut untouched,
+        "telemetry",
+        &super::super::mcp::TelemetryPersistConfig::default(),
+    );
+    assert_eq!(
+        untouched
+            .get("telemetry")
+            .and_then(|v| v.get("events_url"))
+            .and_then(|v| v.as_str()),
+        Some("x"),
+        "all-None must leave the existing section untouched"
+    );
+}
+/// The `[features]` write merges only `feedback_trace_card`: hand-written
+/// sibling feature keys survive, and an all-None config leaves the section
+/// alone.
+#[test]
+fn features_merge_writes_feedback_trace_card_without_splatting_section() {
+    let root_val: TomlValue = toml::from_str("[features]\nweb_fetch = true\n").unwrap();
+    let mut root = root_val.as_table().unwrap().clone();
+    let features = super::super::mcp::FeaturesPersistConfig {
+        feedback_trace_card: Some(false),
+    };
+    merge_section(&mut root, "features", &features);
+    let section = root.get("features").and_then(|v| v.as_table()).unwrap();
+    assert_eq!(
+        section.get("feedback_trace_card").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        section.get("web_fetch").and_then(|v| v.as_bool()),
+        Some(true),
+        "hand-written sibling keys must survive the merge"
+    );
+    let reparsed = load_config_from_toml(&TomlValue::Table(root.clone()));
+    assert_eq!(reparsed.features.feedback_trace_card, Some(false));
+    let untouched_val: TomlValue = toml::from_str("[features]\nvoice_mode = false\n").unwrap();
+    let mut untouched = untouched_val.as_table().unwrap().clone();
+    merge_section(
+        &mut untouched,
+        "features",
+        &super::super::mcp::FeaturesPersistConfig::default(),
+    );
+    assert_eq!(
+        untouched
+            .get("features")
+            .and_then(|v| v.get("voice_mode"))
+            .and_then(|v| v.as_bool()),
+        Some(false),
+        "all-None must leave the existing section untouched"
+    );
+}
 #[test]
 fn transport_oauth_client_id_takes_priority_over_block() {
     let json = r#"{
@@ -98,6 +178,44 @@ fn parse_mcp_config_with_oauth_extracts_byo_client_id() {
         Some("slack-byo-client")
     );
     assert!(!oauth.contains_key("plain"));
+}
+/// The merge recurses into nested tables and only ever inserts, so a key
+/// inside `[ui.status_line]` that this build does not model is not at risk
+/// from a settings write. The status-line parser relies on this: it reports
+/// an unknown key rather than refusing to persist the section over it.
+#[test]
+fn merge_section_preserves_unmodeled_fields_inside_a_nested_table() {
+    let mut table = TomlMap::new();
+    let mut status_line = TomlMap::new();
+    status_line.insert("type".into(), TomlValue::String("builtin".into()));
+    status_line.insert("colour".into(), TomlValue::String("red".into()));
+    let mut ui = TomlMap::new();
+    ui.insert("status_line".into(), TomlValue::Table(status_line));
+    table.insert("ui".into(), TomlValue::Table(ui));
+    let cfg = crate::agent::config::UiConfig {
+        status_line: xai_grok_status_line::test_support::StatusLineConfigFixture::from_kind(
+            xai_grok_status_line::StatusLineType::Command,
+        )
+        .with_command("~/status_line.sh")
+        .into_config(),
+        ..Default::default()
+    };
+    merge_section(&mut table, "ui", &cfg);
+    let written = table
+        .get("ui")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("status_line"))
+        .and_then(|v| v.as_table())
+        .expect("the section survives");
+    assert_eq!(
+        written.get("colour").and_then(|v| v.as_str()),
+        Some("red"),
+        "a key this build does not model must survive a write of the ones it does"
+    );
+    assert_eq!(
+        written.get("type").and_then(|v| v.as_str()),
+        Some("command")
+    );
 }
 #[test]
 fn merge_section_preserves_unmodeled_fields() {

@@ -2,7 +2,7 @@ use xai_grok_telemetry::enums::PermissionMode;
 use xai_grok_telemetry::events::{
     self, PermissionClassifierSource, PermissionClassifierVerdict, PermissionDecisionPayload,
     PermissionDecisionReason, PermissionOutcome, PermissionPromptOutcome,
-    PermissionSecurityFinding,
+    PermissionPromptOutcomeDetail, PermissionSecurityFinding,
 };
 use xai_grok_workspace::permission::{
     AUTO_DENY_CONSECUTIVE_LIMIT, AUTO_DENY_TOTAL_LIMIT, Decision, PermissionEvent,
@@ -16,6 +16,8 @@ use xai_grok_workspace::permission::{
 pub(crate) struct ManagerPermissionAnalytics {
     pub manager_prompt_attempted: Option<bool>,
     pub prompt_outcome: Option<PermissionPromptOutcome>,
+    pub prompt_outcome_detail: Option<PermissionPromptOutcomeDetail>,
+    pub remember_tool_approvals: Option<bool>,
     pub decision_reason: Option<PermissionDecisionReason>,
     pub classifier_source: Option<PermissionClassifierSource>,
     pub classifier_verdict: Option<PermissionClassifierVerdict>,
@@ -81,6 +83,11 @@ pub(crate) fn manager_permission_analytics(
             .prompt_outcome
             .as_deref()
             .and_then(|s| try_enum("prompt_outcome", s)),
+        prompt_outcome_detail: ev
+            .prompt_outcome
+            .as_deref()
+            .and_then(|s| try_enum("prompt_outcome_detail", s)),
+        remember_tool_approvals: ev.remember_tool_approvals,
         decision_reason: ev
             .decision_reason
             .as_deref()
@@ -221,6 +228,8 @@ pub(crate) fn permission_decision_payload(
         subagent_type: None,
         manager_prompt_attempted: analytics.manager_prompt_attempted,
         prompt_outcome: analytics.prompt_outcome,
+        prompt_outcome_detail: analytics.prompt_outcome_detail,
+        remember_tool_approvals: analytics.remember_tool_approvals,
         decision_reason: analytics.decision_reason,
         classifier_source: analytics.classifier_source,
         classifier_verdict: analytics.classifier_verdict,
@@ -274,6 +283,7 @@ mod permission_analytics_tests {
             queue_depth: Some(1),
             security_findings: Some(vec!["opaque_shell".into()]),
             classifier_verdict: Some(classifier_verdict.into()),
+            remember_tool_approvals: Some(true),
         }
     }
 
@@ -311,6 +321,8 @@ mod permission_analytics_tests {
         let a = manager_permission_analytics(None);
         assert!(a.manager_prompt_attempted.is_none());
         assert!(a.prompt_outcome.is_none());
+        assert!(a.prompt_outcome_detail.is_none());
+        assert!(a.remember_tool_approvals.is_none());
         assert!(a.decision_reason.is_none());
         assert!(a.classifier_source.is_none());
         assert!(a.classifier_verdict.is_none());
@@ -474,6 +486,35 @@ mod permission_analytics_tests {
                 "manager prompt outcome {wire} is not mapped by PermissionPromptOutcome"
             );
         }
+    }
+
+    /// Drift guard: the outcome-detail enum is a bijection with the manager's
+    /// `PromptOutcomeKind::ALL` wire vocabulary, so a new "Always allow"
+    /// surface cannot be silently dropped from adoption analytics.
+    #[test]
+    fn prompt_outcome_detail_matches_manager_vocabulary() {
+        use std::collections::BTreeSet;
+        use xai_grok_telemetry::events::PermissionPromptOutcomeDetail;
+        use xai_grok_workspace::permission::PromptOutcomeKind;
+        let manager: BTreeSet<&str> = PromptOutcomeKind::ALL
+            .iter()
+            .map(|k| k.wire_str())
+            .collect();
+        let enum_wire: BTreeSet<String> = PermissionPromptOutcomeDetail::ALL
+            .iter()
+            .map(|d| {
+                serde_json::to_value(d)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        let enum_refs: BTreeSet<&str> = enum_wire.iter().map(String::as_str).collect();
+        assert_eq!(
+            manager, enum_refs,
+            "manager prompt-outcome wires and PermissionPromptOutcomeDetail must be identical sets"
+        );
     }
 
     /// Drift guard: the classifier-source enum is a bijection with the workspace

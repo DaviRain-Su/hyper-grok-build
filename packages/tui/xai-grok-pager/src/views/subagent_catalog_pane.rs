@@ -156,7 +156,7 @@ impl SubagentCatalogPane {
                 let spans = if let Some(d) = &desc {
                     vec![
                         Span::styled(format!("  {item}"), item_style),
-                        Span::styled(format!(" \u{2014} {d}"), desc_style),
+                        Span::styled(format!(" \u{00b7} {d}"), desc_style),
                     ]
                 } else {
                     vec![Span::styled(format!("  {item}"), item_style)]
@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_persona_description_renders_no_em_dash() {
+    fn empty_persona_description_renders_no_separator() {
         use crate::app::bundle::PersonaDetail;
         let mut pane = SubagentCatalogPane::new();
         let mut state = make_state(&["researcher"], &[], &[]);
@@ -498,7 +498,7 @@ mod tests {
         }];
         pane.sync_from_bundle(&state);
 
-        // Empty description should be filtered — single span, no dangling em-dash.
+        // Empty description should be filtered — single span, no dangling separator.
         assert_eq!(pane.entries[1].styled.spans.len(), 1);
     }
 

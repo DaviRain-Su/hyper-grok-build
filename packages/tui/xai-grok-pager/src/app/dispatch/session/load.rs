@@ -12,6 +12,7 @@ use crate::app::agent_view::AgentView;
 #[cfg(feature = "local-workspace")]
 use crate::app::app_view::ActiveView;
 use crate::app::app_view::AppView;
+use crate::app::cancel_latency::TurnEnd;
 use crate::app::dispatch::ctx::{
     SwitchCause, get_active_agent, get_active_agent_mut, switch_to_agent, with_active_agent,
 };
@@ -1081,7 +1082,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         agent.arm_late_replay_grace();
         agent.session.restore_degree = restore_degree;
         agent.session.finish_turn(&mut agent.scrollback);
-        agent.mark_turn_finished();
+        agent.mark_turn_finished(TurnEnd::Aborted);
         if let Some(placeholder_id) = agent.loading_placeholder_id.take() {
             agent.scrollback.remove_entry(placeholder_id);
         }
@@ -1150,6 +1151,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             cwd: cwd.clone(),
             last_turn_summary_gen: agent.last_turn_summary_gen,
         });
+        agent.seed_prompt_history_from_scrollback();
         agent.session.prompt_history_loading = true;
         effects.push(Effect::FetchPromptHistory {
             agent_id,
@@ -1169,7 +1171,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         effects.push(Effect::FetchBilling {
             agent_id,
             silent: true,
-            nonce: 0,
+            nonce: Default::default(),
         });
         if let Some(switch) = deferred {
             agent.session.model_switch_pending = true;
@@ -1195,7 +1197,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             cwd: agent.session.cwd.display().to_string(),
         });
         notify_session_ready(&app.notification_service, agent);
-        crate::memory_release::release_retained_memory_with("session-load-replay");
+        crate::memory_release::release_retained_memory("session-load-replay");
         note_peek_page_flip(app, agent_id, page_flip_entry);
         return effects;
     }
@@ -1215,7 +1217,7 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
         agent.pending_extensions_fetch = false;
         agent.session.prompt_history_loading = false;
         agent.session.finish_command();
-        agent.mark_turn_finished();
+        agent.mark_turn_finished(TurnEnd::Aborted);
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
         agent.pending_first_prompt = None;

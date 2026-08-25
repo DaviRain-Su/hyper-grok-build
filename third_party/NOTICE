@@ -55,7 +55,6 @@ Path:       third_party/nfsserve/
 License:    BSD 3-Clause
 License file: third_party/nfsserve/LICENSE
 Upstream:   https://github.com/huggingface/nfsserve (v0.11.0)
-            via Turso agentfs vendored fork (cli/src/nfsserve/)
 Copyright:  Copyright (c) 2023, XetData; Copyright (c) 2025, Hugging Face
 
 --------------------------------------------------------------------------------

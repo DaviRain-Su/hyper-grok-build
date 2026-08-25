@@ -21,6 +21,7 @@ tracing = { workspace = true }
 urlencoding = { workspace = true }
 xai-grok-config-types = { workspace = true }
 xai-grok-models = { workspace = true }
+xai-grok-status-line = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-tty-utils = { workspace = true }
 

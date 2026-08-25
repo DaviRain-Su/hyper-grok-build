@@ -341,7 +341,7 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
         Some(SessionEvent::TurnFailed { error, .. }) => {
             assert_eq!(
                 error,
-                "Server error (500) \u{2014} Something went wrong on our side. Wait a minute and send again."
+                "Server error (500): Something went wrong on our side. Wait a minute and send again."
             );
         }
         other => panic!("expected TurnFailed, got {other:?}"),

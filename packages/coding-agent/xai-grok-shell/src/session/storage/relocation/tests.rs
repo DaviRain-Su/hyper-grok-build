@@ -172,7 +172,7 @@ fn durable_remove_and_atomic_no_replace_are_inert_building_blocks() {
 fn request(id: &str, source: &str, target: &str, generation: u64) -> RelocationRequest {
     RelocationRequest {
         session_id: id.into(),
-        nonce: "nonce-1".into(),
+        nonce: format!("n-{}", std::process::id()),
         source_cwd: source.into(),
         target_cwd: target.into(),
         cwd_generation: generation,
@@ -287,7 +287,7 @@ fn commit_and_rollback_terminal_proofs_allow_retries_and_second_relocation() {
     assert!(!journal::journal_path(temp.path(), "again").exists());
     storage.finalize_terminal(&lease, &committed).unwrap();
     let mut request = request("again", "/target", "/third", 2);
-    request.nonce = "nonce-2".into();
+    request.nonce = format!("n2-{}", std::process::id());
     let next = storage.stage_and_publish(&lease, request).unwrap();
     assert!(matches!(
         storage.rollback(&lease, &staged),

@@ -419,6 +419,7 @@ fn list_cached_skill_entries(root: &Path, manifest: &BundleManifest) -> Vec<Stri
     names.sort();
     names
 }
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;

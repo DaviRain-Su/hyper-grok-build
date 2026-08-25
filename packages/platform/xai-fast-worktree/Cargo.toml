@@ -14,13 +14,16 @@ name = "pool-perf-bench"
 path = "src/bin/pool_perf_bench.rs"
 required-features = ["bench"]
 
+[[bin]]
+name = "nfs-create-latency-bench"
+path = "src/bin/nfs_create_latency_bench.rs"
+required-features = ["bench"]
+
 [features]
 default-bazel = ["metadata"]
-bench = ["dep:tempfile"]
-# SQLite metadata DB for worktree tracking. On Linux, serde/serde_json are
-# already pulled in unconditionally (overlay metadata), so this feature
-# effectively only gates rusqlite there.
-metadata = ["dep:rusqlite", "dep:serde", "dep:serde_json", "dep:xai-sqlite-journal"]
+bench = []
+# SQLite metadata DB for worktree tracking.
+metadata = ["dep:rusqlite", "dep:xai-sqlite-journal"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -34,15 +37,16 @@ gix = { workspace = true, features = ["status", "parallel"] }
 gix-status = { version = "0.30.0" }
 globset = { workspace = true }
 ignore = { workspace = true }
+libc = { workspace = true }
 num_cpus = { workspace = true }
 
 reflink-copy = { workspace = true }
 rapidhash = "4.2.0"
 rusqlite = { version = "0.37", features = ["bundled"], optional = true }
-serde = { workspace = true, features = ["derive"], optional = true }
-serde_json = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 tokio-util = { workspace = true }
-tempfile = { workspace = true, optional = true }
+tempfile = { workspace = true }
 tracing = { workspace = true }
 xai-gix-status = { workspace = true }
 xai-sqlite-journal = { workspace = true, optional = true }

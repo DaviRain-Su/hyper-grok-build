@@ -460,6 +460,7 @@ async fn planner_fork_inherits_parent_model() {
             // configured model would flow through and the assertion below would
             // catch the regression.
             let actor = StdArc::new(SessionActor {
+                status_wake: Default::default(),
                 goal_role_models: crate::session::GoalRoleModelConfig {
                     planner: crate::agent::config::GoalRoleModelChoice::Explicit(
                         crate::util::config::GoalRoleModel {

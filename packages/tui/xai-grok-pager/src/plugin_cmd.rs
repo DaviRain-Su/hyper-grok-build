@@ -1507,8 +1507,8 @@ fn marketplace_update_with_cache_root(
     if refreshed == 0 && errors.is_empty() {
         if let Some(filter) = name {
             if name_matched {
-                // Source exists but is local — nothing to sync.
-                println!("Source \"{filter}\" is local — nothing to sync.");
+                // Source exists but is local, nothing to sync.
+                println!("Source \"{filter}\" is local, nothing to sync.");
             } else {
                 bail!("Marketplace source \"{filter}\" not found.");
             }

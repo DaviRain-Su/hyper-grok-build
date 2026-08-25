@@ -26,7 +26,7 @@ You can also set always-approve per session on `session/new`:
 }
 ```
 
-Interactive TUI users typically leave the default ask mode (or use auto). See [Permissions and safety](22-permissions-and-safety.md).
+Interactive TUI users typically keep the default mode (or pick ask or auto explicitly). See [Permissions and safety](22-permissions-and-safety.md).
 
 ---
 
