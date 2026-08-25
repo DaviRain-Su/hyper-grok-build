@@ -4,6 +4,14 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.8-r2] — 2026-08-25
+
+### Fixed
+- **Release build** — declare `xai-grok-extra-ca` on `xai-grok-voice`. The 1.0.8
+  merge kept Hyper's voice `Cargo.toml` (Codex Live extras) but took upstream
+  STT/`voice-probe` sources that call `xai_grok_extra_ca`, so every
+  `release-dist` job failed with E0433.
+
 ## [1.0.8-r1] — 2026-08-25
 
 ### Changed

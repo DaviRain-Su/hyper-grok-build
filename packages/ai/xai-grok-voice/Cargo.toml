@@ -21,6 +21,9 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
+# Shared rustls ClientConfig (native + webpki + EXTRA_CA). Upstream 1.0.8 STT
+# streaming and `voice-probe` call this instead of installing rustls locally.
+xai-grok-extra-ca = { workspace = true }
 # Sanctioned TTY detach for the capture/playback subprocesses (Linux system
 # recorders/players, macOS `__mic-capture`/`__speaker-play` self-exec helpers)
 # — workspace rule: never spawn a raw `std::process::Command`.
