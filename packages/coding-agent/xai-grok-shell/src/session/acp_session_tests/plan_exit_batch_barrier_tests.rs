@@ -188,7 +188,9 @@ fn bash_call(id: &str) -> ToolCallResponse {
         kind: "function".to_string(),
         function: crate::sampling::types::ToolCallFunction::new(
             "run_terminal_cmd",
-            r#"{"command":"echo mixed-batch-reject","description":"probe mixed-batch permission cancel"}"#,
+            // Must be a command the manager still prompts for (`echo` is
+            // safe-listed and auto-allows).
+            r#"{"command":"./probe-mixed-batch-reject.sh","description":"probe mixed-batch permission cancel"}"#,
         ),
     }
 }

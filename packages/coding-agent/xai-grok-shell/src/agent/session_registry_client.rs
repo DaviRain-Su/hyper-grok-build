@@ -37,8 +37,6 @@ pub struct RegisterRequest {
     pub parent_session_id: Option<String>,
     // --- Subagent-specific fields (optional, backward-compatible) ---
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_persona: Option<String>,
@@ -492,7 +490,6 @@ mod tests {
             hostname: None,
             device_id,
             parent_session_id: None,
-            session_kind: None,
             subagent_type: None,
             subagent_persona: None,
             subagent_role: None,
@@ -630,7 +627,6 @@ mod tests {
             hostname: None,
             device_id: None,
             parent_session_id: None,
-            session_kind: None,
             subagent_type: None,
             subagent_persona: None,
             subagent_role: None,

@@ -69,6 +69,19 @@ impl NfsWorktreeClient {
     pub fn status_for_dir(&self, _dest: &Path) -> Option<NfsStatusView> {
         None
     }
+    pub fn source_is_linked_local_view(&self, _source: &Path) -> bool {
+        false
+    }
+}
+impl NfsStatusView {
+    #[must_use]
+    pub fn is_linked_local_view(&self) -> bool {
+        false
+    }
+}
+#[must_use]
+pub fn source_is_linked_local_view(_opts: &NfsWorktreeOpts, _source: &Path) -> bool {
+    false
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

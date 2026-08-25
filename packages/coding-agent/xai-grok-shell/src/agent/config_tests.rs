@@ -1843,7 +1843,7 @@ fn compaction_mode_precedence_env_over_config_over_remote_over_default() {
     );
     assert_eq!(
         resolve_compaction_mode_from(None, None, None),
-        CompactionMode::Summary
+        CompactionMode::Segments(xai_chat_state::CompactionDetail::default())
     );
 }
 /// Detail shares the env>config>remote>default combinator that the mode

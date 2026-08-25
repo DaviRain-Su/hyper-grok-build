@@ -1171,6 +1171,7 @@ pub(crate) async fn run_shell_child(
     crate::waterfall::mark(&request.id, crate::waterfall::stage::SESSION_SPAWN);
     spawn_timer.record(SubagentSpawnPhase::SpawnPrepare, start.elapsed());
     let bootstrap_started_at = std::time::Instant::now();
+    let pins = ctx.compaction_pins_for_child(&definition.user_message_template);
     let spawn_result = session::spawn_session_on_thread(
         child_session_info,
         gateway.clone(),
@@ -1205,10 +1206,10 @@ pub(crate) async fn run_shell_child(
         xai_grok_workspace::permission::ClientType::Generic,
         ctx.resolve_auto_compact_threshold_percent(&subagent_model_id),
         xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
-        xai_chat_state::CompactionMode::Summary,
+        pins.mode,
         ctx.resolve_compaction_verbatim_input(),
         ctx.resolve_compaction_tool_choice(),
-        false,
+        pins.two_pass,
         None,
         None,
         std::sync::Arc::new(parking_lot::Mutex::new(

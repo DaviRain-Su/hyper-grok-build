@@ -1019,6 +1019,11 @@ pub trait StorageAdapter: Send + Sync {
         session_title: String,
     ) -> io::Result<bool>;
 
+    /// Stamp `session_kind` only if the session has none yet, atomically
+    /// under the summary lock. A kind already on disk (crash-recovered dir,
+    /// concurrent writer) is preserved.
+    async fn set_session_kind_if_absent(&self, info: &Info, kind: String) -> io::Result<()>;
+
     /// Clear a manual `/rename` pin (`/rename --auto`). Sets
     /// `title_is_manual = false` and, when a pin was present, blanks
     /// `generated_title` and `session_summary` so `display_title()` is

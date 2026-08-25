@@ -557,6 +557,7 @@ pub struct InstrumentationTimer {
     start: Instant,
     fields: Vec<(String, Value)>,
     subphase: Option<crate::startup::Subphase>,
+    subphase_span: Option<tracing::Span>,
     mode: InstrumentationMode,
     _span_guard: Option<tracing::span::EnteredSpan>,
 }
@@ -568,6 +569,7 @@ impl InstrumentationTimer {
             start: Instant::now(),
             fields: Vec::new(),
             subphase: None,
+            subphase_span: None,
             mode: mode(),
             _span_guard: None,
         }
@@ -583,6 +585,7 @@ impl InstrumentationTimer {
             start: Instant::now(),
             fields: Vec::new(),
             subphase: None,
+            subphase_span: None,
             mode,
             _span_guard: span_guard,
         }
@@ -602,6 +605,10 @@ impl InstrumentationTimer {
     /// (while startup is active), so producer to field is checked at compile time.
     pub fn with_subphase(&mut self, sp: crate::startup::Subphase) -> &mut Self {
         self.subphase = Some(sp);
+        // Gated like the drop-time field mirror: a span only when recording is.
+        if self.subphase_span.is_none() && crate::startup::is_active() {
+            self.subphase_span = Some(crate::startup::subphase_span(sp));
+        }
         self
     }
 }
@@ -609,6 +616,8 @@ impl InstrumentationTimer {
 impl Drop for InstrumentationTimer {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed();
+        // Close at the elapsed stamp, so span duration and `*_ms` agree.
+        drop(self.subphase_span.take());
         // Mirror into `unified.jsonl` while startup is active, so a slow-launch
         // report needs no env vars or repro; the first usable session latches this off.
         if crate::startup::is_active() {

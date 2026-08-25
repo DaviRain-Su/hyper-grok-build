@@ -12,11 +12,11 @@
 //! decided_at = 1780000000
 //! ```
 //!
-//! Trust **cascades to subdirectories**: if a folder is recorded trusted, any
-//! path at or below it is considered trusted, unless a nearer (more specific)
-//! folder records its own decision — the longest matching path prefix wins, so
-//! an explicit child untrust overrides an ancestor's trust. The persisted file
-//! is written atomically with owner-only (`0600`) permissions.
+//! A recorded grant covers that workspace key and descendants that still
+//! resolve to the same git root ([`workspace_key`]). A nearer recorded
+//! decision wins. Other workspace keys under the path — including nested git
+//! roots — are not covered. The persisted file is written atomically with
+//! owner-only (`0600`) permissions.
 //!
 //! The store is rooted at [`xai_grok_config::user_grok_home`] — the **Option**
 //! home that resolves to `None` (rather than a cwd-relative `./.grok`) when
@@ -40,7 +40,7 @@ pub const TRUST_FILE_NAME: &str = "trusted_folders.toml";
 /// A single folder's trust record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderTrust {
-    /// Whether the folder (and its subdirectories) is trusted.
+    /// Whether the folder (and same-repo descendants) is trusted.
     pub trusted: bool,
     /// Unix timestamp (seconds) of when the decision was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,38 +120,41 @@ impl TrustStore {
         Some(user_grok_home?.join(TRUST_FILE_NAME))
     }
 
-    /// Whether `workspace_key` is trusted, per the MOST-SPECIFIC recorded
-    /// decision (longest matching path prefix).
+    /// Whether `key` is trusted, per the MOST-SPECIFIC recorded decision that
+    /// applies to this workspace.
     ///
     /// This is the SHARED folder-trust gate: the most-specific-wins semantics
     /// apply to ALL folder-trust surfaces (repo-local MCP and LSP servers, and
     /// project hooks), not just hooks.
     ///
-    /// Trust cascades to subdirectories: a trusted parent folder trusts all of
-    /// its children. When both an ancestor and a nearer folder are recorded, the
-    /// longest matching prefix wins, so an explicit child untrust overrides an
-    /// ancestor's trust instead of being undone by the cascade. The query key is
-    /// canonicalized here, so callers need not pre-canonicalize (symmetric with
-    /// [`Self::set_trusted`]).
+    /// A grant covers the recorded key and descendants that share its
+    /// [`workspace_key`] (one git root). When both an ancestor and a nearer
+    /// folder are recorded, the longest matching prefix wins, so an explicit
+    /// child untrust overrides an ancestor's trust. A descendant with its own
+    /// workspace key is not covered. The query key is canonicalized here, so
+    /// callers need not pre-canonicalize (symmetric with [`Self::set_trusted`]).
     ///
     /// Over-broad keys are ignored on read (fail closed): an empty/relative
     /// key, the filesystem root, or the user's home directory are never honored
-    /// even if such a record reaches the file via hand-edit or migration — each
-    /// would otherwise trust huge swaths of the filesystem through the cascade.
+    /// even if such a record reaches the file via hand-edit or migration.
     /// See [`is_unsafe_trust_root`].
-    pub fn is_trusted(&self, workspace_key: &Path) -> bool {
-        let workspace_key = canonicalize_or_owned(workspace_key);
-        // Among all recorded ancestor folders (including the key itself), the
-        // longest match decides. Canonical, code-produced keys are normalized, so
-        // that longest match is unique. A hand-edited store could hold
-        // non-canonical aliases (e.g. `/a/b` vs `/a/b/`) that tie on depth; on a
-        // tie we require EVERY tied record to be trusted, so a contradictory edit
+    pub fn is_trusted(&self, key: &Path) -> bool {
+        let query = canonicalize_or_owned(key);
+        let query_id = workspace_id(&query);
+        // Among recorded folders that cover this workspace, the longest match
+        // decides. Canonical, code-produced keys are normalized, so that
+        // longest match is unique. A hand-edited store could hold non-canonical
+        // aliases (e.g. `/a/b` vs `/a/b/`) that tie on depth; on a tie we
+        // require EVERY tied record to be trusted, so a contradictory edit
         // fails closed.
         let mut best_depth: Option<usize> = None;
         let mut trusted = false;
         for (folder, record) in &self.doc.folders {
             let folder = Path::new(folder);
-            if is_unsafe_trust_root(folder) || !workspace_key.starts_with(folder) {
+            if is_unsafe_trust_root(folder) || !query.starts_with(folder) {
+                continue;
+            }
+            if workspace_id(folder) != query_id {
                 continue;
             }
             let depth = folder.components().count();
@@ -424,15 +427,6 @@ pub fn is_home_dir(path: &Path) -> bool {
 /// Whether `key` is too broad to ever be a safe trust root — refused on write
 /// and ignored on read (fail closed).
 ///
-/// Each case would trust huge swaths of the filesystem via the subdirectory
-/// cascade in [`TrustStore::is_trusted`]:
-/// - **empty / relative** — the empty path is a prefix of every path, so it
-///   would trust everything (`is_absolute()` is false for these);
-/// - **filesystem root** (`/`) — `parent()` is `None`, and the root is a prefix
-///   of every absolute path, so it would trust the entire filesystem;
-/// - **home directory** — would trust every repository checked out under
-///   `$HOME`.
-///
 /// Also consumed by [`crate::folder_trust`] as the "key can never be recorded"
 /// signal: such a key can't be durably gated, so it resolves Trusted instead of
 /// prompting on a decision that could never persist. Public because the shell's
@@ -440,6 +434,11 @@ pub fn is_home_dir(path: &Path) -> bool {
 /// for a key the store can never grant would be unliftable.
 pub fn is_unsafe_trust_root(key: &Path) -> bool {
     !key.is_absolute() || key.parent().is_none() || is_home_dir(key)
+}
+
+/// `workspace_key` of the nearest existing ancestor (git2 discover fails on a missing path).
+fn workspace_id(path: &Path) -> PathBuf {
+    workspace_key(path.ancestors().find(|p| p.exists()).unwrap_or(path))
 }
 
 fn canonicalize_or_owned(path: &Path) -> PathBuf {
@@ -861,13 +860,13 @@ mod tests {
         let repo = tmp.path().join("repo");
         let child = repo.join("crates").join("inner");
         std::fs::create_dir_all(&child).unwrap();
+        git2::Repository::init(&repo).unwrap();
         let repo_key = canonicalize_or_owned(&repo);
         let child_key = canonicalize_or_owned(&child);
 
         let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
         store.set_trusted(&repo_key).unwrap();
 
-        // Child dir is trusted because an ancestor (the repo root) is trusted.
         assert!(store.is_trusted(&child_key));
         // A sibling outside the trusted root is NOT trusted.
         let sibling = canonicalize_or_owned(tmp.path()).join("other-repo");
@@ -883,6 +882,89 @@ mod tests {
     }
 
     #[test]
+    fn parent_grant_does_not_cover_nested_git_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("work");
+        let nested = parent.join("evil");
+        std::fs::create_dir_all(&nested).unwrap();
+        git2::Repository::init(&nested).unwrap();
+        let parent_key = canonicalize_or_owned(&parent);
+        let nested_key = canonicalize_or_owned(&nested);
+
+        let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
+        store.set_trusted(&parent_key).unwrap();
+
+        assert!(
+            store.is_trusted(&parent_key),
+            "the granted folder stays trusted"
+        );
+        assert!(
+            !store.is_trusted(&nested_key),
+            "a nested git root must not inherit a parent grant"
+        );
+    }
+
+    #[test]
+    fn git_parent_grant_does_not_cover_nested_git_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("work");
+        let nested = parent.join("evil");
+        let sibling = parent.join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        git2::Repository::init(&parent).unwrap();
+        git2::Repository::init(&nested).unwrap();
+        let parent_key = canonicalize_or_owned(&parent);
+        let nested_key = canonicalize_or_owned(&nested);
+        let sibling_key = canonicalize_or_owned(&sibling);
+
+        let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
+        store.set_trusted(&parent_key).unwrap();
+
+        assert!(
+            store.is_trusted(&parent_key),
+            "the granted folder stays trusted"
+        );
+        assert!(
+            store.is_trusted(&sibling_key),
+            "a same-repo subdirectory is still covered"
+        );
+        assert!(
+            !store.is_trusted(&nested_key),
+            "a nested git root must not inherit a parent grant"
+        );
+        assert!(
+            !store.is_trusted(&nested_key.join("src")),
+            "a descendant of the nested git root must not inherit a parent grant"
+        );
+    }
+
+    #[test]
+    fn parent_grant_does_not_cover_nongit_descendant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("work");
+        let child = parent.join("tarball");
+        std::fs::create_dir_all(&child).unwrap();
+        let parent_key = canonicalize_or_owned(&parent);
+        let child_key = canonicalize_or_owned(&child);
+
+        // Plant a dummy .git because libgit2 discover ignores GIT_CEILING_DIRECTORIES.
+        std::fs::write(tmp.path().join(".git"), "gitdir: /nonexistent\n").unwrap();
+
+        let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
+        store.set_trusted(&parent_key).unwrap();
+
+        assert!(
+            store.is_trusted(&parent_key),
+            "the granted folder stays trusted"
+        );
+        assert!(
+            !store.is_trusted(&child_key),
+            "a non-git descendant must not inherit a parent grant"
+        );
+    }
+
+    #[test]
     fn most_specific_decision_wins_over_ancestor_cascade() {
         // An explicit child untrust must override a trusted ancestor (the bug
         // where an untrust was undone by the cascade on the next reload). The
@@ -894,6 +976,7 @@ mod tests {
         let other = parent.join("other");
         std::fs::create_dir_all(&child).unwrap();
         std::fs::create_dir_all(&other).unwrap();
+        git2::Repository::init(&parent).unwrap();
         let parent_key = canonicalize_or_owned(&parent);
         let child_key = canonicalize_or_owned(&child);
         let other_key = canonicalize_or_owned(&other);
@@ -931,6 +1014,7 @@ mod tests {
         let parent = tmp.path().join("parent");
         let child = parent.join("child");
         std::fs::create_dir_all(&child).unwrap();
+        git2::Repository::init(&parent).unwrap();
         let parent_key = canonicalize_or_owned(&parent);
         let child_key = canonicalize_or_owned(&child);
 

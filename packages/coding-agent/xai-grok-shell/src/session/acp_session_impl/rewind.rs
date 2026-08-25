@@ -466,6 +466,12 @@ impl SessionActor {
                 );
             }
 
+            // The rewind may have dropped failed-server reminders with the
+            // truncated turns; re-arm so still-down servers re-announce
+            // (see rearm_failed_server_announcements for why connected
+            // fingerprints stay latched).
+            self.rearm_failed_server_announcements().await;
+
             // Append a RewindMarker to updates.jsonl so the replay pipeline can
             // handle timeline branching (updates.jsonl is append-only).
             self.persist_xai_update_only(XaiSessionUpdate::RewindMarker {

@@ -108,9 +108,27 @@ macro_rules! opaque_id {
     };
 }
 
+/// Prefix reserved for hub-internal session-owner keys (bot-relay rotate lock).
+/// Rejected from client-supplied [`SessionId`] values so `session.open` cannot
+/// occupy those keys.
+pub const HUB_RESERVED_SESSION_PREFIX: &str = "__hub:";
+
+fn validate_session_id(s: &str) -> Result<(), IdError> {
+    if s.starts_with(HUB_RESERVED_SESSION_PREFIX) {
+        return Err(IdError::ReservedPrefix {
+            value: s.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 opaque_id!(
     /// Session identifier. Service-issued or carried from a JWT claim.
-    SessionId
+    ///
+    /// The lexical prefix [`HUB_RESERVED_SESSION_PREFIX`] is reserved for
+    /// hub-internal locks and rejected from client-supplied values.
+    SessionId,
+    extra_validator = validate_session_id
 );
 opaque_id!(
     /// User identifier (the JWT `sub` claim).

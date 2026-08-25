@@ -72,6 +72,26 @@ impl acp::Client for RecordingClient {
     }
 }
 
+async fn assert_reserved_session_kind_is_rejected(
+    conn: &acp::ClientSideConnection,
+    cwd: &std::path::Path,
+) {
+    let error = tokio::time::timeout(
+        RPC_TIMEOUT,
+        conn.new_session(
+            acp::NewSessionRequest::new(cwd.to_path_buf()).meta(
+                json!({ "modelId": "test-model", "sessionKind": "subagent" })
+                    .as_object()
+                    .cloned(),
+            ),
+        ),
+    )
+    .await
+    .expect("reserved session/new timed out")
+    .expect_err("client must not mint subagent session kinds");
+    assert_eq!(error.code, acp::ErrorCode::InvalidParams);
+}
+
 async fn resident_sessions(conn: &acp::ClientSideConnection) -> u64 {
     let resp = ext_method(conn, "x.ai/debug/agent", json!({})).await;
     resp["result"]["registries"]["sessions"]
@@ -429,6 +449,7 @@ fn acp_session_setup_conformance() {
             capabilities.resume.is_some() && capabilities.close.is_some(),
             "clients may not call resume/close unless advertised, got {capabilities:?}"
         );
+        assert_reserved_session_kind_is_rejected(&conn, &cwd).await;
 
         let session_id = new_session(&conn, &cwd).await;
         prompt_turn(&conn, &session_id, "remember this turn").await;

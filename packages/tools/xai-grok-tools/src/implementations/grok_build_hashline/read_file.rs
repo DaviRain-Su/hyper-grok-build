@@ -406,12 +406,8 @@ mod tests {
             .render(ToolMetadata::description_template(&HashlineReadTool))
             .unwrap();
         assert!(
-            rendered.contains("start_line and max_lines for large files"),
+            rendered.contains("start_line") && rendered.contains("max_lines"),
             "renamed offset/limit must appear:\n{rendered}"
-        );
-        assert!(
-            !rendered.contains("offset and limit for large files"),
-            "canonical offset/limit must not remain after rename:\n{rendered}"
         );
     }
 

@@ -142,13 +142,6 @@ pub fn scrollbar_grab_zone(track: Rect) -> Rect {
     }
 }
 
-/// Whether the view is at the bottom (following mode position).
-#[allow(dead_code)] // Useful helper, kept for future use
-pub fn is_at_bottom(total_lines: u16, viewport_lines: u16, offset: u16) -> bool {
-    let max_offset = total_lines.saturating_sub(viewport_lines);
-    offset >= max_offset
-}
-
 /// Result of mapping a scrollbar click/drag position to a scroll offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollbarClickResult {
@@ -409,15 +402,6 @@ mod tests {
         assert!(needs_scrollbar(100, 10)); // Content > viewport
         assert!(!needs_scrollbar(10, 10)); // Content == viewport
         assert!(!needs_scrollbar(5, 10)); // Content < viewport
-    }
-
-    #[test]
-    fn test_is_at_bottom() {
-        // total=100, viewport=10 -> max_offset=90
-        assert!(is_at_bottom(100, 10, 90)); // At bottom
-        assert!(is_at_bottom(100, 10, 95)); // Past bottom (clamped)
-        assert!(!is_at_bottom(100, 10, 89)); // One line above bottom
-        assert!(!is_at_bottom(100, 10, 0)); // At top
     }
 
     #[test]

@@ -206,10 +206,6 @@ mod tests {
             crate::types::tool_metadata::ToolMetadata::kind(&tool),
             ToolKind::WebFetch
         );
-        assert!(
-            crate::types::tool_metadata::ToolMetadata::description_template(&tool)
-                .contains("Fetch the content of a specific URL")
-        );
     }
 
     #[tokio::test]

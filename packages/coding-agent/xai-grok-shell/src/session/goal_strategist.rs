@@ -1221,12 +1221,10 @@ mod tests {
             "placeholders must be substituted"
         );
         assert!(prompt.contains(&*strategy.to_string_lossy()));
-        assert!(prompt.contains("OBJECTIVE:\ndo X"));
+        assert!(prompt.contains("do X"));
         // The session traces dir is substituted in; the strategist reads the
         // traces itself rather than receiving a gaps/diff packet.
         assert!(prompt.contains(&*plan.parent().unwrap().to_string_lossy()));
-        assert!(!prompt.contains("VERIFIER GAPS:"));
-        assert!(!prompt.contains("REPO CHANGES"));
     }
 
     use crate::session::goal_role_tools::tests::assert_no_tool_placeholders;

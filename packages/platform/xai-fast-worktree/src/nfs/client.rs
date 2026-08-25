@@ -70,6 +70,25 @@ pub struct NfsStatusView {
     pub transport: Option<String>,
 }
 
+impl NfsStatusView {
+    /// Status `dir=` is exact. One mount with kind=worktree + source_mode=local.
+    #[must_use]
+    pub fn is_linked_local_view(&self) -> bool {
+        let Some(raw) = self.raw.as_ref() else {
+            return false;
+        };
+        let Some(mounts) = raw.get("mounts").and_then(|v| v.as_array()) else {
+            return false;
+        };
+        if mounts.len() != 1 {
+            return false;
+        }
+        let m = &mounts[0];
+        m.get("kind").and_then(|v| v.as_str()) == Some("worktree")
+            && m.get("source_mode").and_then(|v| v.as_str()) == Some("local")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NfsAdopted {
     pub dest: PathBuf,
@@ -300,6 +319,13 @@ impl NfsWorktreeClient {
             }),
             _ => None,
         }
+    }
+
+    /// Exact registered linked local-codebase view (kind+source_mode).
+    /// Old daemons / missing kind / non-exact dir → false.
+    pub fn source_is_linked_local_view(&self, source: &Path) -> bool {
+        self.status_for_dir(source)
+            .is_some_and(|v| v.is_linked_local_view())
     }
 
     fn interpret_create_ok(
@@ -772,6 +798,54 @@ mod tests {
     use super::super::mount_table::dest_is_mountpoint;
     use super::*;
     use crate::{CreationMode, IgnoredFilesMode, WorkingTreeMode};
+
+    #[test]
+    fn linked_local_status_requires_kind_and_source_mode() {
+        let miss = NfsStatusView {
+            hydration_percent: None,
+            raw: Some(serde_json::json!({"mounts":[{"mountpoint":"/m"}]})),
+            port: None,
+            mount_id: None,
+            transport: None,
+        };
+        assert!(!miss.is_linked_local_view(), "old daemon missing kind");
+        let store = NfsStatusView {
+            hydration_percent: None,
+            raw: Some(serde_json::json!({
+                "mounts":[{"kind":"store","source_mode":"remote"}]
+            })),
+            port: None,
+            mount_id: None,
+            transport: None,
+        };
+        assert!(!store.is_linked_local_view());
+        let worktree = NfsStatusView {
+            hydration_percent: None,
+            raw: Some(serde_json::json!({"mounts":[{"kind":"worktree"}]})),
+            port: None,
+            mount_id: None,
+            transport: None,
+        };
+        assert!(!worktree.is_linked_local_view(), "non-linked worktree");
+        let local = NfsStatusView {
+            hydration_percent: None,
+            raw: Some(serde_json::json!({
+                "mounts":[{"kind":"worktree","source_mode":"local"}]
+            })),
+            port: None,
+            mount_id: None,
+            transport: None,
+        };
+        assert!(local.is_linked_local_view());
+        let empty = NfsStatusView {
+            hydration_percent: None,
+            raw: Some(serde_json::json!({"mounts":[]})),
+            port: None,
+            mount_id: None,
+            transport: None,
+        };
+        assert!(!empty.is_linked_local_view(), "subdir / miss");
+    }
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::{AtomicUsize, Ordering};

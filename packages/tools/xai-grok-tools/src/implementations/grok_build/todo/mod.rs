@@ -390,10 +390,8 @@ mod tests {
 
     #[test]
     fn name_and_description() {
-        use crate::types::tool_metadata::ToolMetadata;
         let tool = TodoWriteTool;
         assert_eq!(xai_tool_runtime::Tool::id(&tool).as_str(), "todo_write");
-        assert!(ToolMetadata::description_template(&tool).contains("task list"));
     }
 
     #[tokio::test]

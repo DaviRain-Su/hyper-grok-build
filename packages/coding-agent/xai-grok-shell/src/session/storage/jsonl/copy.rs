@@ -413,6 +413,17 @@ impl JsonlStorageAdapter {
             &self.announcement_state_file(source_info),
             &self.announcement_state_file(target_info),
         )?;
+        // A truncating or filtering copy can drop the failure announcement
+        // from the child's context while the copied state still marks it
+        // announced, permanently muting it. End the episodes so still-down
+        // servers re-announce — the same rule as the rewind/compaction
+        // re-arm. Connected fingerprints stay latched: connected tools
+        // remain visible in the tool definitions regardless.
+        if announcement_state_copied
+            && (options.target_prompt_index.is_some() || options.fork_filter)
+        {
+            clear_announced_failure_episodes(&self.announcement_state_file(target_info))?;
+        }
 
         // Title-refresh watermark: only a managed parent (one with a watermark)
         // passes managed state to the child, so a fork of a pre-feature session
@@ -568,6 +579,26 @@ fn fork_summary(
             source.last_recap
         },
     }
+}
+
+/// Remove `announced_failed_servers` from a copied `announcement_state.json`,
+/// preserving every other field (including ones this build doesn't know).
+/// A file that doesn't parse is left as copied: the next persist rewrites it.
+fn clear_announced_failure_episodes(path: &Path) -> io::Result<()> {
+    let bytes = std::fs::read(path)?;
+    let Ok(mut state) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Ok(());
+    };
+    let Some(fields) = state.as_object_mut() else {
+        return Ok(());
+    };
+    if fields.remove("announced_failed_servers").is_none() {
+        return Ok(());
+    }
+    crate::session::storage::write_bytes_atomic(
+        path,
+        &serde_json::to_vec(&state).map_err(invalid_data)?,
+    )
 }
 
 /// Copy one optional sidecar file (plan, signals, tool state, ...) when

@@ -2775,9 +2775,12 @@ fn expand_build_card_still_loads_detail() {
         "expected LoadCardDetail, got {effects:?}"
     );
 }
-/// Welcome-screen variants of the conversation-card expand exemption.
+/// Welcome-screen variants of the conversation-card expand exemption, plus
+/// the welcome card-detail round trip: the expand stamps the welcome
+/// picker's identity, a stale-seq result is dropped, and a current one
+/// lands on the welcome entry.
 #[test]
-fn welcome_expand_conversation_card_skips_detail_load() {
+fn welcome_expand_skips_conversation_and_routes_build_card_detail() {
     let mut app = test_app();
     app.session_picker_entries = Some(vec![make_conversation_entry("conv-exp-w1")]);
     let effects = dispatch(
@@ -2804,9 +2807,67 @@ fn welcome_expand_conversation_card_skips_detail_load() {
         },
         &mut app,
     );
-    assert!(
-        matches!(&effects[..], [Effect::LoadCardDetail { .. }]),
-        "expected LoadCardDetail, got {effects:?}"
+    let [
+        Effect::LoadCardDetail {
+            host: SessionPickerHost::Welcome,
+            generation,
+            session_id,
+            seq,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("expected a welcome-stamped LoadCardDetail, got {effects:?}");
+    };
+    assert_eq!(*generation, app.session_picker_generation);
+    assert_eq!(*seq, app.session_picker_detail_seq);
+    assert_eq!(session_id, "local-exp-w1");
+    let stamped_seq = *seq;
+    let _ = dispatch(Action::CycleSessionSourceFilter, &mut app);
+    let detail = crate::app::app_view::CardDetail {
+        turn_count: 3,
+        tool_call_count: 1,
+        first_prompt_preview: "hello".into(),
+    };
+    let welcome_detail = |generation, seq, detail| {
+        Action::TaskComplete(TaskResult::CardDetailLoaded {
+            host: SessionPickerHost::Welcome,
+            generation,
+            source: "local".into(),
+            session_id: "local-exp-w1".into(),
+            seq,
+            detail,
+        })
+    };
+    let welcome_card_detail = |app: &AppView| {
+        app.session_picker_entries.as_ref().and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.id == "local-exp-w1")
+                .and_then(|entry| entry.card_detail.as_ref().map(|d| d.turn_count))
+        })
+    };
+    let _ = dispatch(
+        welcome_detail(app.session_picker_generation, stamped_seq, detail.clone()),
+        &mut app,
+    );
+    assert_eq!(
+        welcome_card_detail(&app),
+        None,
+        "a stale-seq welcome card detail must be dropped"
+    );
+    let _ = dispatch(
+        welcome_detail(
+            app.session_picker_generation,
+            app.session_picker_detail_seq,
+            detail,
+        ),
+        &mut app,
+    );
+    assert_eq!(
+        welcome_card_detail(&app),
+        None,
+        "Headless must not resurrect a cleared Grok row from card detail"
     );
 }
 /// Collect the active agent's system-block texts.

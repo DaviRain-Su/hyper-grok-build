@@ -145,6 +145,7 @@ pub(crate) struct SubagentSpawnContext {
     pub media_gen_batch_limits: xai_grok_tools::media_gen_limits::MediaGenBatchLimits,
     /// Inference idle timeout (secs), resolved from the parent's model config at spawn-context creation time.
     pub inference_idle_timeout_secs: u64,
+    pub parent_compaction: crate::session::CompactionPins,
     /// Tier inputs for resolving `auto_compact_threshold_percent` at
     /// spawn time — once the subagent's actual model id is known.
     /// Lazy because the subagent may be assigned a different model from
@@ -349,6 +350,11 @@ const _: () = {
 pub(crate) fn strip_ask_user_question_tool(tools: &mut Vec<xai_grok_sampling_types::ToolSpec>) {
     tools.retain(|tool| tool.name != "ask_user_question");
 }
+pub(crate) fn strip_workflow_tool(tools: &mut Vec<xai_grok_sampling_types::ToolSpec>) {
+    tools.retain(|tool| {
+        !xai_grok_tools::implementations::grok_build::is_workflow_tool_id(&tool.name)
+    });
+}
 impl SubagentSpawnContext {
     /// Would installing a live bearer resolver strip this subagent's only
     /// credential? A wired resolver is the sampler's sole auth source, so
@@ -409,7 +415,7 @@ impl SubagentSpawnContext {
     }
     /// Not `Config::feature`: the parent's tiers resolve against the
     /// subagent's own remote settings snapshot.
-    fn resolve_feature(&self, feature: crate::agent::config::Feature) -> bool {
+    pub(crate) fn resolve_feature(&self, feature: crate::agent::config::Feature) -> bool {
         use crate::agent::config::FeatureSources;
         let mut sources = self.agent_config.as_ref().map_or_else(
             || FeatureSources::from_process_env(feature),
@@ -434,6 +440,60 @@ impl SubagentSpawnContext {
                 .as_ref()
                 .and_then(|r| r.compaction_tool_choice.as_deref()),
         )
+    }
+    pub(crate) fn snapshot_parent_compaction_pins(
+        resolved_mode: xai_chat_state::CompactionMode,
+        resolved_two_pass: bool,
+        parent_agent_name: Option<&str>,
+        parent_model_agent_type: Option<&str>,
+        parent_cwd: &Path,
+    ) -> crate::session::CompactionPins {
+        let current = parent_agent_name
+            .and_then(|name| xai_grok_agent::discovery::by_name_in_cwd(name, parent_cwd))
+            .map(|d| d.user_message_template)
+            .unwrap_or_default();
+        let template = crate::agent::mvp_agent::inherited_harness_template(
+            &current,
+            parent_model_agent_type,
+            parent_cwd,
+        )
+        .unwrap_or(current);
+        crate::session::cursor_compaction_pins(
+            resolved_mode,
+            resolved_two_pass,
+            crate::session::is_cursor_user_template(&template),
+        )
+    }
+    pub(crate) fn compaction_pins_for_child(
+        &self,
+        child_template: &xai_grok_agent::prompt::user_message::UserMessageTemplate,
+    ) -> crate::session::CompactionPins {
+        crate::session::cursor_compaction_pins(
+            self.parent_compaction.mode,
+            self.parent_compaction.two_pass,
+            crate::session::is_cursor_user_template(child_template),
+        )
+    }
+    /// Env > parent config features > this context's remote settings > default.
+    pub(crate) fn resolve_compaction_mode(&self) -> xai_chat_state::CompactionMode {
+        crate::agent::config::resolve_compaction_mode_from(
+            crate::agent::config::env_string("GROK_COMPACTION_MODE").as_deref(),
+            self.agent_config
+                .as_ref()
+                .and_then(|c| c.features.compaction_mode.as_deref()),
+            self.remote_settings
+                .as_ref()
+                .and_then(|r| r.compaction_mode.as_deref()),
+        )
+        .with_segment_detail(crate::agent::config::resolve_compaction_detail_from(
+            crate::agent::config::env_string("GROK_COMPACTION_DETAIL").as_deref(),
+            self.agent_config
+                .as_ref()
+                .and_then(|c| c.features.compaction_detail.as_deref()),
+            self.remote_settings
+                .as_ref()
+                .and_then(|r| r.compaction_detail.as_deref()),
+        ))
     }
     /// Whether a completed subagent's working copy is saved into the repo as a
     /// git ref and its directory deleted.

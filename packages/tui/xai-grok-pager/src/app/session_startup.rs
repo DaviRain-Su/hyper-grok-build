@@ -736,6 +736,9 @@ pub struct MaterializeCtx {
     /// CLI `--restore-code`. Remote codebase restore is never applied in-place;
     /// this flag either defers to `--worktree` or refuses the in-place path.
     pub restore_code: bool,
+    /// Which rows a most-recent resume may select. Interactive startup excludes
+    /// headless rows; single-prompt continuation preserves the inclusive rule.
+    pub recent_session_selection: RecentSessionSelection,
     /// Pre-TUI restore progress on stdout (interactive tty). Headless keeps
     /// stdout as JSON/NDJSON and uses stderr instead.
     pub restore_progress_on_stdout: bool,
@@ -756,6 +759,7 @@ impl MaterializeCtx {
                 TitleResolution::Allowed
             },
             restore_code: args.restore_code,
+            recent_session_selection: args.local_resume_selection(),
             restore_progress_on_stdout: false,
         }
     }
@@ -769,15 +773,22 @@ pub fn effective_fork_new_cwd(process_cwd: &str, parent_cwd: Option<&Path>) -> S
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| process_cwd.to_string())
 }
+pub use xai_grok_shell::session::persistence::RecentSessionSelection;
 /// Resolve most-recent session id for cwd, or error.
-async fn most_recent_session_id(cwd: &str) -> anyhow::Result<(String, Option<String>)> {
+async fn most_recent_session_id(
+    cwd: &str,
+    selection: RecentSessionSelection,
+) -> anyhow::Result<(String, Option<String>)> {
     let summaries = xai_grok_shell::session::persistence::list_summaries(Some(cwd)).await?;
-    let first = summaries.first().ok_or_else(|| {
-        anyhow::anyhow!(
-            "No session found for current directory. \
-             Use 'grok' to start a new session."
-        )
-    })?;
+    let first = summaries
+        .iter()
+        .find(|summary| selection.admits(summary))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No session found for current directory. \
+                 Use 'grok' to start a new session."
+            )
+        })?;
     Ok((first.info.id.to_string(), first.display_title_opt()))
 }
 /// `AuthManager` for direct grok.com calls made outside the agent (pre-ACP
@@ -857,7 +868,7 @@ pub async fn materialize_startup_for_cwd(
                 anyhow::bail!("chat-mode resume requires a build with the `chat` cargo feature");
             }
             let started = std::time::Instant::now();
-            let (id, title) = most_recent_session_id(cwd).await?;
+            let (id, title) = most_recent_session_id(cwd, ctx.recent_session_selection).await?;
             tracing::info!(
                 source = "local",
                 elapsed_ms = started.elapsed().as_millis() as u64,
@@ -879,7 +890,7 @@ pub async fn materialize_startup_for_cwd(
             if let Some(ref nid) = new_session_id {
                 ensure_session_id_available(nid, cwd)?;
             }
-            let (id, title) = most_recent_session_id(cwd).await?;
+            let (id, title) = most_recent_session_id(cwd, ctx.recent_session_selection).await?;
             Ok(MaterializedStartup::Fork {
                 parent_session_id: id,
                 parent_cwd: None,
@@ -994,7 +1005,8 @@ async fn resolve_existing_session(
     let arg_is_uuid = super::session_title_resolve::is_uuid_shaped(session_id);
     if !arg_is_uuid
         && ctx.title_resolution == TitleResolution::Allowed
-        && let Some(resolved) = resolve_session_by_title(session_id, cwd).await?
+        && let Some(resolved) =
+            resolve_session_by_title(session_id, cwd, ctx.recent_session_selection).await?
     {
         return Ok(resolved);
     }
@@ -1297,9 +1309,14 @@ pub(crate) fn classify_remote_restore(
 async fn resolve_session_by_title(
     arg: &str,
     cwd: &str,
+    selection: RecentSessionSelection,
 ) -> anyhow::Result<Option<ResolvedExisting>> {
     let summaries = xai_grok_shell::session::persistence::list_summaries(Some(cwd)).await?;
-    let Some(chosen) = super::session_title_resolve::select_by_title(arg, &summaries)? else {
+    let candidates: Vec<_> = summaries
+        .into_iter()
+        .filter(|summary| selection.admits(summary))
+        .collect();
+    let Some(chosen) = super::session_title_resolve::select_by_title(arg, &candidates)? else {
         return Ok(None);
     };
     let id = chosen.info.id.to_string();
@@ -1633,6 +1650,7 @@ mod tests {
             chat_mode: true,
             title_resolution: TitleResolution::Allowed,
             restore_code: false,
+            recent_session_selection: RecentSessionSelection::Interactive,
             restore_progress_on_stdout: false,
         }
     }
@@ -1652,6 +1670,61 @@ mod tests {
         );
         assert_eq!(chat_mode_flag_conflict(true, false, false), None);
         assert_eq!(chat_mode_flag_conflict(false, true, true), None);
+    }
+    #[test]
+    fn materialize_ctx_recent_selection_follows_surface() {
+        assert_eq!(
+            MaterializeCtx::from_pager_args(&parse(&["grok"])).recent_session_selection,
+            RecentSessionSelection::Interactive,
+        );
+        assert_eq!(
+            MaterializeCtx::from_pager_args(&parse(&["grok", "-p", "run"]))
+                .recent_session_selection,
+            RecentSessionSelection::Any,
+        );
+    }
+    #[serial_test::serial(GROK_HOME)]
+    #[tokio::test]
+    async fn most_recent_fork_selection_follows_surface() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let cwd = fx.cwd_str();
+        let interactive_id = "aaaaaaaa-1111-2222-3333-444444444444";
+        let headless_id = "bbbbbbbb-1111-2222-3333-444444444444";
+        fx.write_summary(
+            &cwd,
+            interactive_id,
+            serde_json::json!({ "updated_at": "2026-07-01T00:00:00Z" }),
+        );
+        fx.write_summary(
+            &cwd,
+            headless_id,
+            serde_json::json!({
+                "updated_at": "2026-07-02T00:00:00Z",
+                "session_kind": "headless",
+            }),
+        );
+        for (args, expected_parent) in [
+            (&["grok", "-c", "--fork-session"][..], interactive_id),
+            (
+                &["grok", "-p", "run", "-c", "--fork-session"][..],
+                headless_id,
+            ),
+        ] {
+            let args = parse(args);
+            let intent = args.session_startup_intent().unwrap();
+            let result =
+                materialize_startup_for_cwd(MaterializeCtx::from_pager_args(&args), intent, &cwd)
+                    .await
+                    .unwrap();
+            match result {
+                MaterializedStartup::Fork {
+                    parent_session_id, ..
+                } => {
+                    assert_eq!(parent_session_id, expected_parent)
+                }
+                other => panic!("expected Fork, got {other:?}"),
+            }
+        }
     }
     #[test]
     fn materialize_ctx_chat_mode_from_args() {
@@ -1694,6 +1767,7 @@ mod tests {
             chat_mode: false,
             title_resolution: TitleResolution::Allowed,
             restore_code,
+            recent_session_selection: RecentSessionSelection::Interactive,
             restore_progress_on_stdout: false,
         }
     }
@@ -1996,6 +2070,7 @@ mod tests {
             chat_mode: false,
             title_resolution: TitleResolution::Allowed,
             restore_code: false,
+            recent_session_selection: RecentSessionSelection::Interactive,
             restore_progress_on_stdout: false,
         };
         let err = materialize_startup_for_cwd(
@@ -2088,12 +2163,21 @@ mod tests {
                 chat_mode: false,
                 title_resolution: TitleResolution::Allowed,
                 restore_code: false,
+                recent_session_selection: RecentSessionSelection::Interactive,
                 restore_progress_on_stdout: false,
             }
         }
-        async fn resume(arg: &str, cwd: &str) -> anyhow::Result<MaterializedStartup> {
+        async fn resume_with(
+            arg: &str,
+            cwd: &str,
+            selection: RecentSessionSelection,
+        ) -> anyhow::Result<MaterializedStartup> {
+            let ctx = MaterializeCtx {
+                recent_session_selection: selection,
+                ..local_ctx()
+            };
             materialize_startup_for_cwd(
-                local_ctx(),
+                ctx,
                 SessionStartupIntent::Resume {
                     session_id: Some(arg.into()),
                     most_recent_for_cwd: false,
@@ -2101,6 +2185,51 @@ mod tests {
                 cwd,
             )
             .await
+        }
+        async fn resume(arg: &str, cwd: &str) -> anyhow::Result<MaterializedStartup> {
+            resume_with(arg, cwd, RecentSessionSelection::Interactive).await
+        }
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn title_fallback_ignores_headless_matches() {
+            let mut fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            fx.write_summary(
+                &cwd_str,
+                "bbbbbbbb-1111-2222-3333-444444444444",
+                serde_json::json!({
+                    "generated_title": "Fix Login Bug",
+                    "session_kind": "headless",
+                }),
+            );
+            let error = resume("fix login bug", &cwd_str)
+                .await
+                .expect_err("headless title must not resolve interactively");
+            assert!(error.to_string().contains("does not exist"));
+        }
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn headless_title_resume_keeps_headless_matches() {
+            let mut fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            let id = "aaaaaaaa-1111-2222-3333-444444444444";
+            fx.write_summary(
+                &cwd_str,
+                id,
+                serde_json::json!({
+                    "generated_title": "Batch Run",
+                    "session_kind": "headless",
+                }),
+            );
+            match resume_with("batch run", &cwd_str, RecentSessionSelection::Any)
+                .await
+                .unwrap()
+            {
+                MaterializedStartup::Resume { session_id, .. } => {
+                    assert_eq!(session_id, id)
+                }
+                other => panic!("expected Resume, got {other:?}"),
+            }
         }
         /// Also covers letter-case insensitivity: the query case differs from
         /// the stored title.

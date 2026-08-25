@@ -224,7 +224,7 @@ impl MvpAgent {
         let inherited_tool_overrides = parent_handle
             .as_ref()
             .and_then(|ps| ps.resolved_tool_overrides.load_full().map(|o| (*o).clone()));
-        Some(crate::agent::subagent::SubagentSpawnContext {
+        let mut ctx = crate::agent::subagent::SubagentSpawnContext {
             lsp: parent_lsp,
             process_scope: parent_process_scope,
             client_hooks: Default::default(),
@@ -250,6 +250,7 @@ impl MvpAgent {
             workflow_max_concurrent_agents: self.cfg.borrow().workflow_max_concurrent_agents,
             media_gen_batch_limits: self.cfg.borrow().media_gen_batch_limits,
             inference_idle_timeout_secs,
+            parent_compaction: crate::session::CompactionPins::default(),
             auto_compact_threshold_tiers:
                 crate::agent::subagent::AutoCompactThresholdTiers::capture(&self.cfg.borrow()),
             hunk_tracker_handle,
@@ -362,6 +363,15 @@ impl MvpAgent {
             parent_notification_handle: parent_notification_handle.clone(),
             parent_scheduler_handle: parent_scheduler_handle.clone(),
             subagent_sampling_semaphore: self.subagent_sampling_semaphore.clone(),
-        })
+        };
+        ctx.parent_compaction =
+            crate::agent::subagent::SubagentSpawnContext::snapshot_parent_compaction_pins(
+                ctx.resolve_compaction_mode(),
+                ctx.resolve_feature(crate::agent::config::Feature::TwoPassCompaction),
+                ctx.parent_agent_name.as_deref(),
+                ctx.parent_model_agent_type.as_deref(),
+                &ctx.parent_cwd,
+            );
+        Some(ctx)
     }
 }

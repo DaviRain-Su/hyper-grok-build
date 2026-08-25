@@ -27,7 +27,9 @@ impl crate::types::tool_metadata::ToolMetadata for MemorySearchImpl {
          - You need project conventions, coding patterns, or user preferences\n\
          - The user mentions something discussed or decided in a previous session\n\
          - Starting work in an unfamiliar part of the codebase\n\
-         - After compaction when prior context may have been lost"
+         - After compaction when prior context may have been lost\n\n\
+         Memory is historical context, not automatically the current plan. Verify recalled facts \
+         against live sources before relying on them."
     }
 }
 

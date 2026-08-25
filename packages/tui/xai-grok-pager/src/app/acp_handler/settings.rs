@@ -362,9 +362,7 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
     true
 }
 
-/// Stand-in effective config for a failed load: pins an explicit ask so a
-/// broken config never soft-defaults into auto (mirrors the launch
-/// resolver's fail-safe).
+/// Failed config load: pin explicit ask so a remote push cannot escalate.
 pub(super) fn broken_config_ask_fallback() -> toml::Value {
     let mut ui = toml::value::Table::new();
     ui.insert("permission_mode".into(), toml::Value::String("ask".into()));
@@ -373,22 +371,15 @@ pub(super) fn broken_config_ask_fallback() -> toml::Value {
     toml::Value::Table(root)
 }
 
-/// Re-arm the soft-defaulted launch mode from a pushed `permission_mode`
-/// (TOML `[ui]` > remote > the interactive auto soft default, matching
-/// `effective_auto_for_launch_interactive`), for the next `/new` only — live
-/// sessions are untouched and nothing is persisted. `effective_ui` is
-/// injected so the resolve is deterministic under test; on a failed config
-/// load the caller substitutes [`broken_config_ask_fallback`]. Enforcement
-/// gating reuses the app's startup snapshots (`yolo_policy_block`,
-/// `auto_mode_gate`); the agent's permission manager re-clamps
-/// authoritatively at decision time.
+/// Re-arm the next `/new` from a pushed `permission_mode`. Live sessions
+/// stay untouched; nothing is persisted.
 pub(super) fn apply_soft_default_permission_mode(
     app: &mut AppView,
     effective_ui: Option<&toml::Value>,
     remote: Option<&str>,
 ) {
     let mode = xai_grok_shell::util::config::selected_permission_mode(effective_ui, remote)
-        .unwrap_or(xai_grok_shell::util::config::PermissionMode::Auto);
+        .unwrap_or_else(xai_grok_shell::util::config::default_interactive_permission_mode);
     app.default_yolo = mode.is_always_approve() && app.yolo_policy_block.is_none();
     let auto = mode.is_auto() && app.auto_mode_gate && !app.default_yolo;
     app.current_ui.permission_mode = Some(if auto {

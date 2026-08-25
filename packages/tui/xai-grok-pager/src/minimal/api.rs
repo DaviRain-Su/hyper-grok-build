@@ -579,6 +579,10 @@ pub fn renders_parked(v: &AgentView) -> bool {
     v.renders_parked()
 }
 
+pub fn is_turn_or_wake_running(v: &AgentView) -> bool {
+    v.session.state.is_turn_running() || v.wake_turn_active()
+}
+
 /// [`AgentView::watchers`] — idle-surviving background work (running
 /// commands / monitors / loops / subagents) for the shared turn-status
 /// widget's "… still running" cue.

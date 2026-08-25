@@ -657,9 +657,9 @@ pub struct PagerArgs {
     /// Extra rules to append to the system prompt.
     #[clap(long = "rules", alias = "append-system-prompt")]
     pub rules: Option<String>,
-    /// Compaction mode [summary|transcript|segments]: `summary` (default) adds
+    /// Compaction mode [summary|transcript|segments]: `summary` adds
     /// no pointer; `transcript` points at the raw transcript; `segments`
-    /// persists per-segment markdown to grep. Sets `GROK_COMPACTION_MODE`.
+    /// (default) persists per-segment markdown to grep. Sets `GROK_COMPACTION_MODE`.
     #[clap(long = "compaction-mode", value_name = "MODE", hide = true)]
     pub compaction_mode: Option<String>,
     /// Segments verbatim detail [none|minimal|balanced|verbose] (default
@@ -1042,6 +1042,18 @@ impl PagerArgs {
     pub fn resume_most_recent(&self) -> bool {
         self.resume_session.as_deref() == Some("")
     }
+    pub(crate) fn local_resume_selection(
+        &self,
+    ) -> xai_grok_shell::session::persistence::RecentSessionSelection {
+        use xai_grok_shell::session::unified_list::HeadlessPolicy;
+        let policy =
+            if self.single.is_some() || self.prompt_json.is_some() || self.prompt_file.is_some() {
+                HeadlessPolicy::Include
+            } else {
+                HeadlessPolicy::Exclude
+            };
+        xai_grok_shell::session::persistence::RecentSessionSelection::from_headless_policy(policy)
+    }
     /// Classify flags for sandbox profile lookup on an existing session.
     ///
     /// Uses [`Self::session_startup_intent`]; invalid combos fall through to
@@ -1105,7 +1117,7 @@ impl PagerArgs {
             return Ok(());
         };
         use crate::app::session_title_resolve::{PinnedResumeTarget, presandbox_resume_target};
-        let pinned = presandbox_resume_target(&target, cwd)?;
+        let pinned = presandbox_resume_target(&target, cwd, self.local_resume_selection())?;
         self.resume_target_pinned = true;
         if let PinnedResumeTarget::Title {
             ref id,
@@ -1151,7 +1163,10 @@ impl PagerArgs {
                 )
             }
             ResumeTarget::MostRecentForCwd => {
-                xai_grok_shell::session::persistence::resumed_session_sandbox_profile(None, cwd)
+                xai_grok_shell::session::persistence::resolve_recent_session_sandbox_profile(
+                    cwd,
+                    self.local_resume_selection(),
+                )
             }
             ResumeTarget::None => None,
         }

@@ -20,6 +20,7 @@ pub mod plan_approval_resume;
 pub mod resize_storm;
 pub mod scroll_stress;
 pub mod streaming_render;
+pub mod x10_mouse_leak;
 
 /// Enumerates every benchmark scenario that can be dispatched by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Serialize, Deserialize)]

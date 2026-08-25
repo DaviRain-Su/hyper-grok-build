@@ -310,8 +310,6 @@ mod tests {
         let text = title_refresh_instruction("system-reminder");
         assert!(text.starts_with("<system-reminder>"));
         assert!(text.ends_with("</system-reminder>"));
-        assert!(text.contains("WHOLE conversation"));
-        assert!(text.contains("5-10 word"));
     }
 
     #[test]

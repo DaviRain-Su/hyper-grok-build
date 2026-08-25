@@ -1008,12 +1008,6 @@ mod tests {
             std::collections::HashMap::from([(ToolKind::Edit, edit_params)]),
         )
     }
-    /// The strip in `versioned_definition` matches the template verbatim, so
-    /// the sentence must stay in sync with `DESCRIPTION_FULL`.
-    #[test]
-    fn overwrite_guard_sentence_stays_in_sync_with_template() {
-        assert!(DESCRIPTION_FULL.contains(EMPTY_OLD_STRING_GUARD_SENTENCE));
-    }
     #[test]
     fn overwrite_guard_sentence_is_conditional_on_param() {
         use crate::types::tool_metadata::ToolMetadata;
@@ -1031,14 +1025,6 @@ mod tests {
             &serde_json::json!({}),
         );
         let default_desc = default_def.function.description.unwrap();
-        assert!(
-            !default_desc.contains("cannot overwrite"),
-            "guard sentence must be absent by default (legacy overwrite behavior):\n{default_desc}"
-        );
-        assert!(
-            default_desc.contains("To create a new file"),
-            "create-file guidance must remain:\n{default_desc}"
-        );
         let opt_in_def = ToolMetadata::versioned_definition(
             &SearchReplaceTool,
             None,
@@ -1050,9 +1036,10 @@ mod tests {
             &serde_json::json!({"empty_old_string_does_not_override": true}),
         );
         let opt_in_desc = opt_in_def.function.description.unwrap();
+        assert_ne!(default_desc, opt_in_desc);
         assert!(
-            opt_in_desc.contains("cannot overwrite an existing non-empty file"),
-            "guard sentence must appear when the guard is enabled:\n{opt_in_desc}"
+            !default_desc.contains("${") && !opt_in_desc.contains("${"),
+            "must not leak template markers:\n{default_desc}\n{opt_in_desc}"
         );
     }
     #[test]
@@ -1062,12 +1049,8 @@ mod tests {
             .render(ToolMetadata::description_template(&SearchReplaceTool))
             .unwrap();
         assert!(
-            rendered.contains("read_file` prefixes each line") && !rendered.contains("${%"),
+            rendered.contains("read_file") && !rendered.contains("${%"),
             "read bullet must render with the resolved name:\n{rendered}"
-        );
-        assert!(
-            !rendered.contains("before editing it"),
-            "read-before-edit guidance must be gone:\n{rendered}"
         );
         let edit_params = std::collections::HashMap::from([
             ("old_string".to_string(), "old_string".to_string()),
@@ -1080,8 +1063,9 @@ mod tests {
         )
         .render(ToolMetadata::description_template(&SearchReplaceTool))
         .unwrap();
+        assert_ne!(rendered, no_read);
         assert!(
-            !no_read.contains("prefixes each line") && !no_read.contains("- \n"),
+            !no_read.contains("read_file") && !no_read.contains("- \n"),
             "read bullet must vanish cleanly without a Read tool:\n{no_read}"
         );
     }

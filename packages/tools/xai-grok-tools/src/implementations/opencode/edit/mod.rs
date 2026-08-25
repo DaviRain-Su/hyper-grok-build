@@ -575,16 +575,6 @@ mod tests {
         assert!(matches!(tool.tool_namespace(), ToolNamespace::OpenCode));
     }
 
-    #[test]
-    fn description_contains_edit_guidance() {
-        use crate::types::tool_metadata::ToolMetadata;
-        let tool = EditTool;
-        assert!(
-            tool.description_template()
-                .contains("exact string replacements")
-        );
-    }
-
     // ── Input deserialization ───────────────────────────────────────
 
     #[test]

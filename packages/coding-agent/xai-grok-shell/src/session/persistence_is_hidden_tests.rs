@@ -51,6 +51,17 @@ fn not_hidden_for_regular_sessions() {
 }
 
 #[test]
+fn headless_is_listable_but_flagged() {
+    let headless = summary_with_kind(Some("headless"));
+    assert!(!headless.is_hidden(), "headless must stay listable");
+    assert!(headless.is_headless());
+
+    assert!(!summary_with_kind(None).is_headless());
+    assert!(!summary_with_kind(Some("fork")).is_headless());
+    assert!(!summary_with_kind(Some("subagent")).is_headless());
+}
+
+#[test]
 fn explicit_hidden_overrides_session_kind() {
     let mut s = summary_with_kind(Some("subagent"));
     s.hidden = Some(false);

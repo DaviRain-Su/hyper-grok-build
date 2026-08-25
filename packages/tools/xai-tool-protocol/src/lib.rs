@@ -3,11 +3,12 @@
 //! Identifier newtypes, registration payloads, capabilities, hook events,
 //! handshake messages, the JSON-RPC 2.0 envelope and method catalog, the
 //! `ToolErrorWire` / `ToolOutputWire` / `WireToolNotification` wire enums,
-//! every method's `params` / `result` payload struct, and the numeric ↔
-//! string error-code mapping.
+//! every method's `params` / `result` payload struct, the numeric ↔
+//! string error-code mapping, and the bot-relay frame types.
 
 #![forbid(unsafe_code)]
 
+pub mod bot_relay;
 mod capabilities;
 mod connection;
 pub mod envelope;
@@ -25,6 +26,16 @@ mod registry_error;
 pub mod session_event;
 pub mod turn_hook;
 
+pub use bot_relay::{
+    BOT_EVENT_ENVELOPE_V, BOT_RELAY_CAPABILITIES, BotBindConversationParams,
+    BotBindConversationResult, BotCommandParams, BotCommandResult, BotEmptyParams, BotEmptyResult,
+    BotEventChannel, BotEventEnvelope, BotRelayError, BotRelayErrorCode, BotRelayErrorDetail,
+    BotRosterEntry, BotRosterParams, BotRosterResult, BotRunState, BotStatusParams,
+    BotStatusResult, BotSubscribeParams, BotSubscribeResult, BotTranscriptOffboxParams,
+    BotTranscriptOffboxResult, BotUnsubscribeParams, BotUnsubscribeResult, BotVncDescriptorParams,
+    BotVncDescriptorResult, COMMAND_REJECTED_NOT_YET_ENABLED, HubChannel, HubResyncRequiredEvent,
+    HubTurnFinishedEvent, HubUnknownChannel, UpstreamChannel,
+};
 pub use capabilities::{HookKind, NotificationSchemas, StreamingSpec, ToolCapabilities, ToolScope};
 pub use connection::{ConnectionKind, ToolDefinitionMode};
 pub use envelope::{
@@ -58,7 +69,8 @@ pub use frames::{
 pub use handshake::{HelloAckMsg, HelloMsg, PROTOCOL_VERSION};
 pub use hook::HookEvent;
 pub use ids::{
-    ConnectionId, FrameSeq, IdError, RequestId, ServerId, SessionId, ToolCallId, ToolId, UserId,
+    ConnectionId, FrameSeq, HUB_RESERVED_SESSION_PREFIX, IdError, RequestId, ServerId, SessionId,
+    ToolCallId, ToolId, UserId,
 };
 pub use methods::{Method, UNKNOWN_METHOD_MSG_PREFIX};
 pub use notification_wire::{

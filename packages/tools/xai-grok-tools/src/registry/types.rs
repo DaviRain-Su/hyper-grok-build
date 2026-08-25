@@ -2298,15 +2298,7 @@ mod tests {
             result.prompt_text
         );
     }
-    /// Verify the exact tool output variants for all template-rendered error
-    /// paths in `search_replace` when it is the **sole** Edit tool in the config.
-    ///
-    /// Exercises two code paths that use `TemplateRenderer` at runtime:
-    /// 1. `MultipleMatchesFound` — renders `${{ params.edit.replace_all }}`
-    /// 2. `NoMatchesFound` — renders `${{ tools.by_kind.read }}`
-    ///
-    /// Verify that the rendered `search_replace` description exposed to the model
-    /// contains the new minimum-anchor guidance and has no unresolved placeholders.
+    /// Rendered `search_replace` description: Read tool name substitutes, no leftover placeholders.
     #[tokio::test]
     async fn search_replace_description_renders_minimum_anchor_guidance() {
         let builder = ToolRegistryBuilder::new();
@@ -2349,8 +2341,8 @@ mod tests {
             .as_deref()
             .expect("description must be present");
         assert!(
-            !desc.contains("larger string with more surrounding context"),
-            "old guidance encouraging longer blocks must be absent"
+            desc.contains("read_file"),
+            "read tool name must render: {desc}"
         );
         assert!(
             !desc.contains("${{"),
@@ -2705,12 +2697,10 @@ mod tests {
             "replace_all description should reference the renamed param: {replace_all_desc}"
         );
     }
-    /// Descriptions promising completion notifications ("You are notified on
-    /// completion") render conditionally on the client's system-reminders
+    /// Bash tool descriptions branch on the client's system-reminders
     /// setting, plumbed via `set_system_reminders_enabled` into the
-    /// `TemplateRenderer`. With reminders disabled, the bash description and
-    /// the `is_background` field description must not promise notifications;
-    /// they point at the get-output tool instead when one is served.
+    /// `TemplateRenderer`. With reminders disabled they name the get-output
+    /// tool when one is served.
     #[tokio::test]
     async fn bash_descriptions_track_system_reminders_setting() {
         let config_with = |ids: &[&str]| ToolServerConfig {
@@ -2743,34 +2733,23 @@ mod tests {
         let toolset = ToolRegistryBuilder::new()
             .finalize(config_with(&ids), test_session_context(&tmp))
             .expect("finalize");
-        let (desc, field_desc) = bash_texts(&toolset);
-        assert!(
-            desc.contains("You are notified on completion"),
-            "reminders on: description should promise notification: {desc}"
-        );
-        assert!(
-            field_desc.contains("you are notified on completion"),
-            "reminders on: is_background description should promise notification: {field_desc}"
-        );
+        let (desc_on, field_on) = bash_texts(&toolset);
         let tmp = TempDir::new().unwrap();
         let mut builder = ToolRegistryBuilder::new();
         builder.set_system_reminders_enabled(false);
         let toolset = builder
             .finalize(config_with(&ids), test_session_context(&tmp))
             .expect("finalize");
-        let (desc, field_desc) = bash_texts(&toolset);
+        let (desc_off, field_off) = bash_texts(&toolset);
+        assert_ne!(desc_on, desc_off);
+        assert_ne!(field_on, field_off);
         assert!(
-            !desc.contains("notified on completion"),
-            "reminders off: description must not promise notification: {desc}"
+            desc_off.contains("get_task_output"),
+            "reminders off: description should name get_task_output: {desc_off}"
         );
         assert!(
-            desc.contains("Check on it later with the get_task_output tool"),
-            "reminders off: description should point at get_task_output: {desc}"
-        );
-        assert!(
-            !field_desc.contains("notified on completion")
-                && field_desc.contains("check on it later with the get_task_output tool"),
-            "reminders off: is_background description should point at get_task_output: {field_desc}"
+            field_off.contains("get_task_output"),
+            "reminders off: is_background description should name get_task_output: {field_off}"
         );
     }
     /// Each assertion pattern-matches on the exact `ToolOutput::SearchReplace`

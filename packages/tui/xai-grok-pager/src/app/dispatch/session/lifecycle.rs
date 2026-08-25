@@ -323,7 +323,7 @@ fn apply_welcome_workspace_on_new_session(app: &mut AppView) -> Result<(), Vec<E
             app.welcome_local_workspace_ack_pending = true;
             app.session_picker_entries = None;
             app.session_picker_loading = false;
-            app.session_picker_list_seq = app.session_picker_list_seq.saturating_add(1);
+            super::foreign::next_picker_list_generation(app);
             Err(vec![])
         }
         Err(err) => {

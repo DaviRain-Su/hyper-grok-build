@@ -1230,6 +1230,7 @@ async fn run_agent_command(
         agent_args.yolo,
         permission_mode_flag.as_deref(),
         None,
+        xai_grok_shell::util::config::PermissionMode::Ask,
     );
     agent_config.agent_profile_path = agent_args
         .agent_profile

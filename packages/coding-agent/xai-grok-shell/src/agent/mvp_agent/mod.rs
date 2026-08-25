@@ -273,6 +273,8 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub session_yolo_mode: bool,
     pub session_auto_mode: bool,
     pub prompt_display_cwd: Option<String>,
+    /// Persisted visibility of this Build session for roster snapshots/deltas.
+    pub is_headless: bool,
     /// Sticky chat product kind for ACU / product skills sourcing.
     pub is_chat_kind: bool,
 }
@@ -449,6 +451,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         session_yolo_mode,
         session_auto_mode: false,
         prompt_display_cwd: None,
+        is_headless: false,
         is_chat_kind: true,
     }
 }
@@ -716,6 +719,7 @@ const IDLE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis
 struct ResidentResources {
     /// Strong ref pinning the code-nav index; the manager holds only a `Weak`.
     codebase_index: Option<std::sync::Arc<xai_codebase_graph::IndexManagerHandle>>,
+    is_headless: bool,
     require_gateway: bool,
 }
 /// Per-session state that survives an idle-unload (so the session stays

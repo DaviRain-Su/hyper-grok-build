@@ -204,6 +204,9 @@ impl MvpAgent {
                 respond_to: None,
             });
         self.take_session(id);
+        self.resident_roster_titles
+            .borrow_mut()
+            .remove(id.0.as_ref());
         self.session_registry.release(id);
         if let Some(ops) = self.workspace_ops.borrow().as_ref() {
             ops.end_local_session(id.0.as_ref());
@@ -317,6 +320,9 @@ impl MvpAgent {
         &self,
         id: &acp::SessionId,
     ) -> Option<crate::agent::roster::RosterEntry> {
+        if self.session_registry.is_headless(id) {
+            return None;
+        }
         let session_id = id.0.to_string();
         let (cwd, is_worktree, model_id, reasoning_effort, yolo) = {
             let h = self.resident_handle(id)?;

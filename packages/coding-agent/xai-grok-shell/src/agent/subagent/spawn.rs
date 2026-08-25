@@ -130,6 +130,7 @@ impl coordinator::ChildRunner for ShellChildRunner {
                 ctx.parent_mcp_pool = pool;
                 ctx.client_hooks = hooks;
                 super::strip_ask_user_question_tool(&mut definitions);
+                super::strip_workflow_tool(&mut definitions);
                 ctx.parent_tool_definitions = (!definitions.is_empty()).then_some(definitions);
             }
             let gateway = this.gateway.clone();

@@ -1057,8 +1057,8 @@ mod tests {
             prompt.contains(&*expected_path),
             "rendered prompt must reference plan path"
         );
-        assert!(prompt.contains("OBJECTIVE:\nimplement feature X"));
-        assert!(prompt.contains("CONTEXT:\nprior conversation"));
+        assert!(prompt.contains("implement feature X"));
+        assert!(prompt.contains("prior conversation"));
         let _ = std::fs::remove_file(&plan_file);
     }
 

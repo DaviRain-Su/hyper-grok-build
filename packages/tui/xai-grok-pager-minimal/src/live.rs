@@ -189,7 +189,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
             let tail_h = area.height.saturating_sub(status_h + modal_h + sl_h);
             let tick = (now_millis() / 100) as u64;
             if tail_h > 0 {
-                let turn_running = agent.session.state.is_turn_running();
+                let turn_running = minimal_api::is_turn_or_wake_running(agent);
                 draw_tail(
                     frame.buffer_mut(),
                     Rect {
@@ -302,7 +302,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                 width: area.width,
                 height: tail_h,
             };
-            let turn_running = agent.session.state.is_turn_running();
+            let turn_running = minimal_api::is_turn_or_wake_running(agent);
             draw_tail(
                 frame.buffer_mut(),
                 tail_area,
@@ -801,7 +801,7 @@ pub(super) fn tail_height(
 ) -> u16 {
     let theme = Theme::current();
     let sb = &agent.scrollback;
-    let turn_running = agent.session.state.is_turn_running();
+    let turn_running = minimal_api::is_turn_or_wake_running(agent);
     let gap = super::commit::MINIMAL_BLOCK_GAP;
     let mut i = super::commit::scan_frontier(sb, turn_running).tail_start;
     let mut total = 0u16;

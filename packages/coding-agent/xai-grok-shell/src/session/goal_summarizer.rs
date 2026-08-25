@@ -623,7 +623,7 @@ mod tests {
         let _ = run_goal_summarizer(spawner, inputs(&plan, &tn), &emit).await;
 
         let prompt = captured.last_prompt.lock().unwrap().clone().unwrap();
-        assert!(prompt.contains("OBJECTIVE:\ndo X"));
+        assert!(prompt.contains("do X"));
     }
 
     #[tokio::test]

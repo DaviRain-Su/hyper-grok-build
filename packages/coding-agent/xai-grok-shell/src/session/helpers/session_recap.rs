@@ -576,16 +576,11 @@ mod tests {
     #[test]
     fn instruction_asks_for_one_sentence_body() {
         let text = recap_instruction("system-reminder");
-        assert!(text.contains("Output ONLY the body"));
-        assert!(text.contains("You asked"));
-        assert!(text.contains("We fixed"));
-        assert!(text.contains("We merged"));
         assert!(text.contains("billing/retry.rs"));
         assert!(text.contains("queue_worker"));
         assert!(text.contains("We fixed the flaky"));
         assert!(text.contains("We merged the feature"));
         assert!(!text.contains("217584"));
-        assert!(!text.contains("lead with \"Recap"));
     }
 
     #[test]

@@ -16,6 +16,7 @@ use xai_grok_workspace::session::file_state::RewindPoint;
 use crate::session::signals::SessionSignals;
 use crate::session::storage::relocation::{RelocationError, RelocationView};
 use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
+use crate::session::visibility::ClassifiedSessionKind;
 use crate::tools::todo::TodoState;
 use crate::util::grok_home::grok_home;
 use agent_client_protocol as acp;
@@ -646,15 +647,80 @@ fn read_summary_from_dir(session_dir: &Path) -> RelocationResult<Summary> {
     serde_json::from_slice(&bytes).map_err(|source| RelocationError::Json { path, source })
 }
 
-/// The most recently updated local session summary for `cwd` (by
-/// `last_active_at` else `updated_at`), or `None` if there are no local sessions
-/// for that cwd. Sync and local-only — suitable for the startup path that must
-/// resolve the sandbox profile before the (irreversible) OS sandbox is applied.
+/// Dir index plus on-demand summary reads. Search classifies only the FTS
+/// hits it walks; loading every `summary.json` on each query is too expensive
+/// at the ~12K-session scale already called out for recent listing.
+pub(crate) struct SessionKindIndex {
+    view: RelocationView,
+}
+
+impl SessionKindIndex {
+    pub(crate) fn load() -> io::Result<Self> {
+        Self::load_in_root(&grok_home().join("sessions"))
+    }
+
+    pub(crate) fn load_in_root(sessions_root: &Path) -> io::Result<Self> {
+        Ok(Self {
+            view: storage_view(sessions_root).map_err(io::Error::other)?,
+        })
+    }
+
+    pub(crate) fn kind(&self, session_id: &str) -> ClassifiedSessionKind {
+        match self.view.find_persisted_session_dir(session_id) {
+            Ok(Some(dir)) => match read_summary_from_dir(&dir) {
+                Ok(summary) if summary.is_headless() => ClassifiedSessionKind::Headless,
+                Ok(_) => ClassifiedSessionKind::Interactive,
+                Err(_) => ClassifiedSessionKind::Unknown,
+            },
+            Ok(None) | Err(_) => ClassifiedSessionKind::Unknown,
+        }
+    }
+}
+
+#[cfg(test)]
+fn authoritative_summaries_in_root(sessions_root: &Path) -> io::Result<Vec<Summary>> {
+    let view = storage_view(sessions_root).map_err(io::Error::other)?;
+    Ok(view
+        .session_dirs(None)
+        .map_err(io::Error::other)?
+        .into_iter()
+        .filter_map(|dir| read_summary_from_dir(&dir).ok())
+        .collect())
+}
+
+/// Which local rows may satisfy a most-recent startup selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecentSessionSelection {
+    Interactive,
+    Any,
+}
+
+impl RecentSessionSelection {
+    /// Startup-edge map: `Exclude` is interactive-only most-recent;
+    /// `Include`/`Only` keep headless rows eligible (`-p` continuation).
+    pub fn from_headless_policy(policy: crate::session::visibility::HeadlessPolicy) -> Self {
+        match policy {
+            crate::session::visibility::HeadlessPolicy::Exclude => Self::Interactive,
+            crate::session::visibility::HeadlessPolicy::Only
+            | crate::session::visibility::HeadlessPolicy::Include => Self::Any,
+        }
+    }
+
+    pub fn admits(self, summary: &Summary) -> bool {
+        match self {
+            Self::Interactive => !summary.is_headless(),
+            Self::Any => true,
+        }
+    }
+}
+
+/// The most recently updated interactive local session summary for `cwd`.
 fn most_recent_local_summary_for_cwd_in_root(cwd: &str, sessions_root: &Path) -> Option<Summary> {
     most_recent_local_summary_for_cwd_in_view(
         cwd,
         &storage_view(sessions_root).ok()?,
         read_summary_from_dir,
+        RecentSessionSelection::Interactive,
     )
     .ok()
     .flatten()
@@ -664,6 +730,7 @@ fn most_recent_local_summary_for_cwd_in_view(
     cwd: &str,
     view: &RelocationView,
     read_summary: SummaryReader,
+    selection: RecentSessionSelection,
 ) -> RelocationResult<Option<Summary>> {
     let mut best: Option<Summary> = None;
     for session_dir in view.session_dirs(Some(cwd))? {
@@ -675,7 +742,7 @@ fn most_recent_local_summary_for_cwd_in_view(
             }
             Err(error) => return Err(error),
         };
-        if summary.is_hidden() {
+        if summary.is_hidden() || !selection.admits(&summary) {
             continue;
         }
         if best.as_ref().is_none_or(|current| {
@@ -690,19 +757,25 @@ fn most_recent_local_summary_for_cwd_in_view(
     Ok(best)
 }
 
-/// Sync, local-only session summaries for `cwd` (hidden sessions filtered).
-/// For startup paths that must resolve a resume target before the
-/// irreversible OS sandbox is applied; async callers use [`list_summaries`].
+/// Sync, local-only summaries for `cwd` under the caller's title-selection
+/// policy. Explicit-id lookup remains inclusive through
+/// [`find_summary_by_session_id`].
+/// For startup paths that must resolve a resume target before the irreversible
+/// OS sandbox is applied; async callers use [`list_summaries`].
 ///
 /// Listing failures propagate so pre-sandbox callers can fail closed;
 /// individual unreadable summaries are skipped, matching the async path's
 /// tolerance for a single corrupt file.
-pub fn local_summaries_for_cwd_sync(cwd: &str) -> io::Result<Vec<Summary>> {
-    local_summaries_for_cwd_sync_in_root(cwd, &grok_home().join("sessions"))
+pub fn local_summaries_for_cwd_sync(
+    cwd: &str,
+    selection: RecentSessionSelection,
+) -> io::Result<Vec<Summary>> {
+    local_summaries_for_cwd_sync_in_root(cwd, selection, &grok_home().join("sessions"))
 }
 
 fn local_summaries_for_cwd_sync_in_root(
     cwd: &str,
+    selection: RecentSessionSelection,
     sessions_root: &Path,
 ) -> io::Result<Vec<Summary>> {
     let view = storage_view(sessions_root).map_err(io::Error::other)?;
@@ -710,7 +783,7 @@ fn local_summaries_for_cwd_sync_in_root(
     Ok(dirs
         .iter()
         .filter_map(|dir| read_summary_from_dir(dir).ok())
-        .filter(|s| !s.is_hidden())
+        .filter(|summary| !summary.is_hidden() && selection.admits(summary))
         .collect())
 }
 
@@ -733,6 +806,23 @@ pub fn resumed_session_sandbox_profile(
     cwd: Option<&str>,
 ) -> Option<String> {
     resumed_session_sandbox_profile_in_root(session_id, cwd, &grok_home().join("sessions"))
+}
+
+/// Resolve the saved profile for the same typed most-recent view used by
+/// startup materialization.
+pub fn resolve_recent_session_sandbox_profile(
+    cwd: Option<&str>,
+    selection: RecentSessionSelection,
+) -> Option<String> {
+    most_recent_local_summary_for_cwd_in_view(
+        cwd?,
+        &storage_view(&grok_home().join("sessions")).ok()?,
+        read_summary_from_dir,
+        selection,
+    )
+    .ok()
+    .flatten()
+    .and_then(|summary| summary.sandbox_profile)
 }
 
 fn resumed_session_sandbox_profile_in_root(
@@ -1017,6 +1107,16 @@ impl Summary {
                 .as_deref()
                 .is_some_and(|k| k.starts_with("subagent")),
         )
+    }
+
+    /// Whether this is a one-shot `grok -p` session. Deliberately not part of
+    /// [`Self::is_hidden`]: headless sessions stay listable (the picker's
+    /// Headless page, the search index) and are only excluded from the default
+    /// pages by `HeadlessPolicy`. Unstamped summaries (`session_kind` absent)
+    /// are interactive, including pre-stamp one-shots and remote twins the
+    /// registry has not classified; they still fill default `/resume`.
+    pub fn is_headless(&self) -> bool {
+        self.session_kind.as_deref() == Some(crate::session::visibility::SESSION_KIND_HEADLESS)
     }
 
     /// Preferred display title: `generated_title` if non-empty, else `session_summary`.
@@ -2262,6 +2362,10 @@ pub(crate) struct SessionDeps {
     pub(crate) session_summary_model: String,
     pub(crate) registry_title_sync: Option<RegistryGeneratedTitleSync>,
     pub(crate) search_index: crate::session::storage::search::SharedSearchIndex,
+    /// Client-claimed kind for a fresh session (allowlisted at `session/new`;
+    /// currently only `"headless"`). Ignored by the load paths, which never
+    /// restamp a persisted kind.
+    pub(crate) session_kind: Option<String>,
 }
 
 pub(crate) async fn new(
@@ -2278,6 +2382,7 @@ pub(crate) async fn new(
         session_summary_model,
         registry_title_sync,
         search_index,
+        session_kind,
     } = deps;
     let root_dir = grok_home();
     let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
@@ -2285,6 +2390,19 @@ pub(crate) async fn new(
     // Initialize session in storage
     let mut summary = storage.init_session(info, model_id.clone()).await?;
     touch_worktree_for_session(info).await;
+
+    // Stamp the claimed kind only on a summary that has none yet: a dir left
+    // by a crash keeps its persisted kind (init_session already loaded it).
+    // Goes through the locked atomic summary writer so it cannot clobber a
+    // concurrent writer's fields or leave a torn summary.json.
+    if summary.session_kind.is_none()
+        && let Some(kind) = session_kind
+    {
+        storage
+            .set_session_kind_if_absent(info, kind.clone())
+            .await?;
+        summary.session_kind = Some(kind);
+    }
 
     // Update model if different
     if summary.current_model_id != model_id {
@@ -2395,20 +2513,8 @@ pub(crate) async fn new_with_explicit_dir(
     Ok(handle)
 }
 
+/// Restore payload without updates in memory — for streaming replay.
 pub struct PersistedInfo {
-    pub summary: Summary,
-    pub chat_history: Vec<ConversationItem>,
-    /// All session updates (ACP updates and xAI extension updates) in chronological order
-    pub updates: Vec<SessionUpdate>,
-    pub plan_state: Option<TodoState>,
-    pub rewind_points: Vec<RewindPoint>,
-    /// Persisted session signals (None for old sessions without signals file)
-    pub signals: Option<SessionSignals>,
-    pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
-}
-
-/// Same as PersistedInfo but without updates - for memory efficiency when streaming
-pub struct PersistedInfoLight {
     pub summary: Summary,
     pub chat_history: Vec<ConversationItem>,
     pub plan_state: Option<TodoState>,
@@ -2440,8 +2546,10 @@ async fn pull_on_miss(
     try_pull_from_remote(info, client).await.ok_or(err)
 }
 
-#[expect(dead_code, reason = "wired when session restore flow calls load")]
-pub(crate) async fn load(
+/// Load a session without reading updates into memory.
+/// Instead, provides the path to the updates file for streaming reads.
+/// Use this for memory-efficient session loading when replaying updates.
+pub(crate) async fn load_light(
     info: &Info,
     backend: Option<&crate::remote::BackendClient>,
     deps: SessionDeps,
@@ -2455,89 +2563,7 @@ pub(crate) async fn load(
         session_summary_model,
         registry_title_sync,
         search_index,
-    } = deps;
-    let root_dir = grok_home();
-    let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
-
-    let (persisted, loaded_info) = match storage.load_session(info).await {
-        Ok(p) => (p, info.clone()),
-        Err(e) => match backend {
-            Some(client) => {
-                let pulled = pull_on_miss(info, client, e).await?;
-                let p = storage.load_session(&pulled).await?;
-                (p, pulled)
-            }
-            None => return Err(e),
-        },
-    };
-    // Touch on load too: resuming must reset the worktree's gc expiry clock.
-    touch_worktree_for_session(&loaded_info).await;
-
-    let persisted_info = PersistedInfo {
-        summary: persisted.summary,
-        chat_history: persisted.chat_history,
-        updates: persisted.updates,
-        plan_state: persisted.plan_state,
-        rewind_points: persisted.rewind_points,
-        signals: persisted.signals,
-        workflow_runs: persisted.workflow_runs,
-    };
-
-    let (handle, rx, summary_tx, disk_full_tx) = actor_channel();
-
-    let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
-    let remote_sync = init_remote_sync(&persisted_info.summary, storage_mode, auth_manager)?;
-
-    let has_title = !persisted_info.summary.display_title().is_empty();
-    tokio::task::spawn(async move {
-        let mut summary_gen = crate::session::summary::SummaryGenerator::new(
-            crate::session::summary::SummaryConfig {
-                sampling_client,
-                model: session_summary_model,
-                persistence_tx: summary_tx,
-            },
-        );
-        if has_title {
-            summary_gen.mark_done();
-        }
-        let persistence = SessionPersistence {
-            info: loaded_info,
-            storage: storage.clone(),
-            pending_notification: None,
-            rx,
-            remote_sync: remote_sync.clone(),
-            created_fresh: false,
-            relay_sync,
-            summary: summary_gen,
-            registry_title_sync,
-            gateway,
-            search_index,
-            disk_full_tx,
-            disk_full_notified: false,
-        };
-        persistence.run().await;
-    });
-
-    Ok((persisted_info, handle))
-}
-
-/// Like `load`, but doesn't load updates into memory.
-/// Instead, provides the path to the updates file for streaming reads.
-/// Use this for memory-efficient session loading when replaying updates.
-pub(crate) async fn load_light(
-    info: &Info,
-    backend: Option<&crate::remote::BackendClient>,
-    deps: SessionDeps,
-) -> io::Result<(PersistedInfoLight, PersistenceHandle)> {
-    let SessionDeps {
-        sampling_client,
-        storage_mode,
-        auth_manager,
-        relay_sync,
-        gateway,
-        session_summary_model,
-        registry_title_sync,
-        search_index,
+        session_kind: _,
     } = deps;
     let root_dir = grok_home();
     let storage: Box<dyn StorageAdapter> =
@@ -2560,7 +2586,7 @@ pub(crate) async fn load_light(
     let updates_file_path = storage.updates_file_path(&loaded_info);
     let rewind_points_file_path = storage.rewind_points_file_path(&loaded_info);
 
-    let persisted_info = PersistedInfoLight {
+    let persisted_info = PersistedInfo {
         summary: persisted.summary,
         chat_history: persisted.chat_history,
         plan_state: persisted.plan_state,

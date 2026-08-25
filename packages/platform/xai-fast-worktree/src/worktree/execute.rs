@@ -335,7 +335,33 @@ fn execute_create_worktree_dispatch(plan: WorktreePlan) -> Result<CreateWorktree
             }
 
             match &plan.creation_mode {
-                CreationMode::Linked => execute_copy_worktree(plan),
+                CreationMode::Linked => {
+                    // Status-confirmed linked Grove views must not copy the
+                    // projection (hang / projected state) when CreateWorktree
+                    // declines. Preserve fails; projected+clean may git-checkout.
+                    let linked_view = plan.nfs.as_ref().is_some_and(|opts| {
+                        crate::nfs::source_is_linked_local_view(opts, &plan.source)
+                    });
+                    if crate::nfs::dest_is_projected_mount(&plan.source) {
+                        if matches!(
+                            plan.working_tree,
+                            crate::WorkingTreeMode::PreserveWorkingTree
+                        ) {
+                            anyhow::bail!("preserve on a projected Grove source is not supported");
+                        }
+                        tracing::info!(
+                            source = %plan.source.display(),
+                            "projected source: skipping copy fallback, using git checkout"
+                        );
+                        execute_git_checkout_worktree(plan)
+                    } else if linked_view {
+                        anyhow::bail!(
+                            "linked Grove source: CreateWorktree declined; refusing copy fallback"
+                        );
+                    } else {
+                        execute_copy_worktree(plan)
+                    }
+                }
                 CreationMode::Standalone => execute_standalone_worktree(plan),
                 _ => unreachable!(),
             }

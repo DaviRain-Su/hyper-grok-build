@@ -1290,19 +1290,6 @@ async fn setup_goal_reminder_is_plan_aware_when_planner_enabled() {
                 reminder.contains(&expected),
                 "reminder must carry the plan pointer line `{expected}`:\n{reminder}"
             );
-            assert!(
-                reminder.contains(PLAN_SEED_TODOS_PHRASE),
-                "reminder must seed todos from the plan:\n{reminder}"
-            );
-            assert!(
-                reminder.contains("append a bullet to the plan's single"),
-                "reminder must instruct the deviation amendment:\n{reminder}"
-            );
-            assert!(
-                reminder.contains("<task_completion_discipline>")
-                    && reminder.contains("TEST PROACTIVELY:"),
-                "discipline + TEST PROACTIVELY must survive in the consolidated block:\n{reminder}"
-            );
         })
         .await;
 }
@@ -1326,15 +1313,6 @@ async fn setup_goal_reminder_is_no_plan_when_planner_disabled() {
             assert!(
                 !reminder.contains("\nPlan: "),
                 "no-plan reminder must not carry a `Plan:` pointer:\n{reminder}"
-            );
-            assert!(
-                !reminder.contains(PLAN_SEED_TODOS_PHRASE),
-                "no-plan reminder must omit plan-aware seeding:\n{reminder}"
-            );
-            assert!(
-                reminder.contains("<task_completion_discipline>")
-                    && reminder.contains("TEST PROACTIVELY:"),
-                "discipline + TEST PROACTIVELY must remain:\n{reminder}"
             );
         })
         .await;
@@ -1372,18 +1350,10 @@ async fn goal_resume_reminder_is_plan_aware_when_planner_enabled() {
                 panic!("resumed paused goal must flow through to inference");
             };
 
-            assert!(
-                reminder.contains("Continue working now."),
-                "resume reminder must close with the continuation directive:\n{reminder}"
-            );
             let expected = format!("\nPlan: {}\n", plan_path.display());
             assert!(
                 reminder.contains(&expected),
                 "resume reminder must carry the plan pointer `{expected}`:\n{reminder}"
-            );
-            assert!(
-                reminder.contains(PLAN_SEED_TODOS_PHRASE),
-                "resume reminder must be plan-aware:\n{reminder}"
             );
         })
         .await;

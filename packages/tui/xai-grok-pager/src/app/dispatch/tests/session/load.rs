@@ -1,5 +1,6 @@
 //! Tests for session loading, restore, pickers, and deep search.
 use super::*;
+use crate::views::modal::ActiveModal;
 use xai_grok_shell::session::unified_list::ListScope;
 /// Opening the cancel-turn picker while scrollback is focused must
 /// hand keyboard focus to the picker — otherwise up/down keys go
@@ -1639,7 +1640,7 @@ fn chat_mode_query_change_schedules_debounced_search() {
     assert!(
         matches!(
             &effects[..],
-            [Effect::DebounceSessionSearch { query, seq: 1 }] if query == "abc"
+            [Effect::DebounceSessionSearch { query, seq: 1, .. }] if query == "abc"
         ),
         "chat-mode query change must arm the search debounce, got {effects:?}"
     );
@@ -1669,6 +1670,8 @@ fn chat_mode_debounce_expiry_fetches_current_and_drops_stale() {
     let _ = dispatch(Action::TriggerDeepSearch, &mut app);
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionSearchDebounceExpired {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
             query: "abc".into(),
             seq: 1,
         }),
@@ -1685,6 +1688,8 @@ fn chat_mode_debounce_expiry_fetches_current_and_drops_stale() {
     let _ = dispatch(Action::TriggerDeepSearch, &mut app);
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionSearchDebounceExpired {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
             query: "abc".into(),
             seq: 1,
         }),
@@ -1693,6 +1698,33 @@ fn chat_mode_debounce_expiry_fetches_current_and_drops_stale() {
     assert!(
         effects.is_empty(),
         "stale debounce expiry must not fetch, got {effects:?}"
+    );
+    app.session_picker_state.set_query("abcde");
+    let _ = dispatch(Action::TriggerDeepSearch, &mut app);
+    app.active_view = ActiveView::AgentDashboard;
+    let live_generation = app.session_picker_generation;
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionSearchDebounceExpired {
+            host: SessionPickerHost::Welcome,
+            generation: live_generation,
+            query: "abcde".into(),
+            seq: 3,
+        }),
+        &mut app,
+    );
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::FetchSessionList {
+                host: SessionPickerHost::Welcome,
+                generation,
+                query: Some(q),
+                seq: 3,
+                ..
+            }] if q == "abcde" && *generation == live_generation
+        ),
+        "chat-mode expiry off the welcome view must still fetch, re-stamped \
+         with the same host and generation, got {effects:?}"
     );
 }
 /// Build mode: any 2+ char query arms the deep-search debounce — abundant
@@ -1712,7 +1744,7 @@ fn build_mode_query_arms_debounce_despite_title_hits_and_force_skips_it() {
     assert!(
         matches!(
             &effects[..],
-            [Effect::DebounceSessionSearch { query, seq: 1 }] if query == "prost"
+            [Effect::DebounceSessionSearch { query, seq: 1, .. }] if query == "prost"
         ),
         "unforced query must arm the debounce even with 3+ title hits, got {effects:?}"
     );
@@ -1728,7 +1760,7 @@ fn build_mode_query_arms_debounce_despite_title_hits_and_force_skips_it() {
     assert!(
         matches!(
             &effects[..],
-            [Effect::DeepSearchSessions { query, seq: 2 }] if query == "prost"
+            [Effect::DeepSearchSessions { query, seq: 2, .. }] if query == "prost"
         ),
         "forced search must skip the debounce, got {effects:?}"
     );
@@ -1752,6 +1784,8 @@ fn build_mode_short_query_clears_results_and_invalidates_armed_debounce() {
     assert!(!app.session_picker_content_loading);
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionSearchDebounceExpired {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
             query: "ab".into(),
             seq: 1,
         }),
@@ -1763,7 +1797,9 @@ fn build_mode_short_query_clears_results_and_invalidates_armed_debounce() {
     );
 }
 /// Build mode: a current-seq debounce expiry dispatches the deep search; one
-/// superseded by newer typing is dropped.
+/// superseded by newer typing is dropped; a current expiry with the welcome
+/// picker hidden behind another view is dropped by the view-liveness rule
+/// (which applies to build-mode deep search only, unlike chat mode).
 #[test]
 fn build_mode_debounce_expiry_searches_current_and_drops_stale() {
     let mut app = test_app();
@@ -1771,6 +1807,8 @@ fn build_mode_debounce_expiry_searches_current_and_drops_stale() {
     let _ = dispatch(Action::TriggerDeepSearch, &mut app);
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionSearchDebounceExpired {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
             query: "abc".into(),
             seq: 1,
         }),
@@ -1779,7 +1817,7 @@ fn build_mode_debounce_expiry_searches_current_and_drops_stale() {
     assert!(
         matches!(
             &effects[..],
-            [Effect::DeepSearchSessions { query, seq: 1 }] if query == "abc"
+            [Effect::DeepSearchSessions { query, seq: 1, .. }] if query == "abc"
         ),
         "current expiry must dispatch the deep search, got {effects:?}"
     );
@@ -1787,6 +1825,8 @@ fn build_mode_debounce_expiry_searches_current_and_drops_stale() {
     let _ = dispatch(Action::TriggerDeepSearch, &mut app);
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionSearchDebounceExpired {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
             query: "abc".into(),
             seq: 1,
         }),
@@ -1795,6 +1835,23 @@ fn build_mode_debounce_expiry_searches_current_and_drops_stale() {
     assert!(
         effects.is_empty(),
         "stale expiry must be dropped, got {effects:?}"
+    );
+    app.session_picker_state.set_query("abcde");
+    let _ = dispatch(Action::TriggerDeepSearch, &mut app);
+    assert_eq!(app.session_picker_deep_search_seq, 3);
+    app.active_view = ActiveView::AgentDashboard;
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionSearchDebounceExpired {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
+            query: "abcde".into(),
+            seq: 3,
+        }),
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "build-mode expiry for a hidden welcome picker must not search, got {effects:?}"
     );
 }
 /// Modal `/resume` surface: the debounce expiry validates against the
@@ -1818,6 +1875,8 @@ fn build_mode_modal_debounce_expiry_validates_modal_seq() {
     );
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionSearchDebounceExpired {
+            host: SessionPickerHost::AgentModal,
+            generation: modal_picker_generation(&app),
             query: "abc".into(),
             seq: 1,
         }),
@@ -1826,35 +1885,9 @@ fn build_mode_modal_debounce_expiry_validates_modal_seq() {
     assert!(
         matches!(
             &effects[..],
-            [Effect::DeepSearchSessions { query, seq: 1 }] if query == "abc"
+            [Effect::DeepSearchSessions { query, seq: 1, .. }] if query == "abc"
         ),
         "expiry must validate against the modal seq, got {effects:?}"
-    );
-}
-/// Dismissing the welcome picker invalidates an armed deep-search debounce:
-/// its late expiry must not search a picker that no longer exists, and the
-/// spinner flag armed with it must drop (it drives fast ticking).
-#[test]
-fn build_mode_picker_close_invalidates_armed_debounce() {
-    let mut app = test_app();
-    app.session_picker_state.set_query("abc");
-    let _ = dispatch(Action::TriggerDeepSearch, &mut app);
-    assert!(app.session_picker_content_loading);
-    let _ = dispatch(Action::SessionPickerClosed, &mut app);
-    assert!(
-        !app.session_picker_content_loading,
-        "dismissal must drop the armed spinner flag"
-    );
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::SessionSearchDebounceExpired {
-            query: "abc".into(),
-            seq: 1,
-        }),
-        &mut app,
-    );
-    assert!(
-        effects.is_empty(),
-        "expiry armed before the close must not search, got {effects:?}"
     );
 }
 /// Modal-armed debounce + modal close: the dismissal bump lands on the
@@ -1877,6 +1910,7 @@ fn build_mode_modal_close_drops_armed_debounce_despite_seq_collision() {
         app.session_picker_deep_search_seq, 0,
         "modal arm must not touch the welcome counter"
     );
+    let armed_generation = modal_picker_generation(&app);
     get_active_agent_mut(&mut app)
         .expect("active agent")
         .active_modal = None;
@@ -1887,6 +1921,8 @@ fn build_mode_modal_close_drops_armed_debounce_despite_seq_collision() {
     );
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionSearchDebounceExpired {
+            host: SessionPickerHost::AgentModal,
+            generation: armed_generation,
             query: "abc".into(),
             seq: 1,
         }),
@@ -1972,6 +2008,8 @@ fn stale_session_list_responses_are_dropped() {
     let _ = dispatch(Action::ForceDeepSearch, &mut app);
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
             scope: ListScope::Cwd,
             sessions: vec![make_conversation_entry("conv-stale-1")],
             partial: None,
@@ -1986,6 +2024,8 @@ fn stale_session_list_responses_are_dropped() {
     );
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListFailed {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
             error: "boom".into(),
             seq: 1,
             query: Some("abc".into()),
@@ -1998,6 +2038,8 @@ fn stale_session_list_responses_are_dropped() {
     );
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
             scope: ListScope::Cwd,
             sessions: vec![make_conversation_entry("conv-fresh-2")],
             partial: None,
@@ -2044,6 +2086,8 @@ fn modal_search_response_lands_and_stale_is_dropped() {
     let _ = dispatch(Action::ForceDeepSearch, &mut app);
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::AgentModal,
+            generation: modal_picker_generation(&app),
             scope: ListScope::Cwd,
             sessions: vec![make_conversation_entry("conv-hit-1")],
             partial: None,
@@ -2083,6 +2127,8 @@ fn modal_search_response_lands_and_stale_is_dropped() {
     let _ = dispatch(Action::ForceDeepSearch, &mut app);
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::AgentModal,
+            generation: modal_picker_generation(&app),
             scope: ListScope::Cwd,
             sessions: vec![make_conversation_entry("conv-stale-m")],
             partial: None,
@@ -2129,6 +2175,7 @@ fn modal_close_drops_in_flight_search_response() {
     }
     let _ = dispatch(Action::ForceDeepSearch, &mut app);
     let seq = app.session_picker_list_seq;
+    let generation = modal_picker_generation(&app);
     get_active_agent_mut(&mut app)
         .expect("active agent")
         .active_modal = None;
@@ -2139,6 +2186,8 @@ fn modal_close_drops_in_flight_search_response() {
     );
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::AgentModal,
+            generation,
             scope: ListScope::Cwd,
             sessions: vec![make_conversation_entry("conv-late-1")],
             partial: None,
@@ -2175,6 +2224,7 @@ fn modal_pick_drops_in_flight_search_response() {
     }
     let _ = dispatch(Action::ForceDeepSearch, &mut app);
     let seq = app.session_picker_list_seq;
+    let generation = modal_picker_generation(&app);
     let effects = dispatch(Action::PickSession(0), &mut app);
     assert!(
         matches!(&effects[..], [Effect::LoadSession { .. }]),
@@ -2186,6 +2236,8 @@ fn modal_pick_drops_in_flight_search_response() {
     );
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::AgentModal,
+            generation,
             scope: ListScope::Cwd,
             sessions: vec![make_conversation_entry("conv-late-p")],
             partial: None,
@@ -2215,6 +2267,7 @@ fn welcome_esc_drops_in_flight_fetch_response() {
     app.session_picker_entries = Some(vec![make_conversation_entry("conv-w-esc")]);
     let _ = dispatch(Action::TriggerDeepSearch, &mut app);
     let seq = app.session_picker_list_seq;
+    let generation = app.session_picker_generation;
     let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let out = app.handle_input(&esc);
     assert!(
@@ -2231,6 +2284,8 @@ fn welcome_esc_drops_in_flight_fetch_response() {
     let _ = dispatch(Action::SessionPickerClosed, &mut app);
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Welcome,
+            generation,
             scope: ListScope::Cwd,
             sessions: vec![make_conversation_entry("conv-late-w")],
             partial: None,
@@ -2257,6 +2312,7 @@ fn build_welcome_esc_during_load_dismisses_without_resurrection() {
     assert!(!app.chat_mode);
     let _ = dispatch(Action::FetchSessionList, &mut app);
     let seq = app.session_picker_list_seq;
+    let generation = app.session_picker_generation;
     assert!(app.session_picker_loading);
     let mut foreign = make_picker_entry("claude-1", "/repo");
     foreign.source = "claude".into();
@@ -2281,6 +2337,8 @@ fn build_welcome_esc_during_load_dismisses_without_resurrection() {
     );
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Welcome,
+            generation,
             scope: ListScope::Cwd,
             sessions: vec![make_picker_entry("native-late", "/repo")],
             partial: None,
@@ -2315,36 +2373,128 @@ fn build_welcome_esc_dismisses_spinner_only_loading_picker() {
     let _ = dispatch(Action::SessionPickerClosed, &mut app);
     assert!(!app.session_picker_loading, "picker fully dismissed");
 }
-/// Build-mode canary: modal close must not bump the list seq — an in-flight
-/// plain fetch keeps its pre-existing land-after-close behavior.
+/// Build mode: an Only-policy modal fetch completing after close/reopen is
+/// dropped by host/incarnation routing and cannot leak its rows or query stamp
+/// into the replacement Exclude-policy modal.
 #[test]
-fn build_mode_modal_close_does_not_invalidate_plain_fetch() {
+fn build_mode_close_and_reopen_drop_opposite_policy_response() {
+    use xai_grok_shell::session::unified_list::HeadlessPolicy;
     let mut app = test_app_with_agent();
     assert!(!app.chat_mode);
-    open_session_picker_with(&mut app, vec![make_picker_entry("build-cl-1", "/tmp/repo")]);
-    let seq = app.session_picker_list_seq;
+    let _ = dispatch(Action::ShowSessionPicker, &mut app);
+    let old_generation = modal_picker_generation(&app);
+    let only_effects = dispatch(Action::CycleSessionSourceFilter, &mut app);
+    let [
+        Effect::FetchSessionList {
+            host: SessionPickerHost::AgentModal,
+            generation,
+            seq: only_seq,
+            headless_policy: HeadlessPolicy::Only,
+            ..
+        },
+    ] = only_effects.as_slice()
+    else {
+        panic!("expected modal Headless fetch, got {only_effects:?}");
+    };
+    assert_eq!(*generation, old_generation);
+    let only_seq = *only_seq;
     get_active_agent_mut(&mut app)
         .expect("active agent")
         .active_modal = None;
     let _ = dispatch(Action::SessionPickerClosed, &mut app);
-    assert_eq!(
-        app.session_picker_list_seq, seq,
-        "Build-mode close must not invalidate in-flight plain fetches"
-    );
-    let _ = dispatch(
+    let exclude_effects = dispatch(Action::ShowSessionPicker, &mut app);
+    let Some(Effect::FetchSessionList {
+        host: SessionPickerHost::AgentModal,
+        generation: new_generation,
+        seq: exclude_seq,
+        headless_policy,
+        ..
+    }) = exclude_effects.first()
+    else {
+        panic!("expected reopened picker fetch, got {exclude_effects:?}");
+    };
+    assert_eq!(*headless_policy, HeadlessPolicy::Exclude);
+    assert!(*new_generation > old_generation);
+    assert!(*exclude_seq > only_seq);
+    let new_generation = *new_generation;
+    let exclude_seq = *exclude_seq;
+    let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::AgentModal,
+            generation: old_generation,
             scope: ListScope::Cwd,
-            sessions: vec![make_picker_entry("build-late-1", "/tmp/repo")],
+            sessions: vec![make_picker_entry("stale-generation", "/tmp/repo")],
             partial: None,
-            seq,
+            seq: exclude_seq,
+            query: Some("modal-only".into()),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    let Some(ActiveModal::SessionPicker {
+        entries,
+        entries_query,
+        loading,
+        ..
+    }) = app.agents[&AgentId(0)].active_modal.as_ref()
+    else {
+        panic!("reopened picker missing");
+    };
+    assert!(entries.is_none(), "stale incarnation rows must be dropped");
+    assert!(entries_query.is_none(), "stale query stamp must be dropped");
+    assert!(
+        *loading,
+        "the replacement modal keeps waiting for its fetch"
+    );
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::AgentModal,
+            generation: new_generation,
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("stale-policy", "/tmp/repo")],
+            partial: None,
+            seq: only_seq,
             query: None,
         }),
         &mut app,
     );
+    assert!(effects.is_empty());
+    let Some(ActiveModal::SessionPicker {
+        entries, loading, ..
+    }) = app.agents[&AgentId(0)].active_modal.as_ref()
+    else {
+        panic!("reopened picker missing");
+    };
     assert!(
-        app.session_picker_entries.is_some(),
-        "Build-mode plain response still lands after close (pre-existing behavior)"
+        entries.is_none(),
+        "obsolete Only-policy rows must be dropped"
     );
+    assert!(
+        *loading,
+        "the replacement modal keeps waiting for its fetch"
+    );
+    assert!(app.session_picker_entries.is_none());
+    assert!(app.session_picker_entries_query.is_none());
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::AgentModal,
+            generation: new_generation,
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("current", "/tmp/repo")],
+            partial: None,
+            seq: exclude_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    let Some(ActiveModal::SessionPicker {
+        entries: Some(entries),
+        ..
+    }) = app.agents[&AgentId(0)].active_modal.as_ref()
+    else {
+        panic!("reopened picker missing");
+    };
+    assert_eq!(entries[0].id, "current");
 }
 /// Zero-hit search: a normal outcome — the picker shows an empty list,
 /// never the misleading "No sessions found for this directory" toast
@@ -2357,6 +2507,8 @@ fn zero_hit_search_shows_empty_list_without_toast() {
     let _ = dispatch(Action::ForceDeepSearch, &mut app);
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
             scope: ListScope::Cwd,
             sessions: vec![],
             partial: None,
@@ -2379,6 +2531,8 @@ fn zero_hit_search_shows_empty_list_without_toast() {
     let _ = dispatch(Action::FetchSessionList, &mut app);
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
             scope: ListScope::Cwd,
             sessions: vec![],
             partial: None,
@@ -2442,6 +2596,8 @@ fn current_seq_failed_search_clears_indicator_and_stamp() {
     assert!(app.session_picker_content_loading);
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListFailed {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
             error: "boom".into(),
             seq: 1,
             query: Some("hit".into()),
@@ -2483,6 +2639,8 @@ fn modal_failed_search_clears_indicator_and_plain_failure_preserves_spinner() {
     let _ = dispatch(Action::ForceDeepSearch, &mut app);
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListFailed {
+            host: SessionPickerHost::AgentModal,
+            generation: modal_picker_generation(&app),
             error: "boom".into(),
             seq: 1,
             query: Some("hit".into()),
@@ -2530,6 +2688,8 @@ fn modal_failed_search_clears_indicator_and_plain_failure_preserves_spinner() {
     );
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListFailed {
+            host: SessionPickerHost::AgentModal,
+            generation: modal_picker_generation(&app),
             error: "boom".into(),
             seq: app.session_picker_list_seq,
             query: None,
@@ -2564,6 +2724,8 @@ fn build_mode_list_response_preserves_deep_search_spinner() {
     assert!(app.session_picker_content_loading, "deep search in flight");
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
             scope: ListScope::Cwd,
             sessions: vec![make_picker_entry("local-1", "/r")],
             partial: None,
@@ -2579,6 +2741,8 @@ fn build_mode_list_response_preserves_deep_search_spinner() {
     assert!(app.session_picker_entries.is_some(), "entries still land");
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListFailed {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
             error: "boom".into(),
             seq: app.session_picker_list_seq,
             query: None,
@@ -2590,56 +2754,71 @@ fn build_mode_list_response_preserves_deep_search_spinner() {
         "plain list failure must not hide the deep-search spinner"
     );
 }
-/// Build-mode canary: plain picker fetches never bump the list seq, so two
-/// rapid picker opens keep their pre-existing last-write-wins behavior —
-/// BOTH responses land in arrival order instead of the superseded one being
-/// dropped as stale (the stale-drop is chat-search machinery).
+/// Build mode: rapid plain fetches advance both the shared list seq and the
+/// welcome incarnation. A response must match both before it can land, in
+/// either completion order.
 #[test]
-fn build_mode_rapid_plain_fetches_keep_last_write_wins() {
+fn build_mode_rapid_plain_fetches_drop_superseded_response() {
     let mut app = test_app();
     assert!(!app.chat_mode);
     let first = dispatch(Action::FetchSessionList, &mut app);
+    let first_generation = app.session_picker_generation;
     let second = dispatch(Action::FetchSessionList, &mut app);
-    for effects in [&first, &second] {
-        assert!(
-            matches!(
-                &effects[..],
-                [Effect::FetchSessionList {
-                    query: None,
-                    seq: 0,
-                    ..
-                }]
-            ),
-            "Build-mode plain fetch must not bump the seq, got {effects:?}"
-        );
-    }
-    assert_eq!(
-        app.session_picker_list_seq, 0,
-        "Build mode never bumps the list seq"
-    );
+    let second_generation = app.session_picker_generation;
+    let [
+        Effect::FetchSessionList {
+            host: SessionPickerHost::Welcome,
+            generation: first_effect_generation,
+            seq: first_seq,
+            ..
+        },
+    ] = first.as_slice()
+    else {
+        panic!("expected first list fetch, got {first:?}");
+    };
+    let [
+        Effect::FetchSessionList {
+            host: SessionPickerHost::Welcome,
+            generation: second_effect_generation,
+            seq: second_seq,
+            ..
+        },
+    ] = second.as_slice()
+    else {
+        panic!("expected second list fetch, got {second:?}");
+    };
+    assert_eq!(*first_effect_generation, first_generation);
+    assert_eq!(*second_effect_generation, second_generation);
+    assert!(second_generation > first_generation);
+    assert!(*second_seq > *first_seq);
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Welcome,
+            generation: first_generation,
             scope: ListScope::Cwd,
             sessions: vec![make_picker_entry("build-first", "/r")],
             partial: None,
-            seq: 0,
+            seq: *first_seq,
             query: None,
         }),
         &mut app,
     );
-    assert_eq!(
-        app.session_picker_entries
-            .as_ref()
-            .map(|e| e[0].id.as_str()),
-        Some("build-first"),
-        "superseded plain response must land (pre-existing behavior)"
+    assert!(
+        app.session_picker_entries.is_none(),
+        "superseded plain response must be dropped"
+    );
+    assert!(
+        app.session_picker_loading,
+        "the dropped response must not clear the newer fetch's spinner"
     );
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Welcome,
+            generation: second_generation,
             scope: ListScope::Cwd,
             sessions: vec![make_picker_entry("build-second", "/r")],
             partial: None,
-            seq: 0,
+            seq: *second_seq,
             query: None,
         }),
         &mut app,
@@ -2647,9 +2826,712 @@ fn build_mode_rapid_plain_fetches_keep_last_write_wins() {
     assert_eq!(
         app.session_picker_entries
             .as_ref()
-            .map(|e| e[0].id.as_str()),
+            .map(|entries| entries[0].id.as_str()),
         Some("build-second"),
-        "later plain response wins (pre-existing behavior)"
+        "the current response must land"
+    );
+    assert!(!app.session_picker_loading);
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Welcome,
+            generation: first_generation,
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("build-first-late", "/r")],
+            partial: None,
+            seq: *first_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.session_picker_entries
+            .as_ref()
+            .map(|entries| entries[0].id.as_str()),
+        Some("build-second"),
+        "a late superseded response must not clobber the applied result"
+    );
+}
+/// Picker incarnation generations: every fetch reallocates the welcome
+/// picker's generation, a fetch with the modal open overwrites the modal's
+/// constructed 0 placeholder with a fresh allocation (distinct from the
+/// welcome one), and a dismissal reallocates the welcome generation again.
+#[test]
+fn picker_generations_reallocate_on_fetch_and_dismissal() {
+    use crate::views::modal::ActiveModal;
+    let mut app = test_app_with_agent();
+    assert_eq!(app.session_picker_generation, 0);
+    let _ = dispatch(Action::FetchSessionList, &mut app);
+    let welcome_after_fetch = app.session_picker_generation;
+    assert!(welcome_after_fetch > 0, "fetch must allocate a generation");
+    let _ = dispatch(Action::ShowSessionPicker, &mut app);
+    let Some(&ActiveModal::SessionPicker { generation, .. }) = get_active_agent(&app)
+        .expect("active agent")
+        .active_modal
+        .as_ref()
+    else {
+        panic!("expected SessionPicker modal");
+    };
+    assert!(
+        generation > welcome_after_fetch,
+        "open must overwrite the modal's 0 placeholder with a fresh allocation"
+    );
+    assert!(
+        app.session_picker_generation > welcome_after_fetch,
+        "the modal-open fetch reallocates the welcome generation too"
+    );
+    assert_ne!(
+        generation, app.session_picker_generation,
+        "generations are unique across hosts"
+    );
+    get_active_agent_mut(&mut app)
+        .expect("active agent")
+        .active_modal = None;
+    let welcome_before_dismiss = app.session_picker_generation;
+    let _ = dispatch(Action::SessionPickerClosed, &mut app);
+    assert!(
+        app.session_picker_generation > welcome_before_dismiss,
+        "dismissal must reallocate the welcome generation"
+    );
+}
+/// Reopening the modal picker starts a new incarnation: the first
+/// incarnation's late list response is dropped, the reopened incarnation's
+/// own response applies. Also pins the producer side: the modal fetch
+/// carries the modal host and the modal's live generation.
+#[test]
+fn reopened_modal_drops_prior_incarnation_list_result() {
+    use crate::views::modal::ActiveModal;
+    let mut app = test_app_with_agent();
+    assert!(!app.chat_mode);
+    let effects = dispatch(Action::ShowSessionPicker, &mut app);
+    let first_generation = modal_picker_generation(&app);
+    let [
+        Effect::FetchSessionList {
+            host: SessionPickerHost::AgentModal,
+            generation,
+            seq: first_seq,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("expected modal fetch, got {effects:?}");
+    };
+    assert_eq!(*generation, first_generation);
+    let first_seq = *first_seq;
+    get_active_agent_mut(&mut app)
+        .expect("active agent")
+        .active_modal = None;
+    let _ = dispatch(Action::SessionPickerClosed, &mut app);
+    let second_effects = dispatch(Action::ShowSessionPicker, &mut app);
+    let second_generation = modal_picker_generation(&app);
+    let [
+        Effect::FetchSessionList {
+            host: SessionPickerHost::AgentModal,
+            generation,
+            seq: second_seq,
+            ..
+        },
+    ] = second_effects.as_slice()
+    else {
+        panic!("expected reopened modal fetch, got {second_effects:?}");
+    };
+    assert_eq!(*generation, second_generation);
+    assert!(second_generation > first_generation);
+    assert!(*second_seq > first_seq);
+    let second_seq = *second_seq;
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::AgentModal,
+            generation: first_generation,
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("stale-open", "/r")],
+            partial: None,
+            seq: first_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    {
+        let agent = get_active_agent(&app).expect("active agent");
+        let Some(ActiveModal::SessionPicker {
+            entries, loading, ..
+        }) = agent.active_modal.as_ref()
+        else {
+            panic!("expected SessionPicker modal");
+        };
+        assert!(
+            entries.is_none(),
+            "stale-incarnation response must not land"
+        );
+        assert!(loading, "reopened modal keeps waiting for its own fetch");
+    }
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::AgentModal,
+            generation: second_generation,
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("fresh-open", "/r")],
+            partial: None,
+            seq: second_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    let agent = get_active_agent(&app).expect("active agent");
+    let Some(ActiveModal::SessionPicker {
+        entries: Some(list),
+        loading,
+        ..
+    }) = agent.active_modal.as_ref()
+    else {
+        panic!("expected SessionPicker modal with entries");
+    };
+    assert_eq!(list[0].id, "fresh-open");
+    assert!(!loading);
+}
+/// An armed welcome debounce dies with its incarnation: a dismissal drops
+/// the armed spinner flag and reallocates the generation, so the expiry
+/// emits nothing; a browse refetch reallocates the generation while leaving
+/// the deep-search seq current, so its expiry is dropped on the generation
+/// alone.
+#[test]
+fn dismissed_welcome_picker_drops_armed_debounce_expiry() {
+    let mut app = test_app();
+    assert!(!app.chat_mode);
+    app.session_picker_state.set_query("abc");
+    let effects = dispatch(Action::TriggerDeepSearch, &mut app);
+    let armed_generation = app.session_picker_generation;
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::DebounceSessionSearch {
+                host: SessionPickerHost::Welcome,
+                generation,
+                seq: 1,
+                ..
+            }] if *generation == armed_generation
+        ),
+        "welcome debounce must be stamped with the welcome host and its live generation, got {effects:?}"
+    );
+    assert!(app.session_picker_content_loading);
+    let _ = dispatch(Action::SessionPickerClosed, &mut app);
+    assert!(
+        !app.session_picker_content_loading,
+        "dismissal must drop the armed spinner flag"
+    );
+    assert!(
+        app.session_picker_generation > armed_generation,
+        "dismissal must reallocate the welcome generation"
+    );
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionSearchDebounceExpired {
+            host: SessionPickerHost::Welcome,
+            generation: armed_generation,
+            query: "abc".into(),
+            seq: 1,
+        }),
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "dismissed picker's expiry must not search, got {effects:?}"
+    );
+    assert!(!app.session_picker_content_loading);
+    app.session_picker_state.set_query("abcd");
+    let _ = dispatch(Action::TriggerDeepSearch, &mut app);
+    let rearmed_generation = app.session_picker_generation;
+    let armed_seq = app.session_picker_deep_search_seq;
+    let _ = dispatch(Action::FetchSessionList, &mut app);
+    assert_eq!(
+        app.session_picker_deep_search_seq, armed_seq,
+        "the browse refetch leaves the deep-search seq current"
+    );
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionSearchDebounceExpired {
+            host: SessionPickerHost::Welcome,
+            generation: rearmed_generation,
+            query: "abcd".into(),
+            seq: armed_seq,
+        }),
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "the superseded incarnation's expiry must not search, got {effects:?}"
+    );
+}
+/// A welcome-issued fetch whose response completes after a modal opened on
+/// top is dropped: the modal-open fetch reallocated the welcome generation,
+/// so the response can neither retarget the modal nor stamp the welcome bag.
+#[test]
+fn welcome_fetch_response_does_not_retarget_open_modal() {
+    use crate::views::modal::ActiveModal;
+    let mut app = test_app_with_agent();
+    assert!(!app.chat_mode);
+    let effects = dispatch(Action::FetchSessionList, &mut app);
+    let [
+        Effect::FetchSessionList {
+            host: SessionPickerHost::Welcome,
+            generation: welcome_generation,
+            seq: welcome_seq,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("expected welcome fetch, got {effects:?}");
+    };
+    let welcome_generation = *welcome_generation;
+    let welcome_seq = *welcome_seq;
+    let _ = dispatch(Action::ShowSessionPicker, &mut app);
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Welcome,
+            generation: welcome_generation,
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("welcome-late", "/r")],
+            partial: None,
+            seq: welcome_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    {
+        let agent = get_active_agent(&app).expect("active agent");
+        let Some(ActiveModal::SessionPicker {
+            entries, loading, ..
+        }) = agent.active_modal.as_ref()
+        else {
+            panic!("expected SessionPicker modal");
+        };
+        assert!(
+            entries.is_none(),
+            "welcome response must not land in the modal"
+        );
+        assert!(loading, "the modal keeps waiting for its own fetch");
+    }
+    assert!(
+        app.session_picker_entries.is_none(),
+        "the superseded welcome incarnation's response is dropped everywhere"
+    );
+}
+/// The dashboard routing arm: a dashboard-host result (list or card detail)
+/// applies to the mounted surface when generation and its per-kind seq
+/// match, is dropped on a generation or detail-seq mismatch, and is dropped
+/// (with no welcome fallback) while the surface is unmounted.
+#[test]
+fn dashboard_host_results_route_to_surface_only() {
+    use crate::views::session_picker_surface::SessionPickerSurface;
+    let mut app = test_app();
+    let generation = app.alloc_picker_generation();
+    let mut surface = SessionPickerSurface::new(generation);
+    surface.loading = true;
+    app.dashboard_session_picker = Some(surface);
+    let list_result = |generation, id: &str| {
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Dashboard,
+            generation,
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry(id, "/r")],
+            partial: None,
+            seq: 0,
+            query: None,
+        })
+    };
+    let _ = dispatch(list_result(generation, "dash-fresh"), &mut app);
+    {
+        let surface = app.dashboard_session_picker.as_ref().expect("surface");
+        assert_eq!(
+            surface.entries.as_ref().map(|e| e[0].id.as_str()),
+            Some("dash-fresh"),
+            "matching dashboard result must apply to the surface"
+        );
+        assert!(!surface.loading);
+    }
+    let _ = dispatch(list_result(generation + 1, "dash-stale"), &mut app);
+    assert_eq!(
+        app.dashboard_session_picker
+            .as_ref()
+            .and_then(|s| s.entries.as_ref())
+            .map(|e| e[0].id.as_str()),
+        Some("dash-fresh"),
+        "generation mismatch must be dropped"
+    );
+    let detail = crate::app::app_view::CardDetail {
+        turn_count: 9,
+        tool_call_count: 1,
+        first_prompt_preview: "first".into(),
+    };
+    let detail_result = |generation, seq| {
+        Action::TaskComplete(TaskResult::CardDetailLoaded {
+            host: SessionPickerHost::Dashboard,
+            generation,
+            source: "local".into(),
+            session_id: "dash-fresh".into(),
+            seq,
+            detail: detail.clone(),
+        })
+    };
+    let detail_seq = app
+        .dashboard_session_picker
+        .as_ref()
+        .expect("surface")
+        .detail_seq;
+    let surface_card_detail = |app: &AppView| {
+        app.dashboard_session_picker
+            .as_ref()
+            .and_then(|s| s.entries.as_ref())
+            .and_then(|e| e[0].card_detail.as_ref())
+            .map(|d| d.turn_count)
+    };
+    let _ = dispatch(detail_result(generation, detail_seq + 1), &mut app);
+    assert_eq!(
+        surface_card_detail(&app),
+        None,
+        "detail-seq mismatch must be dropped"
+    );
+    let _ = dispatch(detail_result(generation, detail_seq), &mut app);
+    assert_eq!(
+        surface_card_detail(&app),
+        Some(9),
+        "matching card detail must stamp the surface's entry"
+    );
+    app.dashboard_session_picker
+        .as_mut()
+        .expect("surface")
+        .content_loading = true;
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::DeepSearchResults {
+            host: SessionPickerHost::Dashboard,
+            generation,
+            results: vec![content_hit("dash-hit")],
+            seq: 0,
+        }),
+        &mut app,
+    );
+    {
+        let surface = app.dashboard_session_picker.as_ref().expect("surface");
+        assert_eq!(
+            surface
+                .content_results
+                .as_ref()
+                .map(|hits| hits[0].session_id.as_str()),
+            Some("dash-hit"),
+            "matching deep-search results must land on the surface"
+        );
+        assert!(!surface.content_loading);
+    }
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListFailed {
+            host: SessionPickerHost::Dashboard,
+            generation,
+            error: "boom".into(),
+            seq: 0,
+            query: None,
+        }),
+        &mut app,
+    );
+    {
+        let surface = app.dashboard_session_picker.as_ref().expect("surface");
+        assert!(
+            surface.entries.is_none(),
+            "the routed failure clears the surface's native rows"
+        );
+        assert!(!surface.loading);
+    }
+    assert!(app.session_picker_entries.is_none());
+    assert!(!app.session_picker_loading);
+    app.dashboard_session_picker = None;
+    let effects = dispatch(list_result(generation, "dash-unmounted"), &mut app);
+    assert!(effects.is_empty());
+    assert!(app.dashboard_session_picker.is_none());
+    assert!(
+        app.session_picker_entries.is_none(),
+        "an unmounted dashboard result must not fall through to welcome storage"
+    );
+}
+/// A fetch issued for one agent's modal cannot land on another agent's
+/// modal: the generations differ, so the late result is dropped. The
+/// requesting (now background) modal stays loading — nothing routes back to
+/// a non-active modal, same as before host routing.
+#[test]
+fn modal_result_does_not_cross_agents_and_background_modal_starves() {
+    use crate::views::modal::ActiveModal;
+    let mut app = test_app_with_agent();
+    assert!(!app.chat_mode);
+    let a_effects = dispatch(Action::ShowSessionPicker, &mut app);
+    let a_generation = modal_picker_generation(&app);
+    let [Effect::FetchSessionList { seq: a_seq, .. }] = a_effects.as_slice() else {
+        panic!("expected agent A modal fetch, got {a_effects:?}");
+    };
+    let a_seq = *a_seq;
+    insert_placeholder_agent(&mut app, AgentId(1));
+    app.active_view = ActiveView::Agent(AgentId(1));
+    let _ = dispatch(Action::ShowSessionPicker, &mut app);
+    let b_generation = modal_picker_generation(&app);
+    assert_ne!(a_generation, b_generation);
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::AgentModal,
+            generation: a_generation,
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("agent-a-late", "/r")],
+            partial: None,
+            seq: a_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    {
+        let agent = get_active_agent(&app).expect("active agent");
+        let Some(ActiveModal::SessionPicker {
+            entries, loading, ..
+        }) = agent.active_modal.as_ref()
+        else {
+            panic!("expected agent B's SessionPicker modal");
+        };
+        assert!(
+            entries.is_none(),
+            "another agent's result must not land here"
+        );
+        assert!(loading, "B's modal keeps waiting for its own fetch");
+    }
+    let Some(ActiveModal::SessionPicker {
+        entries, loading, ..
+    }) = app.agents[&AgentId(0)].active_modal.as_ref()
+    else {
+        panic!("expected agent A's SessionPicker modal");
+    };
+    assert!(entries.is_none());
+    assert!(
+        loading,
+        "the background modal stays loading: its result is dropped, not delivered"
+    );
+}
+/// A welcome browse refetch clears the search box without bumping the
+/// deep-search seq; the in-flight deep search is orphaned by the refetch's
+/// generation reallocation and must not repopulate the cleared results,
+/// while the new incarnation's own search still lands.
+#[test]
+fn welcome_browse_refetch_orphans_in_flight_deep_search() {
+    let mut app = test_app();
+    assert!(!app.chat_mode);
+    app.session_picker_state.set_query("needle");
+    let effects = dispatch(Action::ForceDeepSearch, &mut app);
+    let search_generation = app.session_picker_generation;
+    assert!(
+        matches!(&effects[..], [Effect::DeepSearchSessions { seq: 1, .. }]),
+        "forced deep search must dispatch, got {effects:?}"
+    );
+    let _ = dispatch(Action::FetchSessionList, &mut app);
+    assert_eq!(
+        app.session_picker_deep_search_seq, 1,
+        "the browse refetch leaves the deep-search seq untouched"
+    );
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::DeepSearchResults {
+            host: SessionPickerHost::Welcome,
+            generation: search_generation,
+            results: vec![content_hit("stale-deep-hit")],
+            seq: 1,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(
+        app.session_picker_content_results.is_none(),
+        "the orphaned deep search must not repopulate the cleared picker"
+    );
+    assert!(!app.session_picker_content_loading);
+    app.session_picker_state.set_query("needle2");
+    let effects = dispatch(Action::ForceDeepSearch, &mut app);
+    assert!(
+        matches!(&effects[..], [Effect::DeepSearchSessions { seq: 2, .. }]),
+        "re-armed deep search must dispatch, got {effects:?}"
+    );
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::DeepSearchResults {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
+            results: vec![content_hit("fresh-deep-hit")],
+            seq: 2,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.session_picker_content_results
+            .as_ref()
+            .map(|hits| hits[0].session_id.as_str()),
+        Some("fresh-deep-hit"),
+        "the live incarnation's deep search must land"
+    );
+    assert!(!app.session_picker_content_loading);
+}
+/// A background modal's in-flight card detail survives welcome-picker
+/// activity: only the routed surface's detail seq moves, so the detail still
+/// applies when the user returns and its own host, generation, and seq
+/// match. The modal's OWN list changes still invalidate its in-flight
+/// details.
+#[test]
+fn background_modal_card_detail_survives_welcome_refetch() {
+    use crate::views::modal::ActiveModal;
+    let mut app = test_app_with_agent();
+    assert!(!app.chat_mode);
+    let modal_effects = dispatch(Action::ShowSessionPicker, &mut app);
+    let modal_generation = modal_picker_generation(&app);
+    let [Effect::FetchSessionList { seq: modal_seq, .. }] = modal_effects.as_slice() else {
+        panic!("expected modal fetch, got {modal_effects:?}");
+    };
+    let modal_seq = *modal_seq;
+    let modal_list = |generation, seq| {
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::AgentModal,
+            generation,
+            scope: ListScope::Cwd,
+            sessions: vec![
+                make_picker_entry("card-target", "/r"),
+                make_picker_entry("card-other", "/r"),
+            ],
+            partial: None,
+            seq,
+            query: None,
+        })
+    };
+    let _ = dispatch(modal_list(modal_generation, modal_seq), &mut app);
+    let effects = dispatch(
+        Action::ExpandSessionCard {
+            source: "local".into(),
+            session_id: "card-target".into(),
+        },
+        &mut app,
+    );
+    let [
+        Effect::LoadCardDetail {
+            host: SessionPickerHost::AgentModal,
+            generation,
+            session_id,
+            seq,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("expected a modal-stamped card detail load, got {effects:?}");
+    };
+    assert_eq!(*generation, modal_generation);
+    assert_eq!(session_id, "card-target");
+    let detail_seq = *seq;
+    app.active_view = ActiveView::Welcome;
+    let welcome_effects = dispatch(Action::FetchSessionList, &mut app);
+    let [
+        Effect::FetchSessionList {
+            seq: welcome_seq, ..
+        },
+    ] = welcome_effects.as_slice()
+    else {
+        panic!("expected welcome fetch, got {welcome_effects:?}");
+    };
+    let welcome_seq = *welcome_seq;
+    let welcome_detail_seq = app.session_picker_detail_seq;
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("welcome-row", "/r")],
+            partial: None,
+            seq: welcome_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        app.session_picker_detail_seq > welcome_detail_seq,
+        "the welcome result advances the welcome detail seq"
+    );
+    {
+        let Some(&ActiveModal::SessionPicker {
+            detail_seq: modal_detail_seq,
+            generation: live_modal_generation,
+            ..
+        }) = app.agents[&AgentId(0)].active_modal.as_ref()
+        else {
+            panic!("agent A's modal must survive the view switch");
+        };
+        assert_eq!(
+            modal_detail_seq, detail_seq,
+            "welcome activity must not advance the modal's detail seq"
+        );
+        assert_eq!(live_modal_generation, modal_generation);
+    }
+    app.active_view = ActiveView::Agent(AgentId(0));
+    let detail = crate::app::app_view::CardDetail {
+        turn_count: 4,
+        tool_call_count: 2,
+        first_prompt_preview: "first".into(),
+    };
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::CardDetailLoaded {
+            host: SessionPickerHost::AgentModal,
+            generation: modal_generation,
+            source: "local".into(),
+            session_id: "card-target".into(),
+            seq: detail_seq,
+            detail: detail.clone(),
+        }),
+        &mut app,
+    );
+    let modal_card_detail = |app: &AppView, id: &str| {
+        let Some(ActiveModal::SessionPicker {
+            entries: Some(entries),
+            ..
+        }) = app.agents[&AgentId(0)].active_modal.as_ref()
+        else {
+            panic!("expected SessionPicker modal with entries");
+        };
+        entries
+            .iter()
+            .find(|e| e.id == id)
+            .expect("entry")
+            .card_detail
+            .as_ref()
+            .map(|d| d.turn_count)
+    };
+    assert_eq!(
+        modal_card_detail(&app, "card-target"),
+        Some(4),
+        "the surviving detail must stamp the background modal's own row"
+    );
+    let effects = dispatch(
+        Action::ExpandSessionCard {
+            source: "local".into(),
+            session_id: "card-other".into(),
+        },
+        &mut app,
+    );
+    let [Effect::LoadCardDetail { seq, .. }] = effects.as_slice() else {
+        panic!("expected a card detail load, got {effects:?}");
+    };
+    let second_detail_seq = *seq;
+    let _ = dispatch(
+        modal_list(modal_generation, app.session_picker_list_seq),
+        &mut app,
+    );
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::CardDetailLoaded {
+            host: SessionPickerHost::AgentModal,
+            generation: modal_generation,
+            source: "local".into(),
+            session_id: "card-other".into(),
+            seq: second_detail_seq,
+            detail,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        modal_card_detail(&app, "card-other"),
+        None,
+        "a modal-targeted list change must still invalidate the modal's own in-flight detail"
     );
 }
 /// Legacy fast path pinned: opening/refreshing the picker fetches with no

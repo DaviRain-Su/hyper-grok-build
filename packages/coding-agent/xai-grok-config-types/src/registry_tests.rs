@@ -60,7 +60,7 @@ fn registered_settings() {
                 "compaction_verbatim_input",
                 ("GROK_COMPACTION_VERBATIM_INPUT", true),
             ),
-            ("two_pass_compaction", ("GROK_TWO_PASS_COMPACTION", false)),
+            ("two_pass_compaction", ("GROK_TWO_PASS_COMPACTION", true)),
             ("backend_tools", ("GROK_BACKEND_SEARCH", true)),
             ("auto_wake", ("GROK_AUTO_WAKE", true)),
             (

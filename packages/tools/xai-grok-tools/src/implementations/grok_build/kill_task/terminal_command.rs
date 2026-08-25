@@ -140,8 +140,6 @@ mod tests {
             "kill_terminal_command"
         );
         let tmpl = ToolMetadata::description_template(&tool);
-        assert!(tmpl.contains("background terminal command"));
-        assert!(tmpl.contains("Terminate"));
         assert!(
             !tmpl.to_lowercase().contains("subagent"),
             "workspace tool must not mention subagents: {tmpl}"
@@ -169,12 +167,16 @@ mod tests {
             .render(ToolMetadata::description_template(&KillTerminalCommandTool))
             .unwrap();
         assert!(
-            rendered.contains("Pass its id (a monitor's id is returned by monitor)"),
-            "renamed task_id must appear in pass-line and monitor aside:\n{rendered}"
+            rendered.contains("monitor"),
+            "monitor tool name must appear:\n{rendered}"
         );
         assert!(
             !rendered.contains("task_id"),
             "canonical task_id must not remain after rename:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("${"),
+            "must not leak template markers:\n{rendered}"
         );
     }
 

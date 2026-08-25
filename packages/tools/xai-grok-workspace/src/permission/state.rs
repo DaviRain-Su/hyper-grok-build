@@ -307,6 +307,64 @@ pub(crate) async fn load_state_from_disk(
     load_state_with_fallback(&dirs.dir, dirs.legacy_dir.as_deref(), client_identifier).await
 }
 
+/// Lets the permission actor pick up a concurrent session's grants without
+/// re-walking the repo root or re-parsing an unchanged store on every request.
+pub(crate) struct CachedStateStore {
+    dir: std::path::PathBuf,
+    legacy_dir: Option<std::path::PathBuf>,
+    client_identifier: Option<String>,
+    /// `(mtime, len)` at the last read; size pairs with mtime to catch a
+    /// same-tick write that coarse-granularity filesystems would hide.
+    last_sig: Option<(std::time::SystemTime, u64)>,
+}
+
+impl CachedStateStore {
+    /// The signature is snapshotted BEFORE the content read, so a concurrent
+    /// persist between the two can only cause a redundant reload later, never
+    /// leave the cache ahead of the loaded state.
+    pub(crate) async fn resolve_and_load(
+        cwd: &AbsPathBuf,
+        client_identifier: Option<&str>,
+    ) -> (Self, PermissionState) {
+        let dirs = resolve_store_dirs(cwd, false).await;
+        let mut store = Self {
+            dir: dirs.dir,
+            legacy_dir: dirs.legacy_dir,
+            client_identifier: client_identifier.map(str::to_owned),
+            last_sig: None,
+        };
+        store.last_sig = store.current_sig().await;
+        let state = store.read().await;
+        (store, state)
+    }
+
+    async fn current_sig(&self) -> Option<(std::time::SystemTime, u64)> {
+        let path = state_file_path(&self.dir, self.client_identifier.as_deref());
+        let meta = tokio::fs::metadata(path).await.ok()?;
+        Some((meta.modified().ok()?, meta.len()))
+    }
+
+    async fn read(&self) -> PermissionState {
+        load_state_with_fallback(
+            &self.dir,
+            self.legacy_dir.as_deref(),
+            self.client_identifier.as_deref(),
+        )
+        .await
+    }
+
+    /// Grants on disk when the file signature changed since the last read, else
+    /// `None` — an unchanged store costs only the `stat`.
+    pub(crate) async fn reload_if_changed(&mut self) -> Option<PermissionState> {
+        let sig = self.current_sig().await;
+        if sig == self.last_sig {
+            return None;
+        }
+        self.last_sig = sig;
+        Some(self.read().await)
+    }
+}
+
 async fn persist_state_to_path_with_writer<F>(
     path: &std::path::Path,
     state: &PermissionState,

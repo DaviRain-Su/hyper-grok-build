@@ -220,8 +220,9 @@ impl SessionActor {
         body.push_str(&format!(
             "\nIt runs in the background: status snapshots and the final result arrive as \
              reminders at turn starts, and the user can watch it in /workflow runs. If it pauses, \
-             it can be resumed by calling the workflow tool with resume_from_run_id: \
-             \"{run_id}\". Keep run ids internal — the user knows runs by display name. No \
+             it can be resumed by calling the workflow tool with source: \
+             {{ type: \"resume\", resume_from_run_id: \"{run_id}\" }}. Keep run ids internal — \
+             the user knows runs by display name. No \
              action needed unless the user asks."
         ));
         self.push_system_reminder(&body);
@@ -320,7 +321,8 @@ fn format_workflow_status_reminder(
                 };
                 let _ = write!(
                     buf,
-                    "\n  Resumable: call the workflow tool with resume_from_run_id: \"{}\"{}.",
+                    "\n  Resumable: call the workflow tool with source: {{ type: \"resume\", \
+                     resume_from_run_id: \"{}\" }}{}.",
                     run.run_id, budget_suffix
                 );
             }
@@ -452,8 +454,9 @@ fn format_workflow_completion_reminder(
             } else {
                 let _ = writeln!(
                     buf,
-                    "  Resumable: call the workflow tool with resume_from_run_id: \"{}\" \
-                     and a raised agent_budget (the resume is rejected while usage is at \
+                    "  Resumable: call the workflow tool with source: {{ type: \"resume\", \
+                     resume_from_run_id: \"{}\" }} and a raised agent_budget (the resume is \
+                     rejected while usage is at \
                      or over the cap).",
                     run.run_id
                 );
@@ -462,8 +465,9 @@ fn format_workflow_completion_reminder(
         if run.status == crate::session::workflow::tracker::WorkflowRunStatus::Failed {
             let _ = writeln!(
                 buf,
-                "  Resumable: call the workflow tool with resume_from_run_id: \"{}\" — \
-                 completed agents replay from the journal and the failed step re-executes.",
+                "  Resumable: call the workflow tool with source: {{ type: \"resume\", \
+                 resume_from_run_id: \"{}\" }} — completed agents replay from the journal and \
+                 the failed step re-executes.",
                 run.run_id
             );
         }
@@ -881,7 +885,7 @@ mod workflow_reminder_tests {
             .next()
             .unwrap()
             .trim_end();
-        assert!(reminder.contains("resume_from_run_id: \"wf_1\""));
+        assert!(reminder.contains("source: { type: \"resume\", resume_from_run_id: \"wf_1\" }"));
         assert!(rendered_detail.starts_with("first second "));
         assert!(rendered_detail.ends_with('…'));
         assert!(rendered_detail.len() <= WORKFLOW_RESULT_SUMMARY_REMINDER_CAP);

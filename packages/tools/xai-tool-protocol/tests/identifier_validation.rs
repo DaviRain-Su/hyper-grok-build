@@ -99,6 +99,23 @@ fn server_id_rejects_empty() {
 }
 
 #[test]
+fn session_id_rejects_hub_reserved_prefix() {
+    use xai_tool_protocol::HUB_RESERVED_SESSION_PREFIX;
+    for bad in [
+        format!("{HUB_RESERVED_SESSION_PREFIX}botrelay:rotate:u"),
+        format!("{HUB_RESERVED_SESSION_PREFIX}"),
+        format!("{HUB_RESERVED_SESSION_PREFIX}x"),
+    ] {
+        let err = SessionId::new(&bad).unwrap_err();
+        assert!(
+            matches!(err, IdError::ReservedPrefix { ref value } if value == &bad),
+            "expected ReservedPrefix for {bad:?}, got {err:?}"
+        );
+    }
+    assert!(SessionId::new("botrelay:rotate:u").is_ok());
+}
+
+#[test]
 fn server_id_rejects_reserved_auto_prefix() {
     for bad in ["auto:my-server", "auto:", "auto:tool:read_file"] {
         let err = ServerId::new(bad).unwrap_err();

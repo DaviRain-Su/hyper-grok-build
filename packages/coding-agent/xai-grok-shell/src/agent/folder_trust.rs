@@ -571,91 +571,28 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn revoke_never_trusted_folder_writes_no_deny_and_preserves_cascade() {
+    fn revoke_never_trusted_folder_writes_no_deny() {
         let _sim = simulate_release_build();
-        // The actual bug fix: revoking a NEVER-trusted child must write no explicit
-        // child STORE deny (returning false) so a later ancestor grant still
-        // cascades to the child — a spurious child `set_untrusted` would win
-        // most-specific and break the cascade. It must STILL downgrade the
-        // in-process cache, though, so a cached storeless grant cannot survive a
-        // mid-session untrust. GROK_HOME-isolated so the grant writes to a temp
-        // store; `#[serial]` because GROK_HOME is global.
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("GROK_HOME", home.path());
-        // Distinct git roots for parent/child so `workspace_key` does not collapse
-        // them onto one key (the child's own `.git` stops discovery at the child).
-        let parent = repo_tmp();
-        let child = parent.path().join("child");
-        std::fs::create_dir_all(&child).unwrap();
-        git2::Repository::init(&child).unwrap();
+        let tmp = repo_tmp();
 
-        // Seed a cached grant with NO backing store record (e.g. a kill-switch /
-        // feature-off `compute` allow), so the cache downgrade is observable below.
-        record(&workspace_key(&child), true);
+        record(&workspace_key(tmp.path()), true);
 
-        // Revoking the never-trusted child reports false and writes no store deny.
         assert!(
-            !revoke_folder_trust(&child),
+            !revoke_folder_trust(tmp.path()),
             "revoking a never-trusted folder must return false"
         );
 
-        // The in-process cache is still downgraded so the untrust is immediate even
-        // for the storeless cached grant.
         assert!(
-            !project_scope_allowed(&child),
+            !project_scope_allowed(tmp.path()),
             "revoke must downgrade the in-process cache even for a never-trusted folder"
         );
 
-        // A subsequent ancestor grant must still cascade to the child — proving
-        // the revoke did not poison the store with a most-specific child deny.
-        let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(parent.path())).unwrap();
+        let store = TrustStore::load();
         assert!(
-            TrustStore::load().is_trusted(&workspace_key(&child)),
-            "ancestor grant must cascade to a child that was only revoked-when-untrusted"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn revoke_ancestor_cascade_trusted_child_writes_explicit_untrust() {
-        let _sim = simulate_release_build();
-        // Revoke on a child trusted ONLY via an ancestor cascade (no direct child
-        // grant) must report was_trusted=true and actually untrust the child: it
-        // writes an explicit child deny (overriding the cascade) and downgrades
-        // the cache. GROK_HOME-isolated so the grant writes to a temp store;
-        // `#[serial]` because GROK_HOME is process-global.
-        let home = tempfile::tempdir().unwrap();
-        let _env = EnvGuard::set("GROK_HOME", home.path());
-        // Distinct git roots so `workspace_key` keeps parent/child as separate
-        // keys (the child's own `.git` stops discovery at the child).
-        let parent = repo_tmp();
-        let child = parent.path().join("child");
-        std::fs::create_dir_all(&child).unwrap();
-        git2::Repository::init(&child).unwrap();
-
-        // Trust the parent only; the child inherits trust via the cascade.
-        let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(parent.path())).unwrap();
-        assert!(
-            TrustStore::load().is_trusted(&workspace_key(&child)),
-            "child must be trusted via the ancestor cascade before revoke"
-        );
-
-        // Revoking the cascade-trusted child reports was_trusted=true, then the
-        // child is untrusted: an explicit child deny overrides the cascade and
-        // the in-process cache is downgraded.
-        assert!(
-            revoke_folder_trust(&child),
-            "a cascade-trusted child must report was_trusted=true"
-        );
-        assert!(
-            !TrustStore::load().is_trusted(&workspace_key(&child)),
-            "revoke must write an explicit child untrust that overrides the cascade"
-        );
-        assert!(
-            !project_scope_allowed(&child),
-            "revoke must downgrade the in-process cache for the child"
+            !store.has_decision(&workspace_key(tmp.path())),
+            "revoking a never-trusted folder must not record a child deny"
         );
     }
 

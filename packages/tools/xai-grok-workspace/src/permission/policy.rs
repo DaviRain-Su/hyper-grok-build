@@ -623,12 +623,22 @@ const EXEC_VEHICLE_HEAD_FAMILIES: &[&str] = &["python", "node", "ruby", "perl", 
 /// [`EXEC_VEHICLE_HEADS`] or a versioned [`EXEC_VEHICLE_HEAD_FAMILIES`]
 /// spelling. `pub(crate)` so [`minimum_always_allow_scope`] floors these to
 /// the full command like dangerous verbs.
+/// Normalized command basename for name matching: leading path stripped,
+/// lowercased, trailing `.exe` removed — so `/usr/bin/GH.EXE` reads as `gh`.
+pub(crate) fn normalized_command_head(words: &[String]) -> Option<String> {
+    let head = words
+        .first()?
+        .rsplit(['/', '\\'])
+        .next()?
+        .to_ascii_lowercase();
+    Some(head.strip_suffix(".exe").unwrap_or(&head).to_owned())
+}
+
 pub(crate) fn head_is_exec_vehicle(words: &[String]) -> bool {
-    let Some(head) = words.first().and_then(|w| w.rsplit(['/', '\\']).next()) else {
+    let Some(head) = normalized_command_head(words) else {
         return false;
     };
-    let head = head.to_ascii_lowercase();
-    let head = head.strip_suffix(".exe").unwrap_or(&head);
+    let head = head.as_str();
     if EXEC_VEHICLE_HEADS.contains(&head) {
         return true;
     }

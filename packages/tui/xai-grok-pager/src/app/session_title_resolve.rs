@@ -8,7 +8,7 @@
 //! [`select_by_title`] as the authoritative error source (ambiguity /
 //! no-match) and as a fallback for callers that bypass pinning.
 
-use xai_grok_shell::session::persistence::Summary;
+use xai_grok_shell::session::persistence::{RecentSessionSelection, Summary};
 
 /// UUID-shaped resume args always take the id path, even when no such id
 /// exists and a session is titled with that exact UUID.
@@ -122,6 +122,7 @@ impl PinnedResumeTarget {
 pub(crate) fn presandbox_resume_target(
     arg: &str,
     cwd: Option<&str>,
+    selection: RecentSessionSelection,
 ) -> anyhow::Result<PinnedResumeTarget> {
     if is_uuid_shaped(arg) {
         return Ok(PinnedResumeTarget::Unresolved);
@@ -135,10 +136,13 @@ pub(crate) fn presandbox_resume_target(
     if xai_grok_shell::session::resolve_local_session_any_cwd(arg).is_some() {
         return Ok(PinnedResumeTarget::Id(arg.to_string()));
     }
-    let summaries = xai_grok_shell::session::persistence::local_summaries_for_cwd_sync(cwd)
-        .map_err(|e| {
-            anyhow::anyhow!("failed to list local sessions while resolving --resume {arg:?}: {e}")
-        })?;
+    let summaries =
+        xai_grok_shell::session::persistence::local_summaries_for_cwd_sync(cwd, selection)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to list local sessions while resolving --resume {arg:?}: {e}"
+                )
+            })?;
     Ok(select_by_title(arg, &summaries)?
         .map(|s| PinnedResumeTarget::Title {
             id: s.info.id.to_string(),

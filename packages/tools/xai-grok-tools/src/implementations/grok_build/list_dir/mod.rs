@@ -1628,8 +1628,6 @@ mod tests {
         use crate::types::tool_metadata::ToolMetadata;
         let tool = ListDirTool;
         assert_eq!(xai_tool_runtime::Tool::id(&tool).as_str(), "list_dir");
-        assert!(ToolMetadata::description_template(&tool).contains("Lists files and directories"));
-        assert!(ToolMetadata::description_template(&tool).contains(".gitignore"));
         assert!(
             ToolMetadata::description_template(&tool)
                 .contains("${{ params.list.target_directory }}"),

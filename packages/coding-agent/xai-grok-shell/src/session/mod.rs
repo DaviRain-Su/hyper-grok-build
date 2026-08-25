@@ -9,6 +9,7 @@ pub mod notifications;
 pub mod pending_interaction;
 pub mod prompt_queue;
 pub mod two_pass;
+pub mod visibility;
 pub use self::acp_session::*;
 pub use self::acp_types::*;
 pub use self::commands::*;
@@ -33,6 +34,28 @@ pub(crate) fn is_cursor_user_template(
     _template: &xai_grok_agent::prompt::user_message::UserMessageTemplate,
 ) -> bool {
     false
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CompactionPins {
+    pub mode: xai_chat_state::CompactionMode,
+    pub two_pass: bool,
+}
+pub(crate) fn cursor_compaction_pins(
+    resolved_mode: xai_chat_state::CompactionMode,
+    resolved_two_pass: bool,
+    is_cursor: bool,
+) -> CompactionPins {
+    if is_cursor {
+        CompactionPins {
+            mode: xai_chat_state::CompactionMode::Summary,
+            two_pass: false,
+        }
+    } else {
+        CompactionPins {
+            mode: resolved_mode,
+            two_pass: resolved_two_pass,
+        }
+    }
 }
 /// `false` twin of [`is_cursor_system_template`]; see [`is_cursor_user_template`].
 pub(crate) fn is_cursor_system_template(

@@ -196,13 +196,17 @@ impl JsonlStorageAdapter {
         });
         Ok(summaries)
     }
+    /// Extra `summary.json` reads allowed past `limit` while skipping
+    /// hidden/headless rows. Keeps refill behavior for a mixed store without
+    /// scanning a headless-dominated tree.
+    const RECENT_LIST_READ_SLACK: usize = 8;
     /// List the N most recently modified session summaries across all
     /// workspaces.
     ///
     /// Instead of reading every `summary.json` (expensive at scale — ~12K
     /// files), this stats each file to get its mtime, sorts by mtime, and
-    /// only reads the top `limit` files. On a machine with ~12K sessions
-    /// this reduces cold-boot `workspace_list` from ~3s to ~200ms.
+    /// reads newest-first only until `limit` rows are kept. On a machine with
+    /// ~12K sessions this reduces cold-boot `workspace_list` from ~3s to ~200ms.
     /// Final order among candidates uses `last_active_at` else `updated_at`.
     pub async fn list_sessions_recent(&self, limit: usize) -> io::Result<Vec<Summary>> {
         let session_dirs = self.scan_session_dirs(None)?;
@@ -217,13 +221,19 @@ impl JsonlStorageAdapter {
             }
         }
         candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-        candidates.truncate(limit);
-        let mut summaries = Vec::with_capacity(candidates.len());
-        for (summary_path, _) in candidates {
+        let max_reads = limit
+            .saturating_mul(Self::RECENT_LIST_READ_SLACK)
+            .max(limit);
+        let mut summaries = Vec::with_capacity(limit.min(candidates.len()));
+        for (reads, (summary_path, _)) in candidates.into_iter().enumerate() {
+            if summaries.len() == limit || reads >= max_reads {
+                break;
+            }
             match std::fs::read(&summary_path) {
                 Ok(bytes) => {
                     if let Ok(summary) = serde_json::from_slice::<Summary>(&bytes)
                         && !summary.is_hidden()
+                        && !summary.is_headless()
                     {
                         summaries.push(summary);
                     }
@@ -1045,6 +1055,16 @@ impl StorageAdapter for JsonlStorageAdapter {
             info,
             super::summary_write::SummaryPatch {
                 generated_title: Some(session_title),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    async fn set_session_kind_if_absent(&self, info: &Info, kind: String) -> io::Result<()> {
+        self.apply_summary_patch(
+            info,
+            super::summary_write::SummaryPatch {
+                session_kind_if_absent: Some(kind),
                 ..Default::default()
             },
         )

@@ -135,6 +135,27 @@ define_methods! {
     /// Hub tells the server to stop serving a session
     /// (hub → server). Notification — no response expected.
     SessionUnbind => "session.unbind",
+
+    // bot_client ↔ service (bot relay)
+    /// Passthrough of an in-box gateway command. `name` and `args` are
+    /// upstream-verbatim; `agentId` is hub routing metadata.
+    BotCommand => "bot.command",
+    /// Short-lived noVNC descriptor. May wake a hibernated box.
+    BotVncDescriptor => "bot.vncDescriptor",
+    /// Cached agent roster. Cold — never wakes the box.
+    BotRoster => "bot.roster",
+    /// Off-box run-state read. Cold — never wakes the box.
+    BotStatus => "bot.status",
+    /// Off-box transcript page. Cold — never wakes the box.
+    BotTranscriptOffbox => "bot.transcript.offbox",
+    /// Subscribe this connection to `bot.event` for the given agents.
+    BotSubscribe => "bot.subscribe",
+    /// Drop this connection's `bot.event` subscription for the given agents.
+    BotUnsubscribe => "bot.unsubscribe",
+    /// Record a conversation → agents index. Does not route by conversation.
+    BotBindConversation => "bot.bindConversation",
+    /// Hub → client event notification (not a client-callable verb).
+    BotEvent => "bot.event",
 }
 
 impl std::fmt::Display for Method {
@@ -149,45 +170,8 @@ mod tests {
 
     #[test]
     fn round_trip_as_wire_str_from_wire_str() {
-        let all = [
-            Method::SessionOpen,
-            Method::SessionClose,
-            Method::SessionBindServer,
-            Method::SessionUnbindServer,
-            Method::SessionAttachServer,
-            Method::ToolsList,
-            Method::ToolsSearch,
-            Method::ToolCall,
-            Method::ToolCancel,
-            Method::ToolNotify,
-            Method::SystemNotify,
-            Method::SubscribeNotifications,
-            Method::UnsubscribeNotifications,
-            Method::Hook,
-            Method::Hello,
-            Method::HelloAck,
-            Method::Ping,
-            Method::Pong,
-            Method::ToolCallProgress,
-            Method::ToolNotification,
-            Method::HookReply,
-            Method::TracesDonate,
-            Method::LogsDonate,
-            Method::MetricsDonate,
-            Method::ToolCallRequest,
-            Method::ToolsChanged,
-            Method::SubscribeAck,
-            Method::UnsubscribeAck,
-            Method::ServersList,
-            Method::ToolServerStatus,
-            Method::ToolServerGetStatus,
-            Method::ToolServerEvict,
-            Method::Serve,
-            Method::SessionBind,
-            Method::SessionUnbind,
-        ];
-        for m in all {
-            assert_eq!(Method::from_wire_str(m.as_wire_str()), Some(m));
+        for m in Method::ALL {
+            assert_eq!(Method::from_wire_str(m.as_wire_str()), Some(*m));
         }
     }
 
@@ -195,6 +179,23 @@ mod tests {
     fn from_wire_str_returns_none_for_unknown() {
         assert_eq!(Method::from_wire_str("not_a_method"), None);
         assert_eq!(Method::from_wire_str(""), None);
+    }
+
+    #[test]
+    fn snake_case_bot_method_aliases_are_rejected() {
+        for alias in [
+            "bot.vnc_descriptor",
+            "bot.bind_conversation",
+            "bot.link_status",
+            "bot.linkStatus",
+            "bot.transcript_offbox",
+            "bot.ensure_box",
+            "bot.ensureBox",
+        ] {
+            assert_eq!(Method::from_wire_str(alias), None, "{alias}");
+            let err = serde_json::from_value::<Method>(serde_json::json!(alias)).unwrap_err();
+            assert!(!err.to_string().is_empty(), "{alias}");
+        }
     }
 
     #[test]

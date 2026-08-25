@@ -17,10 +17,8 @@ Modes set a baseline. Allow, ask, and deny [rules](#configuring-permissions) sti
 
 | Situation | Mode |
 | --------- | ---- |
-| Interactive TUI | Auto for fewer prompts with background checks, or ask to approve every action yourself |
+| Interactive TUI | Default (ask), or auto for fewer prompts with background checks |
 | Scripts, SDKs, CI, agent servers | Always-approve; add [deny rules](#configuring-permissions) or hooks for hard limits |
-
-If you haven't chosen a mode, new interactive sessions use the current default. Once you pick one (via `Shift+Tab`, `/settings`, a `permission_mode` config entry, or a `--permission-mode` flag), your choice always wins and is remembered. Headless runs (`grok -p`), `agent stdio`, and agent servers always start in **ask**.
 
 ```bash
 grok -p "Run the tests" --always-approve

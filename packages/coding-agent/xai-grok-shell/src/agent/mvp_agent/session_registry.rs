@@ -727,7 +727,6 @@ impl SessionRegistry {
             e.resident.get_or_insert_default().codebase_index = Some(index);
         });
     }
-
     /// Mark a session as requiring a gateway connection to drive its turn loop
     /// (vs. a self-contained local session). Tracked via the
     /// `require_gateway_sessions` count surfaced to the leader's auto-update
@@ -737,6 +736,15 @@ impl SessionRegistry {
         self.edit(id, |e| {
             e.resident.get_or_insert_default().require_gateway = true;
         });
+    }
+    pub(super) fn mark_headless(&self, id: &acp::SessionId) {
+        self.edit(id, |e| {
+            e.resident.get_or_insert_default().is_headless = true;
+        });
+    }
+    pub(super) fn is_headless(&self, id: &acp::SessionId) -> bool {
+        self.with(id, |e| e.resident.as_ref().is_some_and(|r| r.is_headless))
+            .unwrap_or(false)
     }
     /// Destructured so a new field has to be counted, or go unmeasured.
     pub(super) fn counts(&self) -> SessionCounts {

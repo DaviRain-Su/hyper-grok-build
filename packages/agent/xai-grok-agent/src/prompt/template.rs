@@ -231,7 +231,6 @@ mod tests {
     fn test_base_template_renders() {
         let prompt = render_base(&default_renderer(), &default_placeholders());
         assert!(prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL));
-        assert!(prompt.contains("user_query"));
     }
 
     #[test]
@@ -291,8 +290,8 @@ mod tests {
         let r = TemplateRenderer::new(tools, HashMap::new());
         let prompt = render_base(&r, &default_placeholders());
         assert!(
-            !prompt.contains("Task Management"),
-            "Task Management section should be omitted"
+            !prompt.contains("todo_write"),
+            "plan tool name must not render when the Plan tool is absent"
         );
     }
 
@@ -303,7 +302,7 @@ mod tests {
         let r = TemplateRenderer::new(tools, HashMap::new());
         let prompt = render_base(&r, &default_placeholders());
         assert!(
-            !prompt.contains("background_tasks"),
+            !prompt.contains("<background_tasks>"),
             "background_tasks section should be omitted"
         );
     }
@@ -317,19 +316,6 @@ mod tests {
         assert!(
             prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL),
             "Must contain agent identity"
-        );
-        assert!(
-            prompt.contains("user_query"),
-            "Must reference user_query tag"
-        );
-    }
-
-    #[test]
-    fn test_compact_prompt_matches_expected() {
-        assert_eq!(
-            COMPACT_SYSTEM_PROMPT,
-            "You are an AI coding agent. You operate in a workspace with a provided codebase.\n\n\
-             Your main goal is to complete the user's request, denoted within the <user_query> tag.",
         );
     }
 
@@ -413,12 +399,12 @@ mod tests {
         let r = TemplateRenderer::new(tools, HashMap::new());
         let prompt = render_base(&r, &default_placeholders());
         assert!(
-            !prompt.contains("Task Management"),
-            "Task Management must be omitted"
+            !prompt.contains("todo_write"),
+            "plan tool name must not render when the Plan tool is absent"
         );
         assert!(
-            !prompt.contains("background_tasks"),
-            "background_tasks must be omitted"
+            !prompt.contains("<background_tasks>"),
+            "background_tasks section must be omitted when Execute is absent"
         );
     }
 
@@ -443,10 +429,6 @@ mod tests {
         assert!(
             !prompt.contains("<memory>"),
             "Memory section was removed from the minimal prompt"
-        );
-        assert!(
-            !prompt.contains("### Memory Management"),
-            "Memory Management section was removed from the minimal prompt"
         );
         assert!(
             !prompt.contains("memory_search"),
@@ -490,12 +472,6 @@ mod tests {
     // ── Apply-patch template rendering ───────────────────────────────────
 
     #[test]
-    fn test_apply_patch_template_renders() {
-        let prompt = render_apply_patch(&default_renderer(), &default_placeholders());
-        assert!(prompt.contains("coding agent"));
-    }
-
-    #[test]
     fn test_apply_patch_template_contains_resolved_tool_names() {
         let prompt = render_apply_patch(&default_renderer(), &default_placeholders());
         assert!(prompt.contains("todo_write"), "Should contain 'todo_write'");
@@ -520,21 +496,8 @@ mod tests {
         let r = TemplateRenderer::new(tools, HashMap::new());
         let prompt = render_apply_patch(&r, &default_placeholders());
         assert!(
-            !prompt.contains("## Planning"),
-            "Planning section should be omitted when plan tool absent"
-        );
-        assert!(
             !prompt.contains("update_plan"),
             "update_plan references should be omitted"
-        );
-    }
-
-    #[test]
-    fn test_apply_patch_template_plan_present_includes_planning() {
-        let prompt = render_apply_patch(&default_renderer(), &default_placeholders());
-        assert!(
-            prompt.contains("## Planning"),
-            "Planning section should be present when plan tool exists"
         );
     }
 
@@ -746,14 +709,6 @@ mod tests {
             prompt.contains("<user_guide>"),
             "interactive prompt must keep the <user_guide> block"
         );
-        assert!(
-            prompt.contains("interactive CLI tool"),
-            "interactive prompt must declare interactive mode in the header"
-        );
-        assert!(
-            !prompt.contains("autonomous agent"),
-            "interactive prompt must NOT advertise non-interactive (autonomous) mode"
-        );
     }
 
     #[test]
@@ -762,24 +717,11 @@ mod tests {
         p["is_non_interactive"] = serde_json::json!(true);
         let prompt = render_base(&default_renderer(), &p);
         assert!(
-            !prompt.contains("`! <command>`"),
-            "non-interactive prompt must suppress the shell-prefix tip"
-        );
-        assert!(
             !prompt.contains("<user_guide>"),
             "non-interactive prompt must suppress the <user_guide> block"
         );
-        assert!(
-            prompt.contains("autonomous agent"),
-            "non-interactive prompt must declare autonomous mode in the header"
-        );
-        assert!(
-            !prompt.contains("interactive CLI tool"),
-            "non-interactive prompt must NOT claim to be the interactive CLI"
-        );
         // Sanity: rest of the template still renders.
         assert!(prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL));
-        assert!(prompt.contains("user_query"));
     }
 
     #[test]

@@ -1180,8 +1180,6 @@ mod tests {
         // rendering (monitor + task + bash + read present): concrete names, no
         // leftover template markers.
         let desc = ToolMetadata::description_template(&tool);
-        assert!(desc.contains("Get output and status from a background task"));
-        // Must name "monitor" so the model connects polling a monitor to this tool.
         assert!(desc.contains("monitor"));
         assert!(
             desc.contains("read_file"),
@@ -1265,10 +1263,6 @@ mod tests {
                 !rendered.contains("${"),
                 "[{label}] left an unrendered template marker:\n{rendered}"
             );
-            assert!(
-                rendered.contains("background task"),
-                "[{label}] must always mention background task:\n{rendered}"
-            );
             assert_eq!(
                 rendered.contains("monitor"),
                 has_monitor,
@@ -1278,6 +1272,11 @@ mod tests {
                 rendered.contains("subagent"),
                 has_task,
                 "[{label}] subagent mention must match task-tool presence:\n{rendered}"
+            );
+            assert_eq!(
+                rendered.contains("read_file"),
+                has_read,
+                "[{label}] read_file mention must match read-tool presence:\n{rendered}"
             );
             assert_eq!(
                 rendered.contains("output_file"),
@@ -1320,23 +1319,26 @@ mod tests {
         ]);
         let rendered = task_output_description(&TemplateRenderer::new(tools, params), None);
         assert!(
-            rendered.contains("Pass process_ids with"),
+            rendered.contains("process_ids"),
             "renamed task_ids must appear:\n{rendered}"
         );
         assert!(
-            rendered.contains("Omit max_wait or pass 0")
-                && rendered.contains("positive max_wait wait"),
+            rendered.contains("max_wait"),
             "renamed timeout_ms must appear:\n{rendered}"
         );
         assert!(
-            rendered.contains("a monitor's id is returned by monitor"),
-            "renamed kill_task task_id must appear in monitor aside:\n{rendered}"
+            rendered.contains("monitor"),
+            "monitor tool name must appear:\n{rendered}"
         );
         assert!(
             !rendered.contains("task_ids")
                 && !rendered.contains("timeout_ms")
                 && !rendered.contains("task_id"),
             "canonical param names must not remain after rename:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("${"),
+            "must not leak template markers:\n{rendered}"
         );
     }
 

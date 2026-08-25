@@ -181,7 +181,6 @@ fn merge_tool_params(
 fn apply_workflow_tool_gates(
     tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
     background_workflows_enabled: bool,
-    is_subagent: bool,
 ) {
     use xai_grok_tools::types::tool::ToolKind;
     if background_workflows_enabled {
@@ -189,11 +188,6 @@ fn apply_workflow_tool_gates(
             .tools
             .retain(|tool| tool.kind != Some(ToolKind::GoalUpdate));
     } else {
-        tool_config
-            .tools
-            .retain(|tool| tool.kind != Some(ToolKind::Workflow));
-    }
-    if is_subagent {
         tool_config
             .tools
             .retain(|tool| tool.kind != Some(ToolKind::Workflow));
@@ -800,11 +794,7 @@ impl AgentBuilder {
             );
             tool_config.tools.retain(|tool| tool.id != ask_user_id);
         }
-        apply_workflow_tool_gates(
-            &mut tool_config,
-            self.background_workflows_enabled,
-            self.prompt_audience == crate::prompt::context::PromptAudience::Subagent,
-        );
+        apply_workflow_tool_gates(&mut tool_config, self.background_workflows_enabled);
         let task_tool_id = format!(
             "{}:{}",
             xai_grok_tools::types::tool::ToolNamespace::GrokBuild,
@@ -1050,6 +1040,11 @@ impl AgentBuilder {
                     params.insert("auto_background_on_timeout".into(), false.into());
                 }
             }
+        }
+        if self.prompt_audience == crate::prompt::context::PromptAudience::Subagent {
+            tool_config.tools.retain(|tool| {
+                !xai_grok_tools::implementations::grok_build::is_workflow_tool(tool.kind, &tool.id)
+            });
         }
         let use_backend_search = self.backend_search;
         let tool_bridge = ToolBridge::finalize_builder(
@@ -1420,8 +1415,8 @@ mod tests {
         let desc = build_task_description(&subagents, &[]);
         assert!(desc.contains("- **code-reviewer**: Reviews code for bugs and style issues."));
         assert!(
-            !desc.contains("Has access to all tools:"),
-            "user-defined entries should not get tool fragments"
+            !desc.contains(xai_tool_types::GENERAL_PURPOSE_SUBAGENT.tools_template),
+            "user-defined entries should not get built-in tool fragments"
         );
     }
     #[test]
@@ -1463,23 +1458,6 @@ mod tests {
         );
     }
     #[test]
-    fn build_task_description_contains_header_and_footer() {
-        let subagents = vec![entry(
-            "explore",
-            "Explore.",
-            SubagentSource::Builtin(BuiltinAgentName::Explore),
-        )];
-        let desc = build_task_description(&subagents, &[]);
-        assert!(
-            desc.contains("Start a subagent that works on a task independently"),
-            "should contain header"
-        );
-        assert!(
-            desc.contains("## Usage notes"),
-            "should contain footer with '## Usage notes' section"
-        );
-    }
-    #[test]
     fn build_task_description_uses_template_variables() {
         let subagents = vec![entry(
             "explore",
@@ -1515,16 +1493,8 @@ mod tests {
             &subagents,
             &["zeta".to_string(), "alpha".to_string(), "alpha".to_string()],
         );
-        assert!(desc.contains(
-            "If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
-             - alpha\n\
-             - zeta"
-        ));
-        assert!(desc.contains(
-            "If the user does not explicitly request a model, omit `${{ params.task.model }}` to inherit the parent model."
-        ));
-        assert!(!desc.contains("Available model slugs:"));
-        assert!(!desc.contains(concat!("grok", " models")));
+        assert!(desc.contains("- alpha\n- zeta"));
+        assert!(desc.contains("${{ params.task.model }}"));
     }
     #[test]
     fn build_task_description_handles_empty_model_catalog() {
@@ -1534,9 +1504,8 @@ mod tests {
             SubagentSource::Builtin(BuiltinAgentName::Explore),
         )];
         let desc = build_task_description(&subagents, &[]);
-        assert!(desc.contains("No explicit model slugs are currently available."));
-        assert!(desc.contains("Omit `${{ params.task.model }}` to inherit the parent model."));
-        assert!(!desc.contains(concat!("grok", " models")));
+        assert!(desc.contains("${{ params.task.model }}"));
+        assert!(!desc.contains("- alpha"));
     }
     #[test]
     fn task_model_guidance_resolves_model_param_override() {
@@ -1552,23 +1521,14 @@ mod tests {
         let rendered = renderer
             .render(&task_model_guidance(&["alpha".to_string()]))
             .expect("model guidance should render");
-        assert!(rendered.contains("omit `child_model` to inherit the parent model"));
+        assert!(rendered.contains("`child_model`"));
         assert!(!rendered.contains("params.task.model"));
     }
     #[test]
     fn child_task_description_is_concise() {
-        assert!(
-            CHILD_TASK_DESCRIPTION.contains("Prefer doing the work yourself"),
-            "child description should discourage recursive delegation"
-        );
-        assert!(
-            !CHILD_TASK_DESCRIPTION.contains("Agent types:"),
-            "child description should not list agent types"
-        );
-        assert!(
-            !CHILD_TASK_DESCRIPTION.contains("<example>"),
-            "child description should not contain examples"
-        );
+        assert!(CHILD_TASK_DESCRIPTION.contains("${{ params.task.subagent_type }}"));
+        assert!(CHILD_TASK_DESCRIPTION.contains("${{ params.task.description }}"));
+        assert!(CHILD_TASK_DESCRIPTION.contains("${{ params.task.prompt }}"));
         assert!(
             CHILD_TASK_DESCRIPTION.contains("oracle"),
             "child description must advertise the built-in oracle type"
@@ -1591,10 +1551,6 @@ mod tests {
             SubagentSource::Builtin(BuiltinAgentName::GeneralPurpose),
         )];
         let desc = build_task_description(&subagents, &[]);
-        assert!(
-            desc.contains("Resuming a previous agent (resume_from)"),
-            "should contain resume_from section header"
-        );
         assert!(
             desc.contains("resume_from"),
             "should reference the resume_from parameter"
@@ -1863,6 +1819,122 @@ mod tests {
             !names.iter().any(|name| name == "ask_user_question"),
             "subagents must not receive ask_user_question even when their profile and parent gate enable it: {names:?}"
         );
+    }
+    async fn workflow_tool_names(
+        audience: crate::prompt::context::PromptAudience,
+        definition: crate::config::AgentDefinition,
+    ) -> Vec<String> {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::notification::ToolNotificationHandle;
+        AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(definition)
+        .with_background_workflows_enabled(true)
+        .with_prompt_audience(audience)
+        .build()
+        .await
+        .expect("agent should build")
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|definition| definition.function.name)
+        .collect()
+    }
+    #[tokio::test]
+    async fn top_level_session_still_receives_workflow() {
+        let names = workflow_tool_names(
+            crate::prompt::context::PromptAudience::Primary,
+            crate::config::AgentDefinition::default_grok_build(),
+        )
+        .await;
+        assert!(
+            names.iter().any(|name| name == "workflow"),
+            "top-level sessions must keep workflow when the feature is enabled: {names:?}"
+        );
+    }
+    #[tokio::test]
+    async fn ordinary_subagent_does_not_receive_workflow() {
+        let names = workflow_tool_names(
+            crate::prompt::context::PromptAudience::Subagent,
+            crate::config::AgentDefinition::general_purpose(),
+        )
+        .await;
+        assert!(
+            !names.iter().any(|name| name == "workflow"),
+            "ordinary subagents must not receive workflow: {names:?}"
+        );
+    }
+    #[tokio::test]
+    async fn workflow_spawned_agent_does_not_receive_workflow() {
+        let names = workflow_tool_names(
+            crate::prompt::context::PromptAudience::Subagent,
+            crate::config::AgentDefinition::default_grok_build(),
+        )
+        .await;
+        assert!(
+            !names.iter().any(|name| name == "workflow"),
+            "workflow-spawned agents must not receive workflow: {names:?}"
+        );
+    }
+    #[tokio::test]
+    async fn custom_child_toolset_cannot_reintroduce_workflow() {
+        use xai_grok_tools::implementations::grok_build::{ReadFileTool, WorkflowTool};
+        let mut definition = crate::config::AgentDefinition::general_purpose();
+        definition.inject_default_tools = false;
+        definition.tool_config.tools = vec![
+            (&ReadFileTool).into(),
+            (&WorkflowTool).into(),
+            xai_grok_tools::registry::types::ToolConfig::from_id("GrokBuild:workflow"),
+        ];
+        let names =
+            workflow_tool_names(crate::prompt::context::PromptAudience::Subagent, definition).await;
+        assert!(
+            names.iter().any(|name| name == "read_file"),
+            "unrelated custom tools must survive: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name == "workflow"),
+            "a custom child toolset must not be able to reintroduce workflow: {names:?}"
+        );
+    }
+    #[tokio::test]
+    async fn child_workflow_strip_leaves_unrelated_tools() {
+        let primary = workflow_tool_names(
+            crate::prompt::context::PromptAudience::Primary,
+            crate::config::AgentDefinition::default_grok_build(),
+        )
+        .await;
+        let child = workflow_tool_names(
+            crate::prompt::context::PromptAudience::Subagent,
+            crate::config::AgentDefinition::default_grok_build(),
+        )
+        .await;
+        assert!(
+            primary.iter().any(|name| name == "workflow"),
+            "premise: primary toolset includes workflow: {primary:?}"
+        );
+        let lost: Vec<&String> = primary
+            .iter()
+            .filter(|name| !child.contains(name))
+            .collect();
+        assert!(
+            lost.iter().any(|name| *name == "workflow"),
+            "child must lose workflow: lost={lost:?}"
+        );
+        assert!(
+            lost.iter()
+                .all(|name| *name == "workflow" || *name == "ask_user_question"),
+            "child strip must not drop unrelated tools: lost={lost:?}"
+        );
+        for name in &child {
+            assert!(
+                primary.contains(name),
+                "child gained unexpected tool {name}; primary={primary:?} child={child:?}"
+            );
+        }
     }
     #[tokio::test]
     async fn curated_empty_toolset_fails_agent_build() {

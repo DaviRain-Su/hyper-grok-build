@@ -48,7 +48,9 @@ impl crate::types::tool_metadata::ToolMetadata for MemoryGetImpl {
          Use after `memory_search` returns a relevant result and you need the full context \
          around a snippet, or to read a specific MEMORY.md file in full.\n\n\
          Line numbers are 1-based and match the line offsets accepted by the `from` parameter, \
-         so targeted follow-up reads or edits can reference exact positions."
+         so targeted follow-up reads or edits can reference exact positions.\n\n\
+         Memory is historical context, not automatically the current plan. Verify recalled facts \
+         against live sources before relying on them."
     }
 }
 

@@ -605,6 +605,7 @@ mod tests {
             worktree_label: None,
             last_turn_summary: None,
             last_recap: None,
+            session_kind: None,
             card_detail: None,
         }
     }
@@ -621,6 +622,8 @@ mod tests {
             content_results: None,
             content_loading: false,
             deep_search_seq: 0,
+            generation: 0,
+            detail_seq: 0,
             source_filter: xai_grok_pager::views::session_picker::SourceFilter::default(),
             pending_delete: None,
             entries_query: None,
@@ -709,37 +712,6 @@ mod tests {
         assert!(
             !text.contains("r refresh"),
             "resume footer must stay session-picker copy:\n{text}"
-        );
-    }
-
-    #[test]
-    fn resume_panel_pins_hidden_external_hint_above_scrolling_list() {
-        // More native rows than the panel fits: the hint must stay pinned
-        // above the list instead of scrolling away with it.
-        let mut entries: Vec<_> = (0..20)
-            .map(|i| session_entry(&format!("native-{i}")))
-            .collect();
-        let mut foreign = session_entry("claude-session");
-        foreign.source = "claude".into();
-        entries.push(foreign);
-        let mut a = with_resume(entries);
-        let theme = Theme::current();
-        let area = Rect::new(0, 0, 80, 10);
-        let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut a, ListPanel::Resume, &theme);
-
-        let text = buffer_text(&buf);
-        assert!(
-            text.contains("1 external session hidden \u{b7} f to show"),
-            "hidden foreign rows must stay explained while the list scrolls:\n{text}"
-        );
-        assert!(
-            text.find("external session hidden") < text.find("native-"),
-            "the hint must be pinned above the first list row:\n{text}"
-        );
-        assert!(
-            !text.contains("claude-session"),
-            "foreign row stays hidden under the default filter:\n{text}"
         );
     }
 

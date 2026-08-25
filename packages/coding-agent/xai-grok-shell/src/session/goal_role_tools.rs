@@ -577,7 +577,7 @@ pub(crate) mod tests {
              {WEB_SEARCH_TOOL} {WEB_FETCH_TOOL}{TOOLSET_TOOLS}";
         let out = tn.apply(template);
         assert!(out.starts_with("rd ls gr wr ex ws wf"));
-        assert!(out.contains("Tools available to you for this review:"));
+        assert!(out.contains("`rd`") && out.contains("`wf`"));
         assert_no_tool_placeholders(&out);
     }
 

@@ -624,13 +624,11 @@ mod tests {
         assert!(prompt.contains("<conversation_history_outline>"));
         assert!(prompt.contains("prev1"));
         assert!(prompt.contains("<user_query>\nfix the bug\n</user_query>"));
-        assert!(prompt.contains("Please be thorough"));
     }
     #[test]
     fn describe_prompt_omits_outline_when_absent() {
         let prompt = build_describe_prompt(None, "what is this");
         assert!(!prompt.contains("<conversation_history_outline>"));
-        assert!(!prompt.contains("outline of the conversation"));
         assert!(prompt.contains("<user_query>\nwhat is this\n</user_query>"));
     }
     #[test]

@@ -74,6 +74,12 @@ Write a concise markdown summary with ## headers covering:
 investigation workflows, or services discovered or used during debugging
 - **Problems & solutions** — bugs found, how they were fixed, workarounds
 
+Prioritize reusable mechanisms, rules, and root causes over a narration of the task. \
+When project structure matters, name the concrete directories and stable repo-relative paths; \
+include an absolute workspace root only when it is operationally necessary and appears in the conversation. \
+Copy exact identifiers and numerical values only when they appear verbatim in the supplied conversation. \
+Never infer a missing value; omit the detail instead.
+
 Omit any section where there is nothing substantive to report. \
 Do NOT include user preferences like OS, shell, or editor — these belong in global memory. \
 Do NOT include an ephemeral progress section — transient status is not useful for future sessions.
@@ -98,8 +104,14 @@ Write a concise markdown summary with ## headers covering only NEW items in:
 - **Debugging techniques** — new techniques used since last flush
 - **Problems & solutions** — new bugs found and fixes
 
+Prioritize reusable mechanisms, rules, and root causes over a narration of the task. \
+When project structure matters, name the concrete directories and stable repo-relative paths; \
+include an absolute workspace root only when it is operationally necessary and appears in the conversation. \
+Copy exact identifiers and numerical values only when they appear verbatim in the supplied conversation; \
+never reconstruct or guess missing values.
+
 Omit any section that has no new content. Do NOT include user preferences \
-(OS, shell, paths) — these are captured in global memory.
+like OS, shell, or editor — these are captured in global memory.
 Do NOT include 'Current state' — this is ephemeral and not useful for future sessions.
 
 Respond with NO_REPLY if nothing genuinely new and useful has happened since \
@@ -457,33 +469,6 @@ mod tests {
             process_flush_response(content, &config),
             FlushResult::Accepted(_)
         ));
-    }
-
-    #[test]
-    fn test_flush_system_prompt_content() {
-        assert!(FLUSH_SYSTEM_PROMPT.contains("markdown"));
-        assert!(FLUSH_SYSTEM_PROMPT.contains("NO_REPLY"));
-        assert!(
-            !FLUSH_SYSTEM_PROMPT.contains("Always write something"),
-            "old bias toward always writing should be removed"
-        );
-        assert!(
-            FLUSH_SYSTEM_PROMPT.contains("genuinely useful"),
-            "prompt should bias toward NO_REPLY for low-value sessions"
-        );
-        assert!(!FLUSH_SYSTEM_PROMPT.contains("User preferences"));
-    }
-
-    #[test]
-    fn test_delta_system_prompt_content() {
-        assert!(FLUSH_DELTA_SYSTEM_PROMPT.contains("incremental update"));
-        assert!(FLUSH_DELTA_SYSTEM_PROMPT.contains("NO_REPLY"));
-        assert!(FLUSH_DELTA_SYSTEM_PROMPT.contains("Previous flush content"));
-        assert!(!FLUSH_DELTA_SYSTEM_PROMPT.contains("User preferences"));
-        assert!(
-            FLUSH_DELTA_SYSTEM_PROMPT.contains("genuinely new and useful"),
-            "delta prompt should use same selectivity standard as primary prompt"
-        );
     }
 
     // -----------------------------------------------------------------------

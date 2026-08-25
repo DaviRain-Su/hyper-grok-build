@@ -9,6 +9,18 @@ mod load;
 mod modal;
 mod take_deferred;
 
+fn content_hit(id: &str) -> xai_grok_shell::extensions::session_search::SearchSessionHit {
+    xai_grok_shell::extensions::session_search::SearchSessionHit {
+        session_id: id.into(),
+        summary: id.into(),
+        cwd: "/repo".into(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        snippet: Some("native transcript match".into()),
+        score: 1.0,
+        matched_fields: vec![],
+    }
+}
+
 /// Like [`test_app`] but with `cwd` set to this crate's directory,
 /// which lives inside the git repo.  Worktree tests require a git
 /// ancestor to pass the `has_git_ancestor` pre-check.

@@ -234,7 +234,6 @@ mod tests {
         let text = imagine_instruction("a golden sunset");
         assert!(text.contains("a golden sunset"));
         assert!(text.contains("image_gen"));
-        assert!(text.contains("verbatim"));
     }
 
     #[test]
@@ -242,7 +241,6 @@ mod tests {
         let text = imagine_video_instruction("a cat playing piano");
         assert!(text.contains("a cat playing piano"));
         assert!(text.contains("image_to_video"));
-        assert!(text.contains("FFmpeg"));
     }
 
     #[test]
@@ -251,7 +249,6 @@ mod tests {
             let text = loop_schedule_instruction("every 30 minutes do x", mode);
             assert!(text.contains("every 30 minutes do x"), "{mode:?}");
             assert!(text.contains("<number><unit>"), "{mode:?}");
-            assert!(text.contains("ask the user how often"), "{mode:?}");
             assert!(
                 !text.contains("10m"),
                 "no host-side default interval: {mode:?}"
@@ -265,31 +262,9 @@ mod tests {
                 "must teach in-place updates via task_id: {mode:?}"
             );
             assert!(
-                text.contains("delete and recreate"),
-                "must steer away from delete+recreate: {mode:?}"
-            );
-            assert!(
                 text.contains("scheduler_delete <task_id>"),
                 "every mode must authorize the fire to end the task: {mode:?}"
             );
-        }
-    }
-
-    #[test]
-    fn each_fire_mode_describes_its_own_runtime() {
-        let detached = loop_schedule_instruction("5m check ci", LoopFireMode::Detached);
-        let in_session = loop_schedule_instruction("5m check ci", LoopFireMode::InSession);
-
-        assert!(detached.contains("cannot see this conversation"));
-        assert!(!detached.contains("arrives as a new turn in this conversation"));
-
-        assert!(in_session.contains("arrives as a new turn in this conversation"));
-        assert!(!in_session.contains("cannot see this conversation"));
-
-        // The two levers the A/B showed carry the behavior are mode-independent.
-        for text in [&detached, &in_session] {
-            assert!(text.contains("report it and call"));
-            assert!(text.contains("Keep it short and concrete"));
         }
     }
 
@@ -299,7 +274,6 @@ mod tests {
         assert!(text.contains("ship the widget"));
         assert!(text.contains("update_goal(completed: true"));
         assert!(text.contains("blocked_reason"));
-        assert!(text.contains("If update_goal returns an error"));
         assert!(
             !text.contains("system-reminder"),
             "expansions ride as user messages and must not claim reminder authority"

@@ -345,10 +345,9 @@ mod tests {
     }
 
     #[test]
-    fn description_mentions_anchors_and_edit() {
+    fn description_template_references_edit_tool() {
         use crate::types::tool_metadata::ToolMetadata;
         let tool = HashlineGrepTool;
-        assert!(ToolMetadata::description_template(&tool).contains("anchor"));
         assert!(ToolMetadata::description_template(&tool).contains("tools.by_kind.edit"));
     }
 

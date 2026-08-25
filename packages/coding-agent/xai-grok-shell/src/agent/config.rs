@@ -700,7 +700,7 @@ pub use xai_grok_config::env_bool;
 /// unrecognized values at each source falling through). `remote` sits just
 /// above the default, mirroring `feature_flag` in `resolve_bool_flag`. Pure so
 /// it's unit-testable without mutating process env.
-fn resolve_compaction_mode_from(
+pub(crate) fn resolve_compaction_mode_from(
     env: Option<&str>,
     config: Option<&str>,
     remote: Option<&str>,
@@ -713,7 +713,7 @@ fn resolve_compaction_mode_from(
 }
 /// Compaction-detail precedence (env > config > remote settings > default). Pure.
 /// Controls the per-turn verbatim detail in `segments` mode (default `verbose`).
-fn resolve_compaction_detail_from(
+pub(crate) fn resolve_compaction_detail_from(
     env: Option<&str>,
     config: Option<&str>,
     remote: Option<&str>,
@@ -5594,7 +5594,7 @@ pub struct Features {
     /// client-side tool execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_tools: Option<bool>,
-    /// `summary` (default) | `transcript` | `segments`. `None` = defer to CLI /
+    /// `summary` | `transcript` | `segments` (default). `None` = defer to CLI /
     /// env (`GROK_COMPACTION_MODE`). Parsed via `CompactionMode::parse`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_mode: Option<String>,

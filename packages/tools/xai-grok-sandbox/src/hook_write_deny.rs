@@ -415,7 +415,7 @@ pub fn verify_hook_write_deny_enforced() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "enforce", target_os = "linux"))]
 pub fn maybe_install_namespace_lockdown_inside_bwrap(profile: &ProfileName) -> Result<(), String> {
     if profile_enforces_hook_write_deny(profile) && crate::is_inside_bwrap() {
         ensure_namespace_lockdown()?;
@@ -423,7 +423,7 @@ pub fn maybe_install_namespace_lockdown_inside_bwrap(profile: &ProfileName) -> R
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(feature = "enforce", unix, not(target_os = "linux")))]
 pub fn maybe_install_namespace_lockdown_inside_bwrap(_profile: &ProfileName) -> Result<(), String> {
     Ok(())
 }

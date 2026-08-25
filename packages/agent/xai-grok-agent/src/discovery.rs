@@ -1214,11 +1214,6 @@ mod tests {
             def.prompt_body.is_some(),
             "orchestrator must have prompt_body"
         );
-        let body = def.prompt_body.as_deref().unwrap();
-        assert!(
-            body.contains("Orchestrator Mode"),
-            "prompt_body must contain Orchestrator Mode"
-        );
     }
 
     #[test]

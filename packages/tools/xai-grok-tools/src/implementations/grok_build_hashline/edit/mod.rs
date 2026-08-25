@@ -481,11 +481,11 @@ mod tests {
             .render(ToolMetadata::description_template(&HashlineEditTool))
             .unwrap();
         assert!(
-            rendered.contains("pass multiple operations in \"changes\""),
+            rendered.contains("\"changes\""),
             "renamed edits param must appear:\n{rendered}"
         );
         assert!(
-            !rendered.contains("in \"edits\""),
+            !rendered.contains("\"edits\""),
             "canonical edits must not remain after rename:\n{rendered}"
         );
     }

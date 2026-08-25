@@ -4,6 +4,24 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.10-r1] — 2026-08-25
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `77cd7eb`
+  (monorepo `SOURCE_REV` `28439e8…`). Official lockstep version is **1.0.10**.
+  Notable upstream (1.0.9–1.0.10):
+  - Headless session classification and resume page
+  - Configurable interactive default permission mode (Ask remains default)
+  - X10 mouse-report reassembly; MCP failure reminder once per episode
+  - Folder-trust no longer implicitly trusts later clones under a parent
+  - `grok clone` depth-1 bootstrap, local/linked codebase reuse
+  - Compaction defaults to two-pass / chat segments; better telemetry
+  - Hide workflow tool from child agents; exclusive workflow source selection
+
+### Fixed
+- **Release build** — `process_identity` matches Hyper `Command::Dashboard(_)`
+  and `Command::Logout { .. }` (r3 failed with E0532/E0533 after pager compiled).
+
 ## [1.0.8-r3] — 2026-08-25
 
 ### Fixed

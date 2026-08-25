@@ -125,7 +125,6 @@ mod tests {
             Some("/src/session/workflows/deep_research.rhai"),
         )])
         .unwrap();
-        assert!(text.starts_with(WORKFLOW_LISTING_HEADER), "got:\n{text}");
         assert!(text.contains("- deep-research: Research a query with citations."));
         assert!(
             text.contains("  Use when: Compare or research a question that needs sourced claims")
@@ -157,11 +156,11 @@ mod tests {
             Some("The following workflows are available:\n\n- review-pr: Review a PR."),
         )
         .unwrap();
-        assert!(merged.contains("skills are available"));
-        assert!(merged.contains("workflows are available"));
+        assert!(merged.contains("- commit: Make a commit."));
+        assert!(merged.contains("- review-pr: Review a PR."));
         assert!(
-            merged.find("skills are available").unwrap()
-                < merged.find("workflows are available").unwrap()
+            merged.find("commit").unwrap() < merged.find("review-pr").unwrap(),
+            "workflows must follow skills in merged listing:\n{merged}"
         );
     }
 

@@ -393,12 +393,14 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 return vec![];
             }
             use crate::views::modal::ActiveModal;
-            let detail_generation = app.session_picker_detail_generation;
+            use crate::views::session_picker_surface::SessionPickerHost;
             let from_modal = if let Some(agent) = get_active_agent_mut(app) {
                 if let Some(ActiveModal::SessionPicker {
                     entries: Some(ref entries),
                     ref mut state,
                     ref content_results,
+                    generation,
+                    detail_seq,
                     ..
                 }) = agent.active_modal
                 {
@@ -414,10 +416,12 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                         let entry = &entries[idx];
                         if native_source && entry.card_detail.is_none() {
                             return vec![Effect::LoadCardDetail {
+                                host: SessionPickerHost::AgentModal,
+                                generation,
                                 source: entry.source.clone(),
                                 session_id: entry.id.clone(),
                                 cwd: entry.cwd.clone(),
-                                generation: detail_generation,
+                                seq: detail_seq,
                             }];
                         }
                         return vec![];
@@ -462,10 +466,12 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                     && entry.card_detail.is_none()
                 {
                     return vec![Effect::LoadCardDetail {
+                        host: SessionPickerHost::Welcome,
+                        generation: app.session_picker_generation,
                         source: entry.source.clone(),
                         session_id: entry.id.clone(),
                         cwd: entry.cwd.clone(),
-                        generation: detail_generation,
+                        seq: app.session_picker_detail_seq,
                     }];
                 }
             } else if native_source

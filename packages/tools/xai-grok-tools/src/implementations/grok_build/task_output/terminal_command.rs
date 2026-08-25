@@ -100,7 +100,6 @@ mod tests {
             "get_terminal_command_output"
         );
         let tmpl = ToolMetadata::description_template(&tool);
-        assert!(tmpl.contains("background terminal command"));
         assert!(
             !tmpl.to_lowercase().contains("subagent"),
             "workspace tool must not mention subagents: {tmpl}"

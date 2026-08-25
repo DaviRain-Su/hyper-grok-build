@@ -41,6 +41,7 @@ pub mod subagent;
 pub mod subscription;
 #[cfg(feature = "codex-live")]
 pub(crate) use dispatch::stop_live_on_teardown;
+mod x10_filter;
 pub(crate) use effects::sanitize_user_error;
 mod event_loop;
 mod event_loop_stall;
@@ -829,10 +830,11 @@ pub async fn run(
         args.permission_mode_flag.as_deref(),
         remote_permission_mode,
     );
-    let launch_auto = xai_grok_shell::util::config::effective_auto_for_launch_interactive(
+    let launch_auto = xai_grok_shell::util::config::effective_auto_for_launch(
         args.yolo,
         args.permission_mode_flag.as_deref(),
         remote_permission_mode,
+        xai_grok_shell::util::config::default_interactive_permission_mode(),
     );
     let mut connect_flags = crate::acp::ConnectFlags {
         subagents: !args.no_subagents,

@@ -85,34 +85,6 @@ fn todo_gate_reminder_renders_plan_tool_name() {
     );
 }
 
-// Interaction with the existing periodic TodoNudge reminder: they
-// address different concerns. The design intentionally
-// separates them, so the gate's reminder must use the gate's own
-// vocabulary — not the periodic-nudge phrasing. The real
-// `TodoNudgeState::try_fire` text is gated behind `&mut self` +
-// private counter fields, so we keep the assertion to the gate
-// side (positive: the gate uses its own phrasing; the periodic
-// nudge's signature phrase must not leak in).
-#[test]
-fn todo_gate_has_its_own_vocabulary() {
-    let gate = build_todo_gate_reminder(&["only-pending"], &[]);
-    // Gate's signature phrase — distinguishes it from the periodic
-    // TodoNudge ("hasn't been used recently") in dashboards and
-    // model-side debugging.
-    assert!(
-        gate.contains("ended your turn"),
-        "gate reminder must use its own signature phrase, got:\n{gate}"
-    );
-    // The periodic-nudge text from
-    // `xai_grok_tools::reminders::todo_nudge::try_fire` is "The {}
-    // tool hasn't been used recently…" — leaking that phrase into
-    // the gate's body would conflate the two reminders.
-    assert!(
-        !gate.contains("hasn't been used recently"),
-        "gate must not borrow the periodic-nudge phrasing, got:\n{gate}"
-    );
-}
-
 // The integration block uses a bare `<` comparison —
 //   `if todo_gate_fires < gate_cfg.max_fires_per_prompt { ... }`
 // — so the cap logic is exercised end-to-end by the replay

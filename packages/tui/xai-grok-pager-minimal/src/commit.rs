@@ -448,7 +448,7 @@ pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
     // Whether a turn is actively running. When idle, every remaining entry is
     // stable and committable (see `is_committable`); a stale `is_running` flag
     // left by the tracker must not wedge the frontier.
-    let turn_running = agent.session.state.is_turn_running();
+    let turn_running = minimal_api::is_turn_or_wake_running(agent);
     let cwd = agent.session.cwd.as_path();
     let sb = &mut agent.scrollback;
 

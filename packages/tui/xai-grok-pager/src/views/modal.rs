@@ -229,6 +229,14 @@ pub enum ActiveModal {
         content_loading: bool,
         /// Monotonically increasing sequence number for deep search requests.
         deep_search_seq: u64,
+        /// Incarnation identity for fetch routing. Constructed as a 0
+        /// placeholder; `dispatch_fetch_session_list` (which runs before any
+        /// fetch exists for the modal) allocates the real generation, so 0
+        /// never appears on a production request.
+        generation: u64,
+        /// Invalidates the modal's in-flight card-detail reads when its rows
+        /// or filters change.
+        detail_seq: u64,
         /// The search query `entries` were server-fetched with (`None` =
         /// unfiltered fetch). See
         /// [`crate::views::session_picker::effective_filter_query`].

@@ -1081,10 +1081,7 @@ async fn open_socket(
         );
     }
     let mut connect_url = url.clone();
-    let expected_role = match kind {
-        ConnectionKind::Harness => "harness",
-        ConnectionKind::ToolServer => "tool_server",
-    };
+    let expected_role = kind.as_wire_str();
     if let Some(existing) = connect_url
         .query_pairs()
         .find(|(k, _)| k == "role")

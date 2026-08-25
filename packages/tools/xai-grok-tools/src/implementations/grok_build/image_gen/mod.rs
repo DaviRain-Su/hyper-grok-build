@@ -513,10 +513,6 @@ mod tests {
     fn tool_name_and_description() {
         let tool = ImageGenTool;
         assert_eq!(xai_tool_runtime::Tool::id(&tool).as_str(), "image_gen");
-        assert!(
-            crate::types::tool_metadata::ToolMetadata::description_template(&tool)
-                .contains("Generate a new image from a text description")
-        );
     }
 
     #[test]

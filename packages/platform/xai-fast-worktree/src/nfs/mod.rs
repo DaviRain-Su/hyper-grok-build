@@ -108,19 +108,37 @@ pub(crate) fn try_grove_worktree(plan: &WorktreePlan) -> Result<Option<CreateWor
     if !confined::is_safe_worktree_id(&plan.worktree_id) {
         anyhow::bail!("invalid worktree id {:?}", plan.worktree_id);
     }
+    let linked = source_is_linked_local_view(opts, &plan.source);
     if dest_is_projected_mount(&plan.source) {
-        tracing::info!(
-            source = %plan.source.display(),
-            "nfs worktree skipped: source is itself an NFS mount"
-        );
-        return Ok(None);
-    }
-    if !dest_is_known_unmounted(&plan.source) && !dest_is_mountpoint(&plan.source) {
-        tracing::info!(
-            source = %plan.source.display(),
-            "nfs worktree skipped: source mount table inconclusive"
-        );
-        return Ok(None);
+        if !linked {
+            tracing::info!(
+                source = %plan.source.display(),
+                "nfs worktree skipped: source is itself an NFS mount"
+            );
+            return Ok(None);
+        }
+        if matches!(plan.working_tree, WorkingTreeMode::PreserveWorkingTree) {
+            tracing::info!(
+                source = %plan.source.display(),
+                "nfs worktree skipped: preserve on a linked local-codebase view"
+            );
+            return Ok(None);
+        }
+    } else if !dest_is_known_unmounted(&plan.source) && !dest_is_mountpoint(&plan.source) {
+        if !linked {
+            tracing::info!(
+                source = %plan.source.display(),
+                "nfs worktree skipped: source mount table inconclusive"
+            );
+            return Ok(None);
+        }
+        if matches!(plan.working_tree, WorkingTreeMode::PreserveWorkingTree) {
+            tracing::info!(
+                source = %plan.source.display(),
+                "nfs worktree skipped: preserve on a linked view (inconclusive mount table)"
+            );
+            return Ok(None);
+        }
     }
     if is_jj_source(&plan.source) {
         tracing::info!(
@@ -297,6 +315,14 @@ fn resolved_backing_path(opts: &NfsWorktreeOpts, worktree_id: &str) -> Option<st
 fn is_jj_source(source: &Path) -> bool {
     source.join(".jj").is_dir()
         || source.join(".git").is_dir() && source.join(".git").join("jj").exists()
+}
+/// Status-confirmed linked local-codebase view. Old daemon / miss → false.
+#[must_use]
+pub fn source_is_linked_local_view(opts: &NfsWorktreeOpts, source: &Path) -> bool {
+    if !opts.enabled {
+        return false;
+    }
+    NfsWorktreeClient::from_opts(opts).source_is_linked_local_view(source)
 }
 pub(crate) fn working_tree_wire(mode: &WorkingTreeMode) -> &'static str {
     match mode {
@@ -806,5 +832,81 @@ mod fallback_gate_tests {
         };
         let result = crate::worktree::execute_plan(plan).unwrap();
         (result.resolved_strategy, creates.load(Ordering::SeqCst))
+    }
+    /// Linked Grove status + CreateWorktree decline must not copy.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linked_grove_declined_does_not_copy() {
+        xai_test_utils::require_git!();
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        xai_test_utils::git::init_git_repo(&repo);
+        std::fs::write(repo.join("marker.txt"), "copied-if-entered").unwrap();
+        xai_test_utils::git::git_commit_all(&repo, "c");
+        let sock = tmp.path().join("c.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let Ok(mut stream) = incoming else { break };
+                let mut line = String::new();
+                let mut reader = BufReader::new(&stream);
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let op = serde_json::from_str::<serde_json::Value>(line.trim())
+                    .ok()
+                    .and_then(|v| v.get("op").and_then(|o| o.as_str()).map(str::to_owned))
+                    .unwrap_or_default();
+                if op == "ping" {
+                    let _ = writeln!(stream, r#"{{"status":"ok","data":{{"v":1,"pong":true}}}}"#);
+                } else if op == "status" {
+                    let _ = writeln!(
+                        stream,
+                        r#"{{"status":"ok","data":{{"v":1,"status":{{"mounts":[{{"kind":"worktree","source_mode":"local"}}]}}}}}}"#
+                    );
+                } else if op == "create_worktree" {
+                    let _ = writeln!(
+                        stream,
+                        r#"{{"status":"ok","data":{{"v":1,"declined":"inconclusive"}}}}"#
+                    );
+                }
+            }
+        });
+        thread::sleep(Duration::from_millis(20));
+        let dest = tmp.path().join("dest");
+        let opts = NfsWorktreeOpts {
+            enabled: true,
+            control_sock: Some(sock),
+            ping_timeout: Duration::from_millis(80),
+            create_timeout: Duration::from_millis(80),
+            ..Default::default()
+        };
+        let copy_before = crate::grove_wt_create_count("copy");
+        let plan = WorktreePlan {
+            source: repo,
+            dest: dest.clone(),
+            git_ref: "HEAD".into(),
+            parallelism: 1,
+            channel_buffer: 8,
+            working_tree: WorkingTreeMode::CleanAll,
+            ignored_files: IgnoredFilesMode::Skip,
+            ignored_parallelism: 1,
+            creation_mode: CreationMode::Linked,
+            cancellation_token: CancellationToken::new(),
+            btrfs_delegate: None,
+            worktree_id: crate::worktree::plan::worktree_id_from_path(&dest),
+            nfs: Some(opts),
+        };
+        let err = crate::worktree::execute_plan(plan).expect_err("must not copy");
+        assert!(
+            err.to_string().contains("refusing copy fallback"),
+            "{err:#}"
+        );
+        assert!(
+            !dest.join("marker.txt").exists(),
+            "linked Grove decline must not file-copy the source"
+        );
+        assert_eq!(crate::grove_wt_create_count("copy"), copy_before);
     }
 }

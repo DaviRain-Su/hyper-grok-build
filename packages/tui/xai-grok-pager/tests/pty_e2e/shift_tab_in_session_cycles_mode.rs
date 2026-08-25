@@ -7,9 +7,7 @@ use super::common::*;
 /// 15. **In-session Shift+Tab cycles permission mode.**
 /// Routes BackTab through the agent view's `resolve_action`, the path that
 /// previously dropped `CycleMode`; test 2b only covers the welcome screen.
-/// With the auto gate on: Normal → Plan → Auto → Always-Approve → Normal.
-/// Re-enables the sandbox-pinned gate and pins the starting mode (an
-/// unconfigured home would otherwise launch straight into Auto).
+/// With the auto gate on (client default): Normal → Plan → Auto → Always-Approve → Normal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn shift_tab_in_session_cycles_mode() {
@@ -17,15 +15,9 @@ async fn shift_tab_in_session_cycles_mode() {
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} turn done."));
 
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness = PtyHarness::spawn_with_content_env(
-        &binary,
-        DEFAULT_ROWS,
-        DEFAULT_COLS,
-        &content,
-        &["--permission-mode", "default"],
-        &[("GROK_AUTO_PERMISSION_MODE", "1")],
-    )
-    .expect("spawn pager");
+    let mut harness =
+        PtyHarness::spawn_with_content(&binary, DEFAULT_ROWS, DEFAULT_COLS, &content, &[])
+            .expect("spawn pager");
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)

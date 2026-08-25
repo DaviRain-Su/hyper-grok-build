@@ -560,7 +560,15 @@ async fn open_session(
     }
 
     let new_resp: acp::NewSessionResponse = acp_send(
-        acp::NewSessionRequest::new(cwd.to_path_buf()).mcp_servers(mcp_servers),
+        acp::NewSessionRequest::new(cwd.to_path_buf())
+            .mcp_servers(mcp_servers)
+            // Fresh `-p` sessions persist as headless so `/resume` keeps them
+            // off its default pages; the load path above never restamps.
+            .meta(
+                serde_json::json!({ "sessionKind": "headless" })
+                    .as_object()
+                    .cloned(),
+            ),
         acp_tx,
     )
     .await?;
@@ -584,7 +592,7 @@ async fn open_session_with_id(
         acp::NewSessionRequest::new(cwd.to_path_buf())
             .mcp_servers(mcp_servers)
             .meta(
-                serde_json::json!({ "sessionId": session_id })
+                serde_json::json!({ "sessionId": session_id, "sessionKind": "headless" })
                     .as_object()
                     .cloned(),
             ),
@@ -618,7 +626,10 @@ async fn fork_then_open(
         ensure_session_id_available(nid, &new_cwd_str)?;
     }
     let parent_is_worktree = parent_session_is_worktree(parent_id, &write_cwd);
-    let payload = fork_session_params(parent_id, &write_cwd, new_id, parent_is_worktree);
+    let mut payload = fork_session_params(parent_id, &write_cwd, new_id, parent_is_worktree);
+    // Shared helper stamps `fork` for interactive `/fork`. `-p` children must
+    // stay headless: the load path below never restamps.
+    payload["sessionKind"] = serde_json::Value::String("headless".into());
     let fork_params = serde_json::value::to_raw_value(&payload)
         .map_err(|e| anyhow::anyhow!("serialize fork params: {e}"))?;
     let req = acp::ExtRequest::new("x.ai/session/fork", fork_params.into());
@@ -740,6 +751,7 @@ fn headless_materialize_ctx(
             crate::app::session_startup::TitleResolution::Allowed
         },
         restore_code,
+        recent_session_selection: crate::app::session_startup::RecentSessionSelection::Any,
         restore_progress_on_stdout: false,
     }
 }
@@ -805,6 +817,7 @@ pub async fn run_single_turn(
         options.yolo,
         options.permission_mode_flag.as_deref(),
         None,
+        xai_grok_shell::util::config::PermissionMode::Ask,
     );
 
     apply_agent_flag(&options.agent, &mut agent_config);

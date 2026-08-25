@@ -182,6 +182,13 @@ fn hook_event_variants_round_trip() {
 fn connection_kind_and_definition_mode_full_serialise() {
     assert_eq!(roundtrip(&ConnectionKind::Harness), json!("harness"));
     assert_eq!(roundtrip(&ConnectionKind::ToolServer), json!("tool_server"));
+    assert_eq!(roundtrip(&ConnectionKind::BotClient), json!("bot_client"));
+    let hello: HelloMsg = serde_json::from_value(json!({
+        "protocol_version": "1.0.0",
+        "kind": "bot_client",
+    }))
+    .expect("hello with kind=bot_client");
+    assert_eq!(hello.kind, ConnectionKind::BotClient);
     assert_eq!(
         roundtrip(&ToolDefinitionMode::Full),
         json!({"mode": "full"})
@@ -476,6 +483,11 @@ fn method_serialises_with_dot_notation_for_dotted_methods() {
         (Method::Hello, "hello"),
         (Method::HelloAck, "hello_ack"),
         (Method::ToolCallRequest, "tool_call_request"),
+        (Method::BotCommand, "bot.command"),
+        (Method::BotVncDescriptor, "bot.vncDescriptor"),
+        (Method::BotTranscriptOffbox, "bot.transcript.offbox"),
+        (Method::BotBindConversation, "bot.bindConversation"),
+        (Method::BotEvent, "bot.event"),
     ];
     for (m, expected) in cases {
         assert_eq!(roundtrip(&m), json!(expected));

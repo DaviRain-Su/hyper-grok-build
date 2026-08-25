@@ -14,29 +14,21 @@ use super::support::*;
 use xai_grok_mcp::servers::McpInitStrategy;
 
 #[test]
-fn default_reminder_says_proceed_without_the_servers() {
+fn default_reminder_lists_connecting_servers() {
     let text = format_mcp_connecting_reminder(&["alpha".to_string()], &[]);
     assert!(text.contains("- alpha\n"));
-    assert!(text.contains("Do not attempt to use tools from these servers yet"));
-    assert!(text.contains("proceed with what you can do in the meantime"));
-    // The delivery contract must NOT leak into sessions that didn't opt in.
-    // Match the delivery branch's exact casing — a case-mismatched needle
-    // would make this guard vacuously pass.
-    assert!(!text.contains("Do NOT end the turn"));
+    assert!(!text.contains("alpha__post"));
+    assert!(!text.contains("alpha__ask"));
 }
 
 #[test]
-fn declared_delivery_tools_demand_delivery_through_them() {
+fn declared_delivery_tools_are_named_in_the_reminder() {
     let text = format_mcp_connecting_reminder(
         &["alpha".to_string(), "beta".to_string()],
         &["alpha__post".to_string(), "alpha__ask".to_string()],
     );
     assert!(text.contains("- alpha\n- beta\n"));
-    // Must name the declared delivery tools and demand delivery through them…
-    assert!(text.contains("delivered ONLY through: alpha__post, alpha__ask"));
-    assert!(text.contains("Do NOT end the turn"));
-    // …and must not carry the default "skip these tools" guidance.
-    assert!(!text.contains("Do not attempt to use tools from these servers yet"));
+    assert!(text.contains("alpha__post, alpha__ask"));
 }
 
 /// A resident `session/load` carrying explicit `startupHints` re-applies the

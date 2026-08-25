@@ -40,6 +40,43 @@ impl StartupPhase {
     }
 }
 
+macro_rules! span_table {
+    ($visibility:vis fn $name:ident($enum_name:ident, parent) { $($variant:ident => $label:literal),* $(,)? }) => {
+        $visibility fn $name(value: $enum_name, parent: &tracing::Span) -> tracing::Span {
+            match value {
+                $($enum_name::$variant => tracing::info_span!(parent: parent, $label),)*
+            }
+        }
+    };
+    ($visibility:vis fn $name:ident($enum_name:ident) { $($variant:ident => $label:literal),* $(,)? }) => {
+        $visibility fn $name(value: $enum_name) -> tracing::Span {
+            match value {
+                $($enum_name::$variant => tracing::info_span!($label),)*
+            }
+        }
+    };
+}
+
+span_table!(fn phase_span(StartupPhase, parent) {
+    ConfigLoad => "startup.config_load",
+    ManagedPolicy => "startup.managed_policy",
+    Bootstrap => "startup.bootstrap",
+    ModelCatalog => "startup.model_catalog",
+    WorkerSpawn => "startup.worker_spawn",
+    LeaderConnect => "startup.leader_connect",
+    AcpInitialize => "startup.acp_initialize",
+    EagerAuth => "startup.eager_auth",
+    AppInit => "startup.app_init",
+    SessionCreate => "startup.session_create",
+});
+
+span_table!(pub(crate) fn subphase_span(Subphase) {
+    SessionLoad => "startup.session_load",
+    SessionReplay => "startup.session_replay",
+    SessionGitScan => "startup.session_git_scan",
+    SessionSpawn => "startup.session_spawn",
+});
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr, serde::Serialize)]
 #[strum(serialize_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -141,6 +178,8 @@ impl PhaseSnapshot {
 struct Inner {
     completed: Vec<(StartupPhase, Duration)>,
     current: Option<(StartupPhase, Instant)>,
+    current_span: Option<tracing::Span>,
+    root_span: tracing::Span,
     auth_mode: AuthMode,
     owner: Owner,
 }
@@ -157,6 +196,8 @@ impl StartupTimer {
             inner: Mutex::new(Inner {
                 completed: Vec::new(),
                 current: None,
+                current_span: None,
+                root_span: tracing::info_span!("startup", outcome = tracing::field::Empty),
                 auth_mode: AuthMode::Unknown,
                 owner: Owner::Agent,
             }),
@@ -171,6 +212,8 @@ impl StartupTimer {
     /// layers can name the same step and it is measured once.
     pub fn enter(&self, phase: StartupPhase) {
         let now = Instant::now();
+        // Dropped after the lock: closing a span runs subscriber hooks.
+        let finished_span;
         {
             let mut g = self.lock();
             if matches!(g.current, Some((open, _)) if open == phase) {
@@ -180,7 +223,10 @@ impl StartupTimer {
                 g.completed.push((prev, now.saturating_duration_since(t0)));
             }
             g.current = Some((phase, now));
+            let span = phase_span(phase, &g.root_span);
+            finished_span = g.current_span.replace(span);
         }
+        drop(finished_span);
         let elapsed_ms = self.started.elapsed().as_millis() as u64;
         tracing::info!(phase = %phase.label(), elapsed_ms, "startup phase");
         crate::unified_log::info(
@@ -192,10 +238,46 @@ impl StartupTimer {
 
     fn close_open_phase(&self) {
         let now = Instant::now();
-        let mut g = self.lock();
-        if let Some((prev, t0)) = g.current.take() {
-            g.completed.push((prev, now.saturating_duration_since(t0)));
+        // Dropped after the lock: closing a span runs subscriber hooks.
+        let finished_span;
+        {
+            let mut g = self.lock();
+            if let Some((prev, t0)) = g.current.take() {
+                g.completed.push((prev, now.saturating_duration_since(t0)));
+            }
+            finished_span = g.current_span.take();
         }
+        drop(finished_span);
+    }
+
+    fn close_root_span(&self, outcome: &'static str) {
+        // Dropped after the lock: closing a span runs subscriber hooks. The
+        // open phase span closes too: `summary` keeps reporting the stuck
+        // phase from `current`, but its span must not run past the total.
+        let (open_phase, root);
+        {
+            let mut g = self.lock();
+            open_phase = g.current_span.take();
+            g.root_span.record("outcome", outcome);
+            root = std::mem::replace(&mut g.root_span, tracing::Span::none());
+        }
+        drop(open_phase);
+        drop(root);
+    }
+
+    /// A discarded run's spans close at the discard, not at the last `Arc`
+    /// drop, so idle wait after first client is never attributed to a phase.
+    fn discard_spans(&self) {
+        // Dropped after the lock: closing a span runs subscriber hooks.
+        let (open_phase, root);
+        {
+            let mut g = self.lock();
+            open_phase = g.current_span.take();
+            g.root_span.record("outcome", "discarded");
+            root = std::mem::replace(&mut g.root_span, tracing::Span::none());
+        }
+        drop(open_phase);
+        drop(root);
     }
 
     pub fn set_auth_mode(&self, mode: AuthMode) {
@@ -474,7 +556,8 @@ fn clear() {
 /// Stops recording for a standalone agent at its first client, so idle
 /// waiting is not counted; client-owned runs are unaffected.
 pub fn mark_agent_serving() {
-    if agent_owned().is_some() {
+    if let Some(timer) = agent_owned() {
+        timer.discard_spans();
         clear();
     }
 }
@@ -589,6 +672,7 @@ pub(crate) fn report_total(outcome: StartupOutcome) {
             if outcome == StartupOutcome::Ok {
                 p.close_open_phase();
             }
+            p.close_root_span(outcome.label());
             (p.summary(), p.auth_mode())
         }
         None => (String::new(), AuthMode::Unknown),
@@ -670,6 +754,174 @@ mod tests {
     // (`CURRENT`/`DONE`/`SUBPHASES` and the redirected unified log); run in
     // parallel they race. Each holder also calls `reset_for_tests` first.
     static SERIAL: Mutex<()> = Mutex::new(());
+
+    mod span_capture {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        use tracing::span::{Attributes, Id};
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::registry::LookupSpan;
+
+        pub(super) struct ClosedSpan {
+            pub(super) name: String,
+            pub(super) parent: Option<String>,
+            pub(super) elapsed: Duration,
+        }
+
+        #[derive(Default)]
+        pub(super) struct SpanLog {
+            open: HashMap<u64, (String, Option<String>, Instant)>,
+            pub(super) closed: Vec<ClosedSpan>,
+        }
+
+        pub(super) struct SpanTimingLayer(pub(super) Arc<Mutex<SpanLog>>);
+
+        impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanTimingLayer {
+            fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
+                let mut log = self.0.lock().unwrap();
+                let parent = attrs
+                    .parent()
+                    .and_then(|pid| log.open.get(&pid.into_u64()))
+                    .map(|(name, _, _)| name.clone());
+                log.open.insert(
+                    id.into_u64(),
+                    (attrs.metadata().name().to_string(), parent, Instant::now()),
+                );
+            }
+
+            fn on_close(&self, id: Id, _ctx: Context<'_, S>) {
+                let mut log = self.0.lock().unwrap();
+                if let Some((name, parent, opened)) = log.open.remove(&id.into_u64()) {
+                    let elapsed = opened.elapsed();
+                    log.closed.push(ClosedSpan {
+                        name,
+                        parent,
+                        elapsed,
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn startup_phases_emit_spans_with_durations() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_tests();
+        crate::unified_log::redirect_to_temp_for_tests();
+
+        let log = Arc::new(Mutex::new(span_capture::SpanLog::default()));
+        let subscriber =
+            tracing_subscriber::registry().with(span_capture::SpanTimingLayer(Arc::clone(&log)));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let _p = begin(Owner::Client);
+        enter(StartupPhase::ConfigLoad);
+        std::thread::sleep(Duration::from_millis(10));
+        // Re-entering the open phase must not open a second span.
+        enter(StartupPhase::ConfigLoad);
+        enter(StartupPhase::Bootstrap);
+        std::thread::sleep(Duration::from_millis(10));
+        {
+            let mut timer = crate::instrumentation::timer("session.git_divergence");
+            timer.with_subphase(Subphase::SessionGitScan);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        report_total(StartupOutcome::Ok);
+
+        let log = log.lock().unwrap_or_else(|e| e.into_inner());
+        let names: Vec<&str> = log.closed.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "startup.config_load",
+                "startup.session_git_scan",
+                "startup.bootstrap",
+                "startup",
+            ]
+        );
+        for c in &log.closed {
+            assert!(
+                c.elapsed >= Duration::from_millis(10),
+                "{} must cover its region, got {:?}",
+                c.name,
+                c.elapsed
+            );
+        }
+
+        // Held spans never parent contextually: phases are explicit children
+        // of the root; the sub-phase timer has no root handle.
+        for c in &log.closed {
+            let expected_parent = match c.name.as_str() {
+                "startup" | "startup.session_git_scan" => None,
+                _ => Some("startup"),
+            };
+            assert_eq!(c.parent.as_deref(), expected_parent, "{}", c.name);
+        }
+
+        // The launch-to-interactive bar contains every phase bar.
+        let root = log
+            .closed
+            .iter()
+            .find(|c| c.name == "startup")
+            .expect("the root startup span closes at the ok total");
+        let phase_sum: Duration = log
+            .closed
+            .iter()
+            .filter(|c| c.parent.as_deref() == Some("startup"))
+            .map(|c| c.elapsed)
+            .sum();
+        assert!(
+            root.elapsed >= phase_sum,
+            "root span ({:?}) must cover the phases it parents ({phase_sum:?})",
+            root.elapsed
+        );
+    }
+
+    #[test]
+    fn agent_run_spans_close_at_discard() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_tests();
+        crate::unified_log::redirect_to_temp_for_tests();
+
+        let log = Arc::new(Mutex::new(span_capture::SpanLog::default()));
+        let subscriber =
+            tracing_subscriber::registry().with(span_capture::SpanTimingLayer(Arc::clone(&log)));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let _p = begin(Owner::Agent);
+        enter(StartupPhase::ConfigLoad);
+        mark_agent_serving();
+
+        let log = log.lock().unwrap_or_else(|e| e.into_inner());
+        let names: Vec<&str> = log.closed.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["startup.config_load", "startup"],
+            "a discarded run's spans close at the discard, not at timer drop"
+        );
+    }
+
+    // The `phases` string is a frozen format that fleet dashboards parse.
+    #[test]
+    fn summary_is_byte_stable_for_fixed_inputs() {
+        let snap = PhaseSnapshot {
+            completed: vec![
+                (StartupPhase::ConfigLoad, Duration::from_millis(12)),
+                (StartupPhase::Bootstrap, Duration::from_millis(1500)),
+            ],
+            open: Some((StartupPhase::SessionCreate, Duration::from_millis(3))),
+        };
+        assert_eq!(
+            snap.summary(),
+            "config_load=12ms, bootstrap=1.5s, session_create>=3ms"
+        );
+    }
 
     #[test]
     fn slow_phase_warning_fires_once_per_open_phase() {

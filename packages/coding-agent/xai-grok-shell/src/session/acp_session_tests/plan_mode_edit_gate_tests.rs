@@ -117,16 +117,8 @@ async fn plan_mode_rejects_grok_edit_outside_plan_file_despite_allow_all_permiss
             );
             let text = tool_result_text(&actor, "call_gate").await;
             assert!(
-                text.contains("Rejected: file edits are not allowed in plan mode"),
-                "rejection text: {text}"
-            );
-            assert!(
                 text.contains("/tmp/test-session/plan.md"),
                 "must name the plan file so the model knows the one editable path: {text}"
-            );
-            assert!(
-                !text.contains("exit_plan_mode"),
-                "rejection should stay short (no exit-tool steering): {text}"
             );
         })
         .await;

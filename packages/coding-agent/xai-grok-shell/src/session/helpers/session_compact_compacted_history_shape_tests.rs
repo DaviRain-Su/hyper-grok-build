@@ -141,11 +141,6 @@ async fn test_compacted_history_raw_strings() {
         !msg_summary_text.contains("<system-reminder>"),
         "Summary message should NOT contain system-reminder (it is now separate)"
     );
-    assert!(
-        msg_summary_text
-            .starts_with("This session is being continued from a previous conversation"),
-        "Summary should start with the continuation preamble"
-    );
     let formatted_summary =
         xai_chat_state::compaction_utils::format_compact_summary_content(compaction_summary);
     assert_eq!(
@@ -192,10 +187,6 @@ async fn test_compacted_history_minimal_no_state_context() {
     assert_eq!(query, "<user_query>\nhello world\n</user_query>");
     assert_eq!(compacted[3].text_content(), "Hi! How can I help?");
     let summary = compacted[4].text_content();
-    assert!(
-        summary.starts_with("This session is being continued"),
-        "Summary should start with preamble (no <user_query> wrapping)"
-    );
     assert!(
         summary.contains("Summary: user said hello."),
         "Summary should contain the original summary text"

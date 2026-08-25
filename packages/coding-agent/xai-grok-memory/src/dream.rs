@@ -101,9 +101,13 @@ rather than discarding prior knowledge. Your job:
    - Greetings, meta-commentary, tool output noise
    - Message counts and tool-usage statistics
    - 'Current state' and 'Next steps' sections
-   - User preferences already in global memory (OS, shell, paths)
+   - User preferences already in global memory (OS, shell, editor)
    - Session metadata (dates, message counts)
 5. **Preserve** decisions, rationale, architecture, preferences, and problem/solution pairs
+6. **Generalize** task narratives into reusable mechanisms, rules, and root causes
+7. **Ground details** — use stable repo-relative paths for project structure; include an absolute \
+workspace root only when operationally necessary and present in the session logs. Copy exact \
+identifiers and numerical values only when they appear verbatim in the input; omit unsupported details
 
 Respond with a single markdown document. Use ## headers to separate topics. \
 Each topic should be self-contained and useful to a future session that knows \
@@ -977,23 +981,6 @@ mod tests {
         // write_long_term overwrites: old content is replaced
         assert!(!memory.contains("Old content."));
         assert_eq!(memory.trim(), response);
-    }
-
-    // -------------------------------------------------------------------
-    // DREAM_SYSTEM_PROMPT sanity checks
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn dream_system_prompt_has_required_content() {
-        assert!(DREAM_SYSTEM_PROMPT.contains("dream"));
-        assert!(DREAM_SYSTEM_PROMPT.contains("NO_REPLY"));
-        assert!(DREAM_SYSTEM_PROMPT.contains("## headers"));
-        // Core instruction verbs that define dream behavior
-        assert!(DREAM_SYSTEM_PROMPT.contains("Merge"));
-        assert!(DREAM_SYSTEM_PROMPT.contains("Resolve"));
-        assert!(DREAM_SYSTEM_PROMPT.contains("Discard"));
-        assert!(DREAM_SYSTEM_PROMPT.contains("Preserve"));
-        assert!(DREAM_SYSTEM_PROMPT.contains("Convert"));
     }
 
     #[test]

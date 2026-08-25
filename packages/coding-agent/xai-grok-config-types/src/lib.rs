@@ -740,9 +740,8 @@ pub struct RemoteSettings {
     /// threshold the shell speculatively summarizes the history prefix in the
     /// background (pass 1 → NOTE₁); at compaction it summarizes NOTE₁ + the
     /// recent tail (pass 2 → final summary), keeping summarizer latency off the
-    /// critical path. `Some(true)` enables (remote rollout), `Some(false)` forces
-    /// off, `None` falls back to `[features] two_pass_compaction` /
-    /// `GROK_TWO_PASS_COMPACTION` / default (off).
+    /// critical path. `Some(false)` forces off, `None` falls through env /
+    /// `[features]` / default (on).
     #[serde(default)]
     pub two_pass_compaction_enabled: Option<bool>,
     /// Dynamic tip list from remote settings. When present with non-empty entries,

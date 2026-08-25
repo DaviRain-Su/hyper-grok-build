@@ -152,10 +152,6 @@ mod tests {
         assert!(text.starts_with("<system-reminder>"));
         assert!(text.ends_with("</system-reminder>"));
         assert!(text.contains("beginning: \"fix the parser\""));
-        // Reply-substance framing (not activity-log meta verbs as the task).
-        assert!(text.contains("AGENT'S REPLY"));
-        assert!(text.contains("avoid \"Explained…\""));
-        assert!(!text.contains("verb-first past tense"));
     }
 
     #[test]

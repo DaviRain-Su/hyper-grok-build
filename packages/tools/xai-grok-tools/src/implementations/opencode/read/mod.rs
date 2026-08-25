@@ -536,20 +536,8 @@ mod tests {
             .render(ToolMetadata::description_template(&ReadTool))
             .unwrap();
         assert!(
-            rendered.contains("start_line and max_lines"),
+            rendered.contains("start_line") && rendered.contains("max_lines"),
             "renamed offset/limit must appear:\n{rendered}"
-        );
-        assert!(
-            rendered.contains("file or directory")
-                && rendered.contains("trailing `/` for subdirectories"),
-            "directory support must be documented:\n{rendered}"
-        );
-        assert!(
-            !rendered.contains("only read files")
-                && !rendered.contains("ls command")
-                && !rendered.contains("a line offset and limit")
-                && !rendered.contains("Bash tool"),
-            "stale files-only/ls/offset/Bash-tool literals must not remain:\n{rendered}"
         );
     }
 

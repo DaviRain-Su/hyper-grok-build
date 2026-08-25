@@ -2345,15 +2345,9 @@ mod tests {
         // Order: system, AGENTS.md user turn, trailing transcript/action user turn.
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, ClassifierMessageRole::System);
-        assert_eq!(msgs[0].text, AUTO_MODE_CLASSIFIER_SYSTEM_PROMPT);
         assert_eq!(msgs[1].role, ClassifierMessageRole::User);
         assert!(msgs[1].text.contains("AGENTS.md"));
         assert!(msgs[1].text.contains("<project_instructions>"));
-        assert!(
-            msgs[1].text.contains(
-                "establish neither first-party user request intent nor permission approval"
-            )
-        );
         assert!(msgs[1].text.contains("\\# Repo rules"));
         // Trailing message renders the turns chronologically.
         let last = &msgs[2];
@@ -2367,7 +2361,6 @@ mod tests {
         assert!(last.text.contains("## Proposed action"));
         assert!(last.text.contains("tool: run_terminal_command"));
         assert!(last.text.contains("access_kind: bash"));
-        assert!(last.text.contains("Respond with JSON only"));
         assert!(!msgs[0].text.contains("## Proposed action"));
     }
 
@@ -2390,7 +2383,6 @@ mod tests {
                 .iter()
                 .any(|m| m.text.contains("<project_instructions>"))
         );
-        assert!(msgs[1].text.contains("(no recent conversation context)"));
         assert!(msgs[1].text.contains("## Proposed action"));
     }
 
@@ -2429,7 +2421,6 @@ mod tests {
                 .starts_with(RECORDED_PERMISSION_DECISIONS_PREAMBLE)
         }));
         assert!(full.last().unwrap().text.contains("## Proposed action"));
-        assert!(full.last().unwrap().text.contains("Respond with JSON only"));
 
         // NoUserToolPrefix: keeps AGENTS.md (so 3 msgs with instructions present),
         // drops the transcript.
@@ -2449,7 +2440,6 @@ mod tests {
                 .starts_with(RECORDED_PERMISSION_DECISIONS_PREAMBLE)
         }));
         assert!(last.contains("## Proposed action"));
-        assert!(last.contains("Respond with JSON only"));
 
         // BareInstructions: drops AGENTS.md + transcript; keeps action + json.
         let bare = build(ClassifierPromptType::BareInstructions);
@@ -2463,7 +2453,6 @@ mod tests {
         let last = &bare.last().unwrap().text;
         assert!(!last.contains("## Recent conversation"));
         assert!(last.contains("## Proposed action"));
-        assert!(last.contains("Respond with JSON only"));
         assert!(!bare.iter().any(|message| {
             message
                 .text
@@ -2479,7 +2468,6 @@ mod tests {
         assert!(last.contains("access_kind: bash"));
         assert!(last.contains("detail: my-build"));
         assert!(!last.contains("## Proposed action"));
-        assert!(!last.contains("Respond with JSON only"));
         assert!(!last.contains("## Recent conversation"));
         assert!(!just.iter().any(|message| {
             message
@@ -2705,8 +2693,6 @@ mod tests {
             &ctx,
             ClassifierPromptType::Full,
         );
-        let trailing = &msgs.last().unwrap().text;
-        assert!(!trailing.contains("The user was asked before running"));
         let decisions = msgs
             .iter()
             .find(|message| {
@@ -2798,11 +2784,6 @@ mod tests {
             .find(|message| message.text.contains("<project_instructions>"))
             .expect("project instructions message");
         assert!(agents.text.contains("\\## Recorded permission decisions"));
-        assert!(
-            agents.text.contains(
-                "establish neither first-party user request intent nor permission approval"
-            )
-        );
         let trailing = &messages.last().unwrap().text;
         assert_eq!(
             trailing

@@ -2542,6 +2542,7 @@ impl SessionActor {
                     let mut tools = override_tools.clone();
                     if self.startup_hints.is_subagent {
                         crate::agent::subagent::strip_ask_user_question_tool(&mut tools);
+                        crate::agent::subagent::strip_workflow_tool(&mut tools);
                     }
                     tools
                 } else {

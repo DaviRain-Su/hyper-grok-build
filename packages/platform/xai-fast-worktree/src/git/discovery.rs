@@ -4,22 +4,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-/// Find the git directory for a path using gix (handles both repos and worktrees).
-///
-/// For a regular repo, returns the `.git` directory. For a linked worktree,
-/// returns the worktree's git dir under `.git/worktrees/<name>`.
-///
-/// Note: currently unused in production code — retained for future use and
-/// tested below. See `find_worktree_git_dir` for the version used by
-/// `copy_git_index`.
-#[allow(dead_code)]
-pub(crate) fn find_git_dir(path: &Path) -> Result<PathBuf> {
-    let repo = gix::discover(path)
-        .with_context(|| format!("failed to discover git repo at {}", path.display()))?;
-
-    Ok(repo.git_dir().to_path_buf())
-}
-
 /// Find the worktree's git directory from its `.git` file.
 ///
 /// Worktrees have a `.git` file (not directory) that points to the actual git dir.
@@ -96,17 +80,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use xai_test_utils::git::{git_commit_all, init_git_repo};
-
-    #[test]
-    fn test_find_git_dir() {
-        xai_test_utils::require_git!();
-        let temp = TempDir::new().unwrap();
-        init_git_repo(temp.path());
-
-        let git_dir = find_git_dir(temp.path()).unwrap();
-        assert!(git_dir.ends_with(".git"));
-        assert!(git_dir.is_dir());
-    }
 
     #[test]
     fn test_find_worktree_git_dir_resolves_relative_gitdir() {

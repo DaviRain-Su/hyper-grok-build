@@ -1452,6 +1452,109 @@ fn edit_manual_expand_survives_completion() {
         "completion must not snap a user-expanded Edit back to Collapsed"
     );
 }
+/// A mid-run expand of an agent Execute must survive stdout progress
+/// (`replace_tool_block` then `set_execute_output`) and completion
+/// (`replace_tool_block` then `finish_running`). No pin /
+/// `respect_manual_folds` required — same-kind preserve, not the
+/// fold-pin system. Kind upgrade Other→Execute still adopts Collapsed.
+#[test]
+fn execute_manual_expand_survives_progress_and_completion() {
+    use crate::scrollback::types::DisplayMode;
+    let mut tracker = AcpUpdateTracker::new();
+    let mut sb = ScrollbackState::new();
+    let tc_id = "toolu_exec_gesture";
+    tracker.handle_update(
+        tool_call(tc_id, acp::ToolKind::Other, "pending"),
+        &meta(),
+        &mut sb,
+    );
+    assert!(
+        matches!(
+            &sb.get(0).unwrap().block,
+            RenderBlock::ToolCall(ToolCallBlock::Other(_))
+        ),
+        "eager pending should land as Other"
+    );
+    sb.get_by_id_mut(sb.get(0).unwrap().id)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    let refine = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from(tc_id)),
+        acp::ToolCallUpdateFields::new()
+            .kind(Some(acp::ToolKind::Execute))
+            .title(Some("Execute `cargo build`".to_string()))
+            .raw_input(Some(serde_json::json!({ "command": "cargo build" }))),
+    ));
+    tracker.handle_update(refine, &meta(), &mut sb);
+    let entry = sb.get(0).expect("entry exists");
+    assert!(
+        matches!(
+            &entry.block,
+            RenderBlock::ToolCall(ToolCallBlock::Execute(_))
+        ),
+        "Other→Execute must upgrade the block kind"
+    );
+    assert_eq!(
+        entry.display_mode,
+        DisplayMode::Collapsed,
+        "Other→Execute must reset even if the placeholder was expanded"
+    );
+    tracker.handle_update(
+        tool_update_in_progress(tc_id, b"Compiling\n"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(
+        sb.get(0).unwrap().display_mode,
+        DisplayMode::Collapsed,
+        "progress must not auto-open a collapsed Execute"
+    );
+    sb.get_by_id_mut(sb.get(0).unwrap().id)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    assert!(
+        !sb.get(0).unwrap().display_mode_pinned,
+        "→ expand without respect_manual_folds must not pin"
+    );
+    tracker.handle_update(
+        tool_update_in_progress(tc_id, b"Compiling\n"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(
+        sb.get(0).unwrap().display_mode,
+        DisplayMode::Expanded,
+        "progress must not snap a user-expanded Execute shut"
+    );
+    match &sb.get(0).unwrap().block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(exec)) => {
+            assert_eq!(exec.output.as_deref(), Some("Compiling\n"));
+        }
+        other => panic!("Expected Execute after progress, got {other:?}"),
+    }
+    tracker.handle_update(
+        tool_update_in_progress(tc_id, b"Compiling\nFinished\n"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(
+        sb.get(0).unwrap().display_mode,
+        DisplayMode::Expanded,
+        "later progress ticks must keep the expand"
+    );
+    tracker.handle_update(
+        tool_update_completed_bash(tc_id, b"Compiling\nFinished\n", 0),
+        &meta(),
+        &mut sb,
+    );
+    let entry = sb.get(0).unwrap();
+    assert!(!entry.is_running);
+    assert_eq!(
+        entry.display_mode,
+        DisplayMode::Expanded,
+        "completion must not snap a user-expanded Execute shut"
+    );
+}
 /// Multi-file (apply_patch shape: several Diff items) and title-fallback
 /// Edits can't be summarized by the one-liner: they materialize Expanded
 /// with the summary marked untrusted, config-independent. Each case

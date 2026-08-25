@@ -1,7 +1,7 @@
 use super::{
-    RelocationError, RelocationView, most_recent_local_summary_for_cwd_in_root,
-    most_recent_local_summary_for_cwd_in_view, read_summary_from_dir,
-    resumed_session_sandbox_profile_in_root,
+    RecentSessionSelection, RelocationError, RelocationView,
+    most_recent_local_summary_for_cwd_in_root, most_recent_local_summary_for_cwd_in_view,
+    read_summary_from_dir, resumed_session_sandbox_profile_in_root,
 };
 use std::{fs, io};
 use tempfile::TempDir;
@@ -218,17 +218,22 @@ fn most_recent_cwd_skips_raced_not_found() {
     );
     let view = RelocationView::load_for_sessions_root(&root).unwrap();
 
-    let picked = most_recent_local_summary_for_cwd_in_view(cwd, &view, |session_dir| {
-        if session_dir.ends_with("removed") {
-            Err(RelocationError::Io {
-                operation: "read",
-                path: session_dir.join("summary.json"),
-                source: io::Error::new(io::ErrorKind::NotFound, "injected"),
-            })
-        } else {
-            read_summary_from_dir(session_dir)
-        }
-    })
+    let picked = most_recent_local_summary_for_cwd_in_view(
+        cwd,
+        &view,
+        |session_dir| {
+            if session_dir.ends_with("removed") {
+                Err(RelocationError::Io {
+                    operation: "read",
+                    path: session_dir.join("summary.json"),
+                    source: io::Error::new(io::ErrorKind::NotFound, "injected"),
+                })
+            } else {
+                read_summary_from_dir(session_dir)
+            }
+        },
+        RecentSessionSelection::Interactive,
+    )
     .unwrap()
     .unwrap();
     assert_eq!(picked.info.id.0.as_ref(), "valid");
@@ -259,17 +264,22 @@ fn most_recent_cwd_propagates_non_not_found_io_errors() {
     );
     let view = RelocationView::load_for_sessions_root(&root).unwrap();
 
-    let error = most_recent_local_summary_for_cwd_in_view(cwd, &view, |session_dir| {
-        if session_dir.ends_with("unreadable-newer") {
-            Err(RelocationError::Io {
-                operation: "read",
-                path: session_dir.join("summary.json"),
-                source: io::Error::new(io::ErrorKind::PermissionDenied, "injected"),
-            })
-        } else {
-            read_summary_from_dir(session_dir)
-        }
-    })
+    let error = most_recent_local_summary_for_cwd_in_view(
+        cwd,
+        &view,
+        |session_dir| {
+            if session_dir.ends_with("unreadable-newer") {
+                Err(RelocationError::Io {
+                    operation: "read",
+                    path: session_dir.join("summary.json"),
+                    source: io::Error::new(io::ErrorKind::PermissionDenied, "injected"),
+                })
+            } else {
+                read_summary_from_dir(session_dir)
+            }
+        },
+        RecentSessionSelection::Interactive,
+    )
     .unwrap_err();
     assert!(matches!(
         error,
@@ -349,6 +359,45 @@ fn most_recent_cwd_skips_hidden_session() {
     assert_eq!(
         resumed_session_sandbox_profile_in_root(None, Some(cwd), &root),
         Some("workspace".to_string())
+    );
+}
+
+#[test]
+fn most_recent_cwd_skips_headless_session() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("sessions");
+    let cwd = "/work/proj";
+    write_session(
+        &root,
+        cwd,
+        "interactive",
+        "2026-01-01T00:00:00Z",
+        None,
+        Some("workspace"),
+        false,
+    );
+    let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
+    let dir = root.join(&encoded).join("headless-newer");
+    fs::create_dir_all(&dir).unwrap();
+    let summary = serde_json::json!({
+        "info": { "id": "headless-newer", "cwd": cwd },
+        "session_summary": "",
+        "created_at": "2026-06-01T00:00:00Z",
+        "updated_at": "2026-06-01T00:00:00Z",
+        "num_messages": 2,
+        "current_model_id": "grok-3",
+        "session_kind": "headless",
+    });
+    fs::write(dir.join("summary.json"), summary.to_string()).unwrap();
+
+    assert_eq!(
+        most_recent_local_summary_for_cwd_in_root(cwd, &root)
+            .unwrap()
+            .info
+            .id
+            .0
+            .to_string(),
+        "interactive"
     );
 }
 

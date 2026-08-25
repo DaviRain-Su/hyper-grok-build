@@ -752,11 +752,6 @@ fn loop_instruction_derives_interval_without_default_or_inline_execute() {
     assert!(instr.contains("30 minutes"));
     assert!(instr.contains("<number><unit>"));
     assert!(instr.contains("ask the user how often"));
-    assert!(instr.contains("Do NOT execute the prompt inline"));
-    assert!(
-        !instr.contains("immediately execute the parsed prompt"),
-        "stale inline-execute wording must be gone: {instr}"
-    );
     assert!(instr.contains("every 30 minutes do x"));
 }
 

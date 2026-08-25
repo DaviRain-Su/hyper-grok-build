@@ -40,6 +40,7 @@ use super::session::load::{
     handle_session_search_debounce_expired, remove_session_from_pickers,
 };
 use super::session::modal::remove_agent_and_cleanup;
+use super::session::picker_routing::PickerRequest;
 use super::settings::ui::apply_setting_rollback;
 use super::status::{
     handle_coding_data_sharing_failed, handle_coding_data_sharing_updated,
@@ -404,12 +405,25 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             error,
         } => handle_session_load_failed(app, agent_id, session_id, error),
         TaskResult::SessionListLoaded {
+            host,
+            generation,
             sessions,
             partial,
             scope,
             seq,
             query,
-        } => handle_session_list_loaded(app, sessions, partial, scope, seq, query),
+        } => handle_session_list_loaded(
+            app,
+            PickerRequest {
+                host,
+                generation,
+                seq,
+            },
+            sessions,
+            partial,
+            scope,
+            query,
+        ),
         TaskResult::ForeignSessionsScanned { entries, seq } => {
             handle_foreign_sessions_scanned(app, entries, seq)
         }
@@ -440,12 +454,36 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.apply_foreign_resume_detection(launch_token, &canonical_cwd, hint);
             vec![]
         }
-        TaskResult::SessionListFailed { error, seq, query } => {
-            handle_session_list_failed(app, error, seq, query)
-        }
-        TaskResult::SessionSearchDebounceExpired { query, seq } => {
-            handle_session_search_debounce_expired(app, query, seq)
-        }
+        TaskResult::SessionListFailed {
+            host,
+            generation,
+            error,
+            seq,
+            query,
+        } => handle_session_list_failed(
+            app,
+            PickerRequest {
+                host,
+                generation,
+                seq,
+            },
+            error,
+            query,
+        ),
+        TaskResult::SessionSearchDebounceExpired {
+            host,
+            generation,
+            query,
+            seq,
+        } => handle_session_search_debounce_expired(
+            app,
+            PickerRequest {
+                host,
+                generation,
+                seq,
+            },
+            query,
+        ),
         TaskResult::RosterLoaded { sessions } => {
             app.leader_roster = sessions;
             app.dashboard_sessions_loading = false;
@@ -462,11 +500,23 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             vec![]
         }
         TaskResult::CardDetailLoaded {
+            host,
+            generation,
             source,
             session_id,
-            generation,
+            seq,
             detail,
-        } => handle_card_detail_loaded(app, source, session_id, generation, detail),
+        } => handle_card_detail_loaded(
+            app,
+            PickerRequest {
+                host,
+                generation,
+                seq,
+            },
+            source,
+            session_id,
+            detail,
+        ),
         TaskResult::SessionRestored {
             agent_id,
             local_session_id,
@@ -1597,9 +1647,20 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.welcome_prompt_focused = false;
             effects
         }
-        TaskResult::DeepSearchResults { results, seq } => {
-            handle_deep_search_results(app, results, seq)
-        }
+        TaskResult::DeepSearchResults {
+            host,
+            generation,
+            results,
+            seq,
+        } => handle_deep_search_results(
+            app,
+            PickerRequest {
+                host,
+                generation,
+                seq,
+            },
+            results,
+        ),
         TaskResult::RewindPointsLoaded { agent_id, points } => {
             handle_rewind_points_loaded(app, agent_id, points)
         }

@@ -65,6 +65,8 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                 xai_grok_shell::session::merge::CwdScope::WithSiblings,
                 None,
                 limit,
+                // The CLI listing is an inventory, not the resume picker.
+                xai_grok_shell::session::visibility::HeadlessPolicy::Include,
             )
             .await;
             print_sessions_grouped(&sessions);

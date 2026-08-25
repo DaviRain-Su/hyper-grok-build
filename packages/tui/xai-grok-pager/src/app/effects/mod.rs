@@ -821,7 +821,14 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchSessionList { query, seq, kind_filter } => {
+        Effect::FetchSessionList {
+            host,
+            generation,
+            query,
+            seq,
+            kind_filter,
+            headless_policy,
+        } => {
             let tx = acp_tx.clone();
             let cwd = cwd.to_path_buf();
             tasks
@@ -829,6 +836,7 @@ pub(crate) fn execute(
                     let mut params = serde_json::json!({
                     "cwd": cwd.to_string_lossy(),
                     "limit": 30,
+                    "headless": headless_policy.as_wire_str(),
                 });
                     if let Some(q) = &query {
                         params["query"] = serde_json::Value::String(q.clone());
@@ -844,6 +852,8 @@ pub(crate) fn execute(
                         event = "session_list_fetch",
                         kind_filter = ?kinds,
                         query = ?query,
+                        ?host,
+                        generation,
                         seq,
                         "FetchSessionList with kind facet filter"
                     );
@@ -863,6 +873,8 @@ pub(crate) fn execute(
                                 .unwrap_or_default();
                             if let Some(err) = wrapper.get("error") {
                                 return TaskResult::SessionListFailed {
+                                    host,
+                                    generation,
                                     error: err.as_str().unwrap_or("unknown error").to_string(),
                                     seq,
                                     query,
@@ -873,6 +885,8 @@ pub(crate) fn execute(
                             let partial = parse_session_list_partial(payload);
                             let scope = parse_session_list_scope(payload);
                             TaskResult::SessionListLoaded {
+                                host,
+                                generation,
                                 sessions,
                                 partial,
                                 scope,
@@ -882,6 +896,8 @@ pub(crate) fn execute(
                         }
                         Err(e) => {
                             TaskResult::SessionListFailed {
+                                host,
+                                generation,
                                 error: sanitize_user_error(&format!("{e}")),
                                 seq,
                                 query,
@@ -890,7 +906,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::DebounceSessionSearch { query, seq } => {
+        Effect::DebounceSessionSearch { host, generation, query, seq } => {
             tasks
                 .spawn(async move {
                     tokio::time::sleep(
@@ -898,6 +914,8 @@ pub(crate) fn execute(
                         )
                         .await;
                     TaskResult::SessionSearchDebounceExpired {
+                        host,
+                        generation,
                         query,
                         seq,
                     }
@@ -948,6 +966,8 @@ pub(crate) fn execute(
                     let params = serde_json::json!({
                     "cwd": cwd.to_string_lossy(),
                     "limit": 30,
+                    "headless": xai_grok_shell::session::unified_list::HeadlessPolicy::Exclude
+                        .as_wire_str(),
                 });
                     let request = acp::ExtRequest::new(
                         "x.ai/session/list",
@@ -1138,7 +1158,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::LoadCardDetail { source, session_id, cwd, generation } => {
+        Effect::LoadCardDetail { host, generation, source, session_id, cwd, seq } => {
             tasks
                 .spawn(async move {
                     use crate::app::app_view::CardDetail;
@@ -1170,9 +1190,11 @@ pub(crate) fn execute(
                             first_prompt_preview: String::new(),
                         });
                     TaskResult::CardDetailLoaded {
+                        host,
+                        generation,
                         source,
                         session_id: result_session_id,
-                        generation,
+                        seq,
                         detail,
                     }
                 });
@@ -4279,7 +4301,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::DeepSearchSessions { query, seq } => {
+        Effect::DeepSearchSessions { host, generation, query, seq, headless_policy } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -4292,6 +4314,7 @@ pub(crate) fn execute(
                         "query": query,
                         "limit": 20,
                         "includeContent": true,
+                        "headless": headless_policy.as_wire_str(),
                     });
                         let request = acp::ExtRequest::new(
                             "x.ai/session/search",
@@ -4344,6 +4367,8 @@ pub(crate) fn execute(
                         tokio::time::sleep(retry_interval).await;
                     }
                     TaskResult::DeepSearchResults {
+                        host,
+                        generation,
                         results,
                         seq,
                     }

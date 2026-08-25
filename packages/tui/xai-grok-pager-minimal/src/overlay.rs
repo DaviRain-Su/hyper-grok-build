@@ -209,7 +209,7 @@ fn will_commit(app: &AppView) -> bool {
     if app_modal_active(agent) {
         return false;
     }
-    let turn_running = agent.session.state.is_turn_running();
+    let turn_running = minimal_api::is_turn_or_wake_running(agent);
     super::commit::scan_frontier(&agent.scrollback, turn_running).will_commit
 }
 

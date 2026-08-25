@@ -121,18 +121,16 @@ async fn baseline_reminder_lists_workflows_under_skills() {
                     .then(|| item.text_content())
                 })
                 .expect("baseline reminder");
-            let skills_at = reminder
-                .find("The following skills are available")
-                .expect("skills header");
+            let commit_at = reminder
+                .find("commit")
+                .expect("skill name must appear in reminder");
             let workflows_at = reminder
-                .find("The following workflows are available")
-                .expect("workflows header");
+                .find("deep-research")
+                .expect("workflow name must appear in reminder");
             assert!(
-                skills_at < workflows_at,
+                commit_at < workflows_at,
                 "workflows must sit under skills:\n{reminder}"
             );
-            assert!(reminder.contains("commit"), "{reminder}");
-            assert!(reminder.contains("deep-research"), "{reminder}");
         })
         .await;
 }
@@ -162,15 +160,7 @@ async fn baseline_reminder_lists_workflows_when_there_are_no_skills() {
                     .then(|| item.text_content())
                 })
                 .expect("workflow-only reminder");
-            assert!(
-                reminder.contains("The following workflows are available"),
-                "{reminder}"
-            );
             assert!(reminder.contains("deep-research"), "{reminder}");
-            assert!(
-                !reminder.contains("The following skills are available"),
-                "{reminder}"
-            );
         })
         .await;
 }
@@ -202,12 +192,9 @@ async fn subagent_session_does_not_list_workflows() {
                     .then(|| item.text_content())
                 })
                 .expect("skill reminder");
+            assert!(reminder.contains("commit"), "{reminder}");
             assert!(
-                reminder.contains("The following skills are available"),
-                "{reminder}"
-            );
-            assert!(
-                !reminder.contains("The following workflows are available"),
+                !reminder.contains("deep-research"),
                 "subagents cannot launch workflows:\n{reminder}"
             );
             assert!(actor.workflow_listing_for_prompt().is_none());

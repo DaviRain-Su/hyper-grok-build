@@ -1202,6 +1202,8 @@ impl AgentView {
                 content_results: None,
                 content_loading: false,
                 deep_search_seq: 0,
+                generation: 0,
+                detail_seq: 0,
                 entries_query: None,
                 source_filter: crate::views::session_picker::SourceFilter::default(),
                 pending_delete: None,

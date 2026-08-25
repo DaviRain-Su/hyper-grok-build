@@ -1362,6 +1362,114 @@ async fn sidecar_flags_gate_their_files_independently() {
     );
 }
 
+/// A truncating (`target_prompt_index`) or filtering (`fork_filter`) fork can
+/// drop the failure announcement from the child's context; the copied
+/// announcement state must end those episodes or a still-down server is never
+/// re-announced to the child. Fingerprints, skill names, and unknown fields
+/// survive; a full fork copies the state verbatim.
+///
+/// The fixture and assertions go through the real [`AnnouncementState`] so
+/// the strip helper's hard-coded key cannot drift from the serde name
+/// unnoticed: on a rename the helper would no-op and the typed emptiness
+/// assert below would fail.
+#[tokio::test]
+async fn fork_truncation_clears_announced_failure_episodes() {
+    use crate::session::announcement_state::{
+        AnnouncedFailure, AnnouncementState, McpServerFingerprint,
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new("src-episodes"),
+        cwd: "/src".to_string(),
+    };
+    adapter
+        .init_session(&source, default_model_id())
+        .await
+        .unwrap();
+    let mut state = serde_json::to_value(AnnouncementState {
+        mcp_server_fingerprints: std::collections::HashMap::from([(
+            "srv".to_string(),
+            McpServerFingerprint {
+                tool_count: 1,
+                description_hash: 2,
+                tool_names_hash: 3,
+            },
+        )]),
+        announced_skill_names: std::collections::HashSet::from(["commit".to_string()]),
+        announced_failed_servers: std::collections::HashMap::from([(
+            "dead".to_string(),
+            AnnouncedFailure::Transport,
+        )]),
+    })
+    .unwrap();
+    state
+        .as_object_mut()
+        .unwrap()
+        .insert("some_future_field".to_string(), true.into());
+    std::fs::write(
+        adapter.announcement_state_file(&source),
+        serde_json::to_vec(&state).unwrap(),
+    )
+    .unwrap();
+
+    type SetOption = fn(&mut CopySessionOptions);
+    let cases: [(&str, SetOption); 2] = [
+        ("truncating", |o| o.target_prompt_index = Some(0)),
+        ("filtering", |o| o.fork_filter = true),
+    ];
+    for (name, set) in cases {
+        let target = Info {
+            id: acp::SessionId::new(format!("tgt-episodes-{name}")),
+            cwd: "/tgt".to_string(),
+        };
+        let mut options = CopySessionOptions::default();
+        set(&mut options);
+        adapter
+            .copy_session_data(&source, &target, options)
+            .await
+            .unwrap();
+        let raw = std::fs::read(adapter.announcement_state_file(&target)).unwrap();
+        let copied: AnnouncementState = serde_json::from_slice(&raw).unwrap();
+        assert!(
+            copied.announced_failed_servers.is_empty(),
+            "{name}: failure episodes must be cleared"
+        );
+        assert_eq!(
+            copied.mcp_server_fingerprints["srv"].tool_count, 1,
+            "{name}: fingerprints survive"
+        );
+        assert!(
+            copied.announced_skill_names.contains("commit"),
+            "{name}: skill names survive"
+        );
+        let raw: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            raw["some_future_field"], true,
+            "{name}: unknown fields survive"
+        );
+    }
+
+    let target_full = Info {
+        id: acp::SessionId::new("tgt-episodes-full"),
+        cwd: "/tgt".to_string(),
+    };
+    adapter
+        .copy_session_data(&source, &target_full, CopySessionOptions::default())
+        .await
+        .unwrap();
+    let copied: AnnouncementState = serde_json::from_slice(
+        &std::fs::read(adapter.announcement_state_file(&target_full)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        copied.announced_failed_servers.get("dead"),
+        Some(&AnnouncedFailure::Transport),
+        "full fork keeps episodes: its context retains the announcement"
+    );
+}
+
 /// Boundary matrix for the capped line reader: exactly-cap content is kept,
 /// cap-plus-one is discarded without consuming an index (so the two copy
 /// passes stay aligned), a drain spanning several read chunks terminates, and

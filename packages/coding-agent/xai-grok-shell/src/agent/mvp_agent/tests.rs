@@ -2458,6 +2458,27 @@ fn drain_roster_changed(
 /// `current_prompt_id`, so a natural `resident_activity` read would emit
 /// `Idle` for a session that is in fact starting a turn.
 #[tokio::test]
+async fn headless_residents_are_excluded_from_snapshots_and_deltas() {
+    use crate::agent::config::Config as AgentConfig;
+    use crate::agent::roster::RosterActivity;
+    use crate::auth::{AuthManager, GrokComConfig};
+    let temp_dir = tempfile::tempdir().unwrap();
+    let auth_manager =
+        std::sync::Arc::new(AuthManager::new(temp_dir.path(), GrokComConfig::default()));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let gateway = GatewaySender::new(tx);
+    let agent = MvpAgent::new(gateway, &AgentConfig::default(), auth_manager, None)
+        .expect("valid test config");
+    let sid = acp::SessionId::new("sess-headless");
+    agent.insert_resident(&sid, make_test_handle("grok-3", false, None));
+    agent.session_registry.mark_headless(&sid);
+    assert!(agent.resident_roster_entry(&sid).is_none());
+    assert!(agent.resident_roster_entries().is_empty());
+    agent.push_roster_delta_upserted(&sid);
+    agent.push_roster_activity_delta(&sid, RosterActivity::Working);
+    assert!(drain_roster_changed(&mut rx).is_none());
+}
+#[tokio::test]
 async fn push_roster_activity_delta_broadcasts_overridden_activity() {
     use crate::agent::config::Config as AgentConfig;
     use crate::agent::roster::RosterActivity;

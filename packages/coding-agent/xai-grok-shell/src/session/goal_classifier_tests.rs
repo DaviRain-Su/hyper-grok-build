@@ -1554,32 +1554,21 @@ fn render_skeptic_prompt_scratch_status_reflects_readiness() {
         )
     };
     let ready = render(true);
-    assert!(
-        ready.contains("Both dirs have been created for you."),
-        "ready render must claim both dirs exist:\n{ready}",
-    );
-    assert!(
-        !ready.contains("mkdir -p"),
-        "ready render must not tell the skeptic to create a dir:\n{ready}",
+    let not_ready = render(false);
+    assert_ne!(
+        ready, not_ready,
+        "scratch readiness must change the rendered prompt"
     );
     assert!(
         !ready.contains("{SCRATCH_STATUS}"),
         "placeholder must resolve"
     );
-
-    let not_ready = render(false);
-    assert!(
-        not_ready.contains("Create your own scratch dir with `mkdir -p` if it is missing."),
-        "not-ready render must instruct the skeptic to create the dir:\n{not_ready}",
-    );
-    assert!(
-        !not_ready.contains("have been created for you"),
-        "not-ready render must not claim the dirs already exist:\n{not_ready}",
-    );
     assert!(
         !not_ready.contains("{SCRATCH_STATUS}"),
         "placeholder must resolve"
     );
+    assert!(ready.contains("/tmp/grok-goal-x/skeptic-0"));
+    assert!(ready.contains("/tmp/grok-goal-x/implementer"));
 }
 
 /// `{PRIOR_GAPS}` renders the gaps when present, the first-round

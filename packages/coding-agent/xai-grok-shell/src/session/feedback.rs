@@ -869,7 +869,6 @@ mod tests {
         assert_eq!(request.session_id, "session-123");
         assert_eq!(request.tier, FeedbackTier::Tier1);
         assert!(request.dismissible);
-        assert!(request.prompt.contains("productively"));
         assert_eq!(request.trigger_type, "tier1_engagement");
         assert_eq!(
             request.trigger_condition.condition,

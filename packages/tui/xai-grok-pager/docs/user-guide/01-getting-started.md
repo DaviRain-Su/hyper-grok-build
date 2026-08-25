@@ -46,6 +46,16 @@ Update to the latest version at any time:
 grok update
 ```
 
+To fetch a repository through Grove (NFS on macOS, FUSE on Linux) after
+`[clone] enabled = true` in Grove config:
+
+```bash
+grok clone <url> [dir]
+```
+
+The default is a depth-1 checkout of the selected branch. Pass `--full-history`
+for a complete clone. See [grok clone](27-grok-clone.md).
+
 ---
 
 ## First Launch

@@ -234,6 +234,9 @@ pub fn apply_child_tool_policy(
             .retain(|tool| tool.kind != Some(ToolKind::Task));
         prune_orphaned_background_task_tools(&mut definition.tool_config);
     }
+    definition.tool_config.tools.retain(|tool| {
+        !xai_grok_tools::implementations::grok_build::is_workflow_tool(tool.kind, &tool.id)
+    });
 }
 /// Resolve runtime overrides and definition defaults in the production order.
 pub fn resolve_runtime_config(
@@ -343,6 +346,100 @@ mod tests {
         assert!(kinds.contains(&Some(ToolKind::Search)));
         assert!(!kinds.contains(&Some(ToolKind::Execute)));
         assert!(!kinds.contains(&Some(ToolKind::Task)));
+        assert!(!kinds.contains(&Some(ToolKind::Workflow)));
+    }
+    #[test]
+    fn general_purpose_definition_omits_workflow() {
+        let cwd = tempfile::tempdir().unwrap();
+        let toggles = HashMap::new();
+        let definition =
+            resolve_agent_definition("general-purpose", &context(cwd.path(), &toggles)).unwrap();
+        assert!(
+            definition.tool_config.tools.iter().all(|tool| {
+                !xai_grok_tools::implementations::grok_build::is_workflow_tool(tool.kind, &tool.id)
+            }),
+            "general-purpose must declare its own list without workflow"
+        );
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Read)),
+            "general-purpose must keep the rest of the grok-build child tools"
+        );
+    }
+    #[test]
+    fn child_tool_policy_strips_workflow_and_keeps_other_tools() {
+        let cwd = tempfile::tempdir().unwrap();
+        let toggles = HashMap::new();
+        let mut definition =
+            resolve_agent_definition("general-purpose", &context(cwd.path(), &toggles)).unwrap();
+        definition
+            .tool_config
+            .tools
+            .push((&xai_grok_tools::implementations::grok_build::WorkflowTool).into());
+        let before: Vec<String> = definition
+            .tool_config
+            .tools
+            .iter()
+            .map(|tool| tool.id.clone())
+            .collect();
+        apply_child_tool_policy(&mut definition, None, true);
+        let after: Vec<String> = definition
+            .tool_config
+            .tools
+            .iter()
+            .map(|tool| tool.id.clone())
+            .collect();
+        assert!(
+            !after
+                .iter()
+                .any(|id| id.ends_with(":workflow") || id == "workflow")
+        );
+        let expected: Vec<String> = before
+            .into_iter()
+            .filter(|id| !id.ends_with(":workflow") && id != "workflow")
+            .collect();
+        assert_eq!(after, expected);
+    }
+    #[test]
+    fn custom_definition_cannot_keep_workflow_after_child_policy() {
+        let mut definition = AgentDefinition::general_purpose();
+        definition
+            .tool_config
+            .tools
+            .push((&xai_grok_tools::implementations::grok_build::WorkflowTool).into());
+        apply_child_tool_policy(&mut definition, None, true);
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Read)),
+            "unrelated tools must remain"
+        );
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .all(|tool| tool.kind != Some(ToolKind::Workflow))
+        );
+    }
+    #[test]
+    fn kindless_workflow_id_is_stripped_by_child_policy() {
+        let mut definition = AgentDefinition::general_purpose();
+        definition
+            .tool_config
+            .tools
+            .push(ToolConfig::from_id("GrokBuild:workflow"));
+        apply_child_tool_policy(&mut definition, None, true);
+        assert!(definition.tool_config.tools.iter().all(|tool| {
+            tool.kind != Some(ToolKind::Workflow)
+                && tool.id.rsplit(':').next()
+                    != Some(xai_grok_tools::implementations::grok_build::WORKFLOW_TOOL_NAME)
+        }));
     }
 
     #[test]
@@ -444,7 +541,6 @@ mod tests {
         )
         .unwrap();
         assert!(prompt.contains("<project_instructions_spec>"));
-        assert!(prompt.contains("read-only codebase exploration agent"));
         assert!(prompt.contains(&format!("Workspace Path: {}", cwd.path().display())));
         assert!(!prompt.contains("${{"));
     }

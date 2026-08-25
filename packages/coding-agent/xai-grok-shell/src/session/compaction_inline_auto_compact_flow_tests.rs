@@ -219,7 +219,7 @@ async fn create_test_actor(
         managed_mcp_handle: Default::default(),
         initial_client_mcp_servers: vec![],
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
-        mcp_announced_servers: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        mcp_announcements: Default::default(),
         mcp_reminder_mode: McpReminderMode::Delta,
         mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mcp_connecting_reminder_injected: std::cell::Cell::new(false),
@@ -1107,6 +1107,55 @@ async fn bare_manual_compact_failure_does_not_suppress_auto() {
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
                 SUPPRESS_NONE,
                 "the same deterministic failure on the AUTO path must suppress"
+            );
+        })
+        .await;
+}
+/// A successful compaction re-arms failed-server announcements: the failure
+/// reminder was dropped with the compacted context (unlike connected servers,
+/// which the compaction context carries), so the announced episodes clear and
+/// the MCP reminder goes dirty for a re-announcement at the next injection.
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_rearms_failed_server_announcements() {
+    use xai_grok_test_support::MockInferenceServer;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let actor =
+                Arc::new(create_test_actor(50_000, 200_000, 85, gateway_tx, persistence_tx).await);
+            let server = MockInferenceServer::start().await.unwrap();
+            server.set_response("Summary of prior work. ".repeat(30));
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.base_url = server.url();
+            actor.chat_state_handle.update_sampling_config(cfg);
+            let filler = "x".repeat(8_000);
+            actor.chat_state_handle.replace_conversation(vec![
+                ConversationItem::system("sys"),
+                ConversationItem::user(format!("u0 {filler}")),
+                ConversationItem::assistant(format!("a0 {filler}")),
+                ConversationItem::user("final query"),
+            ]);
+            actor
+                .mcp_announcements
+                .lock()
+                .failed
+                .insert("dead".to_string(), Default::default());
+            actor
+                .mcp_reminder_dirty
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            let result = actor.run_compact(None).await;
+            assert!(result.is_ok(), "compaction should succeed: {result:?}");
+            assert!(
+                actor.mcp_announcements.lock().failed.is_empty(),
+                "compaction must re-arm failed-server announcements"
+            );
+            assert!(
+                actor
+                    .mcp_reminder_dirty
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "compaction must mark the MCP reminder dirty"
             );
         })
         .await;

@@ -105,14 +105,21 @@ pub const SESSIONS_CHANGED_METHOD: &str = "x.ai/sessions/changed";
 /// Resident rows own the live state but carry no title or last-active time, so
 /// each adopts those from its summary — except a `Working` row keeps its "now"
 /// timestamp. Summaries with no resident row become `Dormant`; keying by id
-/// dedups them. Hidden summaries are excluded.
+/// dedups them. Hidden and headless summaries are excluded, including resident
+/// rows whose persisted summary is headless.
 pub(crate) fn merge_roster(
     mut entries: Vec<RosterEntry>,
     summaries: Vec<Summary>,
 ) -> Vec<RosterEntry> {
+    let excluded_ids: std::collections::HashSet<String> = summaries
+        .iter()
+        .filter(|summary| summary.is_hidden() || summary.is_headless())
+        .map(|summary| summary.info.id.0.to_string())
+        .collect();
+    entries.retain(|entry| !excluded_ids.contains(&entry.session_id));
     let mut by_id: std::collections::HashMap<String, Summary> = summaries
         .into_iter()
-        .filter(|s| !s.is_hidden())
+        .filter(|summary| !excluded_ids.contains(summary.info.id.0.as_ref()))
         .map(|s| (s.info.id.0.to_string(), s))
         .collect();
 
@@ -276,6 +283,17 @@ mod merge_roster_tests {
         hidden.session_kind = Some("subagent".into());
         let out = merge_roster(vec![], vec![hidden]);
         assert!(out.is_empty(), "hidden/subagent summaries are dropped");
+    }
+
+    #[test]
+    fn headless_summaries_exclude_dormant_and_resident_rows() {
+        let mut headless = summary("oneshot", Some("grok -p run"), 5_000);
+        headless.session_kind = Some("headless".into());
+        let out = merge_roster(
+            vec![resident("oneshot", RosterActivity::Working, 9_000)],
+            vec![headless],
+        );
+        assert!(out.is_empty(), "headless one-shots make no roster rows");
     }
 
     #[test]

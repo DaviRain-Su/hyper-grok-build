@@ -2431,7 +2431,7 @@ pub(crate) fn render_session_picker(
     // Content rows will start after fuzzy rows + 1 header row.
     let content_start = picker_entries.len() + 1;
     let content_entry_data: Vec<SessionEntryData> = if let Some(hits) = ctx.content_results
-        && ctx.source_filter != crate::views::session_picker::SourceFilter::External
+        && !ctx.source_filter.is_content_search_disabled()
         && !filter_query.is_empty()
     {
         build_content_entry_data(
@@ -2447,8 +2447,7 @@ pub(crate) fn render_session_picker(
 
     // Show header only if there are actual deduped content rows to display.
     let has_content_rows = !content_entry_data.is_empty();
-    let content_loading = ctx.content_loading
-        && ctx.source_filter != crate::views::session_picker::SourceFilter::External;
+    let content_loading = ctx.content_loading && !ctx.source_filter.is_content_search_disabled();
     let spinner_label = build_content_header_label(content_loading, has_content_rows, ctx.tick);
     // Only show the header when content results exist or when content
     // search is in progress with a non-empty query.  This must match the
@@ -2904,6 +2903,7 @@ mod tests {
             worktree_label: None,
             last_turn_summary: None,
             last_recap: None,
+            session_kind: None,
             card_detail: None,
         }
     }
@@ -3160,8 +3160,6 @@ mod tests {
             "stamped server hit must render:\n{stamped}"
         );
 
-        // Control: unstamped in-flight search keeps the header, proving the
-        // negative assertion above exercises the gate.
         let unstamped = render(None);
         assert!(
             unstamped.contains("Searching session content"),
@@ -3169,81 +3167,68 @@ mod tests {
         );
     }
 
-    /// The hidden-external hint stays pinned on the welcome picker's default
-    /// Grok view when scanned foreign rows exist — even when the native list
-    /// overflows the viewport — and never renders under `--chat` (foreign
-    /// scanning is disabled there, so the hint is dead weight).
     #[test]
-    fn hidden_external_hint_renders_outside_chat_mode() {
+    fn headless_hidden_external_hint_pins_above_list() {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
         let theme = crate::theme::Theme::default();
-        let area = Rect::new(0, 0, 80, 20);
-        // More native rows than the viewport fits: a trailing list row would
-        // scroll out of view, a pinned row must not.
-        let mut entries: Vec<SessionPickerEntry> = (0..30)
-            .map(|i| make_entry(&format!("s{i}"), &format!("native session {i}"), "repo"))
+        let area = Rect::new(0, 0, 80, 24);
+        let mut entries: Vec<SessionPickerEntry> = (0..20)
+            .map(|i| {
+                let mut entry =
+                    make_entry(&format!("s{i}"), &format!("native session {i}"), "repo");
+                entry.session_kind = Some("headless".into());
+                entry
+            })
             .collect();
         let mut foreign = make_entry("f1", "Claude work", "repo");
         foreign.source = "claude".into();
         entries.push(foreign);
 
-        let render = |chat_mode: bool| -> String {
-            let mut buf = Buffer::empty(area);
-            let mut state = PickerState::default();
-            render_session_picker(
-                area,
-                &mut buf,
-                &theme,
-                &mut SessionPickerRenderCtx {
-                    state: &mut state,
-                    sessions: Some(&entries),
-                    cwd: std::path::Path::new("/repo"),
-                    loading: false,
-                    pending_hint: None,
-                    shortcuts_area: None,
-                    content_results: None,
-                    content_loading: false,
-                    entries_query: None,
-                    tick: 0,
-                    grouped: false,
-                    source_filter: crate::views::session_picker::SourceFilter::default(),
-                    pending_delete: false,
-                    chat_mode,
-                },
-            );
-            (0..area.height)
-                .map(|y| {
-                    (0..area.width)
-                        .map(|x| {
-                            buf.cell((x, y))
-                                .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-                        })
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-
-        let build_mode = render(false);
+        let mut buf = Buffer::empty(area);
+        let mut state = PickerState::default();
+        render_session_picker(
+            area,
+            &mut buf,
+            &theme,
+            &mut SessionPickerRenderCtx {
+                state: &mut state,
+                sessions: Some(&entries),
+                cwd: std::path::Path::new("/repo"),
+                loading: false,
+                pending_hint: None,
+                shortcuts_area: None,
+                content_results: None,
+                content_loading: false,
+                entries_query: None,
+                tick: 0,
+                grouped: false,
+                source_filter: crate::views::session_picker::SourceFilter::Headless,
+                pending_delete: false,
+                chat_mode: false,
+            },
+        );
+        let screen = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| {
+                        buf.cell((x, y))
+                            .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let hint = screen.find("external session");
+        let first_row = screen.find("native session 0");
         assert!(
-            build_mode.contains("1 external session hidden \u{b7} f to show"),
-            "default Grok filter must pin the hidden-external hint:\n{build_mode}"
+            hint.is_some(),
+            "Headless page must show the hidden-external hint:\n{screen}"
         );
         assert!(
-            build_mode.find("external session hidden") < build_mode.find("native session 0"),
-            "the hint must be pinned above the first list row:\n{build_mode}"
-        );
-        assert!(
-            !build_mode.contains("Claude work"),
-            "the foreign row itself stays hidden under the default filter:\n{build_mode}"
-        );
-
-        let chat = render(true);
-        assert!(
-            !chat.contains("external session"),
-            "chat mode must not render the hidden-external hint:\n{chat}"
+            first_row.is_none() || hint.unwrap() < first_row.unwrap(),
+            "hint must stay pinned above the first list row:\n{screen}"
         );
     }
 

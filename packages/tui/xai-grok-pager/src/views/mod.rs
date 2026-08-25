@@ -40,6 +40,7 @@ pub mod queue_pane;
 pub mod rewind;
 pub mod scroll_debug_hud;
 pub mod session_picker;
+pub mod session_picker_surface;
 pub mod session_title;
 pub mod settings_modal;
 pub mod shortcuts_bar;

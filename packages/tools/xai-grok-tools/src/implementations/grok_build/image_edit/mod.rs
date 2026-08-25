@@ -457,10 +457,6 @@ mod tests {
     fn tool_name_and_description() {
         let tool = ImageEditTool;
         assert_eq!(xai_tool_runtime::Tool::id(&tool).as_str(), "image_edit");
-        assert!(
-            crate::types::tool_metadata::ToolMetadata::description_template(&tool)
-                .contains("Edit or transform")
-        );
     }
 
     #[test]

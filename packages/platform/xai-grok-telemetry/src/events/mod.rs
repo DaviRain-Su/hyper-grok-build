@@ -236,9 +236,9 @@ pub enum TwoPassOutcome {
     /// Policy or product-exception off (cursor, subagents).
     Disabled,
     /// Armed, fell back to single-pass.
-    Miss,
+    SinglePass,
     /// Pass-2 summary applied.
-    Used,
+    TwoPass,
 }
 
 #[derive(Serialize, Clone, Copy)]
@@ -554,7 +554,7 @@ pub struct CompactionCompleted {
     pub compaction_id: String,
     pub compaction_mode: CompactionModeLabel,
     pub two_pass: TwoPassOutcome,
-    pub segments_written: u32,
+    pub segments_queued: u32,
     pub degenerate_retries: u32,
     pub input_overflow_retries: u32,
     pub is_subagent: bool,
@@ -580,7 +580,7 @@ pub struct CompactionBeginParams {
 pub struct CompactionCompleteStats {
     pub tokens_after: u64,
     pub two_pass_used: bool,
-    pub segments_written: u32,
+    pub segments_queued: u32,
     pub degenerate_retries: u32,
     pub input_overflow_retries: u32,
 }
@@ -590,14 +590,6 @@ pub struct CompactionTiming {
     pub model_wait_ms: Option<u64>,
     pub pre_compaction_ms: Option<u64>,
     pub post_compaction_ms: Option<u64>,
-}
-
-fn resolve_two_pass(enabled: bool, used: bool) -> TwoPassOutcome {
-    match (enabled, used) {
-        (false, _) => TwoPassOutcome::Disabled,
-        (true, true) => TwoPassOutcome::Used,
-        (true, false) => TwoPassOutcome::Miss,
-    }
 }
 
 /// Emits `compaction_triggered` on `begin` and `compaction_completed` on
@@ -658,7 +650,11 @@ impl CompactionScope {
     }
 
     pub fn complete(self, stats: CompactionCompleteStats, timing: CompactionTiming) {
-        let two_pass = resolve_two_pass(self.two_pass_enabled, stats.two_pass_used);
+        let two_pass = match (self.two_pass_enabled, stats.two_pass_used) {
+            (false, _) => TwoPassOutcome::Disabled,
+            (true, true) => TwoPassOutcome::TwoPass,
+            (true, false) => TwoPassOutcome::SinglePass,
+        };
         crate::session_ctx::log_event(CompactionCompleted {
             duration_ms: self.start.elapsed().as_millis() as u64,
             tokens_before: self.tokens_before,
@@ -667,7 +663,7 @@ impl CompactionScope {
             compaction_id: self.compaction_id,
             compaction_mode: self.compaction_mode,
             two_pass,
-            segments_written: stats.segments_written,
+            segments_queued: stats.segments_queued,
             degenerate_retries: stats.degenerate_retries,
             input_overflow_retries: stats.input_overflow_retries,
             is_subagent: self.is_subagent,
@@ -2331,6 +2327,48 @@ pub struct CliUpdate {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// grok clone (utility process)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// History shape requested by the client or produced by the daemon.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloneHistoryMode {
+    Shallow,
+    Full,
+}
+
+/// Whether `grok clone` finished the mount.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloneOutcome {
+    Success,
+    Failed,
+}
+
+/// Where a failed `grok clone` stopped. Closed set — no freeform strings.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloneFailureStage {
+    Configuration,
+    Validation,
+    Preflight,
+    Daemon,
+}
+
+/// One `grok clone` attempt. Content-free: no URL, dest, store, or repo name.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct CloneEnded {
+    pub requested_history: CloneHistoryMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_history: Option<CloneHistoryMode>,
+    pub duration_ms: u64,
+    pub outcome: CloneOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<CloneFailureStage>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Event name bindings
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2342,6 +2380,7 @@ telemetry_event!(
     "auth_lock_replaced_out_from_under"
 );
 telemetry_event!(CliUpdate, "cli_update");
+telemetry_event!(CloneEnded, "clone_ended");
 
 telemetry_event!(Login, "login", external = crate::external::schema::map_auth);
 telemetry_event!(LoginPickerShown, "login_picker_shown");
@@ -2752,6 +2791,42 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn clone_ended_is_content_free_and_omits_absent_fields() {
+        assert_eq!(CloneEnded::NAME, "clone_ended");
+        assert_eq!(
+            serde_json::to_value(CloneEnded {
+                requested_history: CloneHistoryMode::Shallow,
+                effective_history: Some(CloneHistoryMode::Shallow),
+                duration_ms: 42,
+                outcome: CloneOutcome::Success,
+                failure_stage: None,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "requested_history": "shallow",
+                "effective_history": "shallow",
+                "duration_ms": 42,
+                "outcome": "success",
+            })
+        );
+        let failed = serde_json::to_value(CloneEnded {
+            requested_history: CloneHistoryMode::Shallow,
+            effective_history: None,
+            duration_ms: 7,
+            outcome: CloneOutcome::Failed,
+            failure_stage: Some(CloneFailureStage::Preflight),
+        })
+        .unwrap();
+        assert_eq!(failed["failure_stage"], "preflight");
+        assert!(failed.get("effective_history").is_none());
+        let text = failed.to_string();
+        assert!(!text.contains("http"), "{text}");
+        assert!(!text.contains("path"), "{text}");
+        assert!(!text.contains("url"), "{text}");
+        assert!(!text.contains("repo"), "{text}");
+    }
 
     #[test]
     fn process_resource_usage_omits_allocated_bytes_when_unavailable() {
@@ -3187,8 +3262,8 @@ mod tests {
             model_id: Some("grok-4".into()),
             compaction_id: "cid-1".into(),
             compaction_mode: CompactionModeLabel::Summary,
-            two_pass: TwoPassOutcome::Used,
-            segments_written: 0,
+            two_pass: TwoPassOutcome::TwoPass,
+            segments_queued: 0,
             degenerate_retries: 1,
             input_overflow_retries: 2,
             is_subagent: false,
@@ -3206,8 +3281,8 @@ mod tests {
                 "model_id": "grok-4",
                 "compaction_id": "cid-1",
                 "compaction_mode": "summary",
-                "two_pass": "used",
-                "segments_written": 0,
+                "two_pass": "two_pass",
+                "segments_queued": 0,
                 "degenerate_retries": 1,
                 "input_overflow_retries": 2,
                 "is_subagent": false,
@@ -3222,7 +3297,7 @@ mod tests {
             compaction_id: "cid-2".into(),
             compaction_mode: CompactionModeLabel::Transcript,
             two_pass: TwoPassOutcome::Disabled,
-            segments_written: 0,
+            segments_queued: 0,
             degenerate_retries: 0,
             input_overflow_retries: 0,
             is_subagent: true,
@@ -3240,22 +3315,22 @@ mod tests {
                 "compaction_id": "cid-2",
                 "compaction_mode": "transcript",
                 "two_pass": "disabled",
-                "segments_written": 0,
+                "segments_queued": 0,
                 "degenerate_retries": 0,
                 "input_overflow_retries": 0,
                 "is_subagent": true,
             })
         );
 
-        let miss = serde_json::to_value(CompactionCompleted {
+        let single_pass = serde_json::to_value(CompactionCompleted {
             duration_ms: 2,
             tokens_before: 2,
             tokens_after: 2,
             model_id: None,
             compaction_id: "cid-3".into(),
             compaction_mode: CompactionModeLabel::Segments,
-            two_pass: TwoPassOutcome::Miss,
-            segments_written: 1,
+            two_pass: TwoPassOutcome::SinglePass,
+            segments_queued: 1,
             degenerate_retries: 0,
             input_overflow_retries: 0,
             is_subagent: false,
@@ -3265,62 +3340,20 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            miss,
+            single_pass,
             serde_json::json!({
                 "duration_ms": 2,
                 "tokens_before": 2,
                 "tokens_after": 2,
                 "compaction_id": "cid-3",
                 "compaction_mode": "segments",
-                "two_pass": "miss",
-                "segments_written": 1,
+                "two_pass": "single_pass",
+                "segments_queued": 1,
                 "degenerate_retries": 0,
                 "input_overflow_retries": 0,
                 "is_subagent": false,
             })
         );
-    }
-
-    #[test]
-    fn resolve_two_pass_covers_armed_and_used() {
-        assert_eq!(resolve_two_pass(false, false), TwoPassOutcome::Disabled);
-        assert_eq!(resolve_two_pass(false, true), TwoPassOutcome::Disabled);
-        assert_eq!(resolve_two_pass(true, false), TwoPassOutcome::Miss);
-        assert_eq!(resolve_two_pass(true, true), TwoPassOutcome::Used);
-    }
-
-    #[test]
-    fn two_pass_outcome_and_mode_label_serialize_snake_case() {
-        for outcome in [
-            TwoPassOutcome::Disabled,
-            TwoPassOutcome::Miss,
-            TwoPassOutcome::Used,
-        ] {
-            let expected = match outcome {
-                TwoPassOutcome::Disabled => "disabled",
-                TwoPassOutcome::Miss => "miss",
-                TwoPassOutcome::Used => "used",
-            };
-            assert_eq!(
-                serde_json::to_value(outcome).unwrap(),
-                serde_json::json!(expected)
-            );
-        }
-        for mode in [
-            CompactionModeLabel::Summary,
-            CompactionModeLabel::Transcript,
-            CompactionModeLabel::Segments,
-        ] {
-            let expected = match mode {
-                CompactionModeLabel::Summary => "summary",
-                CompactionModeLabel::Transcript => "transcript",
-                CompactionModeLabel::Segments => "segments",
-            };
-            assert_eq!(
-                serde_json::to_value(mode).unwrap(),
-                serde_json::json!(expected)
-            );
-        }
     }
 
     #[test]

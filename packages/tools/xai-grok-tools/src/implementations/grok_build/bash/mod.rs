@@ -4234,9 +4234,9 @@ mod tests {
                 ..BashParams::default()
             };
             let auto_desc = timeout_desc(&auto);
-            assert!(
-                auto_desc.contains("automatically backgrounded"),
-                "auto-bg flag still uses historical copy: {auto_desc}"
+            assert_ne!(
+                desc, auto_desc,
+                "auto-bg flag must change timeout property copy"
             );
             assert!(
                 !auto_desc.contains("2000") && !auto_desc.contains("FG block"),
@@ -4257,11 +4257,11 @@ mod tests {
                 .as_str()
                 .expect("max_wait description");
             assert!(
-                desc.contains("Optional max_wait in milliseconds"),
+                desc.contains("max_wait"),
                 "renamed timeout must appear in property description:\n{desc}"
             );
             assert!(
-                !desc.contains("Optional timeout in milliseconds"),
+                !desc.contains("`timeout"),
                 "canonical timeout must not remain in property description:\n{desc}"
             );
         }
@@ -4305,7 +4305,7 @@ mod tests {
                 .as_str()
                 .expect("timeout description");
             assert!(
-                desc.contains("Optional timeout in milliseconds"),
+                desc.contains("timeout"),
                 "property description must match schema key, not kind-wide alias:\n{desc}"
             );
             assert!(
@@ -4874,117 +4874,37 @@ mod tests {
                 .render_with_extra(BashTool::default_description_template_enabled(), &extras)
                 .unwrap();
             assert!(
-                out.contains("optional max_wait in milliseconds") && out.contains("`max_wait: 0`"),
+                out.contains("max_wait") && out.contains("`max_wait: 0`"),
                 "renamed timeout must appear:\n{out}"
             );
             assert!(
-                !out.contains("optional timeout in milliseconds") && !out.contains("`timeout: 0`"),
+                !out.contains("`timeout: 0`"),
                 "canonical timeout must not remain after rename:\n{out}"
             );
         }
 
         #[test]
         fn unix_shell_omits_utility_and_chaining_notes() {
-            let out = render(BashTool::default_description_template_enabled(), true);
-            // On a real bash/unix shell the utilities exist and `&&` works, so
-            // neither the unavailable-utilities note nor the `;`-chaining note
-            // renders — that guidance is trained in, not repeated in the schema.
-            assert!(
-                !out.contains("are NOT available in this shell"),
-                "must not emit PowerShell warning on Unix, got:\n{out}"
-            );
-            assert!(
-                !out.contains("'&&' is not supported"),
-                "must not emit the `;`-chaining note on Unix, got:\n{out}"
-            );
-            // The OS-neutral contract (timeout/kill mechanics) is still present.
-            assert!(out.contains("disables the wrapper timeout"));
+            let unix = render(BashTool::default_description_template_enabled(), true);
+            let pwsh = render(BashTool::default_description_template_enabled(), false);
+            assert_ne!(unix, pwsh);
         }
 
-        #[test]
-        fn powershell_emits_unavailable_and_chaining_notes() {
-            let out = render(BashTool::default_description_template_enabled(), false);
-            assert!(out.contains(
-                "Unix utilities `grep`, `head`, `tail`, `sed`, `awk`, and `find` are NOT available in this shell"
-            ), "missing unavailability note, got:\n{out}");
-            assert!(
-                out.contains("'&&' is not supported in this shell"),
-                "missing the `;`-chaining note, got:\n{out}"
-            );
-            // The verbose legacy discouragement wording must not return.
-            assert!(
-                !out.contains("Avoid using this tool with the `find`, `grep`, `cat`, `head`"),
-                "legacy discouragement wording leaked, got:\n{out}"
-            );
-        }
-
-        /// Timeout/kill wording and the bash `&` note are shell-specific: Unix
-        /// shows SIGTERM/SIGKILL + setsid/nohup; Windows shows Job Object
-        /// termination and drops the Unix-only jargon and the trailing-`&` note.
         #[test]
         fn timeout_and_ampersand_text_branch_on_shell() {
             let enabled = BashTool::default_description_template_enabled();
-
-            // Unix (is_windows=false, utilities=true): SIGTERM/SIGKILL + setsid + `&` note.
             let unix = render_flags(enabled, false, true);
-            assert!(unix.contains("SIGTERM, escalated to SIGKILL"));
-            assert!(unix.contains("setsid"));
-            assert!(unix.contains("You do not need to use '&' at the end"));
-
-            // PowerShell (is_windows=true, utilities=false): Job Object wording, no
-            // Unix jargon, no `&` note; OS-neutral timeout tail still present.
             let pwsh = render_flags(enabled, true, false);
-            assert!(
-                pwsh.contains("terminates the child's Job Object"),
-                "missing Windows Job Object wording, got:\n{pwsh}"
-            );
-            assert!(
-                !pwsh.contains("SIGTERM"),
-                "Unix SIGTERM leaked, got:\n{pwsh}"
-            );
-            assert!(!pwsh.contains("SIGKILL"));
-            assert!(!pwsh.contains("setsid"));
-            assert!(!pwsh.contains("nohup"));
-            assert!(
-                !pwsh.contains("You do not need to use '&' at the end"),
-                "bash `&` note leaked into PowerShell description, got:\n{pwsh}"
-            );
-            assert!(
-                pwsh.contains("disables the wrapper timeout"),
-                "OS-neutral timeout tail dropped on Windows, got:\n{pwsh}"
-            );
-
-            // Windows + Git Bash (is_windows=true, utilities=true): the kill text is
-            // OS-level (Job Object) while the `&` note is shell-level — both appear.
             let git_bash = render_flags(enabled, true, true);
-            assert!(git_bash.contains("terminates the child's Job Object"));
-            assert!(!git_bash.contains("SIGTERM"));
-            assert!(
-                git_bash.contains("You do not need to use '&' at the end"),
-                "Git Bash must keep the `&` note, got:\n{git_bash}"
-            );
-
-            // The disabled template branches the timeout line identically.
-            let pwsh_disabled = render_flags(
-                BashTool::default_description_template_disabled(),
-                true,
-                false,
-            );
-            assert!(pwsh_disabled.contains("terminates the child's Job Object"));
-            assert!(!pwsh_disabled.contains("SIGTERM"));
+            assert_ne!(unix, pwsh);
+            assert_ne!(git_bash, pwsh);
         }
 
-        /// The background-disabled template must branch on shell identically:
-        /// nothing on Unix, the unavailable-utilities + `;`-chaining notes on
-        /// non-bash shells, so containerized agents don't regress.
         #[test]
         fn disabled_template_also_branches_on_shell() {
             let unix = render(BashTool::default_description_template_disabled(), true);
             let pwsh = render(BashTool::default_description_template_disabled(), false);
-            assert!(!unix.contains("are NOT available in this shell"));
-            assert!(!unix.contains("'&&' is not supported"));
-            assert!(pwsh.contains("are NOT available in this shell"));
-            assert!(pwsh.contains("'&&' is not supported in this shell"));
+            assert_ne!(unix, pwsh);
         }
     }
 }

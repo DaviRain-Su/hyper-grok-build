@@ -1091,6 +1091,8 @@ impl AgentView {
                                         content_results: None,
                                         content_loading: false,
                                         deep_search_seq: 0,
+                                        generation: 0,
+                                        detail_seq: 0,
                                         entries_query: None,
                                         source_filter:
                                             crate::views::session_picker::SourceFilter::default(),
@@ -2421,7 +2423,7 @@ impl AgentView {
                     // Append content search result rows (same pattern as welcome).
                     let content_start = picker_entries.len() + 1;
                     let content_entry_data = if let Some(hits) = content_results.as_deref()
-                        && *source_filter != crate::views::session_picker::SourceFilter::External
+                        && !source_filter.is_content_search_disabled()
                         && !filter_query.is_empty()
                     {
                         build_content_entry_data(
@@ -2435,8 +2437,8 @@ impl AgentView {
                         Vec::new()
                     };
                     let has_content_rows = !content_entry_data.is_empty();
-                    let effective_content_loading = *content_loading
-                        && *source_filter != crate::views::session_picker::SourceFilter::External;
+                    let effective_content_loading =
+                        *content_loading && !source_filter.is_content_search_disabled();
                     let spinner_label = build_content_header_label(
                         effective_content_loading,
                         has_content_rows,
@@ -2817,6 +2819,7 @@ mod session_picker_delete_tests {
             worktree_label: None,
             last_turn_summary: None,
             last_recap: None,
+            session_kind: None,
             card_detail: None,
         }
     }
@@ -2832,6 +2835,8 @@ mod session_picker_delete_tests {
             content_results: None,
             content_loading: false,
             deep_search_seq: 0,
+            generation: 0,
+            detail_seq: 0,
             entries_query: None,
             source_filter: crate::views::session_picker::SourceFilter::default(),
             pending_delete: None,

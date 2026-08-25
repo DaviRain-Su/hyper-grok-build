@@ -42,17 +42,6 @@ fn prefire_lead_percent() -> u64 {
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_PREFIRE_LEAD_PERCENT)
 }
-fn compaction_mode_label(
-    mode: xai_chat_state::CompactionMode,
-) -> xai_grok_telemetry::events::CompactionModeLabel {
-    use xai_chat_state::CompactionMode;
-    use xai_grok_telemetry::events::CompactionModeLabel;
-    match mode {
-        CompactionMode::Summary => CompactionModeLabel::Summary,
-        CompactionMode::Transcript => CompactionModeLabel::Transcript,
-        CompactionMode::Segments(_) => CompactionModeLabel::Segments,
-    }
-}
 /// Cheap fingerprint of a conversation prefix for prefire NOTE₁ validity. A
 /// mismatch means the prefix changed (edit / rewind / branch) since pass-1, so
 /// the cached NOTE₁ no longer summarizes the current prefix and must be dropped.
@@ -931,7 +920,17 @@ impl SessionActor {
                 context_window,
                 model_id: model_id.clone(),
                 user_context_provided: user_context.is_some(),
-                compaction_mode: compaction_mode_label(self.compaction.compaction_mode),
+                compaction_mode: match self.compaction.compaction_mode {
+                    xai_chat_state::CompactionMode::Summary => {
+                        xai_grok_telemetry::events::CompactionModeLabel::Summary
+                    }
+                    xai_chat_state::CompactionMode::Transcript => {
+                        xai_grok_telemetry::events::CompactionModeLabel::Transcript
+                    }
+                    xai_chat_state::CompactionMode::Segments(_) => {
+                        xai_grok_telemetry::events::CompactionModeLabel::Segments
+                    }
+                },
                 two_pass_enabled: self.two_pass_active(),
                 is_subagent: self.startup_hints.is_subagent,
             },
@@ -1210,7 +1209,7 @@ impl SessionActor {
                         xai_grok_telemetry::events::CompactionCompleteStats {
                             tokens_after,
                             two_pass_used: false,
-                            segments_written: 0,
+                            segments_queued: 0,
                             degenerate_retries: 0,
                             input_overflow_retries: 0,
                         },
@@ -1862,7 +1861,7 @@ impl SessionActor {
         if cancel.is_cancelled() {
             return self.emit_compact_cancelled(auto_trigger).await;
         }
-        let segments_written = u32::from(
+        let segments_queued = u32::from(
             self.persist_compaction_segment(&segment_messages, &generate_session_compact),
         );
         self.chat_state_handle
@@ -1946,7 +1945,7 @@ impl SessionActor {
             .tool_bridge()
             .on_skill_discovery_compaction()
             .await;
-        self.persist_announcement_state().await;
+        self.rearm_failed_server_announcements().await;
         self.plan_mode.lock().reset_after_compaction();
         self.persist_plan_mode_state();
         self.dispatch_hook(
@@ -2006,7 +2005,7 @@ impl SessionActor {
             xai_grok_telemetry::events::CompactionCompleteStats {
                 tokens_after,
                 two_pass_used,
-                segments_written,
+                segments_queued,
                 degenerate_retries: telemetry.degenerate_rejections,
                 input_overflow_retries: input_overflow_rejections,
             },

@@ -1412,6 +1412,53 @@ async fn list_sessions_recent_excludes_hidden_sessions() {
     assert_eq!(recent[0].info.id, acp::SessionId::new("visible"));
 }
 #[tokio::test]
+async fn list_sessions_recent_skips_headless_without_shorting_the_page() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = crate::util::grok_home::encode_cwd_dirname("/workspace");
+    let now = chrono::Utc::now();
+    let times: Vec<_> = (0..4).map(|i| now - chrono::Duration::hours(i)).collect();
+    for (i, (id, kind)) in [
+        ("h-new", Some("headless")),
+        ("h-mid", Some("headless")),
+        ("i-old", None),
+        ("i-older", None),
+    ]
+        .into_iter()
+        .enumerate()
+    {
+        let dir = write_test_summary(tmp.path(), &cwd, id, times[i], None, None, kind);
+        set_mtime(&dir.join("summary.json"), times[i]);
+    }
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let recent = adapter.list_sessions_recent(2).await.unwrap();
+    let ids: Vec<&str> = recent.iter().map(|s| s.info.id.0.as_ref()).collect();
+    assert_eq!(
+            ids,
+            ["i-old", "i-older"],
+            "headless rows are skipped and their slots refilled from older candidates"
+        );
+}
+#[tokio::test]
+async fn list_sessions_recent_bounds_reads_on_headless_dominated_store() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = crate::util::grok_home::encode_cwd_dirname("/workspace");
+    let now = chrono::Utc::now();
+    let newest_interactive = 40;
+    for i in 0..50 {
+        let id = format!("s{i}");
+        let kind = (i != newest_interactive).then_some("headless");
+        let ts = now - chrono::Duration::minutes(i);
+        let dir = write_test_summary(tmp.path(), &cwd, &id, ts, None, None, kind);
+        set_mtime(&dir.join("summary.json"), ts);
+    }
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let recent = adapter.list_sessions_recent(2).await.unwrap();
+    assert!(
+            recent.is_empty(),
+            "interactive rows past the read bound must not force a full scan"
+        );
+}
+#[tokio::test]
 async fn list_sessions_recent_empty_dir() {
     let tmp = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());

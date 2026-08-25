@@ -124,18 +124,9 @@ fn pty_shift_tab_cycles_to_auto_mode_banner() {
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    // Pin the starting mode: with the gate ON, an empty sandbox home would
-    // launch straight into Auto, and this test cycles the ring from Normal.
-    let mut harness = PtyHarness::new_in_sandbox(
-        &binary,
-        ROWS,
-        COLS,
-        &["--permission-mode", "default"],
-        &sandbox,
-        &env_refs,
-        None,
-    )
-    .expect("spawn pager in PTY (xai-grok-pager-pty-harness)");
+    let mut harness =
+        PtyHarness::new_in_sandbox(&binary, ROWS, COLS, &[], &sandbox, &env_refs, None)
+            .expect("spawn pager in PTY (xai-grok-pager-pty-harness)");
 
     // Drain startup; welcome or agent chrome.
     let _ = harness.wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT);

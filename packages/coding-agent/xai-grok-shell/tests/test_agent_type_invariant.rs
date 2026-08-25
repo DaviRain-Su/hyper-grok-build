@@ -36,6 +36,115 @@ fn invalidate_models_cache(home: &std::path::Path) {
         std::fs::remove_file(&cache).expect("failed to delete models_cache.json");
     }
 }
+/// Grok-build system template marker. Absence means the alternate harness.
+fn is_grok_build_system_prompt(sys_prompt: &str) -> bool {
+    sys_prompt.contains("<work_policy>")
+}
+/// Alternate-agent compiled prompts: grok-build's `<work_policy>` is absent
+/// from the system template, and the injected workspace path is present in
+/// a user-role message (`cursor_user.md`, not `cursor_prompt.md`). Empty or
+/// unrelated prompts fail the user-path check.
+fn assert_alternate_harness(server: &MockInferenceServer, workspace: &std::path::Path) {
+    let sys_prompt = server
+        .last_system_prompt()
+        .expect("should have at least one inference request");
+    let user_prompt = last_request_user_text(server)
+        .expect("should have a user message on the inference request");
+    let path = workspace.to_string_lossy();
+    assert!(
+        !is_grok_build_system_prompt(&sys_prompt),
+        "alternate template must not use grok-build `<work_policy>`\n\
+         system prompt preview: {}",
+        &sys_prompt[..sys_prompt.len().min(500)]
+    );
+    assert!(
+        user_prompt.contains(path.as_ref()),
+        "alternate user template must include injected workspace path `{path}`\n\
+         user prompt preview: {}",
+        &user_prompt[..user_prompt.len().min(500)]
+    );
+}
+/// Join user-role message text from the most recent chat/Responses request.
+fn last_request_user_text(server: &MockInferenceServer) -> Option<String> {
+    let body = server.requests().into_iter().rev().find_map(|e| {
+        if e.path.contains("chat/completions") || e.path.contains("responses") {
+            e.body
+        } else {
+            None
+        }
+    })?;
+    let texts = user_role_texts(&body);
+    if texts.is_empty() {
+        None
+    } else {
+        Some(texts.join("\n"))
+    }
+}
+fn user_role_texts(body: &serde_json::Value) -> Vec<String> {
+    let Some(items) = body
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| body.get("input").and_then(serde_json::Value::as_array))
+    else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter(|m| m.get("role").and_then(serde_json::Value::as_str) == Some("user"))
+        .filter_map(|m| m.get("content").and_then(content_to_text))
+        .collect()
+}
+fn content_to_text(content: &serde_json::Value) -> Option<String> {
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
+    let parts = content.as_array()?;
+    let mut out = String::new();
+    for part in parts {
+        if !matches!(
+            part.get("type").and_then(serde_json::Value::as_str),
+            Some("text") | Some("input_text")
+        ) {
+            continue;
+        }
+        let Some(text) = part.get("text").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(text);
+    }
+    (!out.is_empty()).then_some(out)
+}
+#[test]
+fn user_role_texts_joins_chat_user_turns_not_system() {
+    let body = serde_json::json!({
+        "messages": [
+            { "role": "system", "content": "system-only" },
+            { "role": "user", "content": "Workspace Path: /tmp/ws" },
+            { "role": "user", "content": "say hello" }
+        ]
+    });
+    let user = user_role_texts(&body).join("\n");
+    assert!(user.contains("Workspace Path: /tmp/ws"), "{user}");
+    assert!(user.contains("say hello"), "{user}");
+    assert!(!user.contains("system-only"), "{user}");
+}
+#[test]
+fn user_role_texts_reads_responses_input_text_parts() {
+    let body = serde_json::json!({
+        "instructions": "system-only",
+        "input": [{
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "Workspace Path: /tmp/ws" }]
+        }]
+    });
+    assert_eq!(
+        user_role_texts(&body),
+        vec!["Workspace Path: /tmp/ws".to_string()]
+    );
+}
 /// Start a mock server with two models:
 /// - `default-model`: no agent_type (→ defaults to "grok-build")
 async fn dual_model_server() -> MockInferenceServer {
@@ -79,7 +188,7 @@ async fn test_default_model_uses_grok_build_harness() {
             .last_system_prompt()
             .expect("should have at least one inference request");
         assert!(
-            sys_prompt.contains("Grok") || sys_prompt.contains("grok"),
+            is_grok_build_system_prompt(&sys_prompt),
             "default model should use grok-build harness\nsystem prompt preview: {}",
             &sys_prompt[..sys_prompt.len().min(500)]
         );
@@ -156,16 +265,14 @@ async fn test_session_resume_preserves_harness() {
         let resumed_sys_prompt = server
             .last_system_prompt()
             .expect("should have captured resumed system prompt");
-        let original_has_grok =
-            original_sys_prompt.contains("Grok") || original_sys_prompt.contains("grok");
-        let resumed_has_grok =
-            resumed_sys_prompt.contains("Grok") || resumed_sys_prompt.contains("grok");
+        let original_is_grok = is_grok_build_system_prompt(&original_sys_prompt);
+        let resumed_is_grok = is_grok_build_system_prompt(&resumed_sys_prompt);
         assert_eq!(
-            original_has_grok,
-            resumed_has_grok,
+            original_is_grok,
+            resumed_is_grok,
             "resumed session should use the same harness as the original\n\
-             original identity markers: grok={original_has_grok}\n\
-             resumed identity markers: grok={resumed_has_grok}\n\
+             original grok-build template: {original_is_grok}\n\
+             resumed grok-build template: {resumed_is_grok}\n\
              original prompt (first 300): {}\n\
              resumed prompt (first 300): {}",
             &original_sys_prompt[..original_sys_prompt.len().min(300)],
@@ -202,7 +309,7 @@ async fn test_model_without_agent_type_defaults_to_grok_build() {
                 .last_system_prompt()
                 .expect("should have at least one inference request");
             assert!(
-            sys_prompt.contains("Grok") || sys_prompt.contains("grok"),
+            is_grok_build_system_prompt(&sys_prompt),
             "model without agent_type should default to grok-build harness\nsystem prompt preview: {}",
             &sys_prompt[..sys_prompt.len().min(500)]
         );
@@ -242,7 +349,7 @@ async fn test_grok_agent_env_overrides_model_agent_type() {
                 .last_system_prompt()
                 .expect("should have inference request");
             assert!(
-            sys_prompt.contains("Grok") || sys_prompt.contains("grok"),
+            is_grok_build_system_prompt(&sys_prompt),
             "GROK_AGENT=grok-build should override catalog model agent_type\nsystem prompt preview: {}",
             &sys_prompt[..sys_prompt.len().min(500)]
         );

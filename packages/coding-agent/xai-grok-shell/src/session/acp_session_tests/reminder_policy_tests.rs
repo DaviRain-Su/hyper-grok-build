@@ -298,10 +298,6 @@ async fn same_session_rolls_over_once_when_local_date_advances() {
                 "rollover reminder must be wrapped in system-reminder tags: {text}"
             );
             assert!(
-                text.contains("The local date has changed since this session started"),
-                "rollover reminder must announce the date change: {text}"
-            );
-            assert!(
                 text.contains(&today.to_string()),
                 "rollover reminder must carry today's date {today}: {text}"
             );
@@ -354,10 +350,8 @@ async fn rollover_reminder_follows_the_custom_template_date_intent() {
                 "a today_local-bearing custom template must keep the rollover reminder"
             );
             assert!(
-                conv[0]
-                    .text_content()
-                    .contains("The local date has changed since this session started"),
-                "the kept reminder must be the date-rollover reminder: {}",
+                conv[0].text_content().contains(&today.to_string()),
+                "the kept reminder must carry today's date: {}",
                 conv[0].text_content()
             );
         })
@@ -397,10 +391,8 @@ async fn rollover_reminder_fires_when_fallback_stamps_a_date_free_template() {
                 "a fallback-stamped date must roll over even under a date-free template"
             );
             assert!(
-                conv[0]
-                    .text_content()
-                    .contains("The local date has changed since this session started"),
-                "the injected reminder must be the date-rollover reminder: {}",
+                conv[0].text_content().contains(&today.to_string()),
+                "the injected reminder must carry today's date: {}",
                 conv[0].text_content()
             );
         })
