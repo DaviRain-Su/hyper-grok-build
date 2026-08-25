@@ -53,13 +53,15 @@ fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<P
     use xai_grok_telemetry::process_info::LeaderMode::Standalone;
     let (entrypoint, interactivity) = match command {
         Some(Command::Agent(_)) => return None,
-        Some(Command::Dashboard) => return None,
+        Some(Command::Dashboard(_)) => return None,
+        Some(Command::Codex(_)) => return None,
         Some(Command::Login { .. }) => (Entrypoint::Cli, Interactivity::Interactive),
         Some(
             Command::Inspect { .. }
             | Command::Doctor(_)
             | Command::Leader(_)
-            | Command::Logout
+            | Command::Logout { .. }
+            | Command::Nexus { .. }
             | Command::Mcp(_)
             | Command::Plugin(_)
             | Command::Memory(_)
