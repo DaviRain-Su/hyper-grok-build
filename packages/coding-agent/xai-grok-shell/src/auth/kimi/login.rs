@@ -251,8 +251,10 @@ async fn refresh_kimi_code_auth(force: bool) -> Option<GrokAuth> {
     let file_lock = match crate::auth::manager::lock::try_lock_auth_file_async(
         &path,
         KIMI_REFRESH_LOCK_TIMEOUT,
+        crate::auth::manager::lock::Heartbeat::Skip,
     )
     .await
+    .into_guard()
     {
         Some(lock) => lock,
         None => {
@@ -273,8 +275,9 @@ async fn refresh_kimi_code_auth(force: bool) -> Option<GrokAuth> {
     } else {
         tracing::warn!("auth: Kimi refresh lock lost before IdP; re-acquiring");
         drop(file_lock);
-        match crate::auth::manager::lock::try_lock_auth_file_async(&path, KIMI_REFRESH_LOCK_TIMEOUT)
+        match crate::auth::manager::lock::try_lock_auth_file_async(&path, KIMI_REFRESH_LOCK_TIMEOUT, crate::auth::manager::lock::Heartbeat::Skip)
             .await
+            .into_guard()
         {
             Some(relock) => {
                 if let Some(adopted) = try_adopt_sibling_kimi_token(home, &refresh, force) {
@@ -306,8 +309,10 @@ async fn refresh_kimi_code_auth(force: bool) -> Option<GrokAuth> {
             match crate::auth::manager::lock::try_lock_auth_file_async(
                 &path,
                 KIMI_REFRESH_LOCK_TIMEOUT,
+                crate::auth::manager::lock::Heartbeat::Skip,
             )
             .await
+            .into_guard()
             {
                 Some(relock) => Some(relock),
                 None => {

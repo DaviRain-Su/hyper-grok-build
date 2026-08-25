@@ -174,8 +174,10 @@ async fn refresh_github_copilot_auth(force: bool) -> Option<GrokAuth> {
     let file_lock = match crate::auth::manager::lock::try_lock_auth_file_async(
         &path,
         GITHUB_COPILOT_REFRESH_LOCK_TIMEOUT,
+        crate::auth::manager::lock::Heartbeat::Skip,
     )
     .await
+    .into_guard()
     {
         Some(lock) => lock,
         None => {
@@ -199,8 +201,10 @@ async fn refresh_github_copilot_auth(force: bool) -> Option<GrokAuth> {
         match crate::auth::manager::lock::try_lock_auth_file_async(
             &path,
             GITHUB_COPILOT_REFRESH_LOCK_TIMEOUT,
+            crate::auth::manager::lock::Heartbeat::Skip,
         )
         .await
+        .into_guard()
         {
             Some(relock) => {
                 if let Some(adopted) =
@@ -232,8 +236,10 @@ async fn refresh_github_copilot_auth(force: bool) -> Option<GrokAuth> {
             match crate::auth::manager::lock::try_lock_auth_file_async(
                 &path,
                 GITHUB_COPILOT_REFRESH_LOCK_TIMEOUT,
+                crate::auth::manager::lock::Heartbeat::Skip,
             )
             .await
+            .into_guard()
             {
                 Some(relock) => Some(relock),
                 None => {

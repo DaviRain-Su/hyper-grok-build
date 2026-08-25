@@ -478,8 +478,8 @@ fn dropping_the_guard_silences_the_heartbeat_before_anyone_else_can_hold_the_loc
     file.try_lock_exclusive().unwrap();
     let heartbeat = LockHeartbeat::spawn(file.try_clone().unwrap(), StdDuration::from_millis(1));
     drop(AuthFileLock {
-        heartbeat: Some(heartbeat),
-        file,
+        _heartbeat: Some(heartbeat),
+        _file: file,
     });
 
     let mut second = OpenOptions::new()

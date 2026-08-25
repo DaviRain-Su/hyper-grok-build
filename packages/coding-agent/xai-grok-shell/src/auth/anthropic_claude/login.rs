@@ -409,8 +409,10 @@ async fn refresh_anthropic_claude_auth(force: bool) -> Option<GrokAuth> {
     let file_lock = match crate::auth::manager::lock::try_lock_auth_file_async(
         &path,
         REFRESH_LOCK_TIMEOUT,
+        crate::auth::manager::lock::Heartbeat::Skip,
     )
     .await
+    .into_guard()
     {
         Some(lock) => lock,
         None => {
@@ -431,8 +433,9 @@ async fn refresh_anthropic_claude_auth(force: bool) -> Option<GrokAuth> {
     } else {
         tracing::warn!("anthropic-claude auth: refresh lock lost before IdP; re-acquiring");
         drop(file_lock);
-        match crate::auth::manager::lock::try_lock_auth_file_async(&path, REFRESH_LOCK_TIMEOUT)
+        match crate::auth::manager::lock::try_lock_auth_file_async(&path, REFRESH_LOCK_TIMEOUT, crate::auth::manager::lock::Heartbeat::Skip)
             .await
+            .into_guard()
         {
             Some(relock) => {
                 if let Some(adopted) =
@@ -462,8 +465,9 @@ async fn refresh_anthropic_claude_auth(force: bool) -> Option<GrokAuth> {
             tracing::warn!(
                 "anthropic-claude auth: re-acquiring the live lock to persist refreshed credentials"
             );
-            match crate::auth::manager::lock::try_lock_auth_file_async(&path, REFRESH_LOCK_TIMEOUT)
+            match crate::auth::manager::lock::try_lock_auth_file_async(&path, REFRESH_LOCK_TIMEOUT, crate::auth::manager::lock::Heartbeat::Skip)
                 .await
+                .into_guard()
             {
                 Some(relock) => Some(relock),
                 None => {

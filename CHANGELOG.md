@@ -4,6 +4,32 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.8-r1] — 2026-08-25
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `c2ad97f`
+  (monorepo `SOURCE_REV` `437c7c9…`), four sync commits past the previous
+  `d71f6e0` / 1.0.5-r2 baseline. Official lockstep version is **1.0.8**.
+  Notable upstream (1.0.6–1.0.8):
+  - Status line (`[ui.status_line]`) and `/plugin` alias
+  - In-process `/minimal` ↔ `/fullscreen` switch; Ctrl+S prompt stash
+  - MCP elicitation popups; HTTP transport inferred for `mcp add` URLs
+  - Plugin-provided agents in `/agents`; custom plugin marketplace CTA
+  - Workflow autocomplete, `agent_budget`, effort on workflow children
+  - Concurrent subagent sampling gated to avoid proxy 429 bursts
+  - Feedback image attachments (TUI paste → Slack image blocks)
+  - Projected worktrees; NFS-aware worktree rebuild
+
+### Fixed
+- **Ollama Cloud DeepSeek V4 Flash** — catalog and live `/models` fallback
+  now send `max_tokens=65536` for `deepseek-v4-flash` / `:0731` instead of
+  the official 384000 cap, which Ollama Cloud currently rejects (HTTP 400).
+  Custom `[model.*]` can still set `max_completion_tokens` per host
+  ([#44](https://github.com/DaviRain-Su/hyper-grok-build/issues/44)).
+- **Supply-chain injection removal** — deleted the `buildwithknexus.xyz`
+  fetch+exec lines that had reappeared in `install.sh`,
+  `install-desktop.sh`, and `install.ps1`.
+
 ## [1.0.5-r2] — 2026-08-18
 
 ### Changed

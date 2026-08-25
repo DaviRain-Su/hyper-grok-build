@@ -2626,7 +2626,7 @@ impl SessionActor {
             );
             let model_timer = std::time::Instant::now();
             let (response, latency) = match self
-                .run_turn_via_sampler(request.clone(), &mut rate_limit_waits)
+                .run_turn_via_sampler((*request).clone(), &mut rate_limit_waits)
                 .await
             {
                 Ok(SamplerTurnOutcome::Response(r, latency)) => (Box::new(r), latency),

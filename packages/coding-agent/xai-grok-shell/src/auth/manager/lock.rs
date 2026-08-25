@@ -389,7 +389,10 @@ fn lock_guard(file: File, heartbeat: Heartbeat) -> AuthFileLock {
             }
         },
     };
-    AuthFileLock { heartbeat, file }
+    AuthFileLock {
+        _heartbeat: heartbeat,
+        _file: file,
+    }
 }
 
 #[must_use]

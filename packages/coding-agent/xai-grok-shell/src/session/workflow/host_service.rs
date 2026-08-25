@@ -551,7 +551,12 @@ impl HostService {
                     cwd: None,
                     runtime_overrides: SubagentRuntimeOverrides {
                         model: opts.model.clone(),
-                        reasoning_effort: reasoning_effort.map(|effort| effort.to_string()),
+                        reasoning_effort: reasoning_effort.and_then(|effort| {
+                            effort
+                                .as_str()
+                                .parse::<xai_tool_types::SubagentReasoningEffort>()
+                                .ok()
+                        }),
                         output_token_budget: None,
                         model_override_provenance: ModelOverrideProvenance::Tool,
                         capability_mode,

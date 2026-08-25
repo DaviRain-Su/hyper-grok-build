@@ -289,7 +289,7 @@ pub(super) fn get_task_output_path(
     session_id: &str,
     task_id: &str,
 ) -> Result<PathBuf, UnsafeTaskPathId> {
-    get_task_output_path_in(&crate::util::grok_home::grok_home(), session_id, task_id)
+    get_task_output_path_in(&xai_grok_config::grok_home(), session_id, task_id)
 }
 
 /// Inner implementation with an injectable grok home for tests.
@@ -316,9 +316,9 @@ fn get_task_output_path_in(
     let tasks_dir = session_dir.join("tasks");
     // Legacy flat layout, no <encoded-cwd> shield: tighten every level
     // (best-effort; failures surface on the log write).
-    let _ = crate::util::grok_home::create_dir_all_owner_only(&tasks_dir);
-    crate::util::grok_home::set_dir_owner_only(&session_dir);
-    crate::util::grok_home::set_dir_owner_only(&sessions_root);
+    let _ = xai_grok_config::create_dir_all_owner_only(&tasks_dir);
+    xai_grok_config::set_dir_owner_only(&session_dir);
+    xai_grok_config::set_dir_owner_only(&sessions_root);
     Ok(tasks_dir.join(format!("{}.log", task_id)))
 }
 
@@ -452,7 +452,10 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn task_output_dirs_are_owner_only() {
-        use crate::test_support::unix_mode;
+        fn unix_mode(path: &std::path::Path) -> u32 {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
 
         let home = tempfile::TempDir::new().unwrap();
         let path = get_task_output_path_in(home.path(), "task-perm-test", "t1").unwrap();

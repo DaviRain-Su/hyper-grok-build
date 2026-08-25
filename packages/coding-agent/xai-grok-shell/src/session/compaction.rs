@@ -1206,7 +1206,20 @@ impl SessionActor {
                         items_after = new_len,
                         "Codex remote compact installed replacement history"
                     );
-                    compaction.complete(tokens_after);
+                    compaction.complete(
+                        xai_grok_telemetry::events::CompactionCompleteStats {
+                            tokens_after,
+                            two_pass_used: false,
+                            segments_written: 0,
+                            degenerate_retries: 0,
+                            input_overflow_retries: 0,
+                        },
+                        xai_grok_telemetry::events::CompactionTiming {
+                            model_wait_ms: None,
+                            pre_compaction_ms: None,
+                            post_compaction_ms: None,
+                        },
+                    );
                     return Ok(());
                 }
                 Ok(None) => {

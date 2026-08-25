@@ -3946,8 +3946,6 @@ mod tests {
             assert!(keys.contains(id), "missing offline fallback {id}");
         }
         for key in [
-            "ollama/deepseek-v4-flash",
-            "ollama/deepseek-v4-flash:0731",
             "ollama/deepseek-v4-pro",
             "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731",
         ] {
@@ -3963,6 +3961,21 @@ mod tests {
                 m.max_completion_tokens,
                 Some(384_000),
                 "{key}: DeepSeek V4 max output is 384K"
+            );
+        }
+        for key in ["ollama/deepseek-v4-flash", "ollama/deepseek-v4-flash:0731"] {
+            let m = platform_builtin_models()
+                .iter()
+                .find(|m| m.catalog_key() == key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            assert_eq!(
+                m.context_window, 1_000_000,
+                "{key}: DeepSeek V4 is 1M context"
+            );
+            assert_eq!(
+                m.max_completion_tokens,
+                Some(65_536),
+                "{key}: Ollama Cloud Flash output cap is 64K"
             );
         }
         let fw_flash_0731 = platform_builtin_models()

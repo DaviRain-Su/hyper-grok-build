@@ -26,9 +26,14 @@ use crate::sampling::ApiBackend;
 /// Default context when the wire omits `context_length`.
 const DEFAULT_CONTEXT_WINDOW: u64 = 256_000;
 
-/// DeepSeek V4 (Flash/Pro) official context + max output (also on Ollama Cloud).
+/// DeepSeek V4 official context + max output.
+///
+/// Ollama Cloud currently rejects Flash output above 65536
+/// (`max_tokens (384000) exceeds model's maximum output tokens (65536)`
+/// for `deepseek-v4-flash:0731`). Pro still advertises 384k.
 const DEEPSEEK_V4_CONTEXT_WINDOW: u64 = 1_000_000;
 const DEEPSEEK_V4_MAX_COMPLETION_TOKENS: u32 = 384_000;
+const DEEPSEEK_V4_FLASH_MAX_COMPLETION_TOKENS: u32 = 65_536;
 
 /// Offline/live fallback context when `/models` omits `context_length`.
 fn platform_default_context_window(platform: PlatformId, model_id: &str) -> u64 {
@@ -38,8 +43,15 @@ fn platform_default_context_window(platform: PlatformId, model_id: &str) -> u64 
     DEFAULT_CONTEXT_WINDOW
 }
 
+fn is_ollama_deepseek_v4_flash(model_id: &str) -> bool {
+    model_id.starts_with("deepseek-v4-flash")
+}
+
 /// Offline/live fallback max completion when the wire omits output caps.
 fn platform_default_max_completion_tokens(platform: PlatformId, model_id: &str) -> u32 {
+    if platform == PlatformId::Ollama && is_ollama_deepseek_v4_flash(model_id) {
+        return DEEPSEEK_V4_FLASH_MAX_COMPLETION_TOKENS;
+    }
     if platform == PlatformId::Ollama && model_id.starts_with("deepseek-v4") {
         return DEEPSEEK_V4_MAX_COMPLETION_TOKENS;
     }
@@ -423,6 +435,7 @@ fn nexus_wire_to_entry(
         agent_type: default_agent_type(),
         inference_idle_timeout_secs: None,
         max_retries: None,
+        subagent_rate_limit_max_attempts: None,
         hidden: false,
         supported_in_api: true,
         supports_backend_search: false,
@@ -499,9 +512,16 @@ pub(crate) fn platform_wire_model_to_entry(
                     | xai_grok_models::ModelCapability::AlwaysThinking
             )
         });
-    let max_completion_tokens = wire
-        .max_output_tokens
-        .unwrap_or_else(|| platform_default_max_completion_tokens(platform, &wire.id));
+    let max_completion_tokens = {
+        let requested = wire
+            .max_output_tokens
+            .unwrap_or_else(|| platform_default_max_completion_tokens(platform, &wire.id));
+        if platform == PlatformId::Ollama && is_ollama_deepseek_v4_flash(&wire.id) {
+            requested.min(DEEPSEEK_V4_FLASH_MAX_COMPLETION_TOKENS)
+        } else {
+            requested
+        }
+    };
     ModelEntryConfig {
         id: Some(platform.managed_model_key(&wire.id)),
         name: Some(wire.display_name.clone().unwrap_or_else(|| wire.id.clone())),
@@ -550,6 +570,7 @@ pub(crate) fn platform_wire_model_to_entry(
         agent_type: default_agent_type(),
         inference_idle_timeout_secs: None,
         max_retries: None,
+        subagent_rate_limit_max_attempts: None,
         hidden: false,
         // Subscription requires OAuth stamp; open platforms are API-key ready.
         supported_in_api: !platform.uses_oauth(),
@@ -907,6 +928,7 @@ fn radius_wire_model_to_entry(base_url: &str, wire: RadiusWireModel) -> Option<M
         agent_type: default_agent_type(),
         inference_idle_timeout_secs: None,
         max_retries: None,
+        subagent_rate_limit_max_attempts: None,
         hidden: false,
         supported_in_api: true,
         supports_backend_search: false,
@@ -1320,8 +1342,9 @@ mod tests {
     }
 
     #[test]
-    fn ollama_deepseek_v4_defaults_1m_context_and_384k_output() {
+    fn ollama_deepseek_v4_flash_defaults_1m_context_and_64k_output() {
         // Ollama `/v1/models` only returns id/owned_by — no context_length.
+        // Cloud Flash:0731 rejects the official 384k output cap (issue #44).
         let wire = WireModel {
             id: "deepseek-v4-flash:0731".into(),
             context_length: 0,
@@ -1338,10 +1361,50 @@ mod tests {
         assert_eq!(entry.context_window.get(), DEEPSEEK_V4_CONTEXT_WINDOW);
         assert_eq!(
             entry.max_completion_tokens,
-            Some(DEEPSEEK_V4_MAX_COMPLETION_TOKENS)
+            Some(DEEPSEEK_V4_FLASH_MAX_COMPLETION_TOKENS)
         );
         assert!(entry.supported_in_api);
         assert!(entry.env_key.is_some());
+    }
+
+    #[test]
+    fn ollama_deepseek_v4_flash_clamps_inflated_wire_output() {
+        let wire = WireModel {
+            id: "deepseek-v4-flash".into(),
+            context_length: 1_000_000,
+            max_output_tokens: Some(384_000),
+            supports_reasoning: false,
+            supports_image_in: false,
+            supports_video_in: false,
+            display_name: None,
+            supports_thinking_type: None,
+            think_efforts: None,
+        };
+        let entry = platform_wire_model_to_entry(PlatformId::Ollama, wire, "https://ollama.com/v1");
+        assert_eq!(
+            entry.max_completion_tokens,
+            Some(DEEPSEEK_V4_FLASH_MAX_COMPLETION_TOKENS)
+        );
+    }
+
+    #[test]
+    fn ollama_deepseek_v4_pro_keeps_384k_output() {
+        let wire = WireModel {
+            id: "deepseek-v4-pro".into(),
+            context_length: 0,
+            max_output_tokens: None,
+            supports_reasoning: false,
+            supports_image_in: false,
+            supports_video_in: false,
+            display_name: None,
+            supports_thinking_type: None,
+            think_efforts: None,
+        };
+        let entry = platform_wire_model_to_entry(PlatformId::Ollama, wire, "https://ollama.com/v1");
+        assert_eq!(
+            entry.max_completion_tokens,
+            Some(DEEPSEEK_V4_MAX_COMPLETION_TOKENS)
+        );
     }
 
     #[test]

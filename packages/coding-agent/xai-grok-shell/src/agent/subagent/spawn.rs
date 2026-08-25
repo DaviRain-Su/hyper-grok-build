@@ -334,6 +334,8 @@ pub(crate) fn present_child_completion(
                 child_session_id: result.child_session_id.clone(),
                 status: result.status().to_owned(),
                 error: result.error.clone(),
+                termination_reason: result.termination_reason.clone(),
+                usage: None,
                 tool_calls: result.tool_calls,
                 turns: result.turns,
                 duration_ms: result.duration_ms,

@@ -263,7 +263,7 @@ impl SessionActor {
                 percentage = trigger.percentage,
                 "hypercore turn: pre-seed auto-compact"
             );
-            if let Err(e) = self.run_compact_only(trigger).await {
+            if let Err(e) = self.run_compact_only(trigger, false).await {
                 tracing::error!(error = %e, "hypercore pre-seed compact failed");
                 if Self::is_auth_compact_error(&e) {
                     return Err(self.surface_compact_auth_failure(e).await);
@@ -508,7 +508,7 @@ impl SessionActor {
                                     round = compact_round,
                                     "hypercore turn: mid-turn compact before continue"
                                 );
-                                if let Err(e) = self.run_compact_only(trigger).await {
+                                if let Err(e) = self.run_compact_only(trigger, false).await {
                                     tracing::error!(
                                         error = %e,
                                         "hypercore mid-turn compact failed"
@@ -520,7 +520,7 @@ impl SessionActor {
                                         .data(format!("hypercore mid-turn compact failed: {e}")));
                                 }
                             } else if let Some(trigger) = self.check_auto_compact_needed().await
-                                && let Err(e) = self.run_compact_only(trigger).await
+                                && let Err(e) = self.run_compact_only(trigger, false).await
                             {
                                 tracing::error!(
                                     error = %e,
@@ -747,7 +747,7 @@ impl SessionActor {
             credential,
             error_code: None,
         };
-        match self.handle_sampling_failure(synthetic).await {
+        match self.handle_sampling_failure(synthetic, 0).await {
             Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                 credential: recovered_cred,
                 store,
@@ -1004,7 +1004,7 @@ impl SessionActor {
         {
             a.content = Arc::<str>::from(assistant_text);
         }
-        self.record_assistant_response(assistant_item).await;
+        self.record_assistant_response(assistant_item, false).await;
     }
 
     /// Execute one model-step's tool batch via the legacy pipeline.

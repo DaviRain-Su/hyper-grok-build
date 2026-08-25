@@ -32,6 +32,7 @@ xai-grok-config = { workspace = true }
 xai-grok-paths = { path = "../../platform/xai-grok-paths" }
 xai-grok-sandbox = { path = "../../tools/xai-grok-sandbox", default-features = false }
 xai-grok-tools = { workspace = true }
+xai-tool-types = { workspace = true }
 xai-grok-workspace = { workspace = true }
 xai-tty-utils = { workspace = true }
 

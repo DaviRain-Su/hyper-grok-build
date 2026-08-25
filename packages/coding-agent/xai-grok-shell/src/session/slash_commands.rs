@@ -239,6 +239,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         argument_hint: Some("status | redefine <plugin> <event> <lambda> | eval <expr> | commit | discard | recover"),
         aliases: &[],
         gate: BuiltinGate::Plugins,
+        workflow_projection: WorkflowProjection::None,
         resolve: |args| {
             let trimmed = args.trim();
             if let Some(rest) = trimmed.strip_prefix("redefine") {

@@ -192,7 +192,9 @@ fn is_retryable_oauth_transport(err: &reqwest::Error) -> bool {
     match xai_grok_http::TransportFailure::classify(err).kind {
         xai_grok_http::TransportFailureKind::Interrupted
         | xai_grok_http::TransportFailureKind::Unreachable => true,
-        xai_grok_http::TransportFailureKind::Permanent => false,
+        xai_grok_http::TransportFailureKind::Permanent
+        | xai_grok_http::TransportFailureKind::CertificateUntrusted
+        | xai_grok_http::TransportFailureKind::CertificateInvalid => false,
     }
 }
 

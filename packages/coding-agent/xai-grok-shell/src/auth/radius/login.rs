@@ -549,8 +549,10 @@ async fn refresh_radius_auth_inner(force: bool) -> Option<GrokAuth> {
     let file_lock = match crate::auth::manager::lock::try_lock_auth_file_async(
         &path,
         REFRESH_LOCK_TIMEOUT,
+        crate::auth::manager::lock::Heartbeat::Skip,
     )
     .await
+    .into_guard()
     {
         Some(lock) => lock,
         None => {
@@ -571,8 +573,9 @@ async fn refresh_radius_auth_inner(force: bool) -> Option<GrokAuth> {
     } else {
         tracing::warn!("radius auth: refresh lock lost before token exchange; re-acquiring");
         drop(file_lock);
-        match crate::auth::manager::lock::try_lock_auth_file_async(&path, REFRESH_LOCK_TIMEOUT)
+        match crate::auth::manager::lock::try_lock_auth_file_async(&path, REFRESH_LOCK_TIMEOUT, crate::auth::manager::lock::Heartbeat::Skip)
             .await
+            .into_guard()
         {
             Some(relock) => {
                 if let Some(adopted) = try_adopt_sibling_radius_token(home, &refresh, force) {
@@ -596,8 +599,9 @@ async fn refresh_radius_auth_inner(force: bool) -> Option<GrokAuth> {
         if result.is_err() {
             None
         } else {
-            match crate::auth::manager::lock::try_lock_auth_file_async(&path, REFRESH_LOCK_TIMEOUT)
+            match crate::auth::manager::lock::try_lock_auth_file_async(&path, REFRESH_LOCK_TIMEOUT, crate::auth::manager::lock::Heartbeat::Skip)
                 .await
+                .into_guard()
             {
                 Some(relock) => Some(relock),
                 None => {

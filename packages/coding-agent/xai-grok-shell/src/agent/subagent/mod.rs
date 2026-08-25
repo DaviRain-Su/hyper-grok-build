@@ -529,64 +529,6 @@ impl SubagentPresentation {
         Arc::clone(&self.is_turn_active)
     }
 }
-pub(crate) fn present_child_completion(
-    completion: ChildCompletion<ShellCompletionData>,
-    gateway: &GatewaySender,
-) {
-    let ChildCompletion {
-        request,
-        result,
-        completion_data,
-        disposition,
-    } = completion;
-    let parent_channel_open = completion_data
-        .parent_cmd_tx
-        .as_ref()
-        .is_some_and(|tx| !tx.is_closed());
-    let will_wake = should_auto_wake_subagent(
-        disposition.backgrounded,
-        result.cancelled,
-        completion_data.auto_wake_enabled,
-        disposition.waiter_delivered,
-        disposition.explicitly_killed,
-        completion_data
-            .goal_loop_active
-            .load(std::sync::atomic::Ordering::Relaxed),
-        parent_channel_open,
-    ) && disposition.should_surface;
-    if completion_data.spawned_notification_emitted || request.run_in_background {
-        emit_subagent_notification(
-            gateway,
-            &request.parent_session_id,
-            SessionUpdate::SubagentFinished {
-                subagent_id: request.id.clone(),
-                child_session_id: result.child_session_id.clone(),
-                status: result.status().to_owned(),
-                error: result.error.clone(),
-                termination_reason: result.termination_reason.clone(),
-                usage: None,
-                tool_calls: result.tool_calls,
-                turns: result.turns,
-                duration_ms: result.duration_ms,
-                tokens_used: completion_data.telemetry_tokens,
-                output: result.success.then(|| result.output.to_string()),
-                will_wake,
-            },
-            completion_data.parent_cmd_tx.as_ref(),
-        );
-    }
-    if will_wake {
-        inject_subagent_completed_prompt(
-            &request.id,
-            &result,
-            &request,
-            &completion_data.task_completion_reservations,
-            completion_data.parent_cmd_tx.as_ref(),
-            &completion_data.task_output_tool_name,
-            &completion_data.synthetic_trace_tx,
-        );
-    }
-}
 /// Resume provenance metadata for a subagent.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SubagentProvenance {

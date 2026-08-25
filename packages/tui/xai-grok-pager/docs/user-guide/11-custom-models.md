@@ -122,6 +122,17 @@ Grok resolves the API key in this order:
 
 The `context_window` value tells Grok when to trigger auto-compaction. When you override a known model, Grok inherits that model's context window. When you define a new model and omit `context_window`, Grok defaults to 200,000 tokens, so set it explicitly to match your provider.
 
+### Output token cap
+
+`max_completion_tokens` is the per-response output limit sent as Chat Completions `max_tokens` (or `max_completion_tokens` / `max_output_tokens` on other backends). Built-in catalog rows already set this. For a custom `[model.*]` that talks to a host with a lower output limit than the catalog default, set it explicitly or the provider will reject the request (HTTP 400). Example — Ollama Cloud DeepSeek V4 Flash:0731 currently allows 65536 output tokens:
+
+```toml
+[model.deepseek-v4-flash]
+model = "deepseek-v4-flash:0731"
+base_url = "https://ollama.com/v1"
+max_completion_tokens = 65536
+```
+
 ### Global Default Headers
 
 To apply the same headers to *every* model in the catalog -- built-in, prefetched from `/v1/models`, or custom -- set them once under the global `[models]` section instead of repeating them per model:

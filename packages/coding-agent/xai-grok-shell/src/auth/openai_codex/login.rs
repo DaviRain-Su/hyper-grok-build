@@ -609,8 +609,10 @@ async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
     let file_lock = match crate::auth::manager::lock::try_lock_auth_file_async(
         &path,
         CODEX_REFRESH_LOCK_TIMEOUT,
+        crate::auth::manager::lock::Heartbeat::Skip,
     )
     .await
+    .into_guard()
     {
         Some(lock) => lock,
         None => {
@@ -643,8 +645,10 @@ async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
         match crate::auth::manager::lock::try_lock_auth_file_async(
             &path,
             CODEX_REFRESH_LOCK_TIMEOUT,
+            crate::auth::manager::lock::Heartbeat::Skip,
         )
         .await
+        .into_guard()
         {
             Some(relock) => {
                 if let Some(adopted) = try_adopt_sibling_codex_token(home, &refresh, force) {
@@ -686,8 +690,10 @@ async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
             match crate::auth::manager::lock::try_lock_auth_file_async(
                 &path,
                 CODEX_REFRESH_LOCK_TIMEOUT,
+                crate::auth::manager::lock::Heartbeat::Skip,
             )
             .await
+            .into_guard()
             {
                 Some(relock) => Some(relock),
                 None => {

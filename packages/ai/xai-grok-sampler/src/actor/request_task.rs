@@ -650,6 +650,7 @@ async fn run_one_attempt(
                 captured,
                 reasoning_model_identity,
                 None,
+                FailedResponseCapture::default(),
                 output_observed,
             )
             .await
@@ -674,6 +675,7 @@ async fn run_one_attempt(
                 captured,
                 reasoning_model_identity,
                 None,
+                FailedResponseCapture::default(),
                 output_observed,
             )
             .await
@@ -698,6 +700,7 @@ async fn run_one_attempt(
                 captured,
                 reasoning_model_identity,
                 None,
+                FailedResponseCapture::default(),
                 output_observed,
             )
             .await
