@@ -1127,6 +1127,7 @@ pub(in crate::app::dispatch) fn skip_picker_and_create_session(
         agent_id,
         cwd: app.cwd.clone(),
         model_id: None,
+        permission_mode_override: None,
         preferred_session_id,
         chat_kind,
     }]

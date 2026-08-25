@@ -4,6 +4,14 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.8-r3] — 2026-08-25
+
+### Fixed
+- **Release build** — finish 1.0.8 merge leftovers that only showed up once
+  `xai-grok-pager` compiled: welcome resume key is `key_resume` (F3),
+  `Effect::CreateSession` sets `permission_mode_override: None`, and
+  `/workflow` suggestions use `ArgItem::new`.
+
 ## [1.0.8-r2] — 2026-08-25
 
 ### Fixed

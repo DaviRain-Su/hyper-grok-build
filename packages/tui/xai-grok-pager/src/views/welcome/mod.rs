@@ -1815,7 +1815,7 @@ fn render_welcome_done(
             items.push((key_i_with_x, import_text.as_str()));
         }
         items.push((key_w, new_worktree_text.as_str()));
-        items.push((key_s, resume_text.as_str()));
+        items.push((key_resume, resume_text.as_str()));
         // "Changelog" above Quit; no shortcut — opened by click (row or block).
         if show_changelog_action {
             items.push(("", changelog_text.as_str()));

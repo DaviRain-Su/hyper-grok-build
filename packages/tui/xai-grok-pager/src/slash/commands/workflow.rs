@@ -17,11 +17,13 @@ fn first_phase_items(ctx: &AppCtx) -> Vec<ArgItem> {
     let mut items: Vec<ArgItem> = ctx
         .saved_workflows
         .iter()
-        .map(|workflow| ArgItem {
-            display: workflow.name.clone(),
-            match_text: workflow.name.clone(),
-            insert_text: format!("{} ", workflow.name),
-            description: workflow.description.clone(),
+        .map(|workflow| {
+            ArgItem::new(
+                workflow.name.clone(),
+                workflow.name.clone(),
+                format!("{} ", workflow.name),
+                workflow.description.clone(),
+            )
         })
         .collect();
     items.extend(WORKFLOW_OPS.iter().map(|&(op, description)| {
@@ -30,12 +32,12 @@ fn first_phase_items(ctx: &AppCtx) -> Vec<ArgItem> {
         } else {
             format!("{op} ")
         };
-        ArgItem {
-            display: op.to_string(),
-            match_text: op.to_string(),
+        ArgItem::new(
+            op.to_string(),
+            op.to_string(),
             insert_text,
-            description: description.to_string(),
-        }
+            description.to_string(),
+        )
     }));
     items
 }
@@ -134,12 +136,12 @@ impl LaunchFlagSpec {
 
     fn value_items(self, ctx: &AppCtx, base: &str, syntax: LaunchValueSyntax) -> Vec<ArgItem> {
         match self.value_provider {
-            LaunchValueProvider::Opaque => vec![ArgItem {
-                display: self.name.to_string(),
-                match_text: format!("{base} {}", self.name),
-                insert_text: format!("{base} {} ", self.name),
-                description: self.description.to_string(),
-            }],
+            LaunchValueProvider::Opaque => vec![ArgItem::new(
+                self.name.to_string(),
+                format!("{base} {}", self.name),
+                format!("{base} {} ", self.name),
+                self.description.to_string(),
+            )],
             LaunchValueProvider::ReasoningEffort => ctx
                 .models
                 .reasoning_effort_options()
@@ -158,12 +160,12 @@ impl LaunchFlagSpec {
                         LaunchValueSyntax::Separate => format!("{} {canonical}", self.name),
                         LaunchValueSyntax::Equals => format!("{}={canonical}", self.name),
                     };
-                    ArgItem {
-                        display: format!("{} {canonical}", self.name),
-                        match_text: format!("{base} {argument} {} {}", option.id, option.label),
-                        insert_text: format!("{base} {argument} "),
+                    ArgItem::new(
+                        format!("{} {canonical}", self.name),
+                        format!("{base} {argument} {} {}", option.id, option.label),
+                        format!("{base} {argument} "),
                         description,
-                    }
+                    )
                 })
                 .collect(),
         }
@@ -322,12 +324,12 @@ fn manage_run_items(ctx: &AppCtx, op: &str) -> Vec<ArgItem> {
             // match_text must include the verb: the controller ranks the
             // full args query (`resume rev`) against this string.
             let insert_text = format!("{op} {}", run.name);
-            ArgItem {
-                display: run.name.clone(),
-                match_text: insert_text.clone(),
+            ArgItem::new(
+                run.name.clone(),
+                insert_text.clone(),
                 insert_text,
-                description: run.status.replace('_', " "),
-            }
+                run.status.replace('_', " "),
+            )
         })
         .collect()
 }
