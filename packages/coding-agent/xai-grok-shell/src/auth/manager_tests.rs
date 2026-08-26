@@ -341,6 +341,60 @@ async fn update_preserves_openai_codex_and_kimi_scopes() {
     );
 }
 
+/// Refresh holds `auth.json.lock` across the IdP call, then persists.
+/// A second exclusive flock on a new fd deadlocks the same process on
+/// Linux — persist must reuse the held guard and still merge scopes.
+#[tokio::test]
+async fn update_under_held_refresh_lock_does_not_deadlock() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    let mgr = Arc::new(AuthManager::new_test_isolated(dir.path(), cfg.clone()));
+    let home = dir.path();
+
+    let kimi = GrokAuth {
+        key: "kimi-access".into(),
+        auth_mode: AuthMode::KimiCode,
+        refresh_token: Some("kimi-rt".into()),
+        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
+    };
+    crate::auth::storage::store_kimi_code_auth(home, &kimi).unwrap();
+
+    let lock = mgr
+        .try_lock_auth_file_async(REFRESH_LOCK_TIMEOUT, lock::Heartbeat::Skip)
+        .await
+        .into_guard()
+        .expect("uncontended acquire");
+
+    let xai = GrokAuth {
+        key: "xai-refreshed".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("xai-rt".into()),
+        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
+    };
+    let saved = tokio::time::timeout(
+        StdDuration::from_secs(2),
+        mgr.update_under_held_lock(xai, &lock),
+    )
+    .await
+    .expect("nested flock would hang past this timeout")
+    .expect("held-lock persist must succeed");
+    assert_eq!(saved.key, "xai-refreshed");
+
+    let store = read_auth_json(&home.join("auth.json")).unwrap();
+    assert_eq!(
+        store.get(&cfg.auth_scope()).map(|a| a.key.as_str()),
+        Some("xai-refreshed")
+    );
+    assert!(
+        store.contains_key(crate::auth::model::KIMI_CODE_OAUTH_SCOPE),
+        "held-lock xAI persist must still merge third-party scopes"
+    );
+    assert_eq!(
+        crate::auth::storage::read_kimi_code_auth(home).map(|a| a.key),
+        Some("kimi-access".into())
+    );
+}
+
 /// Regression: when auth.json contains corrupt JSON, update() must not
 /// clobber the file with a single-entry map. Instead it should update
 /// in-memory only and leave the file untouched.

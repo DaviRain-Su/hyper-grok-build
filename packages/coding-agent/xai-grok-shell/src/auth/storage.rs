@@ -888,6 +888,21 @@ fn ensure_live_auth_file_lock(
     }
 }
 
+/// Run `f` under an already-held live `auth.json.lock`.
+///
+/// Refresh paths hold this flock across the IdP call. Opening a second
+/// exclusive flock on a new fd is not re-entrant (Linux treats the two
+/// descriptors independently), so those writers must reuse the held guard
+/// rather than calling [`with_auth_json_scope_lock`].
+pub(crate) fn with_held_auth_json_lock<R>(
+    auth_json_path: &Path,
+    file_lock: &AuthFileLock,
+    f: impl FnOnce() -> std::io::Result<R>,
+) -> std::io::Result<R> {
+    ensure_live_auth_file_lock(file_lock, auth_json_path)?;
+    f()
+}
+
 /// Hold an exclusive flock on `auth.json.lock` for a short disk RMW.
 ///
 /// Blocking is intentional: these writers only touch disk (no network under
@@ -895,9 +910,10 @@ fn ensure_live_auth_file_lock(
 /// can still identify the holder. Failure to open or acquire the lock aborts
 /// the write: proceeding unlocked can lose a sibling process's auth scope.
 ///
-/// Shared by third-party scope writers (`store_*_auth`) and xAI
+/// Shared by third-party scope writers (`store_*_auth`) and unlocked xAI
 /// [`AuthManager::update`] / `save_without_enrichment` so multi-provider
-/// logins coexist under one `auth.json`.
+/// logins coexist under one `auth.json`. Callers that already hold
+/// [`AuthFileLock`] (refresh persist) must use [`with_held_auth_json_lock`].
 pub(crate) fn with_auth_json_scope_lock<R>(
     auth_json_path: &Path,
     f: impl FnOnce() -> std::io::Result<R>,
@@ -1205,6 +1221,44 @@ mod scope_lock_tests {
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         assert!(!ran.get(), "replaced-inode lock must not guard a write");
         assert!(!auth_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn held_lock_write_does_not_open_a_second_flock() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let lock_path = dir.path().join("auth.json.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        let file_lock = AuthFileLock {
+            _heartbeat: None,
+            _file: file,
+        };
+
+        let ran = Cell::new(false);
+        with_held_auth_json_lock(&auth_path, &file_lock, || {
+            ran.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(ran.get(), "held-lock persist must run under the live guard");
+
+        let extra = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(
+            extra.try_lock_exclusive().is_err(),
+            "a second exclusive flock on a new fd must not be granted while the guard is live"
+        );
     }
 
     #[test]

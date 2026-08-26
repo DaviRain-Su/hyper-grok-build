@@ -41,7 +41,7 @@ use super::model::{
 use super::refresh::{RefreshOutcome, TokenRefresher, resolve_refresh_credential};
 use super::storage::{
     AuthFileLock, read_auth_json, read_auth_json_or_empty_recovering_corrupt,
-    with_auth_json_scope_lock, write_auth_json,
+    with_auth_json_scope_lock, with_held_auth_json_lock, write_auth_json,
 };
 
 #[cfg(test)]
@@ -968,28 +968,90 @@ impl AuthManager {
     /// Invariants:
     /// - **Disk write before any network I/O** (else a sibling process can
     ///   reuse the not-yet-rotated RT and the IdP returns `invalid_grant`).
-    /// - **Caller holds the `auth.json` file lock** (production callers:
-    ///   `refresh_chain` Success arm, `flow::run_auth_flow`).
+    /// - Unlocked callers serialize through `auth.json.lock` so a whole-map
+    ///   RMW cannot drop Kimi/Codex/Claude scopes. Refresh already holds
+    ///   that flock across the IdP call and must go through
+    ///   [`Self::update_under_held_lock`] — a second exclusive flock on a
+    ///   new fd deadlocks the same process on Linux.
     ///
     /// Returns the input `GrokAuth` BEFORE enrichment lands; callers
     /// needing the post-enrichment view re-read `current()`.
     pub(crate) async fn update(self: &Arc<Self>, auth: GrokAuth) -> std::io::Result<GrokAuth> {
-        let update_started = std::time::Instant::now();
-        // Whole-map RMW must share `auth.json.lock` with Kimi/Codex/Claude/etc.
-        // writers. An unlocked read-then-write after a third-party login can
-        // drop their scope and leave only the xAI entry — users experience
-        // this as "logging into Grok wiped OpenAI/Kimi".
-        tracing::debug!(scope = %self.scope, "auth: storing token");
-        let write_result = with_auth_json_scope_lock(&self.path, || {
+        let auth = self.commit_persisted_auth(
+            auth,
+            None,
+            "auth update disk written",
+            "auth update disk write failed",
+        )?;
+        self.spawn_user_info_enrichment(auth.clone());
+        Ok(auth)
+    }
+
+    /// Like [`Self::update`], but reuses the refresh-held [`AuthFileLock`]
+    /// instead of opening a second flock.
+    pub(crate) async fn update_under_held_lock(
+        self: &Arc<Self>,
+        auth: GrokAuth,
+        lock: &AuthFileLock,
+    ) -> std::io::Result<GrokAuth> {
+        let auth = self.commit_persisted_auth(
+            auth,
+            Some(lock),
+            "auth update disk written",
+            "auth update disk write failed",
+        )?;
+        self.spawn_user_info_enrichment(auth.clone());
+        Ok(auth)
+    }
+
+    /// Persist to disk and cache without spawning the background `/user` task
+    /// (already merged inline, or a stale fetch must not race a fresh write).
+    pub(crate) async fn save_without_enrichment(
+        &self,
+        auth: GrokAuth,
+    ) -> std::io::Result<GrokAuth> {
+        self.commit_persisted_auth(
+            auth,
+            None,
+            "auth update disk written (no enrichment)",
+            "auth update disk write failed (no enrichment)",
+        )
+    }
+
+    /// Whole-map RMW of this manager's scope. `held_lock` is the live refresh
+    /// flock when the caller already owns it; otherwise we acquire a short
+    /// exclusive lock so unlocked logins still merge with other providers.
+    fn persist_scope_entry(
+        &self,
+        auth: &GrokAuth,
+        held_lock: Option<&AuthFileLock>,
+    ) -> std::io::Result<()> {
+        let write = || {
             let mut map = read_auth_json_or_empty_recovering_corrupt(&self.path)?;
             // One entry per scope (personal and team share the scope key).
             map.insert(self.scope.clone(), auth.clone());
             write_auth_json(&self.path, &map)
-        });
-        let elapsed_ms = update_started.elapsed().as_millis() as u64;
+        };
+        match held_lock {
+            Some(lock) => with_held_auth_json_lock(&self.path, lock, write),
+            None => with_auth_json_scope_lock(&self.path, write),
+        }
+    }
+
+    fn commit_persisted_auth(
+        &self,
+        auth: GrokAuth,
+        held_lock: Option<&AuthFileLock>,
+        ok_msg: &'static str,
+        err_msg: &'static str,
+    ) -> std::io::Result<GrokAuth> {
+        let started = std::time::Instant::now();
+        tracing::debug!(scope = %self.scope, "auth: storing token");
+        let write_result = self.persist_scope_entry(&auth, held_lock);
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         match &write_result {
             Ok(()) => xai_grok_telemetry::unified_log::info(
-                "auth update disk written",
+                ok_msg,
                 None,
                 Some(serde_json::json!({
                     "rt_prefix": auth.refresh_token.as_deref().map(bearer_suffix),
@@ -1002,7 +1064,7 @@ impl AuthManager {
                 // Non-recoverable lock/IO error — keep conservative: memory only.
                 tracing::warn!(error = %e, "auth: disk update failed, updating in-memory only");
                 xai_grok_telemetry::unified_log::error(
-                    "auth update disk write failed",
+                    err_msg,
                     None,
                     Some(serde_json::json!({
                         "error": e.to_string(),
@@ -1016,61 +1078,6 @@ impl AuthManager {
         // current session work with fresh credentials while the user fixes the
         // filesystem (e.g. read-only disk). Without this, a disk failure leaves
         // the stale/dead token in memory and the user is completely stuck.
-        *self.permanent_failure.write() = None;
-        self.with_inner_write(|inner| *inner = Some(auth.clone()));
-
-        // Fire-and-forget enrichment. Off the critical path -- a slow
-        // `/user` would otherwise widen the sibling-process
-        // `invalid_grant` race window.
-        self.spawn_user_info_enrichment(auth.clone());
-
-        write_result?;
-        Ok(auth)
-    }
-
-    /// Persist to disk and cache without spawning the background `/user` task
-    /// (already merged inline, or a stale fetch must not race a fresh write).
-    pub(crate) async fn save_without_enrichment(
-        &self,
-        auth: GrokAuth,
-    ) -> std::io::Result<GrokAuth> {
-        let started = std::time::Instant::now();
-        tracing::debug!(scope = %self.scope, "auth: storing token (no enrichment)");
-        // Same flock as third-party scope writers — see `update`.
-        let write_result = with_auth_json_scope_lock(&self.path, || {
-            let mut map = read_auth_json_or_empty_recovering_corrupt(&self.path)?;
-            map.insert(self.scope.clone(), auth.clone());
-            write_auth_json(&self.path, &map)
-        });
-        let elapsed_ms = started.elapsed().as_millis() as u64;
-        match &write_result {
-            Ok(()) => xai_grok_telemetry::unified_log::info(
-                "auth update disk written (no enrichment)",
-                None,
-                Some(serde_json::json!({
-                    "rt_prefix": auth.refresh_token.as_deref().map(bearer_suffix),
-                    "key_prefix": bearer_suffix(&auth.key),
-                    "elapsed_ms": elapsed_ms,
-                    "scope": self.scope,
-                })),
-            ),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "auth: disk update failed, updating in-memory only (no enrichment)"
-                );
-                xai_grok_telemetry::unified_log::error(
-                    "auth update disk write failed (no enrichment)",
-                    None,
-                    Some(serde_json::json!({
-                        "error": e.to_string(),
-                        "elapsed_ms": elapsed_ms,
-                        "scope": self.scope,
-                    })),
-                );
-            }
-        }
-        // Always update in-memory, even if disk write failed (see update()).
         *self.permanent_failure.write() = None;
         self.with_inner_write(|inner| *inner = Some(auth.clone()));
         write_result?;
@@ -1768,43 +1775,45 @@ impl AuthManager {
     // ── Refresh chain (single mutation point) ─────────────────────────
 
     /// The only mutation point: persists on success, records the verdict on failure.
-    /// `_lock` type-enforces that the persisting `update()` runs under the file lock.
+    /// `lock` is the live refresh flock; persist reuses it (flock is not re-entrant).
     async fn apply_refresh_outcome(
         self: &Arc<Self>,
         outcome: RefreshOutcome,
         reason: RefreshReason,
         attempted_key: Option<String>,
-        _lock: &AuthFileLock,
+        lock: &AuthFileLock,
     ) -> Result<GrokAuth, AuthError> {
         let pre_key_suffix = attempted_key.as_deref().map(bearer_suffix);
         match outcome {
-            RefreshOutcome::Success(new_auth) => match self.update(*new_auth).await {
-                Ok(auth) => {
-                    let new_suffix = bearer_suffix(&auth.key);
-                    xai_grok_telemetry::unified_log::info(
-                        "auth.refresh.success",
-                        None,
-                        Some(serde_json::json!({
-                            "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
-                            "old_key_prefix": pre_key_suffix,
-                            "new_key_prefix": new_suffix,
-                            "key_changed": pre_key_suffix != Some(new_suffix),
-                        })),
-                    );
-                    tracing::info!(expires_at = ?auth.expires_at, "auth.refresh.success");
-                    self.refresh_notify.notify_waiters();
-                    Ok(auth)
+            RefreshOutcome::Success(new_auth) => {
+                match self.update_under_held_lock(*new_auth, lock).await {
+                    Ok(auth) => {
+                        let new_suffix = bearer_suffix(&auth.key);
+                        xai_grok_telemetry::unified_log::info(
+                            "auth.refresh.success",
+                            None,
+                            Some(serde_json::json!({
+                                "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
+                                "old_key_prefix": pre_key_suffix,
+                                "new_key_prefix": new_suffix,
+                                "key_changed": pre_key_suffix != Some(new_suffix),
+                            })),
+                        );
+                        tracing::info!(expires_at = ?auth.expires_at, "auth.refresh.success");
+                        self.refresh_notify.notify_waiters();
+                        Ok(auth)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "auth: failed to persist refreshed token");
+                        xai_grok_telemetry::unified_log::warn(
+                            "auth.refresh.persist_failed",
+                            None,
+                            Some(serde_json::json!({ "error": format!("{e}") })),
+                        );
+                        Err(AuthError::transient_source(e))
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "auth: failed to persist refreshed token");
-                    xai_grok_telemetry::unified_log::warn(
-                        "auth.refresh.persist_failed",
-                        None,
-                        Some(serde_json::json!({ "error": format!("{e}") })),
-                    );
-                    Err(AuthError::transient_source(e))
-                }
-            },
+            }
             RefreshOutcome::PermanentFailure {
                 error,
                 tried_key,

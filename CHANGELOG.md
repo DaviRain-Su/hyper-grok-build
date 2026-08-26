@@ -4,6 +4,18 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.10-r2] — 2026-08-26
+
+### Fixed
+- **Startup hang after an expired xAI session** — OIDC refresh already holds
+  `auth.json.lock` across the IdP call; Hyper's multi-provider `update()` then
+  opened a second exclusive flock on a new fd, which deadlocks the same
+  process on Linux (blank TUI, no further logs). Refresh persist now reuses
+  the held lock, matching the Kimi/Codex writers.
+- **Bundled Opus on 64-bit Linux** — CMake now installs `libopus.a` into
+  `lib/` (`CMAKE_INSTALL_LIBDIR`) so `audiopus_sys` can link. GNUInstallDirs
+  previously put the archive in `lib64`, which that crate never searches.
+
 ## [1.0.10-r1] — 2026-08-25
 
 ### Changed
