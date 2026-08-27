@@ -533,17 +533,14 @@ impl SkillManager {
         &self.startup_skills
     }
 
-    /// Reset discovery state for compaction.
+    /// Reset the walk cache after compaction.
     ///
-    /// Clears `announced_names` so the reminder will re-announce on
-    /// the next file access after compaction, and clears `checked_dirs`
-    /// so dynamically discovered skills can be re-discovered if the
-    /// model navigates back into the same directories.
-    ///
-    /// Does NOT clear `discovered_skills` (those are preserved for the
-    /// compaction context and slash commands).
+    /// Clears `checked_dirs` so a newly created `SKILL.md` in a previously
+    /// visited directory can still be discovered. Does **not** clear
+    /// `announced_names` or `discovered_skills`: already-announced skills
+    /// must not be re-injected after every compact (that re-added the full
+    /// listing to the conversation each cycle).
     pub fn on_compaction(&mut self) {
-        self.announced_names.clear();
         self.checked_dirs.clear();
     }
 
@@ -1143,8 +1140,8 @@ mod tests {
 
     #[test]
     fn compaction_does_not_produce_pending() {
-        // Compaction clears announced_names but does NOT queue a pending.
-        // Re-announcement happens when the reminder re-fires after compaction.
+        // Compaction clears the walk cache but does NOT queue a pending and
+        // does NOT forget announced_names — already-listed skills stay listed.
         let mut mgr = SkillManager::new();
         mgr.seed(
             None,
@@ -1154,13 +1151,22 @@ mod tests {
             None,
             None,
         );
+        let _ = mgr.take_pending_reconciliation();
         mgr.add_discovered(vec![make_skill("d", "/d/SKILL.md")]);
         let _ = mgr.take_pending_reconciliation();
 
         mgr.on_compaction();
         assert!(mgr.take_pending_reconciliation().is_none());
-        // But discovered skills are preserved for the compaction context.
+        // Discovered skills and announced names both survive compaction.
         assert_eq!(mgr.discovered_skills().len(), 1);
+        assert!(
+            mgr.announced_names().contains("s"),
+            "startup skill must stay announced across compaction"
+        );
+        assert!(
+            mgr.announced_names().contains("d"),
+            "discovered skill must stay announced across compaction"
+        );
     }
 
     #[test]

@@ -4,6 +4,18 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.10-r3] — 2026-08-27
+
+### Fixed
+- **Release CI artifact upload** — wrap `actions/upload-artifact` with two
+  retries. `v1.0.10-r2` built every target, then `aarch64-apple-darwin`
+  failed `CreateArtifact` with `ENOTFOUND` after 54 minutes and skipped
+  publish.
+- **AGENTS.md / skill re-injection after compact** — compaction no longer
+  forgets already-injected project-instruction files or skill listings.
+  Clearing those sets made the next tool call re-add the full AGENTS.md
+  (and skill catalog) into the conversation every cycle.
+
 ## [1.0.10-r2] — 2026-08-26
 
 ### Fixed

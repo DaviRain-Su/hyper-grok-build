@@ -342,11 +342,10 @@ jobs:
             --bundle-root bundled
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: ./.github/actions/upload-artifact-retry
         with:
           name: ${{ env.ARCHIVE }}
           path: ${{ env.ARCHIVE }}
-          if-no-files-found: error
 
   # Prebuilt Gambit scheme live image (`hyper-scheme-image`): the kernel in
   # packages/extensions/xai-grok-scheme-runtime/kernel/runtime.ss compiled to a
@@ -442,11 +441,10 @@ jobs:
           echo "SCHEME_ARCHIVE=$archive" >> "$GITHUB_ENV"
 
       - name: Upload scheme image artifact
-        uses: actions/upload-artifact@v6
+        uses: ./.github/actions/upload-artifact-retry
         with:
           name: ${{ env.SCHEME_ARCHIVE }}
           path: ${{ env.SCHEME_ARCHIVE }}
-          if-no-files-found: error
 
   # Note: the Windows install.ps1 integration job was removed — it cold-compiled
   # the full shell graph on GHA windows-2022, often hung/cancelled for hours, and
@@ -638,11 +636,10 @@ jobs:
           shasum -a 256 "${DESKTOP_ARCHIVE}" || sha256sum "${DESKTOP_ARCHIVE}"
 
       - name: Upload desktop artifact
-        uses: actions/upload-artifact@v6
+        uses: ./.github/actions/upload-artifact-retry
         with:
           name: ${{ env.DESKTOP_ARCHIVE }}
           path: ${{ env.DESKTOP_ARCHIVE }}
-          if-no-files-found: error
 
   release:
     name: publish GitHub Release
