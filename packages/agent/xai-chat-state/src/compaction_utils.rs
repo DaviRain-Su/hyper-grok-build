@@ -922,7 +922,10 @@ pub struct CompactedHistoryInput<'a> {
     pub user_message_prefix: String,
     /// Pre-rendered AGENTS.md `<system-reminder>` block to re-inject after the
     /// user prefix. `None` means no project instructions to re-inject.
-    /// This preserves project instructions verbatim across compaction.
+    ///
+    /// Compaction already keeps a tagged `ProjectInstructions` item when one
+    /// is in the preserved prefix (`preserve_inherited_prefix`). Callers must
+    /// not pass a reminder that would duplicate that slot.
     pub agents_md_reminder: Option<String>,
     /// State context snapshot taken before compaction cleared the conversation.
     pub state_context: &'a CompactionStateContext,
