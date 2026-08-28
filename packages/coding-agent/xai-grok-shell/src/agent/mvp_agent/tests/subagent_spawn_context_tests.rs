@@ -212,6 +212,7 @@ fn model_entry_with_rate_limit(
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     }
 }

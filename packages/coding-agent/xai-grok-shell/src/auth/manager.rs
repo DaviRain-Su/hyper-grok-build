@@ -447,6 +447,47 @@ impl AuthManager {
         manager
     }
 
+    /// Deterministic proxy stub for test constructors that must not touch
+    /// effective config / real home.
+    #[doc(hidden)]
+    pub const TEST_ISOLATED_PROXY: &str = "http://127.0.0.1:9";
+
+    /// Explicit-path constructor for tests and integration binaries.
+    ///
+    /// - **Never** reads `GROK_AUTH` / `GROK_AUTH_PATH` / `HOME` / `GROK_HOME`
+    /// - **Never** calls `EndpointsConfig::from_effective_config()` or `grok_home()`
+    /// - Loads/persists **only** the given `auth_json_path`
+    /// - Uses `proxy_base_url` as-is (pass [`Self::TEST_ISOLATED_PROXY`] or a mock)
+    ///
+    /// `#[doc(hidden)]`: not a product API — for hermetic harnesses only.
+    /// Prefer over [`Self::new`] whenever env precedence is not under test.
+    #[doc(hidden)]
+    pub fn for_test_with_auth_path(
+        auth_json_path: impl Into<PathBuf>,
+        grok_com_config: GrokComConfig,
+        proxy_base_url: impl Into<String>,
+    ) -> Self {
+        Self::from_auth_json_path(
+            auth_json_path.into(),
+            grok_com_config.auth_scope(),
+            grok_com_config,
+            proxy_base_url.into(),
+        )
+    }
+
+    /// Convenience: `grok_home/auth.json` + [`Self::TEST_ISOLATED_PROXY`].
+    ///
+    /// Available to lib unit tests (`cfg(test)`) and integration crates via
+    /// [`Self::for_test_with_auth_path`]. Does not consult process env.
+    #[doc(hidden)]
+    pub fn for_test_home(grok_home: &Path, grok_com_config: GrokComConfig) -> Self {
+        Self::for_test_with_auth_path(
+            grok_home.join("auth.json"),
+            grok_com_config,
+            Self::TEST_ISOLATED_PROXY,
+        )
+    }
+
     /// Lib-unit alias of [`Self::for_test_home`] (historical name).
     #[cfg(test)]
     pub(crate) fn new_test_isolated(grok_home: &Path, grok_com_config: GrokComConfig) -> Self {

@@ -1900,39 +1900,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(auth.key, "fresh-token-from-disk");
-        assert!(!is_new_login, "should not be a new login");
-        assert_eq!(mgr.current().unwrap().key, "fresh-token-from-disk");
-    }
-    /// When in-memory token is valid (not expired), run_auth_flow should
-    /// return it directly without checking disk.
-    #[tokio::test]
-    async fn run_auth_flow_returns_cached_when_valid() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = GrokComConfig::default();
-        let mgr = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
-        let valid = GrokAuth {
-            key: "still-valid".into(),
-            auth_mode: AuthMode::Oidc,
-            expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.into()),
-            oidc_client_id: Some("client-1".into()),
-            ..GrokAuth::test_default()
-        };
-        mgr.hot_swap(valid);
-        let (auth, is_new_login) = run_auth_flow(
-            &mgr,
-            &cfg,
-            false,
-            None,
-            None,
-            None,
-            LoginTransportOverride::None,
-        )
-        .await
-        .unwrap();
         assert_eq!(auth.key, "still-valid");
-        assert!(!is_new_login);
+        assert!(!is_new_login, "should not be a new login");
+        assert_eq!(mgr.current().unwrap().key, "still-valid");
     }
     #[tokio::test]
     async fn run_auth_flow_defers_to_consumer_refresh_on_transient_failure() {

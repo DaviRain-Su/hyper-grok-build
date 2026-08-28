@@ -2979,20 +2979,20 @@ async fn unsupported_backend_search_sends_no_hosted_tool_on_either_channel() {
 
             // Model advertises server-side search: the hosted tool rides both channels.
             actor.supports_backend_search.set(true);
-            assert!(!actor.hosted_tools_for_turn().is_empty());
+            assert!(!actor.hosted_tools_for_turn().await.is_empty());
             assert_eq!(
-                xai_grok_sampling_types::extra_tool_entries(&actor.hosted_tools_for_turn()).len(),
+                xai_grok_sampling_types::extra_tool_entries(&actor.hosted_tools_for_turn().await).len(),
                 1
             );
 
             // Model does not: the gate empties the list before it can reach the wire.
             actor.supports_backend_search.set(false);
             assert!(
-                actor.hosted_tools_for_turn().is_empty(),
+                actor.hosted_tools_for_turn().await.is_empty(),
                 "the backend-search gate must drop the hosted tool"
             );
             assert!(
-                xai_grok_sampling_types::extra_tool_entries(&actor.hosted_tools_for_turn())
+                xai_grok_sampling_types::extra_tool_entries(&actor.hosted_tools_for_turn().await)
                     .is_empty(),
                 "and so no raw-JSON entry is produced to splice"
             );
@@ -3021,11 +3021,11 @@ async fn per_turn_tool_overrides_win_over_the_config_web_search_policy() {
                 }])
                 .await;
             actor.supports_backend_search.set(true);
-            assert!(actor.backend_search_active());
+            assert!(actor.backend_search_active().await);
 
             // No per-turn update: the config policy is what reaches the wire.
             assert_eq!(
-                actor.effective_hosted_tools(),
+                actor.effective_hosted_tools().await,
                 vec![xai_grok_sampling_types::HostedTool::WebSearch {
                     options: Some(configured.clone()),
                 }],
@@ -3041,14 +3041,14 @@ async fn per_turn_tool_overrides_win_over_the_config_web_search_policy() {
             }));
 
             assert_eq!(
-                actor.effective_hosted_tools(),
+                actor.effective_hosted_tools().await,
                 vec![xai_grok_sampling_types::HostedTool::WebSearch {
                     options: Some(per_turn.clone()),
                 }],
                 "an explicit per-turn override replaces the configured policy on the wire"
             );
             assert_eq!(
-                actor.effective_tool_overrides(),
+                actor.effective_tool_overrides().await,
                 Some(xai_grok_sampling_types::ToolOverrides {
                     x_search: None,
                     web_search: Some(per_turn),
@@ -3062,7 +3062,7 @@ async fn per_turn_tool_overrides_win_over_the_config_web_search_policy() {
                 web_search: Some(None),
             }));
             assert_eq!(
-                actor.effective_hosted_tools(),
+                actor.effective_hosted_tools().await,
                 vec![xai_grok_sampling_types::HostedTool::WebSearch {
                     options: Some(configured),
                 }],

@@ -137,33 +137,33 @@ fn decide_relaunch_is_idempotent_and_directional() {
 
     // Equal → declined, and the flag is NOT armed.
     assert!(matches!(
-        decide_relaunch_for_update(&control_state, "0.1.100".to_string(), &relaunching),
+        decide_relaunch_for_update(&control_state, "0.1.100".to_string(), false, &relaunching),
         Ok(ControlPayload::RelaunchDeclined { .. })
     ));
     assert!(!relaunching.load(Ordering::SeqCst));
 
     // Strictly-older target (downgrade) → declined; never downgrade.
     assert!(matches!(
-        decide_relaunch_for_update(&control_state, "0.1.0".to_string(), &relaunching),
+        decide_relaunch_for_update(&control_state, "0.1.0".to_string(), false, &relaunching),
         Ok(ControlPayload::RelaunchDeclined { .. })
     ));
     // Unparseable target → declined (dev "unknown" builds).
     assert!(matches!(
-        decide_relaunch_for_update(&control_state, "unknown".to_string(), &relaunching),
+        decide_relaunch_for_update(&control_state, "unknown".to_string(), false, &relaunching),
         Ok(ControlPayload::RelaunchDeclined { .. })
     ));
     assert!(!relaunching.load(Ordering::SeqCst));
 
     // Newer → accepted, arms the flag.
     assert!(matches!(
-        decide_relaunch_for_update(&control_state, "0.2.0".to_string(), &relaunching),
+        decide_relaunch_for_update(&control_state, "0.2.0".to_string(), false, &relaunching),
         Ok(ControlPayload::Relaunching { .. })
     ));
     assert!(relaunching.load(Ordering::SeqCst));
 
     // Second accepted request while armed → declined (idempotent).
     assert!(matches!(
-        decide_relaunch_for_update(&control_state, "0.3.0".to_string(), &relaunching),
+        decide_relaunch_for_update(&control_state, "0.3.0".to_string(), false, &relaunching),
         Ok(ControlPayload::RelaunchDeclined { .. })
     ));
 }

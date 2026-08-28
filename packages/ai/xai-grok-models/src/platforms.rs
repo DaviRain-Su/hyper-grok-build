@@ -3733,7 +3733,11 @@ mod tests {
             .collect();
         assert!(zai_coding.contains(&"glm-5.2"));
         assert!(zai_coding.contains(&"glm-5.1"));
-        assert_eq!(zai_coding.len(), 6);
+        // 2026-08: GLM-5.3 + GLM-5.3-Flash shipped on the Coding Plan
+        // (docs.z.ai: 1M context / 128K output, thinking always enabled).
+        assert!(zai_coding.contains(&"glm-5.3"));
+        assert!(zai_coding.contains(&"glm-5.3-flash"));
+        assert_eq!(zai_coding.len(), 8);
     }
 
     /// Mirror of the live `api.kimi.com/coding/v1/models` K3 entry

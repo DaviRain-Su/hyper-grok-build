@@ -1496,7 +1496,9 @@ mod tests {
             // only the veto can empty the capture. The collector is armed
             // before the stream runs, so the abort lands on the tool frame.
             capture.record_reasoning_delta(0, 0, "reasoning-1".into(), "looping thought");
-            let raw = stream::iter(vec![Ok(tool_frame), Ok(completed_event())]).boxed();
+            let raw = stream::iter(vec![Ok(tool_frame), Ok(completed_event())])
+                .map(|r: Result<rs::ResponseStreamEvent, _>| r.map(ResponsesStreamItem::Event))
+                .boxed();
             let events = collect(stream_responses_tracked(
                 raw,
                 None,
@@ -1552,11 +1554,7 @@ mod tests {
     }
 
     async fn stop_reason_for_incomplete(reason: &str) -> Option<StopReason> {
-        let raw = stream::iter(vec![
-            Ok(text_delta_event("cut")),
-            Ok(incomplete_event(reason)),
-        ])
-        .boxed();
+        let raw = raw_events(vec![Ok(text_delta_event("cut")), Ok(incomplete_event(reason))]);
         let events = collect(stream_responses(
             raw,
             None,
@@ -1600,7 +1598,7 @@ mod tests {
                 response: build_response(rs_types::Status::Incomplete),
                 sequence_number: 0,
             });
-        let raw = stream::iter(vec![Ok(text_delta_event("cut")), Ok(event)]).boxed();
+        let raw = raw_events(vec![Ok(text_delta_event("cut")), Ok(event)]);
         let events = collect(stream_responses(
             raw,
             None,
@@ -1639,7 +1637,7 @@ mod tests {
                 response,
                 sequence_number: 0,
             });
-        let raw = stream::iter(vec![Ok(event)]).boxed();
+        let raw = raw_events(vec![Ok(event)]);
         let events = collect(stream_responses(
             raw,
             None,

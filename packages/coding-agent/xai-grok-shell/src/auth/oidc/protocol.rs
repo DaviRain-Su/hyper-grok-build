@@ -1328,7 +1328,10 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None)
+        let probe = crate::auth::oidc::refresh::SuspendProbe::start(
+            crate::auth::oidc::refresh::ProbeScope::Exchange,
+        );
+        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None, &probe)
             .await
             .expect("transient 5xx must be retried until success");
         assert_eq!(resp.access_token, "new-at");
@@ -1366,7 +1369,10 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let err = refresh_tokens(&token_endpoint, "rt", "client", None, None)
+        let probe = crate::auth::oidc::refresh::SuspendProbe::start(
+            crate::auth::oidc::refresh::ProbeScope::Exchange,
+        );
+        let err = refresh_tokens(&token_endpoint, "rt", "client", None, None, &probe)
             .await
             .expect_err("invalid_grant is terminal");
         assert!(
@@ -1413,7 +1419,10 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None)
+        let probe = crate::auth::oidc::refresh::SuspendProbe::start(
+            crate::auth::oidc::refresh::ProbeScope::Exchange,
+        );
+        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None, &probe)
             .await
             .expect("a non-terminal coded 4xx must be retried until success");
         assert_eq!(resp.access_token, "new-at");

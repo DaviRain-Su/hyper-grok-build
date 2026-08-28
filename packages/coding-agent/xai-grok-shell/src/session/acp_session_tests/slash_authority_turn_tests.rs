@@ -672,7 +672,7 @@ async fn parent_skill_lookup_matches_advertised_gated_collision_and_skill_only_l
 
             let slash_skills = actor.slash_skills_for_resolve().await;
             let availability = actor.command_availability_for_skill_projection().await;
-            let advertised = slash_commands::available_commands(&slash_skills, availability, &[]);
+            let advertised = slash_commands::available_commands(&slash_skills, availability, &[], &[], &[]);
             let advertised_skill_names: Vec<_> = advertised
                 .iter()
                 .filter(|command| {

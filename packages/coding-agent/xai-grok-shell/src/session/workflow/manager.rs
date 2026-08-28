@@ -1051,8 +1051,8 @@ mod tests {
             panic!("expected resumed spawn event");
         };
         assert_eq!(
-            req.runtime_overrides.reasoning_effort.as_deref(),
-            Some("high")
+            req.runtime_overrides.reasoning_effort,
+            Some(xai_tool_types::SubagentReasoningEffort::High)
         );
         complete_spawn(req);
         assert!(matches!(
@@ -1483,12 +1483,12 @@ mod tests {
             complete_spawn(req);
         }
         assert_eq!(
-            efforts.get("inherits").and_then(Option::as_deref),
-            Some("high")
+            efforts.get("inherits").copied().flatten(),
+            Some(xai_tool_types::SubagentReasoningEffort::High)
         );
         assert_eq!(
-            efforts.get("overrides").and_then(Option::as_deref),
-            Some("low")
+            efforts.get("overrides").copied().flatten(),
+            Some(xai_tool_types::SubagentReasoningEffort::Low)
         );
         assert!(matches!(
             outcome_rx.await.unwrap(),

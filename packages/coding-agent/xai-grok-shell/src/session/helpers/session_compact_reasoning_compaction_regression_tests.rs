@@ -175,6 +175,9 @@ fn test_config(base_url: &str) -> SamplerConfig {
         temperature: Some(0.7),
         top_p: None,
         api_backend: ApiBackend::ChatCompletions,
+        adapter_kind: Default::default(),
+        request_compat: None,
+        endpoint_path: None,
         auth_scheme: Default::default(),
         extra_headers: Default::default(),
         extra_response_includes: Vec::new(),
@@ -198,6 +201,11 @@ fn test_config(base_url: &str) -> SamplerConfig {
         compaction_at_tokens: None,
         doom_loop_recovery: None,
         header_injector: None,
+        responses_codex_dialect: false,
+        bedrock_request_metadata: Default::default(),
+        bedrock_headers: Default::default(),
+        bedrock_profile: None,
+        kimi_dialect: false,
     }
 }
 

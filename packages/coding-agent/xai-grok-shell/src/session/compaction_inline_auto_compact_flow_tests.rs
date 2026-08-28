@@ -761,6 +761,7 @@ async fn family_switch_compacts_lossy_with_new_model() {
                     tool_call_id: "call_xai_minted_id".to_string(),
                     content: std::sync::Arc::<str>::from("file listing"),
                     images: Vec::new(),
+                    is_error: false,
                 }),
                 ConversationItem::assistant("done"),
             ]);

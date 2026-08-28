@@ -329,7 +329,7 @@ fn resolve_model_authored_skill_requires_exact_child_catalog_name_and_loader() {
 
     let flush_skill = vec![make_skill("flush", true)];
     let memory_off = CommandAvailability::default();
-    let advertised = available_commands(&flush_skill, memory_off, &[]);
+    let advertised = available_commands(&flush_skill, memory_off, &[], &[], &[]);
     assert!(advertised.iter().any(|command| command.name == "flush"));
     assert!(
         super::resolve_model_authored_skill(
@@ -1749,7 +1749,7 @@ fn same_named_builtin_projects_workflow_metadata_without_replacing_command() {
         source: "builtin",
         path: None,
     };
-    let commands = available_commands(&[], all_gated(), std::slice::from_ref(&workflow));
+    let commands = available_commands(&[], all_gated(), std::slice::from_ref(&workflow), &[], &[]);
     let matching: Vec<_> = commands
         .iter()
         .filter(|command| command.name == "deep-research")
@@ -1794,7 +1794,7 @@ fn ordinary_builtin_collisions_do_not_project_workflow_metadata() {
     status_workflow.source = "project";
     let mut goal_workflow = listing("goal");
     goal_workflow.source = "user";
-    let commands = available_commands(&[], all_gated(), &[status_workflow, goal_workflow]);
+    let commands = available_commands(&[], all_gated(), &[status_workflow, goal_workflow], &[], &[]);
 
     assert_eq!(
         commands

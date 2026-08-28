@@ -48,7 +48,7 @@ async fn refresh_path_lock_acquire_attaches_the_heartbeat() {
         panic!("an empty auth dir has no sibling token to adopt");
     };
     assert!(
-        guard.heartbeat.is_some(),
+        guard._heartbeat.is_some(),
         "the refresh-path hold must carry the heartbeat that placates old binaries"
     );
 }

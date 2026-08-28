@@ -1942,7 +1942,9 @@ async fn build_compacted_history_multi_turn_with_parallel_tool_calls() {
             model_id: Some("grok-3".to_string()),
             model_fingerprint: None,
             reasoning_effort: None,
-        }),
+            provider_native_state: None,
+    reasoning_model_identity: None,
+}),
         // [4] Tool result for call_1
         ConversationItem::tool_result("call_1", "fn main() {\n    println!(\"hello world\");\n}"),
         // [5] Tool result for call_2
@@ -1976,7 +1978,9 @@ async fn build_compacted_history_multi_turn_with_parallel_tool_calls() {
             model_id: Some("grok-3".to_string()),
             model_fingerprint: None,
             reasoning_effort: None,
-        }),
+            provider_native_state: None,
+    reasoning_model_identity: None,
+}),
         // [9] Tool result for call_3
         ConversationItem::tool_result("call_3", "File edited successfully."),
         // [10] Tool result for call_4
@@ -2314,7 +2318,9 @@ fn conversation_item_preserves_reasoning_siblings() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
-        }),
+            provider_native_state: None,
+    reasoning_model_identity: None,
+}),
     ]);
     assert_eq!(result.len(), 3);
     assert!(matches!(result[1], ConversationItem::Reasoning(_)));
@@ -2338,7 +2344,9 @@ fn strip_reasoning_blocks_drops_reasoning_siblings() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
-        }),
+            provider_native_state: None,
+    reasoning_model_identity: None,
+}),
     ]);
     assert_eq!(result.len(), 1, "reasoning sibling must be dropped");
     assert!(matches!(result[0], ConversationItem::Assistant(_)));
@@ -2388,7 +2396,9 @@ fn prepare_for_summarization_drops_reasoning_sibling_on_mutated_assistant() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
-        }),
+            provider_native_state: None,
+    reasoning_model_identity: None,
+}),
         ConversationItem::tool_result("tc1", "match found"),
     ]);
     assert_eq!(
@@ -2431,7 +2441,9 @@ fn prepare_for_summarization_drops_standalone_reasoning_sibling() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
-        }),
+            provider_native_state: None,
+    reasoning_model_identity: None,
+}),
     ]);
     assert_eq!(result.len(), 1);
     let ConversationItem::Assistant(a) = &result[0] else {
@@ -2467,7 +2479,9 @@ fn prepare_for_summarization_handles_multi_assistant_mixed_conversation() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
-        }),
+            provider_native_state: None,
+    reasoning_model_identity: None,
+}),
         ConversationItem::tool_result("tc1", "match"),
         ConversationItem::user("second turn"),
         mk_reasoning(),
@@ -2477,7 +2491,9 @@ fn prepare_for_summarization_handles_multi_assistant_mixed_conversation() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
-        }),
+            provider_native_state: None,
+    reasoning_model_identity: None,
+}),
         ConversationItem::tool_result("tc2", "stray"),
         ConversationItem::user("third turn"),
         ConversationItem::Assistant(AssistantItem {
@@ -2486,7 +2502,9 @@ fn prepare_for_summarization_handles_multi_assistant_mixed_conversation() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
-        }),
+            provider_native_state: None,
+    reasoning_model_identity: None,
+}),
     ]);
     assert_eq!(result.len(), 6);
     assert!(
@@ -2555,7 +2573,9 @@ fn prepare_for_summarization_is_idempotent() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
-        }),
+            provider_native_state: None,
+    reasoning_model_identity: None,
+}),
         ConversationItem::tool_result("tc1", "files"),
     ];
     let once = prepare_conversation_for_summarization(input.clone());

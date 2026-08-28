@@ -665,6 +665,7 @@ fn reasoning_effort_helpers_resolve_wire_name_to_catalog_key() {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     custom.info.supports_reasoning_effort = true;

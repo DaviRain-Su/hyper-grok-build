@@ -53,6 +53,8 @@ async fn test_compacted_history_raw_strings() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            provider_native_state: None,
+            reasoning_model_identity: None,
         }),
         ConversationItem::tool_result("tc1", "fn login() { /* buggy code */ }"),
         ConversationItem::Assistant(AssistantItem {
@@ -67,6 +69,8 @@ async fn test_compacted_history_raw_strings() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            provider_native_state: None,
+            reasoning_model_identity: None,
         }),
         ConversationItem::tool_result("tc2", "Successfully replaced text."),
     ];
@@ -223,6 +227,8 @@ async fn grok_build_compaction_drops_working_tail_regression_206460() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            provider_native_state: None,
+            reasoning_model_identity: None,
         }),
         ConversationItem::tool_result("tc1", "fn login() { /* ... */ }"),
     ];

@@ -538,7 +538,7 @@ async fn session_actor_register_command_slash_hello_wasm() {
             let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new(
                 "/hello_wasm Grok",
             ))];
-            let outcome = slash_commands::resolve(
+            let outcome = slash_commands::resolve_human_intent(
                 prompt,
                 &[],
                 slash_commands::CommandAvailability::default(),
