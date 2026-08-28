@@ -29,6 +29,7 @@ xai-grok-version = { workspace = true }
 xai-grok-telemetry = { workspace = true }
 xai-grok-workspace = { workspace = true }
 xai-grok-dashboard = { path = "../xai-grok-dashboard" }
+xai-hyper-web = { path = "../xai-hyper-web" }
 xai-crash-handler = { path = "../../platform/xai-crash-handler" }
 xai-acp-lib = { workspace = true }
 

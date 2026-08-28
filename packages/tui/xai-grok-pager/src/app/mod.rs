@@ -65,7 +65,7 @@ mod xt_filter;
 pub(crate) use crate::terminal::{kitty_flags_pushed, kitty_releases_reported};
 pub use cli::{
     AgentArgs, AgentCmd, Command, HeadlessArgs, LeaderArgs, LeaderMgmtArgs, LeaderMgmtCommand,
-    LeaderTargetArgs, OutputFormat, PagerArgs, ServeArgs, WrapArgs,
+    LeaderTargetArgs, OutputFormat, PagerArgs, ServeArgs, WebArgs, WrapArgs,
 };
 pub use cli::{WorkspaceMgmtArgs, WorkspaceMgmtCommand, WorkspaceStartArgs};
 use crossterm::cursor::{self, SetCursorStyle};

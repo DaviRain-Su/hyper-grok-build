@@ -1008,6 +1008,21 @@ fn test_reinstall_hint_gh_release_mentions_gh_command() {
 }
 
 #[test]
+#[cfg(feature = "community-build")]
+fn test_reinstall_hint_community_points_at_github_releases() {
+    let hint = reinstall_hint("community-github", "stable");
+    assert!(
+        hint.contains("releases/latest/download/install"),
+        "community reinstall must pipe the GitHub Release asset: {hint}"
+    );
+    assert!(
+        !hint.contains("raw.githubusercontent.com") && !hint.contains("/dev/install"),
+        "community reinstall must not pipe a git branch: {hint}"
+    );
+}
+
+#[test]
+#[cfg(not(feature = "community-build"))]
 fn test_reinstall_hint_internal_mentions_platform_installer() {
     let hint = reinstall_hint("internal", "stable");
     if cfg!(windows) {
@@ -1034,6 +1049,7 @@ fn test_reinstall_hint_internal_mentions_platform_installer() {
 }
 
 #[test]
+#[cfg(not(feature = "community-build"))]
 fn test_reinstall_hint_internal_alpha_sets_channel() {
     let hint = reinstall_hint("internal", "alpha");
     if cfg!(windows) {
@@ -1051,6 +1067,7 @@ fn test_reinstall_hint_internal_alpha_sets_channel() {
 }
 
 #[test]
+#[cfg(not(feature = "community-build"))]
 fn test_reinstall_hint_enterprise_uses_enterprise_script() {
     // Enterprise ships via its own bootstrap script (channel hardcoded
     // there), never install.sh + GROK_CHANNEL.

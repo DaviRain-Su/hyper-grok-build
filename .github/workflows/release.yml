@@ -4,7 +4,7 @@ name: Release
 # targets, package per-target archives named
 # hyper-<version>-<target-triple>.{tar.gz|zip} (binary + bundled runtime skills +
 # LICENSE + NOTICE + THIRD-PARTY-NOTICES), generate SHA256SUMS, and publish as a
-# GitHub Release. install.sh / install.ps1 resolve these exact asset names.
+# GitHub Release. `hyper update` and SHA256SUMS resolve these exact asset names.
 
 on:
   push:
@@ -341,12 +341,26 @@ jobs:
             --binary-entry "$binary_entry" \
             --bundle-root bundled
 
+      # macos-14 has seen CreateArtifact ENOTFOUND; retry once before failing.
       - name: Upload artifact
+        id: upload-cli
+        continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
           name: ${{ env.ARCHIVE }}
           path: ${{ env.ARCHIVE }}
           if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+      - name: Retry upload artifact
+        if: steps.upload-cli.outcome == 'failure'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
 
   # Prebuilt Gambit scheme live image (`hyper-scheme-image`): the kernel in
   # packages/extensions/xai-grok-scheme-runtime/kernel/runtime.ss compiled to a
@@ -442,23 +456,33 @@ jobs:
           echo "SCHEME_ARCHIVE=$archive" >> "$GITHUB_ENV"
 
       - name: Upload scheme image artifact
+        id: upload-scheme
+        continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
           name: ${{ env.SCHEME_ARCHIVE }}
           path: ${{ env.SCHEME_ARCHIVE }}
           if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+      - name: Retry upload scheme image artifact
+        if: steps.upload-scheme.outcome == 'failure'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.SCHEME_ARCHIVE }}
+          path: ${{ env.SCHEME_ARCHIVE }}
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
 
-  # Note: the Windows install.ps1 integration job was removed — it cold-compiled
-  # the full shell graph on GHA windows-2022, often hung/cancelled for hours, and
-  # blocked publish. Windows CLI artifacts still come from matrix build target
-  # x86_64-pc-windows-msvc (hyper-*-x86_64-pc-windows-msvc.zip). install.ps1
-  # remains in-repo for end users; run test_install_ps1 locally if needed.
+  # Windows native install.ps1 CI was removed: it cold-compiled the full shell
+  # graph on windows-2022, often hung, and blocked publish. Windows CLI artifacts
+  # still come from matrix target x86_64-pc-windows-msvc.
 
-  # macOS install.sh contract: exercises bsdtar listing/parser branch against
-  # the same community fixtures (full install, binary-only, injection rollback,
-  # double-slash / SUMS rejection). Complements Linux GNU tar CI.
-  install-sh-macos:
-    name: install.sh (macos-14)
+  # Community updater contract against the same release-archive fixtures on
+  # macOS (bsdtar) and Linux (GNU tar) before publish.
+  community-update-macos:
+    name: community updater (macos-14)
     runs-on: macos-14
     timeout-minutes: 60
     steps:
@@ -469,22 +493,22 @@ jobs:
         run: cargo install dotslash --locked
       - uses: Swatinem/rust-cache@v2
         with:
-          key: install-sh-macos
-          shared-key: install-sh-macos
+          key: community-update-macos
+          shared-key: community-update-macos
       - name: Show tar flavor
         run: |
           tar --version 2>&1 | head -3 || true
           which tar
-      - name: Run install.sh / community contract tests
+      - name: Installer supply-chain check
+        run: sh scripts/check-installer-supply-chain.sh
+      - name: Run community updater / archive contract tests
         run: |
           cargo test -p xai-grok-update \
             --features community-build,community-update-test-hooks \
             --test test_community_update --locked -- --nocapture
 
-  # Linux install.sh contract (GNU tar) — same test binary as macOS so both
-  # TAR_FLAVOR branches are live-exercised before publish.
-  install-sh-linux:
-    name: install.sh (ubuntu-24.04)
+  community-update-linux:
+    name: community updater (ubuntu-24.04)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -495,11 +519,13 @@ jobs:
         run: cargo install dotslash --locked
       - uses: Swatinem/rust-cache@v2
         with:
-          key: install-sh-linux
-          shared-key: install-sh-linux
+          key: community-update-linux
+          shared-key: community-update-linux
       - name: Show tar flavor
         run: tar --version | head -3
-      - name: Run install.sh / community contract tests
+      - name: Installer supply-chain check
+        run: sh scripts/check-installer-supply-chain.sh
+      - name: Run community updater / archive contract tests
         run: |
           cargo test -p xai-grok-update \
             --features community-build,community-update-test-hooks \
@@ -619,9 +645,6 @@ jobs:
             export HYPER_AGENT_BIN="\$HOME/.hyper/desktop/bin/hyper"
             comet
 
-          Or:
-            curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install-desktop.sh | bash
-
           Data:
             Desktop engine store: ~/.hyper/desktop  (COMET_DATA_DIR)
             Hyper agent home:     ~/.grok            (GROK_HOME)
@@ -638,15 +661,28 @@ jobs:
           shasum -a 256 "${DESKTOP_ARCHIVE}" || sha256sum "${DESKTOP_ARCHIVE}"
 
       - name: Upload desktop artifact
+        id: upload-desktop
+        continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
           name: ${{ env.DESKTOP_ARCHIVE }}
           path: ${{ env.DESKTOP_ARCHIVE }}
           if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+      - name: Retry upload desktop artifact
+        if: steps.upload-desktop.outcome == 'failure'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.DESKTOP_ARCHIVE }}
+          path: ${{ env.DESKTOP_ARCHIVE }}
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
 
   release:
     name: publish GitHub Release
-    needs: [build, desktop, scheme-image, install-sh-macos, install-sh-linux]
+    needs: [build, desktop, scheme-image, community-update-macos, community-update-linux]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -663,8 +699,16 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Require the five CLI archives + three desktop bundles (Linux x64/arm64,
-      # macOS arm64) + three scheme image binaries. Extra files are rejected.
+      - name: Stage installer scripts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          install -m 0755 install.sh dist/install.sh
+          install -m 0755 install-desktop.sh dist/install-desktop.sh
+          install -m 0644 install.ps1 dist/install.ps1
+
+      # Require the five CLI archives + three desktop bundles + three scheme
+      # images + the three bootstrap scripts. Extra files are rejected.
       - name: Assert release asset set
         shell: bash
         run: |
@@ -682,6 +726,9 @@ jobs:
             "hyper-scheme-image-${version}-aarch64-apple-darwin.tar.gz"
             "hyper-scheme-image-${version}-x86_64-unknown-linux-gnu.tar.gz"
             "hyper-scheme-image-${version}-aarch64-unknown-linux-gnu.tar.gz"
+            "install.sh"
+            "install.ps1"
+            "install-desktop.sh"
           )
           cd dist
           ls -l
@@ -700,7 +747,7 @@ jobs:
               exit 1
             fi
           done
-          echo "CLI (5) + desktop (3) + scheme image (3) release archives present"
+          echo "CLI (5) + desktop (3) + scheme image (3) + installers (3) present"
 
       - name: Generate SHA256SUMS
         working-directory: dist
@@ -720,9 +767,12 @@ jobs:
             "hyper-scheme-image-${version}-aarch64-apple-darwin.tar.gz" \
             "hyper-scheme-image-${version}-x86_64-unknown-linux-gnu.tar.gz" \
             "hyper-scheme-image-${version}-aarch64-unknown-linux-gnu.tar.gz" \
+            install.sh \
+            install.ps1 \
+            install-desktop.sh \
             > SHA256SUMS
           cat SHA256SUMS
-          test "$(wc -l < SHA256SUMS | tr -d '[:space:]')" -eq 11
+          test "$(wc -l < SHA256SUMS | tr -d '[:space:]')" -eq 14
 
       # Contract verifier applies to CLI hyper-* archives only (root binary +
       # bundled/**). Desktop bundles are bin/comet+hyper layout.
@@ -757,8 +807,7 @@ jobs:
           draft: false
           # Always publish as a full release. Community revision tags use a
           # hyphenated suffix (e.g. v0.2.114-r1); treating those as GitHub
-          # prereleases would hide them from /latest and break installers /
-          # `hyper update`.
+          # prereleases would hide them from /latest and break `hyper update`.
           prerelease: false
           make_latest: true
           generate_release_notes: true
@@ -768,32 +817,39 @@ jobs:
 
             Unofficial multi-provider community build of [Grok Build](https://github.com/xai-org/grok-build).
 
-            ### CLI install
+            Pipe the **release asset**, never a git branch:
 
             ```sh
             # macOS / Linux
-            curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+            curl -fsSL https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.sh | sh
             ```
 
             ```powershell
-            # Windows PowerShell
-            irm https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.ps1 | iex
+            irm https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.ps1 | iex
             ```
 
-            Pin a version: `bash install.sh --version ${{ github.ref_name }}`
+            Already installed? `hyper update`
 
-            ### Desktop install (local-link UI, macOS arm64 / Linux)
+            ### CLI archives
+
+            | OS | Asset |
+            | -- | ----- |
+            | macOS arm64 | `hyper-<version>-aarch64-apple-darwin.tar.gz` |
+            | macOS x86_64 | `hyper-<version>-x86_64-apple-darwin.tar.gz` |
+            | Linux x86_64 (glibc ≥ 2.17) | `hyper-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+            | Linux arm64 (glibc ≥ 2.17) | `hyper-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+            | Windows x86_64 | `hyper-<version>-x86_64-pc-windows-msvc.zip` |
+
+            ### Desktop (local-link UI, macOS arm64 / Linux)
 
             ```sh
-            curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install-desktop.sh | bash
-            # pin: bash install-desktop.sh --version ${{ github.ref_name }}
-            comet
+            curl -fsSL https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install-desktop.sh | sh
             ```
 
-            Desktop assets: `hyper-desktop-*-{aarch64-apple-darwin,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu}.tar.gz`
+            Download `hyper-desktop-*-{aarch64-apple-darwin,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu}.tar.gz`
             (bundles `bin/comet` + `bin/hyper`; offline / no cloud sync).
 
             Scheme live image (optional, for `runtime.scheme` plugins):
             `hyper-scheme-image-*-{aarch64-apple-darwin,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu}.tar.gz`
-            — installers place it at `~/.grok/bin/hyper-scheme-image`; without it the
+            — place it at `~/.grok/bin/hyper-scheme-image`; without it the
             runtime falls back to `gxi`/`gsi` on PATH.

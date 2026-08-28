@@ -4,6 +4,22 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+### Added
+- **`hyper web`** — Tailscale-first browser control plane. Loopback listener
+  with a persistent `~/.grok/web-token`, 401 without the token, and printed
+  `tailscale serve` hints. Session chat is not wired yet.
+
+### Changed
+- **Installer is a GitHub Release asset** — `install.sh` / `install.ps1` /
+  `install-desktop.sh` stay in-tree as source, but the documented one-liner
+  pipes `releases/latest/download/install.sh`, never the git default branch
+  (the injection path in #46). CI publishes those scripts with `SHA256SUMS`
+  and rejects `curl -k` / `nohup` / third-party hosts.
+
+### Fixed
+- **Release artifact upload** — retry `actions/upload-artifact` once after
+  CreateArtifact `ENOTFOUND` (this failed `aarch64-apple-darwin` on v1.0.10-r2).
+
 ## [1.0.10-r2] — 2026-08-26
 
 ### Fixed

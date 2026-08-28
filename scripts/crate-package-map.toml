@@ -81,6 +81,7 @@ crates = [
   "xai-grok-config",
   "xai-grok-config-types",
   "xai-grok-dashboard",
+  "xai-hyper-web",
   "xai-grok-mcp",
   "xai-grok-memory",
   "xai-grok-update",

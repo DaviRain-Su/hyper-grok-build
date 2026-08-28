@@ -7,9 +7,12 @@
 # the binary as ~/.hyper/bin/hyper (versioned binary in ~/.hyper/downloads/,
 # atomic symlink in bin/).
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | sh
-#   sh install.sh --version v0.2.109      # pin a specific release
+# Usage — pipe the GitHub *Release asset*, never a git branch:
+#   curl -fsSL https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.sh | sh
+#   sh install.sh --version v1.0.10-r1      # pin a specific release
+#
+# Do not pipe a git branch. The default-branch copy is source, not the
+# install path (issue #46).
 #
 # Environment:
 #   HYPER_SHARE_DIR        install root (default: ~/.hyper)
@@ -273,6 +276,22 @@ if [ -z "$ARCHIVE_URL" ]; then
         | tr '\n' ' ')"
     err "release $TAG has no asset for this platform (tried gnu${TRIPLE_FALLBACK:+ and musl}). Available: ${available:-none}"
 fi
+
+# Production downloads must come from this repo's GitHub Releases. Tests set
+# HYPER_UPDATE_BASE_URL to a local fixture and may use that origin only.
+assert_allowed_download_url() {
+    case "$1" in
+        "https://github.com/${REPO}/releases/download/"*) return 0 ;;
+    esac
+    if [ -n "${HYPER_UPDATE_BASE_URL:-}" ]; then
+        case "$1" in
+            "${HYPER_UPDATE_BASE_URL}"*) return 0 ;;
+        esac
+    fi
+    err "refusing download from unexpected host: $1"
+}
+assert_allowed_download_url "$SUMS_URL"
+assert_allowed_download_url "$ARCHIVE_URL"
 
 # ── Download + verify ────────────────────────────────────────────────────────
 printf 'Downloading hyper v%s (%s)...\n' "$RESOLVED_VERSION" "$TRIPLE"

@@ -7,9 +7,12 @@
 #   ~/.hyper/desktop/bin/{comet,hyper}
 #   symlinks into ~/.local/bin when writable
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install-desktop.sh | sh
-#   sh install-desktop.sh --version v0.2.119-r1
+# Usage — pipe the GitHub *Release asset*, never a git branch:
+#   curl -fsSL https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install-desktop.sh | sh
+#   sh install-desktop.sh --version v1.0.10-r1
+#
+# Do not pipe a git branch. The default-branch copy is source, not the
+# install path (issue #46).
 #
 # Environment:
 #   HYPER_SHARE_DIR   install root (default: ~/.hyper)
@@ -169,6 +172,20 @@ fi
 if [ -z "$SUMS_URL" ]; then
     SUMS_URL="https://github.com/${REPO}/releases/download/${TAG}/SHA256SUMS"
 fi
+
+assert_allowed_download_url() {
+    case "$1" in
+        "https://github.com/${REPO}/releases/download/"*) return 0 ;;
+    esac
+    if [ -n "${HYPER_UPDATE_BASE_URL:-}" ]; then
+        case "$1" in
+            "${HYPER_UPDATE_BASE_URL}"*) return 0 ;;
+        esac
+    fi
+    err "refusing download from unexpected host: $1"
+}
+assert_allowed_download_url "$ASSET_URL"
+assert_allowed_download_url "$SUMS_URL"
 
 ARCHIVE="$TMP_DIR/$ASSET"
 SUMS="$TMP_DIR/SHA256SUMS"

@@ -16596,6 +16596,7 @@ dependencies = [
  "xai-grok-update",
  "xai-grok-version",
  "xai-grok-workspace",
+ "xai-hyper-web",
  "xai-tty-utils",
 ]
 
@@ -17618,6 +17619,23 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "xai-hyper-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "webbrowser",
+ "xai-grok-version",
 ]
 
 [[package]]

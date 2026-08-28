@@ -34,23 +34,26 @@ pub enum UpdateRunMode {
 const PROMPT_UPDATE_NOW: &str = "Update now? [Y/n/d]";
 const MSG_AUTO_UPDATE_BACKGROUND: &str = "Auto-update running in background.";
 const MSG_RUN_UPDATE_MANUAL: &str = "Run `grok update` to get the latest version.";
-/// An empty or `"stable"` channel means stable — the installers' default
-/// (`CHANNEL="${GROK_CHANNEL:-stable}"` in install.sh).
+/// An empty or `"stable"` channel means stable — the official installers'
+/// default (`CHANNEL="${GROK_CHANNEL:-stable}"` in x.ai `install.sh`).
 fn is_stable_channel(channel: &str) -> bool {
     channel.is_empty() || channel == "stable"
 }
 
 /// Manual-install one-liner for this platform's bootstrap installer.
 ///
-/// On Unix the variable must prefix `bash` (which runs install.sh), not
-/// `curl`: in `VAR=x curl … | bash` the assignment applies to `curl` only
-/// and install.sh would fall back to stable.
+/// Official Grok: on Unix the variable must prefix `bash` (which runs
+/// `x.ai/cli/install.sh`), not `curl`.
+///
+/// Hyper: pipe the GitHub *Release asset*, never a git branch.
 fn manual_install_cmd(channel: &str) -> String {
     if cfg!(feature = "community-build") {
         return if cfg!(windows) {
-            "irm https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.ps1 | iex".to_string()
+            "irm https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.ps1 | iex"
+                .to_string()
         } else {
-            "curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash".to_string()
+            "curl -fsSL https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.sh | sh"
+                .to_string()
         };
     }
     // Only interpolate a well-formed channel ([A-Za-z0-9._-]) into the
@@ -86,7 +89,10 @@ fn manual_install_cmd(channel: &str) -> String {
 /// Build a reinstall hint for a known installer type.
 fn reinstall_hint(installer: &str, channel: &str) -> String {
     if cfg!(feature = "community-build") && installer == "community-github" {
-        return format!("Please reinstall Hyper via:\n  {}", manual_install_cmd(channel));
+        return format!(
+            "Please reinstall Hyper from the GitHub Release asset:\n  {}",
+            manual_install_cmd(channel)
+        );
     }
     match installer {
         "npm" => "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string(),

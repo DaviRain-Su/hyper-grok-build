@@ -29,7 +29,7 @@ use anyhow::Result;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use tokio_util::sync::CancellationToken;
-use xai_grok_pager::app::cli::DashboardArgs;
+use xai_grok_pager::app::cli::{DashboardArgs, WebArgs};
 use xai_grok_pager::app::{
     AgentCmd, Command, HeadlessArgs, LeaderMgmtArgs, LeaderMgmtCommand, LeaderMode,
     LeaderTargetArgs, PagerArgs, join_early_prefetch, resolve_leader_mode, resolve_use_leader,
@@ -53,7 +53,7 @@ fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<P
     use xai_grok_telemetry::process_info::LeaderMode::Standalone;
     let (entrypoint, interactivity) = match command {
         Some(Command::Agent(_)) => return None,
-        Some(Command::Dashboard(_)) => return None,
+        Some(Command::Dashboard(_)) | Some(Command::Web(_)) => return None,
         Some(Command::Codex(_)) => return None,
         Some(Command::Login { .. }) => (Entrypoint::Cli, Interactivity::Interactive),
         Some(
@@ -216,6 +216,25 @@ fn init_dashboard_tracing() {
 /// Run the browser dashboard before pager initialization. This keeps the
 /// read-only observer out of memtrace, Sentry, crash-session cleanup, managed
 /// policy checks, and other TUI startup side effects.
+fn run_hyper_web(args: &WebArgs) -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("xai_hyper_web=info")),
+        )
+        .init();
+    let mut config = xai_hyper_web::WebServerConfig::new(xai_grok_config::grok_home());
+    if let Some(bind) = args.bind {
+        config.bind = bind;
+    }
+    config.allow_remote = args.allow_remote;
+    config.open_browser = args.open;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    run_and_shutdown(runtime, xai_hyper_web::serve(config), RUNTIME_SHUTDOWN_GRACE)
+}
+
 fn run_web_dashboard(args: &DashboardArgs) -> Result<()> {
     init_dashboard_tracing();
     let mut config = xai_grok_dashboard::DashboardServerConfig::new(xai_grok_config::grok_home());
@@ -1980,6 +1999,13 @@ fn main() {
         }
         return;
     }
+    if let Some(Command::Web(web_args)) = &args.command {
+        if let Err(error) = run_hyper_web(web_args) {
+            eprintln!("Error: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     xai_grok_pager_minimal::install();
     #[cfg(all(feature = "jemalloc", unix))]
     xai_grok_pager::memory_release::install_release_hook(purge_jemalloc_retained_pages);
@@ -2439,6 +2465,9 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 }
                 config.open_browser = !dashboard_args.no_open;
                 return xai_grok_dashboard::serve(config).await;
+            }
+            Command::Web(_) => {
+                unreachable!("hyper web is consumed before runtime startup");
             }
         }
     }
@@ -3191,6 +3220,24 @@ mod tests {
         assert_eq!(dashboard.bind, Some("127.0.0.1:9191".parse().unwrap()));
         assert!(dashboard.no_open);
         assert!(std::env::var("GROK_OPEN_DASHBOARD_AT_STARTUP").is_err());
+    }
+
+    #[test]
+    fn web_subcommand_parses_bind_and_allow_remote() {
+        let args = PagerArgs::try_parse_from([
+            "hyper",
+            "web",
+            "--bind",
+            "127.0.0.1:9100",
+            "--allow-remote",
+        ])
+        .unwrap();
+        let Some(Command::Web(web)) = args.command else {
+            panic!("expected web subcommand");
+        };
+        assert_eq!(web.bind, Some("127.0.0.1:9100".parse().unwrap()));
+        assert!(web.allow_remote);
+        assert!(!web.open);
     }
     /// `grok dashboard --no-leader` is allowed — the dashboard does not
     /// require a leader, so the combination launches into the dashboard in

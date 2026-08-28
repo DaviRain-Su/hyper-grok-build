@@ -42,6 +42,7 @@ this as an enforced lint yet.
 | Role | Crate path |
 |------|------------|
 | `hyper` binary | `packages/coding-agent/xai-grok-pager-bin` |
+| Tailscale web control plane | `packages/coding-agent/xai-hyper-web` (`hyper web`) |
 | TUI app | `packages/tui/xai-grok-pager` |
 | Session / agent runtime | `packages/coding-agent/xai-grok-shell` |
 | Sampler / LLM stream | `packages/ai/xai-grok-sampler` |

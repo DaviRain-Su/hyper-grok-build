@@ -184,7 +184,7 @@ fn is_hyper_monorepo_root(dir: &Path) -> bool {
     dir.join("packages/coding-agent").is_dir()
         || dir.join("packages/tui").is_dir()
         || dir.join("crates/codegen").is_dir()
-        || dir.join("VERSION").is_file() && dir.join("install.sh").is_file()
+        || dir.join("VERSION").is_file() && dir.join("Cargo.toml").is_file()
 }
 
 fn canonicalize_if_possible(p: PathBuf) -> PathBuf {

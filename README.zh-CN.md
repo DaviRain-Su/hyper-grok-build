@@ -24,6 +24,7 @@ xAI Grok、Kimi Code / Moonshot、ChatGPT Codex、OpenCode Go、OpenAI、Anthrop
 还能通过 Agent Client Protocol(ACP)嵌入到编辑器中。
 UI 已本地化为 10 种语言(English、中文、日本語、한국어、Español、
 Português、Français、Deutsch、Русский),并可在设置中实时切换。运行
+`hyper web` 启动面向 Tailscale 的浏览器控制面（先提供带 token 的监听器；会话聊天尚未接通），说明见 [docs/web-over-tailscale.md](docs/web-over-tailscale.md)。
 `hyper dashboard --web` 可以打开本地只读的纯 Rust Web 仪表盘，查看会话指标、
 事件时间线、图表、日志和实时事件流。
 
@@ -76,16 +77,20 @@ Português、Français、Deutsch、Русский),并可在设置中实时切�
 glibc / `linux-gnu` —— 按 **glibc 2.17+** 链接，可在 Ubuntu 16.04 / RHEL 7
 及更新系统上运行，不要求 Ubuntu 24.04)以及 Windows
 (x86_64)的预编译单文件二进制已发布在
-[GitHub Releases](https://github.com/DaviRain-Su/hyper-grok-build/releases):
+[GitHub Releases](https://github.com/DaviRain-Su/hyper-grok-build/releases)。
+
+管道执行 **Release 产物**（随 tag 固定，并写入 `SHA256SUMS`）。**不要**管道执行
+git 分支 —— 那是 [issue #46](https://github.com/DaviRain-Su/hyper-grok-build/issues/46)
+的注入路径。
 
 ```sh
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+curl -fsSL https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.sh | sh
 ```
 
 ```powershell
 # Windows PowerShell
-irm https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.ps1 | iex
+irm https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.ps1 | iex
 ```
 
 ```sh
@@ -94,17 +99,17 @@ hyper login          # xAI / Grok 会话(浏览器 OAuth)
 hyper                # 启动 TUI
 ```
 
-安装指定版本:
+安装指定版本（脚本仍会校验 `SHA256SUMS`）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.119-r1
+curl -fsSL https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.sh | sh -s -- --version v1.0.10-r1
 ```
 
-安装程序会根据发布版的 `SHA256SUMS` 校验每一次下载,
-安装到 `~/.hyper/bin/hyper`(Windows 上为 `%USERPROFILE%\.hyper\bin\hyper.exe`),
-并在需要时打印出需要添加的 PATH 配置行。
+安装到 `~/.hyper/bin/hyper`（Windows 为
+`%USERPROFILE%\.hyper\bin\hyper.exe`）。已经装过？`hyper update` 只读本仓库
+GitHub Releases，不会覆盖官方 `~/.grok/bin/grok`。
 
-> 如需尚未发布的改动，可从下方源码构建；否则请安装上方的最新发布版。
+> 如需尚未发布的改动，从下方源码构建。
 
 ### 用 Nix 安装
 
@@ -243,9 +248,7 @@ Hyper 与 xAI / SpaceXAI **没有隶属关系**。在同一台机器上:
 
 - 会话、API key 和 OAuth 权限是共享的 —— 登录一次,两个 CLI 都能看到。
 - Leader 的 list/kill 可以同时看到两个产品的 leader。请只 kill 你自己启动的 leader。
-- 社区构建版使用完全隔离的更新器：`hyper update` 和启动时自动更新只读取本仓库的 GitHub Releases，Hyper 二进制及更新状态都保存在 `~/.hyper`（托管可执行文件为 `~/.hyper/bin/hyper`）。发布包中的 `bundled/**` 会事务性地安装到 `~/.grok/bundled`（或 `$GROK_HOME/bundled`），绝不会覆盖 `~/.grok/bin/grok`。自动更新偏好仍属于 Hyper 与官方版共享的 `~/.grok` 配置。重新运行 `install.sh` / `install.ps1` 仍可用于修复安装。
-
-Hyper 的安装脚本不会改写官方安装程序的任何内容。
+- 社区构建版使用完全隔离的更新器：`hyper update` 和启动时自动更新只读取本仓库的 GitHub Releases，Hyper 二进制及更新状态都保存在 `~/.hyper`（托管可执行文件为 `~/.hyper/bin/hyper`）。发布包中的 `bundled/**` 会事务性地安装到 `~/.grok/bundled`（或 `$GROK_HOME/bundled`），绝不会覆盖 `~/.grok/bin/grok`。自动更新偏好仍属于 Hyper 与官方版共享的 `~/.grok` 配置。修复安装请用 Release 产物安装脚本或 `hyper update`。
 
 ---
 
@@ -303,7 +306,7 @@ Amp 风格的 **agent 模式**(low / medium / high / ultra 档位)目前**仅有
 | `packages/platform/` | 路径、FS/git、崩溃、遥测、测试 |
 | `packages/build/` | 构建辅助（protoc） |
 | `desktop/comet/` | 可选**本地**桌面控制器（gpui；嵌套 workspace；已去云）。启动：`./scripts/run-desktop.sh` |
-| `install.sh` / `install.ps1` | 发布安装脚本 |
+| `install.sh` / `install.ps1` | Release 产物安装脚本（不要管道执行 git 默认分支） |
 | `.github/workflows/release.yml` | 多平台发布 CI |
 
 > [!IMPORTANT]

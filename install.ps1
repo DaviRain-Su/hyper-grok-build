@@ -4,9 +4,12 @@
 # Releases, verifies its SHA-256 against the release's SHA256SUMS manifest,
 # and installs the binary as %USERPROFILE%\.hyper\bin\hyper.exe.
 #
-# Usage:
-#   irm https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.ps1 | iex
-#   powershell -ExecutionPolicy Bypass -File install.ps1 -Version v0.2.109
+# Usage — pipe the GitHub *Release asset*, never a git branch:
+#   irm https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.ps1 | iex
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Version v1.0.10-r1
+#
+# Do not pipe a git branch. The default-branch copy is source, not the
+# install path (issue #46).
 #
 # Environment:
 #   HYPER_SHARE_DIR        install root (default: %USERPROFILE%\.hyper)
@@ -92,6 +95,15 @@ if ($ArchiveMatches.Count -ne 1) { Fail "release $Tag must contain exactly one a
 if ($SumsMatches.Count -ne 1) { Fail "release $Tag must contain exactly one SHA256SUMS asset" }
 $ArchiveAsset = $ArchiveMatches[0]
 $SumsAsset = $SumsMatches[0]
+
+function Assert-AllowedDownloadUrl([string]$Url) {
+    $ReleasePrefix = "https://github.com/$Repo/releases/download/"
+    if ($Url.StartsWith($ReleasePrefix, [StringComparison]::OrdinalIgnoreCase)) { return }
+    if ($env:HYPER_UPDATE_BASE_URL -and $Url.StartsWith($env:HYPER_UPDATE_BASE_URL, [StringComparison]::OrdinalIgnoreCase)) { return }
+    Fail "refusing download from unexpected host: $Url"
+}
+Assert-AllowedDownloadUrl $ArchiveAsset.browser_download_url
+Assert-AllowedDownloadUrl $SumsAsset.browser_download_url
 
 # ── Download + verify ────────────────────────────────────────────────────────
 $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("hyper-install-" + [System.IO.Path]::GetRandomFileName())

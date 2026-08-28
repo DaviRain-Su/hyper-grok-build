@@ -27,7 +27,9 @@ Agent Client Protocol (ACP). The UI is localized in 10 languages
 (English, 中文, 日本語, 한국어, Español, Português, Français, Deutsch,
 Русский) and switchable live from Settings. A local, read-only Rust web
 dashboard is available with `hyper dashboard --web` for session metrics,
-timelines, charts, logs, and live event streaming.
+timelines, charts, logs, and live event streaming. `hyper web` starts a
+Tailscale-first browser control plane (authenticated listener; chat UI later)
+— see [docs/web-over-tailscale.md](docs/web-over-tailscale.md).
 
 [Installation](#installation) ·
 [Providers](#providers) ·
@@ -78,16 +80,20 @@ Prebuilt single-file binaries for macOS (arm64/x86_64), Linux (arm64/x86_64,
 glibc / `linux-gnu` — linked against **glibc 2.17+** so they run on Ubuntu
 16.04 / RHEL 7 and newer, not only Ubuntu 24.04), and Windows (x86_64) are
 published on
-[GitHub Releases](https://github.com/DaviRain-Su/hyper-grok-build/releases):
+[GitHub Releases](https://github.com/DaviRain-Su/hyper-grok-build/releases).
+
+Pipe the **release asset** (immutable with the tag, checksummed in
+`SHA256SUMS`). Do **not** pipe a git branch — that was the injection path
+in [issue #46](https://github.com/DaviRain-Su/hyper-grok-build/issues/46).
 
 ```sh
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+curl -fsSL https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.sh | sh
 ```
 
 ```powershell
 # Windows PowerShell
-irm https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.ps1 | iex
+irm https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.ps1 | iex
 ```
 
 ```sh
@@ -96,17 +102,18 @@ hyper login          # xAI / Grok session (browser OAuth)
 hyper                # start the TUI
 ```
 
-Pin a release:
+Pin a release (the bootstrap script still verifies `SHA256SUMS`):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.119-r1
+curl -fsSL https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.sh | sh -s -- --version v1.0.10-r1
 ```
 
-The installer verifies every download against the release’s `SHA256SUMS`,
-installs into `~/.hyper/bin/hyper` (`%USERPROFILE%\.hyper\bin\hyper.exe` on
-Windows), and prints the PATH line to add when needed.
+The installer installs into `~/.hyper/bin/hyper`
+(`%USERPROFILE%\.hyper\bin\hyper.exe` on Windows). Already installed?
+`hyper update` reads this repository's GitHub Releases and never
+overwrites official `~/.grok/bin/grok`.
 
-> Need unreleased changes? Build from source below; otherwise install the latest release above.
+> Need unreleased changes? Build from source below.
 
 ### Install with Nix
 
@@ -247,9 +254,7 @@ Implications:
 
 - Sessions, API keys, and OAuth scopes are shared — log in once, both CLIs can see them.
 - Leader list/kill can see both products’ leaders. Prefer killing only leaders you started.
-- Community builds use an isolated updater: `hyper update` and startup auto-update read only this repository's GitHub Releases, while Hyper binaries and update state stay under `~/.hyper` (the managed executable is `~/.hyper/bin/hyper`). Release archives may also ship a managed `bundled/**` tree, which the updater installs transactionally at `~/.grok/bundled` (or `$GROK_HOME/bundled`). They never overwrite `~/.grok/bin/grok`. The auto-update preference remains part of Hyper's shared `~/.grok` configuration. Re-running `install.sh` / `install.ps1` remains a supported recovery path.
-
-Nothing in the official installer is rewritten by Hyper’s install script.
+- Community builds use an isolated updater: `hyper update` and startup auto-update read only this repository's GitHub Releases, while Hyper binaries and update state stay under `~/.hyper` (the managed executable is `~/.hyper/bin/hyper`). Release archives may also ship a managed `bundled/**` tree, which the updater installs transactionally at `~/.grok/bundled` (or `$GROK_HOME/bundled`). They never overwrite `~/.grok/bin/grok`. The auto-update preference remains part of Hyper's shared `~/.grok` configuration. Recovery is the release-asset installer or `hyper update`.
 
 ---
 
@@ -305,7 +310,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 | `packages/platform/` | Paths, FS/git, crash, telemetry, tests |
 | `packages/build/` | Build helpers (protoc) |
 | `desktop/comet/` | Optional **local** desktop controller (gpui; nested workspace; cloud stripped). Run: `./scripts/run-desktop.sh` |
-| `install.sh` / `install.ps1` | Release installers |
+| `install.sh` / `install.ps1` | Release-asset installers (never pipe the git default branch) |
 | `.github/workflows/release.yml` | Multi-target release CI |
 
 > [!IMPORTANT]

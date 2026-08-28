@@ -232,6 +232,12 @@ See ~/.grok/README.md for more information.
     /// `dashboard --web` starts the read-only Rust web dashboard over local
     /// session artifacts. The web server only accepts loopback bind addresses.
     Dashboard(DashboardArgs),
+    /// Browser control plane for a local Hyper agent (Tailscale-first).
+    ///
+    /// Listens on loopback by default. Put `tailscale serve` in front for
+    /// access from a phone or another machine on your tailnet. Chat sessions
+    /// are not wired yet; this command is the authenticated listener.
+    Web(WebArgs),
 }
 
 #[derive(Debug, clap::Args, Clone, Default)]
@@ -247,6 +253,22 @@ pub struct DashboardArgs {
     /// Do not open the default browser for `--web`.
     #[arg(long, requires = "web")]
     pub no_open: bool,
+}
+
+#[derive(Debug, clap::Args, Clone, Default)]
+pub struct WebArgs {
+    /// Listen address (default: 127.0.0.1:9100).
+    #[arg(long, value_name = "ADDR")]
+    pub bind: Option<SocketAddr>,
+
+    /// Allow a non-loopback bind (Tailscale 100.x). Never use a public address.
+    /// Prefer `tailscale serve` in front of loopback instead.
+    #[arg(long)]
+    pub allow_remote: bool,
+
+    /// Open the default browser to the local URL (includes the token).
+    #[arg(long)]
+    pub open: bool,
 }
 /// Arguments for the subscription-backed Codex connector.
 #[derive(Debug, clap::Args, Clone)]

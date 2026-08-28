@@ -41,7 +41,7 @@ Hyper TUI transcripts stay under `GROK_HOME`. Same agent identity and tools.
 | `./scripts/package-desktop.sh` | Done (local tarball) |
 | CI `desktop.yml` check | Done |
 | GitHub Release desktop assets | Done — `hyper-desktop-<ver>-<triple>.tar.gz` for macOS arm64 + Linux x64/arm64 |
-| `install-desktop.sh` | Done |
+| `install-desktop.sh` (release asset) | Done — pipe `releases/latest/download/install-desktop.sh`, not a git branch |
 
 ## Build & run
 

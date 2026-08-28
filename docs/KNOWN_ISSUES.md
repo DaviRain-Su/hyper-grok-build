@@ -11,7 +11,8 @@ Last reviewed: 2026-08-03 (v0.2.118-r1 release).
   `GROK_VERSION` from the root `VERSION` file into the binary. The `v0.1.0`
   marketing tag set that header to `0.1.0`, which production rejects
   (minimum **0.1.202**). Releases must use the monorepo lockstep version
-  (currently `0.2.118-r1`). Upgrade with a fresh `install.sh` run.
+  (currently `0.2.118-r1`). Upgrade with the release-asset installer or
+  `hyper update`.
 
 ## Open (accepted for v0.2.110)
 
