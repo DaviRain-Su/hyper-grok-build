@@ -102,7 +102,7 @@ hyper                # 启动 TUI
 安装指定版本（脚本仍会校验 `SHA256SUMS`）：
 
 ```sh
-curl -fsSL https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.sh | sh -s -- --version v1.0.10-r1
+curl -fsSL https://github.com/DaviRain-Su/hyper-grok-build/releases/latest/download/install.sh | sh -s -- --version v1.0.11-r1
 ```
 
 安装到 `~/.hyper/bin/hyper`（Windows 为

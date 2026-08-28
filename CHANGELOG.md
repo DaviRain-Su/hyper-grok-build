@@ -4,10 +4,27 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.11-r1] — 2026-08-28
+
 ### Added
 - **`hyper web`** — Tailscale-first browser control plane. Loopback listener
   with a persistent `~/.grok/web-token`, 401 without the token, and printed
   `tailscale serve` hints. Session chat is not wired yet.
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `9684fa3`
+  (monorepo `SOURCE_REV` `70ec060…`, 47 upstream changes). Highlights: hooks
+  prompt-gate ordering (UserPromptSubmit blocks hold the queue), auth
+  `AuthBackend` trait, workspace OIDC proactive-refresh flag, subagent
+  active-message follow-ups, dashboard v2 workspace, sandbox io_uring
+  child-network bypass block, `grok-4.6` legacy-slug retarget, websocket
+  crates unified on 0.28, per-request `LengthPolicy` salvage for truncated
+  responses, and a security fix stopping installers from sending the
+  deployment key as a Bearer token to an attacker-settable URL.
+- **Z.AI GLM-5.3 / GLM-5.3-Flash** on `zai`, `zai-coding`, `zai-coding-cn`
+  (1M context / 128K output; 5.3 always reasons with `low|high|max`).
+- **Ollama Cloud lineup refresh** — added `glm-5.3-flash` and `kimi-k3`
+  per live `ollama.com/search?c=cloud`; dropped `kimi-k2.5` /
+  `minimax-m2.5` (no longer on the cloud page). Live `/models` sync
+  remains authoritative for the full list.
 
 ### Changed
 - **Installer is a GitHub Release asset** — `install.sh` / `install.ps1` /
@@ -19,6 +36,10 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 ### Fixed
 - **Release artifact upload** — retry `actions/upload-artifact` once after
   CreateArtifact `ENOTFOUND` (this failed `aarch64-apple-darwin` on v1.0.10-r2).
+- **Auth devbox recovery / test suite repair** — restored hermetic
+  `AuthManager::for_test_*` constructors and fixed ~50 test-build errors
+  accumulated across merges (new `ModelInfo`/`ModelEntry`/`SamplerConfig`
+  fields, sync-vs-async tool probes, slash-command resolver arity).
 
 ## [1.0.10-r2] — 2026-08-26
 
