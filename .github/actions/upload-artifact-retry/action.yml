@@ -1,0 +1,57 @@
+name: Upload artifact (retry)
+description: >
+  Wrap actions/upload-artifact with retries. GitHub-hosted runners occasionally
+  fail CreateArtifact with ENOTFOUND / transient DNS after a long build; a
+  50-minute compile should not be discarded for that.
+
+inputs:
+  name:
+    description: Artifact name
+    required: true
+  path:
+    description: File or glob to upload
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Upload (attempt 1)
+      id: a1
+      continue-on-error: true
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+
+    - name: Wait before retry 1
+      if: steps.a1.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "artifact upload failed (${{ steps.a1.outcome }}); retrying in 15s" >&2
+        sleep 15
+
+    - name: Upload (attempt 2)
+      id: a2
+      if: steps.a1.outcome == 'failure'
+      continue-on-error: true
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+
+    - name: Wait before retry 2
+      if: steps.a1.outcome == 'failure' && steps.a2.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "artifact upload failed again; retrying in 30s" >&2
+        sleep 30
+
+    - name: Upload (attempt 3)
+      if: steps.a1.outcome == 'failure' && steps.a2.outcome == 'failure'
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        if-no-files-found: error

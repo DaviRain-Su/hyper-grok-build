@@ -343,24 +343,10 @@ jobs:
 
       # macos-14 has seen CreateArtifact ENOTFOUND; retry once before failing.
       - name: Upload artifact
-        id: upload-cli
-        continue-on-error: true
-        uses: actions/upload-artifact@v6
+        uses: ./.github/actions/upload-artifact-retry
         with:
           name: ${{ env.ARCHIVE }}
           path: ${{ env.ARCHIVE }}
-          if-no-files-found: error
-          compression-level: 0
-          overwrite: true
-      - name: Retry upload artifact
-        if: steps.upload-cli.outcome == 'failure'
-        uses: actions/upload-artifact@v6
-        with:
-          name: ${{ env.ARCHIVE }}
-          path: ${{ env.ARCHIVE }}
-          if-no-files-found: error
-          compression-level: 0
-          overwrite: true
 
   # Prebuilt Gambit scheme live image (`hyper-scheme-image`): the kernel in
   # packages/extensions/xai-grok-scheme-runtime/kernel/runtime.ss compiled to a
@@ -456,24 +442,10 @@ jobs:
           echo "SCHEME_ARCHIVE=$archive" >> "$GITHUB_ENV"
 
       - name: Upload scheme image artifact
-        id: upload-scheme
-        continue-on-error: true
-        uses: actions/upload-artifact@v6
+        uses: ./.github/actions/upload-artifact-retry
         with:
           name: ${{ env.SCHEME_ARCHIVE }}
           path: ${{ env.SCHEME_ARCHIVE }}
-          if-no-files-found: error
-          compression-level: 0
-          overwrite: true
-      - name: Retry upload scheme image artifact
-        if: steps.upload-scheme.outcome == 'failure'
-        uses: actions/upload-artifact@v6
-        with:
-          name: ${{ env.SCHEME_ARCHIVE }}
-          path: ${{ env.SCHEME_ARCHIVE }}
-          if-no-files-found: error
-          compression-level: 0
-          overwrite: true
 
   # Windows native install.ps1 CI was removed: it cold-compiled the full shell
   # graph on windows-2022, often hung, and blocked publish. Windows CLI artifacts
@@ -661,24 +633,10 @@ jobs:
           shasum -a 256 "${DESKTOP_ARCHIVE}" || sha256sum "${DESKTOP_ARCHIVE}"
 
       - name: Upload desktop artifact
-        id: upload-desktop
-        continue-on-error: true
-        uses: actions/upload-artifact@v6
+        uses: ./.github/actions/upload-artifact-retry
         with:
           name: ${{ env.DESKTOP_ARCHIVE }}
           path: ${{ env.DESKTOP_ARCHIVE }}
-          if-no-files-found: error
-          compression-level: 0
-          overwrite: true
-      - name: Retry upload desktop artifact
-        if: steps.upload-desktop.outcome == 'failure'
-        uses: actions/upload-artifact@v6
-        with:
-          name: ${{ env.DESKTOP_ARCHIVE }}
-          path: ${{ env.DESKTOP_ARCHIVE }}
-          if-no-files-found: error
-          compression-level: 0
-          overwrite: true
 
   release:
     name: publish GitHub Release
