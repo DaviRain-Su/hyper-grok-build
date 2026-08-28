@@ -34,12 +34,22 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
   and rejects `curl -k` / `nohup` / third-party hosts.
 
 ### Fixed
-- **Release artifact upload** — retry `actions/upload-artifact` once after
-  CreateArtifact `ENOTFOUND` (this failed `aarch64-apple-darwin` on v1.0.10-r2).
 - **Auth devbox recovery / test suite repair** — restored hermetic
   `AuthManager::for_test_*` constructors and fixed ~50 test-build errors
   accumulated across merges (new `ModelInfo`/`ModelEntry`/`SamplerConfig`
   fields, sync-vs-async tool probes, slash-command resolver arity).
+
+## [1.0.10-r3] — 2026-08-27
+
+### Fixed
+- **Release CI artifact upload** — wrap `actions/upload-artifact` with two
+  retries. `v1.0.10-r2` built every target, then `aarch64-apple-darwin`
+  failed `CreateArtifact` with `ENOTFOUND` after 54 minutes and skipped
+  publish.
+- **AGENTS.md / skill re-injection after compact** — compaction no longer
+  forgets already-injected project-instruction files or skill listings.
+  Clearing those sets made the next tool call re-add the full AGENTS.md
+  (and skill catalog) into the conversation every cycle.
 
 ## [1.0.10-r2] — 2026-08-26
 

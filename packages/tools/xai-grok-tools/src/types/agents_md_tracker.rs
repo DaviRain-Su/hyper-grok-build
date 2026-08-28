@@ -3,8 +3,9 @@
 //! When the agent accesses files outside the initial CWD→root discovery
 //! chain, this tracker walks up from the target path to the git root,
 //! checking each directory for AGENTS.md files. Newly discovered files
-//! are reported once per session (or once per compaction cycle) as
-//! path-only reminders — the agent decides whether to read them.
+//! are reported once per session as path-only reminders — the agent
+//! decides whether to read them. Compaction does not re-report files
+//! already reminded about.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -94,7 +95,7 @@ pub struct AgentsMdTracker {
     initial_discovery: HashSet<PathBuf>,
 
     /// AGENTS.md file paths we've already reminded the agent about.
-    /// Each file gets at most one reminder per session (or compaction cycle).
+    /// Each file gets at most one reminder per session.
     /// All entries are canonicalized via `normalize()`.
     reminded: HashSet<PathBuf>,
 
@@ -383,23 +384,18 @@ impl AgentsMdTracker {
         discoveries
     }
 
-    /// Reset discovery state so that reminders re-fire after compaction.
-    /// Called by the compaction flow to ensure the agent is re-notified about
-    /// AGENTS.md files it may have lost context on.
+    /// Reset the walk cache after compaction so newly created instruction
+    /// files can still be found.
     ///
-    /// Clears both `reminded` (so reminders aren't deduplicated) AND
-    /// `checked_dirs` (so directories are re-scanned via stat). Without
-    /// clearing `checked_dirs`, `check_path()` would skip directories it
-    /// already visited and never re-discover the AGENTS.md files in them —
-    /// making the `reminded.clear()` useless.
+    /// Clears `checked_dirs` (directories are re-stat'd on the next access).
+    /// Does **not** clear `reminded` or `initial_discovery`: files already
+    /// reported (or injected at session start) must not be re-injected after
+    /// every compact. Re-firing those reminders grew the conversation by a
+    /// full AGENTS.md copy each cycle.
     ///
     /// The cost is a few extra stat calls on the first tool access after
     /// compaction — negligible compared to the tool execution itself.
-    ///
-    /// Does NOT clear `initial_discovery` — the system prompt survives
-    /// compaction and still contains those files.
     pub fn on_compaction(&mut self) {
-        self.reminded.clear();
         self.checked_dirs.clear();
     }
 
@@ -665,7 +661,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_compaction_clears_reminded_and_checked_dirs_for_refire() {
+    async fn on_compaction_does_not_refire_already_reminded() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let sub = root.join("sub");
@@ -685,14 +681,17 @@ mod tests {
         assert!(second.is_empty());
 
         tracker.on_compaction();
-        assert!(tracker.reminded.is_empty());
+        assert_eq!(
+            tracker.reminded.len(),
+            1,
+            "already-reminded files must stay reminded across compaction"
+        );
         assert!(tracker.checked_dirs.is_empty());
 
         let refire = tracker.check_path(&sub.join("file3.rs")).await;
-        assert_eq!(
-            refire.len(),
-            1,
-            "AGENTS.md reminder must re-fire after compaction"
+        assert!(
+            refire.is_empty(),
+            "AGENTS.md reminder must not re-fire after compaction"
         );
         assert_eq!(tracker.reminded.len(), 1);
     }
@@ -720,6 +719,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn on_compaction_still_discovers_new_files_in_previously_checked_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+
+        let mut tracker = AgentsMdTracker::new();
+        tracker
+            .seed(vec![], Some(root.to_path_buf()), vec![], None)
+            .await;
+
+        let first = tracker.check_path(&sub.join("file.rs")).await;
+        assert!(first.is_empty(), "no AGENTS.md yet");
+
+        fs::write(sub.join("AGENTS.md"), "added after first walk").unwrap();
+        tracker.on_compaction();
+
+        let found = tracker.check_path(&sub.join("file2.rs")).await;
+        assert_eq!(
+            found.len(),
+            1,
+            "a newly created AGENTS.md in a previously walked dir must still be found"
+        );
+    }
+
+    #[tokio::test]
     async fn reminded_paths_returns_current_set() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -740,7 +765,11 @@ mod tests {
         assert_eq!(tracker.reminded_paths().len(), 2);
 
         tracker.on_compaction();
-        assert!(tracker.reminded_paths().is_empty());
+        assert_eq!(
+            tracker.reminded_paths().len(),
+            2,
+            "compaction must not forget already-reminded instruction files"
+        );
     }
 
     #[tokio::test]
