@@ -84,6 +84,7 @@ pub async fn parse_prompt(
         prompt,
         working_directory,
         _session_info,
+        super::InputAuthority::HumanIntent,
         verbatim,
         is_cursor,
         String::new(),
@@ -98,10 +99,12 @@ pub(crate) async fn parse_prompt_with_skills(
     prompt: &[acp::ContentBlock],
     working_directory: PathBuf,
     _session_info: &crate::session::info::Info,
+    authority: super::InputAuthority,
     verbatim: bool,
     is_cursor: bool,
     skill_information: String,
 ) -> Result<ParsedPrompt, acp::Error> {
+    let allows_file_expansion = authority != super::InputAuthority::ModelAuthoredUntrusted;
     let mut message_parts: Vec<String> = Vec::new();
     let mut image_parts = Vec::new();
     let mut resource_links = Vec::new();
@@ -112,7 +115,7 @@ pub(crate) async fn parse_prompt_with_skills(
             acp::ContentBlock::Image(image_content) => image_parts.push(image_content.clone()),
             acp::ContentBlock::ResourceLink(link) => {
                 resource_links.push(link.clone());
-                if link.meta.is_none() {
+                if allows_file_expansion && link.meta.is_none() {
                     let path = extract_path_from_uri(link);
                     message_parts.push(format!("@{path}"));
                 }
@@ -125,7 +128,11 @@ pub(crate) async fn parse_prompt_with_skills(
         }
     }
     let message = message_parts.join(" ");
-    let file_ref_tokens = collect_file_references(&message);
+    let file_ref_tokens = if allows_file_expansion {
+        collect_file_references(&message)
+    } else {
+        Vec::new()
+    };
     let mut file_ref_contents = Vec::new();
     for token in file_ref_tokens {
         let Some(mut file_ref) = FileReference::parse(&token) else {
@@ -497,6 +504,73 @@ mod tests {
             "fileState": "minimized"
         })));
         assert!(parse_editor_meta(&link).is_none());
+    }
+    #[tokio::test]
+    async fn test_runtime_control_prompt_expands_file_references() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("status.log"), "RUNTIME_FILE_MARKER").unwrap();
+        let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+            "inspect @status.log",
+        ))];
+        let info = crate::session::info::Info {
+            id: agent_client_protocol::SessionId::new("test"),
+            cwd: dir.path().display().to_string(),
+        };
+        let parsed = parse_prompt_with_skills(
+            &blocks,
+            dir.path().to_path_buf(),
+            &info,
+            super::super::InputAuthority::RuntimeControl,
+            false,
+            false,
+            String::new(),
+        )
+        .await
+        .unwrap();
+        assert!(parsed.assemble().contains("RUNTIME_FILE_MARKER"));
+    }
+    #[tokio::test]
+    async fn test_model_authored_prompt_does_not_expand_file_references() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "TEXT_SECRET_MARKER").unwrap();
+        std::fs::write(dir.path().join("linked-secret.txt"), "LINK_SECRET_MARKER").unwrap();
+        let blocks = vec![
+            acp::ContentBlock::Text(acp::TextContent::new("inspect @secret.txt")),
+            acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
+                "linked-secret.txt",
+                "file://linked-secret.txt",
+            )),
+        ];
+        let info = crate::session::info::Info {
+            id: agent_client_protocol::SessionId::new("test"),
+            cwd: dir.path().display().to_string(),
+        };
+        let parsed = parse_prompt_with_skills(
+            &blocks,
+            dir.path().to_path_buf(),
+            &info,
+            super::super::InputAuthority::ModelAuthoredUntrusted,
+            false,
+            false,
+            String::new(),
+        )
+        .await
+        .unwrap();
+        let assembled = parsed.assemble();
+        assert!(parsed.query.contains("inspect @secret.txt"));
+        assert!(!parsed.query.contains("@linked-secret.txt"));
+        assert!(assembled.contains("file://linked-secret.txt"));
+        for forbidden in [
+            "TEXT_SECRET_MARKER",
+            "LINK_SECRET_MARKER",
+            "<attached_files>",
+            "<file_contents",
+        ] {
+            assert!(
+                !assembled.contains(forbidden),
+                "unexpected {forbidden}: {assembled}"
+            );
+        }
     }
     #[test]
     fn test_grok_render_plain_message() {

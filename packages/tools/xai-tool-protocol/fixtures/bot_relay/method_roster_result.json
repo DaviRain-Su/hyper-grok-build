@@ -1,0 +1,10 @@
+{
+  "agents": [
+    {
+      "agentId": "agt_1",
+      "name": "Watcher",
+      "status": "idle",
+      "lastTurnAt": 1700000123000
+    }
+  ]
+}

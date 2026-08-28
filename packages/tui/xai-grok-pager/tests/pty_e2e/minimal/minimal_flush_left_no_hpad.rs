@@ -80,7 +80,7 @@ async fn minimal_flush_left_no_hpad() {
     // leading spaces.
     content.set_response("PERMISSION_SETTLED — turn finished after the allow.");
     let args = json!({
-        "command": "touch flush_marker.txt",
+        "command": "echo flush-check > flush_marker.txt",
         "description": "flush-left permission check",
     })
     .to_string();

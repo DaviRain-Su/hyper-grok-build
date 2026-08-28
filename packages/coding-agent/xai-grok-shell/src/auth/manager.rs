@@ -28,6 +28,7 @@ use sleep_gate::SleepGate;
 
 use crate::util::dual_clock::DualClock;
 
+use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
 use crate::auth::config::GrokComConfig;
 use crate::auth::error::AuthError;
 use crate::auth::token_type::TokenType;
@@ -51,7 +52,6 @@ use chrono::DateTime;
 #[cfg(test)]
 use enrichment::apply_user_info_enrichment;
 
-#[cfg(test)]
 use super::model::AuthStore;
 use super::model::LEGACY_SCOPE;
 
@@ -333,7 +333,7 @@ impl ScopeRemoval {
 
 impl AuthManager {
     pub fn new(grok_home: &Path, grok_com_config: GrokComConfig) -> Self {
-        let scope = grok_com_config.auth_scope();
+        let scope = ActiveAuthBackend::default().scope_key(&grok_com_config);
         let proxy_base_url =
             crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
 
@@ -394,27 +394,7 @@ impl AuthManager {
         let (auth, auth_read_detail, initial_disk_state) = match read_auth_json(&path) {
             Ok(map) => {
                 let found = lookup_auth(&map, &scope);
-                // If lookup_auth skipped a legacy WebLogin token, remove the
-                // stale scope entry from auth.json so it is not re-evaluated
-                // on every launch.
-                if found.is_none()
-                    && map
-                        .get(LEGACY_SCOPE)
-                        .is_some_and(|a| a.auth_mode == AuthMode::WebLogin)
-                {
-                    // Best-effort cleanup under advisory lock (consistent with
-                    // other auth.json writers). Non-blocking: if the lock is
-                    // held by a concurrent process, skip — retried next launch.
-                    if let Some(_lock) = lock::try_lock_auth_file_nonblocking(&path) {
-                        let mut cleaned = map.clone();
-                        cleaned.remove(LEGACY_SCOPE);
-                        let _ = write_auth_json(&path, &cleaned);
-                        tracing::debug!("auth: removed stale WebLogin scope from auth.json");
-                        // lock released on drop
-                    } else {
-                        tracing::debug!("auth: skipped WebLogin cleanup (lock unavailable)");
-                    }
-                }
+                Self::prune_stale_inherited_scopes(&path, &map, found.is_none());
                 let detail = serde_json::json!({
                     "read": "ok",
                     "resolved_path": path.display().to_string(),
@@ -467,51 +447,43 @@ impl AuthManager {
         manager
     }
 
-    /// Deterministic proxy stub for test constructors that must not touch
-    /// effective config / real home.
-    #[doc(hidden)]
-    pub const TEST_ISOLATED_PROXY: &str = "http://127.0.0.1:9";
-
-    /// Explicit-path constructor for tests and integration binaries.
-    ///
-    /// - **Never** reads `GROK_AUTH` / `GROK_AUTH_PATH` / `HOME` / `GROK_HOME`
-    /// - **Never** calls `EndpointsConfig::from_effective_config()` or `grok_home()`
-    /// - Loads/persists **only** the given `auth_json_path`
-    /// - Uses `proxy_base_url` as-is (pass [`Self::TEST_ISOLATED_PROXY`] or a mock)
-    ///
-    /// `#[doc(hidden)]`: not a product API — for hermetic harnesses only.
-    /// Prefer over [`Self::new`] whenever env precedence is not under test.
-    #[doc(hidden)]
-    pub fn for_test_with_auth_path(
-        auth_json_path: impl Into<PathBuf>,
-        grok_com_config: GrokComConfig,
-        proxy_base_url: impl Into<String>,
-    ) -> Self {
-        Self::from_auth_json_path(
-            auth_json_path.into(),
-            grok_com_config.auth_scope(),
-            grok_com_config,
-            proxy_base_url.into(),
-        )
-    }
-
-    /// Convenience: `grok_home/auth.json` + [`Self::TEST_ISOLATED_PROXY`].
-    ///
-    /// Available to lib unit tests (`cfg(test)`) and integration crates via
-    /// [`Self::for_test_with_auth_path`]. Does not consult process env.
-    #[doc(hidden)]
-    pub fn for_test_home(grok_home: &Path, grok_com_config: GrokComConfig) -> Self {
-        Self::for_test_with_auth_path(
-            grok_home.join("auth.json"),
-            grok_com_config,
-            Self::TEST_ISOLATED_PROXY,
-        )
-    }
-
     /// Lib-unit alias of [`Self::for_test_home`] (historical name).
     #[cfg(test)]
     pub(crate) fn new_test_isolated(grok_home: &Path, grok_com_config: GrokComConfig) -> Self {
         Self::for_test_home(grok_home, grok_com_config)
+    }
+
+    /// Drops inherited `WebLogin` entries that `lookup_auth` skipped, so they are not re-evaluated on
+    /// every launch. Best-effort under the advisory lock: a concurrent holder means retry next launch.
+    fn prune_stale_inherited_scopes(path: &Path, map: &AuthStore, lookup_missed: bool) {
+        if !lookup_missed {
+            return;
+        }
+
+        let stale: Vec<&str> = ActiveAuthBackend::default()
+            .inherited_scopes()
+            .iter()
+            .filter(|scope| {
+                map.get(**scope)
+                    .is_some_and(|a| a.auth_mode == AuthMode::WebLogin)
+            })
+            .copied()
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+
+        let Some(_lock) = lock::try_lock_auth_file_nonblocking(path) else {
+            tracing::debug!("auth: skipped WebLogin cleanup (lock unavailable)");
+            return;
+        };
+
+        let mut cleaned = map.clone();
+        for scope in stale {
+            cleaned.remove(scope);
+        }
+        let _ = write_auth_json(path, &cleaned);
+        tracing::debug!("auth: removed stale WebLogin scope from auth.json");
     }
 
     /// Single field-assembly point for [`Self::new`]'s two construction paths
@@ -804,6 +776,11 @@ impl AuthManager {
                 .api_key_auth_disabled()
                 .then_some(AuthError::ApiKeyAuthDisabled);
         }
+        // The pin reads an xAI-issued claim, and a token minted elsewhere has none.
+        // The failure path clears the scope, so an unguarded check deletes the credential every launch.
+        if !ActiveAuthBackend::default().is_xai_authority() {
+            return None;
+        }
         let policy = crate::auth::oidc::login_principal_policy(&self.grok_com_config)?;
         let actual = crate::auth::oidc::peek_access_token_principal_id(&auth.key);
         crate::auth::oidc::enforce_login_principal(Some(&policy), actual.as_deref())
@@ -1085,7 +1062,12 @@ impl AuthManager {
     }
 
     /// Spawn the `/user` enrichment task; body in the `enrichment` submodule.
+    /// `/user` lives on the xAI proxy, so a build pointed elsewhere would send its bearer to the wrong host.
+    /// That would happen on every login and every refresh.
     fn spawn_user_info_enrichment(self: &Arc<Self>, auth: GrokAuth) {
+        if !ActiveAuthBackend::default().is_xai_authority() {
+            return;
+        }
         enrichment::spawn(Arc::clone(self), auth);
     }
 
@@ -1461,6 +1443,7 @@ impl AuthManager {
         }
     }
 
+    #[tracing::instrument(name = "auth.lock_wait", skip_all)]
     pub(crate) async fn try_lock_auth_file_async(
         &self,
         timeout: StdDuration,
@@ -1700,6 +1683,11 @@ impl AuthManager {
         self: &Arc<Self>,
         unusable: Option<&str>,
     ) -> Result<GrokAuth, AuthError> {
+        // Devbox mints an xAI credential and clears auth.json to do it.
+        // Under another authority that evicts the sibling login and hands an xAI refresh token to a foreign host.
+        if !ActiveAuthBackend::default().is_xai_authority() {
+            return Err(AuthError::NotLoggedIn);
+        }
         if self.grok_com_config.blocks_automatic_oidc() {
             tracing::debug!(
                 "auth: devbox recovery skipped (preferred_method=api_key blocks automatic OIDC)"

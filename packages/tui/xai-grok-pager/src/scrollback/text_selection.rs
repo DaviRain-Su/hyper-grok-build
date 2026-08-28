@@ -1061,7 +1061,13 @@ pub(crate) fn reconstruct_full_selection_text_with_boundaries(
         let Some(cols) = selectable_cols(&line.content, &line.selectable) else {
             continue;
         };
-        let width = cols.end.saturating_sub(cols.start);
+        let boundary = boundaries.get(idx).map(Arc::as_ref);
+        let width = boundary
+            .map_or(cols.clone(), |boundary| {
+                boundary.anchored_cols(cols.clone())
+            })
+            .end
+            .saturating_sub(cols.start);
 
         // Map against the exact text painted in the selectable columns, in
         // logical order: this is the string `set_line_safe_bidi` reorders, so
@@ -1127,7 +1133,7 @@ pub(crate) fn reconstruct_full_selection_text_with_boundaries(
         };
         out.push_str(&apply_selection_boundary(
             selected,
-            boundaries.get(idx).map(Arc::as_ref),
+            boundary,
             col_range.start == 0,
             col_range.end == width,
         ));

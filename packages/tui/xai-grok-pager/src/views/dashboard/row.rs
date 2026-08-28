@@ -158,6 +158,99 @@ pub fn build_rows_with_roster(
     sort_rows(&mut rows, grouping, reorder);
     rows
 }
+/// Build dashboard v2 rows from the persisted workspace membership.
+///
+/// The snapshot is authoritative: live agents absent from it are intentionally
+/// omitted until the adoption PR writes them into the store. A matching live
+/// agent contributes its richer runtime row; otherwise stored metadata produces
+/// a read-only idle row.
+pub fn build_rows_with_workspace(
+    agents: &IndexMap<AgentId, AgentView>,
+    snapshot: &xai_grok_dashboard_store::WorkspaceSnapshot,
+    home: Option<&str>,
+) -> Vec<DashboardRow> {
+    let live_by_session: std::collections::HashMap<&str, (AgentId, &AgentView)> = agents
+        .iter()
+        .filter_map(|(id, agent)| {
+            agent
+                .session
+                .session_id
+                .as_ref()
+                .map(|session_id| (session_id.0.as_ref(), (*id, agent)))
+        })
+        .collect();
+    snapshot
+        .members
+        .iter()
+        .filter(|member| matches!(member.kind, xai_grok_dashboard_store::MemberKind::Build))
+        .map(|member| {
+            if let Some((id, agent)) = live_by_session.get(member.session_id.as_ref()) {
+                return top_level_row(*id, agent, false, false, home);
+            }
+            workspace_member_row(member, home)
+        })
+        .collect()
+}
+fn workspace_member_row(
+    member: &xai_grok_dashboard_store::Member,
+    home: Option<&str>,
+) -> DashboardRow {
+    let session_id = member.session_id.as_ref();
+    let cwd = member
+        .cwd
+        .as_deref()
+        .filter(|cwd| !cwd.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let label = member
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(sanitize)
+        .or_else(|| {
+            cwd.file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .map(sanitize)
+        })
+        .unwrap_or_else(|| sanitize(session_id));
+    let mut badges = Vec::new();
+    if member.is_worktree {
+        badges.push(RowBadge::Worktree);
+    }
+    DashboardRow {
+        id: DashboardRowId::Workspace {
+            session_id: session_id.to_owned(),
+        },
+        label,
+        subtitle: None,
+        state: RowState::Idle,
+        activity: None,
+        secondary_line: member
+            .last_turn_summary
+            .as_deref()
+            .or(member.model.as_deref())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(sanitize),
+        cwd_display: if cwd.as_os_str().is_empty() {
+            String::new()
+        } else {
+            super::state::compact_cwd(&cwd, home)
+        },
+        cwd,
+        last_change_at: crate::util::system_time_from_unix_ms(member.last_change_unix_ms),
+        pinned: false,
+        is_active: false,
+        badges,
+        context_pct: None,
+        indent: 0,
+        parent_label: None,
+        is_more_placeholder: false,
+        more_count: 0,
+    }
+}
 /// Build the local-agent rows WITHOUT applying filter or sort. Shared by
 /// [`build_rows`] and [`build_rows_with_roster`].
 ///
@@ -519,19 +612,7 @@ fn top_level_row(
     let subtitle = top_level_subtitle(agent);
     let activity = top_level_activity(agent, state);
     let secondary_line = top_level_secondary_line(agent, state, activity.as_deref());
-    let anchor: Instant = match state {
-        RowState::Working => agent
-            .turn_started_at
-            .or(agent.last_active_at)
-            .unwrap_or_else(fallback_epoch),
-        RowState::NeedsInput
-        | RowState::Idle
-        | RowState::Inactive
-        | RowState::Completed
-        | RowState::Failed
-        | RowState::Blocked => agent.last_active_at.unwrap_or_else(fallback_epoch),
-    };
-    let last_change_at = crate::util::system_time_from_instant(anchor);
+    let last_change_at = top_level_last_change_at(agent, state);
     let mut badges = Vec::new();
     if agent.is_worktree {
         badges.push(RowBadge::Worktree);
@@ -570,6 +651,22 @@ fn top_level_row(
         is_more_placeholder: false,
         more_count: 0,
     }
+}
+/// Wall-clock anchor used by both dashboard rows and workspace metadata sync.
+pub(crate) fn top_level_last_change_at(agent: &AgentView, state: RowState) -> SystemTime {
+    let anchor: Instant = match state {
+        RowState::Working => agent
+            .turn_started_at
+            .or(agent.last_active_at)
+            .unwrap_or_else(fallback_epoch),
+        RowState::NeedsInput
+        | RowState::Idle
+        | RowState::Inactive
+        | RowState::Completed
+        | RowState::Failed
+        | RowState::Blocked => agent.last_active_at.unwrap_or_else(fallback_epoch),
+    };
+    crate::util::system_time_from_instant(anchor)
 }
 fn subagent_row(
     parent: AgentId,
@@ -1061,8 +1158,100 @@ fn build_clusters(rows: &[DashboardRow]) -> Vec<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol as acp;
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
+    fn workspace_member(
+        session_id: &str,
+        title: &str,
+        summary: Option<&str>,
+    ) -> xai_grok_dashboard_store::Member {
+        xai_grok_dashboard_store::Member {
+            session_id: xai_grok_dashboard_store::SessionId::new(session_id).unwrap(),
+            kind: xai_grok_dashboard_store::MemberKind::Build,
+            origin: xai_grok_dashboard_store::MemberOrigin::Local,
+            cwd: Some(format!("/tmp/{session_id}")),
+            title: Some(title.to_owned()),
+            model: Some("grok-test".to_owned()),
+            last_turn_summary: summary.map(str::to_owned),
+            is_worktree: false,
+            last_change_unix_ms: 1_725_000_000_000,
+            pin_rank: None,
+            order_rank: None,
+        }
+    }
+    fn workspace_snapshot(
+        members: Vec<xai_grok_dashboard_store::Member>,
+    ) -> xai_grok_dashboard_store::WorkspaceSnapshot {
+        xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members,
+            data_version: 1,
+        }
+    }
+    #[test]
+    fn workspace_snapshot_is_authoritative_and_live_match_enriches_row() {
+        let mut matched = crate::app::agent_view::test_fixtures::make_agent();
+        matched.session.session_id = Some(acp::SessionId::new("saved"));
+        matched.display_name = Some("Live title".to_owned());
+        let mut unadopted = crate::app::agent_view::test_fixtures::make_agent();
+        unadopted.session.session_id = Some(acp::SessionId::new("not-saved"));
+        let agents = IndexMap::from([(AgentId(7), matched), (AgentId(8), unadopted)]);
+        let snapshot = workspace_snapshot(vec![workspace_member(
+            "saved",
+            "Stored title",
+            Some("Stored summary"),
+        )]);
+        let rows = build_rows_with_workspace(&agents, &snapshot, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, DashboardRowId::TopLevel(AgentId(7)));
+        assert_eq!(rows[0].label, "Live title");
+    }
+    #[test]
+    fn workspace_rows_ignore_non_build_members() {
+        let mut conversation = workspace_member("shared", "Conversation", None);
+        conversation.kind = xai_grok_dashboard_store::MemberKind::Conversation;
+        let snapshot = workspace_snapshot(vec![
+            workspace_member("shared", "Build", None),
+            conversation,
+        ]);
+        let rows = build_rows_with_workspace(&IndexMap::new(), &snapshot, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].id,
+            DashboardRowId::Workspace {
+                session_id: "shared".to_owned()
+            }
+        );
+        assert_eq!(rows[0].label, "Build");
+    }
+    #[test]
+    fn unloaded_workspace_members_are_idle_in_snapshot_order() {
+        let mut second = workspace_member("second", "Second", None);
+        second.is_worktree = true;
+        let snapshot = workspace_snapshot(vec![
+            workspace_member("first", "First", Some("First summary")),
+            second,
+        ]);
+        let rows = build_rows_with_workspace(&IndexMap::new(), &snapshot, None);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].id,
+            DashboardRowId::Workspace {
+                session_id: "first".to_owned()
+            }
+        );
+        assert_eq!(rows[0].state, RowState::Idle);
+        assert_eq!(rows[0].secondary_line.as_deref(), Some("First summary"));
+        assert_eq!(
+            rows[1].id,
+            DashboardRowId::Workspace {
+                session_id: "second".to_owned()
+            }
+        );
+        assert_eq!(rows[1].secondary_line.as_deref(), Some("grok-test"));
+        assert!(rows[1].badges.contains(&RowBadge::Worktree));
+    }
     fn make_subagent(child_id: &str, finished: bool, status: Option<&str>) -> SubagentInfo {
         let now = Instant::now();
         SubagentInfo {
@@ -1764,6 +1953,8 @@ mod tests {
             available_commands_generation: 0,
             available_tools: None,
             model_switch_pending: false,
+            hook_block_hold: false,
+            blocked_prompt: None,
             user_model_preference: None,
             deferred_model_switch: None,
             bg_tasks: std::collections::BTreeMap::new(),

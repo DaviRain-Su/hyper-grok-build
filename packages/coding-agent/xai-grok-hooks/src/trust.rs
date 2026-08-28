@@ -38,11 +38,62 @@ pub fn list_trusted_projects_with_file(trust_file: &Path) -> std::io::Result<Vec
 
 /// Check whether a hook is disabled by name.
 ///
-/// Disabled hooks are listed in , one hook name per line.
+/// Disabled hooks are listed in `$GROK_HOME/disabled-hooks`, one hook name
+/// per line.
 pub fn is_hook_disabled(hook_name: &str) -> bool {
     match disabled_hooks_file_path() {
         Some(file) => is_hook_disabled_with_file(hook_name, &file),
         None => false,
+    }
+}
+
+/// Disabled state for display surfaces (hooks modal, status reports) — the
+/// display spelling of the dispatcher's eligibility rule
+/// (`dispatcher::eligible_or_record_skip`): managed-policy hooks never
+/// display as disabled (their disable state is ignored at dispatch), and an
+/// ordinary hook is disabled by either its spec flag or a disabled-hooks
+/// entry. Keep the two in lockstep or the modal lies about what runs.
+pub fn hook_disabled_for_display(spec: &crate::config::HookSpec) -> bool {
+    hook_disabled_for_display_with(spec, &DisabledHooks::load())
+}
+
+/// [`hook_disabled_for_display`] against a pre-loaded snapshot (bulk display
+/// passes and tests).
+pub fn hook_disabled_for_display_with(
+    spec: &crate::config::HookSpec,
+    disabled: &DisabledHooks,
+) -> bool {
+    !spec.is_managed_policy() && (!spec.enabled || disabled.contains(&spec.name))
+}
+
+/// One-shot snapshot of the disabled-hooks file, for callers that evaluate
+/// many specs per pass (dispatch loops, the stop-gate guard) — one read
+/// instead of one per spec.
+pub struct DisabledHooks(std::collections::HashSet<String>);
+
+impl DisabledHooks {
+    /// Build from explicit names (tests; no filesystem or env dependence).
+    pub fn from_names<I: IntoIterator<Item = String>>(names: I) -> Self {
+        Self(names.into_iter().collect())
+    }
+
+    pub fn load() -> Self {
+        let names = disabled_hooks_file_path()
+            .and_then(|file| std::fs::read_to_string(file).ok())
+            .map(|content| {
+                content
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self(names)
+    }
+
+    pub fn contains(&self, hook_name: &str) -> bool {
+        self.0.contains(hook_name)
     }
 }
 
@@ -56,7 +107,7 @@ fn is_hook_disabled_with_file(hook_name: &str, file: &Path) -> bool {
         .any(|l| !l.trim().is_empty() && !l.trim().starts_with('#') && l.trim() == hook_name)
 }
 
-/// Disable a hook by name. Adds to .
+/// Disable a hook by name (append to `$GROK_HOME/disabled-hooks`).
 pub fn disable_hook(hook_name: &str) -> Result<(), String> {
     let file = disabled_hooks_file_path()
         .ok_or_else(|| "no user grok home (set $GROK_HOME or $HOME)".to_string())?;
@@ -80,7 +131,7 @@ fn disable_hook_with_file(hook_name: &str, file: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Enable a hook by name (remove from ).
+/// Enable a hook by name (remove from `$GROK_HOME/disabled-hooks`).
 pub fn enable_hook(hook_name: &str) -> Result<bool, String> {
     match disabled_hooks_file_path() {
         Some(file) => enable_hook_with_file(hook_name, &file),

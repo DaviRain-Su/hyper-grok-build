@@ -1,10 +1,10 @@
 use super::*;
 use xai_grok_tools::implementations::skills::types::SkillScope;
 
-/// Shadows [`super::resolve`] for the cases that route something other
+/// Shadows [`super::resolve_human_intent`] for the cases that route something other
 /// than `/loop`: they are indifferent to the fire mode, and pinning it
 /// here keeps a plumbing change out of every unrelated call site. Tests
-/// that care about the mode call `super::resolve` directly.
+/// that care about the mode call `super::resolve_human_intent` directly.
 fn resolve(
     prompt_blocks: Vec<acp::ContentBlock>,
     skills: &[SkillInfo],
@@ -12,7 +12,7 @@ fn resolve(
     skill_rewrite: SkillSlashRewrite,
     workflows: &[crate::session::workflow::registry::WorkflowListing],
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
-    super::resolve(
+    super::resolve_human_intent(
         prompt_blocks,
         skills,
         availability,
@@ -185,38 +185,6 @@ fn invoke_text(outcome: SlashCommandOutcome) -> String {
     }
 }
 
-// ── parse_slash_prefix ──────────────────────────────────────────
-
-#[test]
-fn parse_slash_prefix_extracts_name_and_args() {
-    assert_eq!(
-        parse_slash_prefix(&[text_block("/compact keep auth")]),
-        Some(("compact", "keep auth")),
-    );
-    assert_eq!(
-        parse_slash_prefix(&[text_block("/yolo")]),
-        Some(("yolo", "")),
-    );
-}
-
-#[test]
-fn parse_slash_prefix_ignores_non_leading_slash() {
-    assert_eq!(
-        parse_slash_prefix(&[text_block("please run /commit")]),
-        None
-    );
-    assert_eq!(parse_slash_prefix(&[text_block("fix the bug")]), None);
-    assert_eq!(parse_slash_prefix(&[text_block("/")]), None);
-}
-
-#[test]
-fn parse_slash_prefix_trims_whitespace() {
-    assert_eq!(
-        parse_slash_prefix(&[text_block("  /commit fix typo  ")]),
-        Some(("commit", "fix typo")),
-    );
-}
-
 // ── builtin resolve fns ─────────────────────────────────────────
 
 fn resolve_builtin(name: &str, args: &str) -> Option<BuiltinAction> {
@@ -305,6 +273,86 @@ fn status_alias_resolves_to_session_info() {
         outcome,
         SlashCommandOutcome::Builtin(BuiltinAction::SessionInfo)
     ));
+}
+
+#[test]
+fn resolve_model_authored_skill_requires_exact_child_catalog_name_and_loader() {
+    let skills = vec![make_skill("commit", true), make_skill("other", true)];
+
+    let outcome = super::resolve_model_authored_skill(
+        vec![text_block("/commit fix typo")],
+        "commit",
+        "fix typo",
+        &skills,
+        all_gated(),
+        true,
+    )
+    .unwrap_err();
+    let skill = first_skill(outcome);
+    assert_eq!(skill.name, "commit");
+    assert_eq!(skill.args, "fix typo");
+
+    for (name, has_skill_loader) in [
+        ("Commit", true),
+        ("local:commit", true),
+        ("missing", true),
+        ("commit", false),
+        ("always-approve", true),
+    ] {
+        assert!(
+            super::resolve_model_authored_skill(
+                vec![text_block(&format!("/{name}"))],
+                name,
+                "",
+                &skills,
+                all_gated(),
+                has_skill_loader,
+            )
+            .is_ok(),
+            "{name} with loader={has_skill_loader} must stay inert"
+        );
+    }
+
+    let colliding = vec![make_skill("compact", true)];
+    let outcome = super::resolve_model_authored_skill(
+        vec![text_block("/local:compact keep history")],
+        "local:compact",
+        "keep history",
+        &colliding,
+        all_gated(),
+        true,
+    )
+    .unwrap_err();
+    let skill = first_skill(outcome);
+    assert_eq!(skill.name, "local:compact");
+    assert_eq!(skill.args, "keep history");
+
+    let flush_skill = vec![make_skill("flush", true)];
+    let memory_off = CommandAvailability::default();
+    let advertised = available_commands(&flush_skill, memory_off, &[]);
+    assert!(advertised.iter().any(|command| command.name == "flush"));
+    assert!(
+        super::resolve_model_authored_skill(
+            vec![text_block("/flush")],
+            "flush",
+            "",
+            &flush_skill,
+            memory_off,
+            true,
+        )
+        .is_err()
+    );
+    assert!(
+        super::resolve_model_authored_skill(
+            vec![text_block("/local:flush")],
+            "local:flush",
+            "",
+            &flush_skill,
+            memory_off,
+            true,
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -443,7 +491,7 @@ fn resolve_loop_without_args_uses_bare_command_display_text() {
 #[test]
 fn resolve_loop_expands_for_the_sessions_fire_mode() {
     let text_of = |mode| {
-        let outcome = super::resolve(
+        let outcome = super::resolve_human_intent(
             vec![text_block("/loop 1m echo hello")],
             &[],
             all_gated(),

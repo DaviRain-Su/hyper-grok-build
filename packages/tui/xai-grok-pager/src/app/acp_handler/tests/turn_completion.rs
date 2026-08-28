@@ -420,18 +420,27 @@
     }
 
     #[test]
-    fn wake_turn_completed_in_replay_only_records_pid() {
-        // Markers are client-local and never replayed.
+    fn wake_turn_completed_in_replay_records_pid_and_visible_marker() {
+        // A visible wake still records its pid and now also gets a marker.
+        // The chunk must be isReplay — live output_epoch does not count.
         let mut app = make_app_with_agent("sess-wake");
-        app.agents
-            .get_mut(&AgentId(0))
-            .unwrap()
-            .session
-            .loading_replay = true;
+        begin_replay(&mut app);
+        let _ = handle(
+            make_replay_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
+            &mut app,
+        );
         let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let started_at = app.agents[&AgentId(0)].turn_started_at;
 
         let affected = handle_ext_notification(
-            &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "end_turn", true),
+            &xai_turn_completed_replay(
+                "sess-wake",
+                "task-completed-bg1",
+                "end_turn",
+                Some(1500),
+                None,
+                serde_json::json!({}),
+            ),
             &mut app,
         );
 
@@ -443,11 +452,12 @@
                 .contains("task-completed-bg1"),
             "the replay arm must keep recording wake pids"
         );
-        assert_eq!(
-            agent.scrollback.len(),
-            len_before,
-            "no marker during replay"
-        );
+        assert_eq!(agent.scrollback.len(), len_before + 1);
+        assert!(matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnCompleted { elapsed: Some(_) })
+        ));
+        assert_eq!(agent.turn_started_at, started_at, "replay must not finalize");
     }
 
     #[test]
@@ -507,6 +517,7 @@
                 stop_reason: "rate_limit".into(),
                 agent_result: Some(rate_limit_copy.into()),
                 usage: None,
+                elapsed_ms: None,
             },
             meta: Some(serde_json::json!({ "isReplay": false })),
         };
@@ -1065,9 +1076,8 @@
 
     #[test]
     fn replayed_stop_hooks_render_as_standalone_block() {
-        // Replay keeps the legacy standalone block: turn markers are
-        // client-local and not reconstructed from the persisted stream,
-        // so there is nothing to merge into on resume.
+        // Replay keeps stop hooks standalone: the reconstructed marker is
+        // pushed with empty hook groups and must not fold the stash.
         let mut app = make_app_with_agent("sess-replay");
         app.agents
             .get_mut(&AgentId(0))
@@ -1781,6 +1791,529 @@
             agent.pending_stop_hooks.is_none(),
             "it must not stash onto the running local turn"
         );
+    }
+
+    fn begin_replay(app: &mut AppView) {
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .loading_replay = true;
+    }
+
+    #[test]
+    fn replay_completed_with_elapsed_pushes_worked_for() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p1",
+                "end_turn",
+                Some(2500),
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("p1"));
+        match last_session_event(&agent.scrollback) {
+            Some(SessionEvent::TurnCompleted { elapsed: Some(d) }) => {
+                assert_eq!(d, std::time::Duration::from_millis(2500));
+            }
+            other => panic!("expected Worked-for marker, got {other:?}"),
+        }
+        assert!(agent.turn_started_at.is_none());
+        assert!(agent.expect_send_now_cancel.is_none());
+    }
+
+    #[test]
+    fn replay_completed_without_elapsed_is_turn_completed_not_zero() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let _ = handle_ext_notification(
+            &xai_turn_completed_notif("sess-1", "p1", "end_turn", true),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        match last_session_event(&agent.scrollback) {
+            Some(ev @ SessionEvent::TurnCompleted { elapsed: None }) => {
+                assert_eq!(ev.message(), "Turn completed.");
+            }
+            other => panic!("expected markerless-elapsed completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_cancelled_pushes_cancelled_marker() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p1",
+                "cancelled",
+                Some(800),
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnCancelled { .. })
+        ));
+    }
+
+    #[test]
+    fn replay_hook_denied_pushes_blocked_marker() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p1",
+                "cancelled",
+                Some(400),
+                None,
+                serde_json::json!({ "cancellationCategory": "HookDenied" }),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnBlockedByHook { .. })
+        ));
+    }
+
+    #[test]
+    fn replay_failed_without_banner_pushes_failed_marker() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p1",
+                "error",
+                Some(100),
+                Some("boom"),
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn replay_failed_with_banner_skips_failed_marker() {
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.scrollback.push_block(
+                crate::scrollback::block::RenderBlock::session_event(SessionEvent::RequestFailed {
+                    status: Some(400),
+                    headline: "Bad request (400)".into(),
+                    detail: "The server rejected this request.".into(),
+                }),
+            );
+        }
+        begin_replay(&mut app);
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p1",
+                "error",
+                Some(100),
+                Some("boom"),
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("p1"));
+        assert_eq!(agent.scrollback.len(), len_before);
+    }
+
+    #[test]
+    fn replay_rate_limit_records_pid_no_marker() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p1",
+                "rate_limit",
+                Some(50),
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("p1"));
+        assert_eq!(agent.scrollback.len(), len_before);
+    }
+
+    #[test]
+    fn replay_chatty_rate_limited_wake_paints_failure_marker() {
+        // Live `finish_wake_turn` paints TurnFailed for a chatty rate-limited
+        // wake; replay must not drop that footer.
+        let mut app = make_app_with_agent("sess-wake");
+        begin_replay(&mut app);
+        let _ = handle(
+            make_replay_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
+            &mut app,
+        );
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-wake",
+                "task-completed-bg1",
+                "rate_limit",
+                Some(50),
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("task-completed-bg1"));
+        assert_eq!(agent.scrollback.len(), len_before + 1);
+        assert!(matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnFailed { .. })
+        ));
+        assert_eq!(
+            agent.failed_wake_marker_for.as_deref(),
+            Some("task-completed-bg1")
+        );
+    }
+
+    #[test]
+    fn replay_silent_rate_limited_wake_stays_markerless() {
+        let mut app = make_app_with_agent("sess-wake");
+        begin_replay(&mut app);
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let _ = handle_ext_notification(
+            &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "rate_limit", true),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("task-completed-bg1"));
+        assert_eq!(agent.scrollback.len(), len_before);
+        assert!(agent.failed_wake_marker_for.is_none());
+    }
+
+    #[test]
+    fn replay_send_now_records_pid_no_marker() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p1",
+                "cancelled",
+                Some(50),
+                None,
+                serde_json::json!({ "cancelTrigger": "send_now" }),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("p1"));
+        assert_eq!(agent.scrollback.len(), len_before);
+    }
+
+    #[test]
+    fn replay_unknown_stop_reason_pushes_completed_marker() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p1",
+                "brand_new_token",
+                Some(10),
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("p1"));
+        assert!(matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnCompleted { .. })
+        ));
+    }
+
+    #[test]
+    fn replay_duplicate_pid_one_marker() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let n = xai_turn_completed_replay(
+            "sess-1",
+            "p1",
+            "end_turn",
+            Some(10),
+            None,
+            serde_json::json!({}),
+        );
+        let _ = handle_ext_notification(&n, &mut app);
+        let _ = handle_ext_notification(&n, &mut app);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            crate::app::agent_view::test_fixtures::count_turn_markers(agent),
+            1
+        );
+    }
+
+    #[test]
+    fn replay_two_pids_two_markers() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p1",
+                "end_turn",
+                Some(10),
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p2",
+                "end_turn",
+                Some(20),
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("p1"));
+        assert!(agent.replayed_terminal_prompts.contains("p2"));
+        assert_eq!(
+            crate::app::agent_view::test_fixtures::count_turn_markers(agent),
+            2
+        );
+    }
+
+    #[test]
+    fn replay_silent_wake_records_pid_no_marker() {
+        let mut app = make_app_with_agent("sess-wake");
+        begin_replay(&mut app);
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let _ = handle_ext_notification(
+            &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "end_turn", true),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("task-completed-bg1"));
+        assert_eq!(agent.scrollback.len(), len_before);
+    }
+
+    #[test]
+    fn replay_stop_hooks_stay_standalone() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let _ = handle_ext_notification(
+            &xai_hook_execution_notif_for_prompt("sess-1", "stop", Some("p1"), true),
+            &mut app,
+        );
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p1",
+                "end_turn",
+                Some(10),
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let _ = handle_ext_notification(
+            &xai_hook_execution_notif_for_prompt("sess-1", "stop", Some("p1"), true),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 2);
+        assert!(agent.pending_stop_hooks.is_none());
+        match last_session_event(&agent.scrollback) {
+            Some(SessionEvent::TurnCompleted { .. }) => {}
+            other => panic!("expected completed marker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_wake_suppressed_tool_only_records_pid_no_marker() {
+        let mut app = make_app_with_agent("sess-wake");
+        begin_replay(&mut app);
+        send_replay_suppressed_tool_call(&mut app, "sess-wake", "task-completed-bg1");
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-wake",
+                "task-completed-bg1",
+                "end_turn",
+                Some(10),
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("task-completed-bg1"));
+        assert!(
+            !agent.replayed_visible_prompts.contains("task-completed-bg1"),
+            "a suppressed TodoWrite must not count as visible output"
+        );
+        assert_eq!(agent.scrollback.len(), len_before);
+    }
+
+    #[test]
+    fn replay_goal_summary_error_stays_markerless() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "goal-summary-g1",
+                "error",
+                Some(10),
+                Some("classifier failed"),
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("goal-summary-g1"));
+        assert_eq!(agent.scrollback.len(), len_before);
+    }
+
+    #[test]
+    fn replay_direct_bash_records_pid_no_marker() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        send_replay_bash_tool_call(&mut app, "sess-1", "p-bash");
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p-bash",
+                "end_turn",
+                Some(10),
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("p-bash"));
+        assert!(agent.replayed_bash_prompts.contains("p-bash"));
+        assert_eq!(
+            agent.scrollback.len(),
+            len_before,
+            "direct bash must not paint a Worked-for marker"
+        );
+    }
+
+    #[test]
+    fn replay_direct_bash_cancelled_paints_marker() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        send_replay_bash_tool_call(&mut app, "sess-1", "p-bash");
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p-bash",
+                "cancelled",
+                Some(10),
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("p-bash"));
+        assert!(agent.replayed_bash_prompts.contains("p-bash"));
+        assert_eq!(
+            agent.scrollback.len(),
+            len_before + 1,
+            "cancelled direct bash must paint TurnCancelled"
+        );
+        assert!(matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnCancelled { .. })
+        ));
+    }
+
+    #[test]
+    fn replay_direct_bash_error_paints_marker() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        send_replay_bash_tool_call(&mut app, "sess-1", "p-bash");
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p-bash",
+                "error",
+                Some(10),
+                Some("boom"),
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("p-bash"));
+        assert!(agent.replayed_bash_prompts.contains("p-bash"));
+        assert_eq!(
+            agent.scrollback.len(),
+            len_before + 1,
+            "failed direct bash must paint TurnFailed"
+        );
+        assert!(matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn replay_empty_prompt_id_records_no_marker() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "",
+                "end_turn",
+                Some(10),
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains(""));
+        assert_eq!(agent.scrollback.len(), len_before);
     }
 
     /// Builds a live `LastTurnSummary` notification.

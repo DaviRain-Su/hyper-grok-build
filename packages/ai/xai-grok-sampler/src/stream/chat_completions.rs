@@ -254,9 +254,17 @@ pub fn stream_chat_completions<'a>(
             })
             .collect();
 
-        // Honor tool calls by overriding the stop reason if the model
-        // forgot to set it (mirrors the shell's behavior).
+        // Tool calls override the stop reason, even an explicit `length`.
+        // NOTE: opposite precedence from the Messages backend, where Length
+        // wins so `drive_l2` can refuse to salvage a possibly
+        // argument-truncated trailing call. Load-bearing; don't "fix" here.
         if !tool_calls.is_empty() {
+            if finish_reason == Some(StopReason::Length) {
+                tracing::warn!(
+                    request_id = %request_id,
+                    "tool calls mask a length-truncated response; arguments may be truncated"
+                );
+            }
             finish_reason = Some(StopReason::ToolCalls);
         }
 
@@ -492,6 +500,75 @@ mod tests {
                 assert_eq!(t.text, "thinking...");
             }
             other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// A text-only `length` finish completes with `stop_reason=Length` and
+    /// the partial text preserved — fail-vs-salvage belongs to `drive_l2`,
+    /// not this transform.
+    #[tokio::test]
+    async fn length_finish_completes_with_length_stop() {
+        let raw = stream::iter::<Vec<Result<ChatCompletionChunk, SamplingError>>>(vec![
+            Ok(text_chunk("truncated answ")),
+            Ok(final_chunk(FinishReason::Length)),
+        ])
+        .boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::Length));
+                assert_eq!(response.assistant_text(), "truncated answ");
+            }
+            other => panic!("expected Completed(Length), got {other:?}"),
+        }
+    }
+
+    /// Pins the load-bearing precedence: tool calls override an explicit
+    /// `length` finish (opposite of the Messages backend) — see the NOTE at
+    /// the override site.
+    #[tokio::test]
+    async fn tool_calls_override_length_finish() {
+        let tool_chunk = make_chunk(vec![ChatChunkDelta {
+            role: None,
+            content: None,
+            reasoning_content: None,
+            tool_calls: vec![ChunkToolCallDelta {
+                index: 0,
+                id: Some("call_cut".into()),
+                kind: Some("function".into()),
+                function: Some(ToolCallFunctionDelta {
+                    name: Some("do_thing".into()),
+                    arguments: Some("{\"x\": \"trunc".into()),
+                }),
+            }],
+            tool_call_id: None,
+        }]);
+        let raw = stream::iter::<Vec<Result<ChatCompletionChunk, SamplingError>>>(vec![
+            Ok(tool_chunk),
+            Ok(final_chunk(FinishReason::Length)),
+        ])
+        .boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+                assert_eq!(response.tool_calls().len(), 1);
+            }
+            other => panic!("expected Completed(ToolCalls), got {other:?}"),
         }
     }
 

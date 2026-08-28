@@ -21,7 +21,7 @@ toml = { workspace = true }
 tracing = { workspace = true }
 urlencoding = { workspace = true }
 which = { workspace = true }
-xai-grok-home = { workspace = true }
+xai-dirs = { workspace = true }
 xai-tty-utils = { workspace = true }
 xai-grok-version = { workspace = true }
 

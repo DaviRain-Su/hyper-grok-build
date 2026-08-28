@@ -87,6 +87,10 @@ pub(crate) async fn single_check(
     alpha_test_key: Option<&str>,
     user_id: &str,
 ) -> Option<UnblockResult> {
+    use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
+    if !ActiveAuthBackend::default().is_xai_authority() {
+        return None;
+    }
     let user_url = format!("{}/user?include=subscription", proxy_base_url);
     let http_client = crate::http::shared_client();
     let auth = auth_manager.current()?;

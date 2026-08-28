@@ -22,17 +22,16 @@ const ACCEPT_HINT: &str = "accept suggestion";
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn prompt_suggestion_ghost_tab_accepts() {
-    // The suggestion model (`grok-build-0.1`, the shell's built-in default)
+    // The suggestion model (`grok-4.6`, the shell's built-in default)
     // must be in the mock catalog: the shell catalog-guards the effective
     // suggestion model and *skips the request entirely* when it is not
-    // sampleable (`prompt_suggest::effective_suggest_model`), exactly as it
-    // does for OAuth users whose catalogs exclude it. Listing it exercises
-    // the real guarded path end-to-end: pager hints the model from its
-    // catalog → shell guard passes → request fires → ghost renders.
+    // sampleable (`prompt_suggest::effective_suggest_model`). Listing it
+    // exercises the real guarded path end-to-end: pager hints the model from
+    // its catalog → shell guard passes → request fires → ghost renders.
     // `test-model` stays first so it remains the session's default model.
     let content = ContentController::start_with_models(vec![
         MockModel::new("test-model"),
-        MockModel::new("grok-build-0.1"),
+        MockModel::new("grok-4.6"),
     ])
     .await
     .expect("start content");

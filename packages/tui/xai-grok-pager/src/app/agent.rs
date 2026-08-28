@@ -688,6 +688,19 @@ impl AgentState {
         }
     }
 }
+/// Context of a hook-blocked prompt requeued at the local queue front — see
+/// [`AgentSession::blocked_prompt`].
+#[derive(Debug, Clone)]
+pub struct BlockedPromptContext {
+    /// Local queue row id of the requeued blocked prompt.
+    pub row_id: u64,
+    /// Qualified name of the blocking hook, from `cancellationContext`.
+    pub hook_name: Option<String>,
+    /// Hook-authored block reason (user-facing, never model context).
+    pub reason: Option<String>,
+    /// The blocked turn was a combined submission of several queued rows.
+    pub was_combined: bool,
+}
 /// A model switch stashed while no session exists, applied once the session
 /// id materialises (`apply_deferred_model_switch`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -805,6 +818,21 @@ pub struct AgentSession {
     /// `SwitchModelComplete`, or by `begin_session_reload` when a reconnect
     /// drops the in-flight RPC — else a lost completion jams the queue forever.
     pub model_switch_pending: bool,
+    /// A `UserPromptSubmit` hook blocked the last turn: hold the local
+    /// drip-feed queue (`maybe_drain_queue`) so queued follow-ups never
+    /// auto-run as if the blocked prompt had succeeded. Client-side mirror of
+    /// the shell's server-queue hold (which cannot see this queue). Cleared on
+    /// user re-engagement — a fresh submit, send-now / interjection, a save
+    /// or removal of the blocked row itself — and by `begin_session_reload`,
+    /// so a stale flag cannot jam a restored queue. An edit exit that
+    /// resolves nothing (Esc, pane switch, unrelated row) keeps the hold and
+    /// reopens the blocked-prompt card.
+    pub hook_block_hold: bool,
+    /// The hook-blocked prompt requeued at the queue front, while
+    /// [`Self::hook_block_hold`] is armed on the client that owns
+    /// the card. Lets the card reopen after an exit that resolved nothing.
+    /// Cleared with the hold (`release_hook_block_hold`, session reload).
+    pub blocked_prompt: Option<BlockedPromptContext>,
     /// Model the user chose this session via `/model` / the model picker, or
     /// the last successfully applied live remote `ModelChanged` (leader-mode
     /// fan-out). Survives reconnect (`begin_session_reload` does **not** clear
@@ -1203,6 +1231,8 @@ mod tests {
             available_commands_generation: 0,
             available_tools: None,
             model_switch_pending: false,
+            hook_block_hold: false,
+            blocked_prompt: None,
             user_model_preference: None,
             deferred_model_switch: None,
             bg_tasks: BTreeMap::new(),

@@ -41,6 +41,18 @@ impl StartupPhase {
 }
 
 macro_rules! span_table {
+    ($visibility:vis fn $name:ident, fn $under:ident($enum_name:ident) { $($variant:ident => $label:literal),* $(,)? }) => {
+        $visibility fn $name(value: $enum_name) -> tracing::Span {
+            match value {
+                $($enum_name::$variant => tracing::info_span!($label),)*
+            }
+        }
+        $visibility fn $under(value: $enum_name, parent: &tracing::Span) -> tracing::Span {
+            match value {
+                $($enum_name::$variant => tracing::info_span!(parent: parent, $label),)*
+            }
+        }
+    };
     ($visibility:vis fn $name:ident($enum_name:ident, parent) { $($variant:ident => $label:literal),* $(,)? }) => {
         $visibility fn $name(value: $enum_name, parent: &tracing::Span) -> tracing::Span {
             match value {
@@ -56,6 +68,7 @@ macro_rules! span_table {
         }
     };
 }
+pub(crate) use span_table;
 
 span_table!(fn phase_span(StartupPhase, parent) {
     ConfigLoad => "startup.config_load",
@@ -70,7 +83,7 @@ span_table!(fn phase_span(StartupPhase, parent) {
     SessionCreate => "startup.session_create",
 });
 
-span_table!(pub(crate) fn subphase_span(Subphase) {
+span_table!(pub(crate) fn subphase_span(Subphase, parent) {
     SessionLoad => "startup.session_load",
     SessionReplay => "startup.session_replay",
     SessionGitScan => "startup.session_git_scan",
@@ -238,7 +251,6 @@ impl StartupTimer {
 
     fn close_open_phase(&self) {
         let now = Instant::now();
-        // Dropped after the lock: closing a span runs subscriber hooks.
         let finished_span;
         {
             let mut g = self.lock();
@@ -268,16 +280,7 @@ impl StartupTimer {
     /// A discarded run's spans close at the discard, not at the last `Arc`
     /// drop, so idle wait after first client is never attributed to a phase.
     fn discard_spans(&self) {
-        // Dropped after the lock: closing a span runs subscriber hooks.
-        let (open_phase, root);
-        {
-            let mut g = self.lock();
-            open_phase = g.current_span.take();
-            g.root_span.record("outcome", "discarded");
-            root = std::mem::replace(&mut g.root_span, tracing::Span::none());
-        }
-        drop(open_phase);
-        drop(root);
+        self.close_root_span("discarded");
     }
 
     pub fn set_auth_mode(&self, mode: AuthMode) {
@@ -839,6 +842,7 @@ mod tests {
             [
                 "startup.config_load",
                 "startup.session_git_scan",
+                "timer",
                 "startup.bootstrap",
                 "startup",
             ]
@@ -853,10 +857,12 @@ mod tests {
         }
 
         // Held spans never parent contextually: phases are explicit children
-        // of the root; the sub-phase timer has no root handle.
+        // of the root; the sub-phase timer has no root handle, and its
+        // subphase span nests under it so the interval counts once.
         for c in &log.closed {
             let expected_parent = match c.name.as_str() {
-                "startup" | "startup.session_git_scan" => None,
+                "startup" | "timer" => None,
+                "startup.session_git_scan" => Some("timer"),
                 _ => Some("startup"),
             };
             assert_eq!(c.parent.as_deref(), expected_parent, "{}", c.name);

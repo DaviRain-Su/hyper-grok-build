@@ -949,19 +949,32 @@ async fn reset_title_to_auto_then_generated_title_is_adopted() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
+    // The sync task sends the row PUT only after the data POST's response.
     let upsert_path = format!("/sessions/{SESSION_ID}");
-    let upserted_title = server.requests().into_iter().rev().find_map(|r| {
-        (r.method == "PUT" && r.path == upsert_path)
-            .then(|| {
-                r.body
-                    .as_ref()?
-                    .get("session")?
-                    .get("title")?
-                    .as_str()
-                    .map(str::to_owned)
-            })
-            .flatten()
-    });
+    let find_upserted_title = || {
+        server.requests().into_iter().rev().find_map(|r| {
+            (r.method == "PUT" && r.path == upsert_path)
+                .then(|| {
+                    r.body
+                        .as_ref()?
+                        .get("session")?
+                        .get("title")?
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .flatten()
+        })
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let upserted_title = loop {
+        if let Some(title) = find_upserted_title() {
+            break Some(title);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
     assert_eq!(
         upserted_title.as_deref(),
         Some(""),

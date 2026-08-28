@@ -461,10 +461,13 @@ pub(crate) fn join_searchable(parts: impl IntoIterator<Item = Option<String>>) -
 
 impl RenderBlock {
     pub(crate) fn rendered_output(&self, ctx: &BlockContext) -> RenderedBlockOutput {
-        let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = self else {
-            return RenderedBlockOutput::from(self.output(ctx));
+        let mut rendered = match self {
+            RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) => edit.rendered_output(ctx),
+            RenderBlock::ToolCall(ToolCallBlock::SentMessage(message)) => {
+                message.rendered_output(ctx)
+            }
+            _ => return RenderedBlockOutput::from(self.output(ctx)),
         };
-        let mut rendered = edit.rendered_output(ctx);
         if self.has_bullet(ctx) {
             prepend_bullet(&mut rendered.output, ctx, self.bullet(ctx));
         }
@@ -1000,6 +1003,18 @@ impl RenderBlock {
                             Some(theme.accent_error)
                         }
                     }
+                    ToolCallBlock::SentMessage(b) => Some(match &b.presentation {
+                        crate::scrollback::blocks::SentMessagePresentation::Sending
+                        | crate::scrollback::blocks::SentMessagePresentation::Sent => {
+                            theme.accent_tool
+                        }
+                        crate::scrollback::blocks::SentMessagePresentation::Rejected { .. } => {
+                            theme.accent_error
+                        }
+                        crate::scrollback::blocks::SentMessagePresentation::Unconfirmed {
+                            ..
+                        } => theme.warning,
+                    }),
                     ToolCallBlock::Other(b) => {
                         if b.is_success() {
                             Some(theme.accent_tool)

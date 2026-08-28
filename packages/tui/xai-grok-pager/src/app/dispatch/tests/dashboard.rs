@@ -1494,6 +1494,288 @@ fn dashboard_open_without_leader_fetches_local_sessions() {
         "non-leader dashboard open must fetch the local idle-session list",
     );
 }
+#[test]
+fn workspace_dashboard_open_loads_one_snapshot_and_skips_rosters() {
+    let mut app = test_app_with_agent();
+    app.workspace_dashboard_enabled = true;
+    app.active_view = ActiveView::Agent(AgentId(0));
+    let effects = dispatch_open_dashboard(&mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::LoadWorkspaceSnapshot { .. }]
+    ));
+    assert!(app.workspace_store_loading);
+    assert!(app.dashboard_sessions_loading);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FetchRoster | Effect::FetchDashboardSessions))
+    );
+    let _ = dispatch_exit_dashboard(&mut app);
+    let effects = dispatch_open_dashboard(&mut app);
+    assert!(
+        effects.is_empty(),
+        "an in-flight workspace read must suppress duplicate opens"
+    );
+}
+#[test]
+fn workspace_snapshot_load_requests_live_adoption() {
+    let temp = tempfile::tempdir().unwrap();
+    let store =
+        xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db")).unwrap();
+    let snapshot = store.snapshot().unwrap();
+    let mut app = test_app_with_agent();
+    app.workspace_dashboard_enabled = true;
+    app.workspace_store_loading = true;
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::WorkspaceSnapshotLoaded { store, snapshot }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(app.workspace_store.is_some());
+    assert!(app.workspace_snapshot.is_some());
+    assert!(app.workspace_sync_requested);
+}
+#[test]
+fn workspace_dashboard_reopens_store_when_only_stale_snapshot_remains() {
+    let mut app = test_app_with_agent();
+    app.workspace_dashboard_enabled = true;
+    app.workspace_snapshot = Some(xai_grok_dashboard_store::WorkspaceSnapshot {
+        grouping: xai_grok_dashboard_store::Grouping::State,
+        members: vec![],
+        data_version: 1,
+    });
+    app.active_view = ActiveView::Agent(AgentId(0));
+    let effects = dispatch_open_dashboard(&mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::LoadWorkspaceSnapshot { .. }]
+    ));
+    assert!(app.workspace_store_loading);
+}
+#[test]
+fn workspace_session_created_becomes_an_upsert_candidate() {
+    let temp = tempfile::tempdir().unwrap();
+    let store =
+        xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db")).unwrap();
+    let snapshot = store.snapshot().unwrap();
+    let mut app = test_app_with_agent();
+    app.workspace_dashboard_enabled = true;
+    app.workspace_store = Some(store);
+    app.workspace_snapshot = Some(snapshot);
+    app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionCreated {
+            agent_id: AgentId(0),
+            session_id: acp::SessionId::new("created"),
+            models: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    let effects = crate::app::workspace_sync::drain(&mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::UpsertWorkspaceMembers { members, .. }]
+            if members.len() == 1 && members[0].key.session_id.as_ref() == "created"
+    ));
+}
+#[test]
+fn workspace_busy_write_retries_only_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let store =
+        xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db")).unwrap();
+    let snapshot = store.snapshot().unwrap();
+    let mut app = test_app();
+    app.workspace_dashboard_enabled = true;
+    app.workspace_snapshot = Some(snapshot.clone());
+    app.workspace_write_in_flight = true;
+    let attempted = xai_grok_dashboard_store::NewMember {
+        key: xai_grok_dashboard_store::MemberKey {
+            session_id: xai_grok_dashboard_store::SessionId::new("saved").unwrap(),
+            kind: xai_grok_dashboard_store::MemberKind::Build,
+        },
+        origin: xai_grok_dashboard_store::MemberOrigin::Local,
+        metadata: xai_grok_dashboard_store::MemberMetadata {
+            cwd: Some("/tmp".into()),
+            title: None,
+            model: None,
+            last_turn_summary: None,
+            is_worktree: false,
+            last_change_unix_ms: 1,
+        },
+    };
+    let mut permanent = attempted.clone();
+    permanent.key.session_id = xai_grok_dashboard_store::SessionId::new("permanent").unwrap();
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::WorkspaceMembersUpserted {
+            store,
+            snapshot: Ok(snapshot.clone()),
+            failures: vec![
+                WorkspaceMemberUpsertFailure {
+                    session_id: "saved".into(),
+                    error: "busy".into(),
+                    retryable: true,
+                },
+                WorkspaceMemberUpsertFailure {
+                    session_id: "permanent".into(),
+                    error: "all pinned".into(),
+                    retryable: false,
+                },
+            ],
+            attempted: vec![attempted.clone(), permanent.clone()],
+        }),
+        &mut app,
+    );
+    assert!(app.workspace_sync_requested);
+    assert_eq!(
+        app.workspace_retry_metadata.get(&attempted.key.session_id),
+        Some(&attempted.metadata)
+    );
+    assert!(
+        !app.workspace_retry_metadata
+            .contains_key(&permanent.key.session_id)
+    );
+    assert_eq!(
+        app.workspace_failed_metadata.get(&permanent.key.session_id),
+        Some(&permanent.metadata)
+    );
+    app.workspace_sync_requested = false;
+    app.workspace_write_in_flight = true;
+    let store = app.workspace_store.take().unwrap();
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::WorkspaceMembersUpserted {
+            store,
+            snapshot: Ok(snapshot),
+            failures: vec![WorkspaceMemberUpsertFailure {
+                session_id: "saved".into(),
+                error: "busy again".into(),
+                retryable: true,
+            }],
+            attempted: vec![attempted.clone()],
+        }),
+        &mut app,
+    );
+    assert!(!app.workspace_sync_requested);
+    assert!(
+        !app.workspace_retry_metadata
+            .contains_key(&attempted.key.session_id)
+    );
+    assert_eq!(
+        app.workspace_failed_metadata.get(&attempted.key.session_id),
+        Some(&attempted.metadata)
+    );
+    app.workspace_sync_requested = false;
+    app.workspace_write_in_flight = true;
+    let store = app.workspace_store.take().unwrap();
+    let mut changed = attempted;
+    changed.metadata.title = Some("changed".into());
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::WorkspaceMembersUpserted {
+            store,
+            snapshot: Ok(xai_grok_dashboard_store::WorkspaceSnapshot {
+                grouping: xai_grok_dashboard_store::Grouping::State,
+                members: vec![],
+                data_version: 1,
+            }),
+            failures: vec![WorkspaceMemberUpsertFailure {
+                session_id: "saved".into(),
+                error: "busy changed".into(),
+                retryable: true,
+            }],
+            attempted: vec![changed.clone()],
+        }),
+        &mut app,
+    );
+    assert!(app.workspace_sync_requested);
+    assert_eq!(
+        app.workspace_retry_metadata.get(&changed.key.session_id),
+        Some(&changed.metadata)
+    );
+}
+#[test]
+fn workspace_snapshot_failure_reopens_without_suppressing_attempted_member() {
+    let temp = tempfile::tempdir().unwrap();
+    let store =
+        xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db")).unwrap();
+    let mut app = test_app();
+    app.workspace_dashboard_enabled = true;
+    app.workspace_snapshot = Some(store.snapshot().unwrap());
+    app.workspace_write_in_flight = true;
+    let attempted = xai_grok_dashboard_store::NewMember {
+        key: xai_grok_dashboard_store::MemberKey {
+            session_id: xai_grok_dashboard_store::SessionId::new("saved").unwrap(),
+            kind: xai_grok_dashboard_store::MemberKind::Build,
+        },
+        origin: xai_grok_dashboard_store::MemberOrigin::Local,
+        metadata: xai_grok_dashboard_store::MemberMetadata {
+            cwd: Some("/tmp".into()),
+            title: None,
+            model: None,
+            last_turn_summary: None,
+            is_worktree: false,
+            last_change_unix_ms: 1,
+        },
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::WorkspaceMembersUpserted {
+            store,
+            snapshot: Err("snapshot failed".into()),
+            failures: vec![],
+            attempted: vec![attempted.clone()],
+        }),
+        &mut app,
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::LoadWorkspaceSnapshot { .. }]
+    ));
+    assert!(app.workspace_store.is_none());
+    assert!(app.workspace_store_loading);
+    assert!(
+        !app.workspace_failed_metadata
+            .contains_key(&attempted.key.session_id)
+    );
+}
+#[test]
+fn workspace_row_never_arms_permanent_delete() {
+    let mut app = test_app_with_agent();
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().selected =
+        Some(crate::views::dashboard::DashboardRowId::Workspace {
+            session_id: "saved".to_owned(),
+        });
+    assert!(dispatch_dashboard_stop(&mut app).is_empty());
+    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_none());
+}
+#[test]
+fn workspace_overlay_cycle_omits_unadopted_live_agents() {
+    let mut app = test_app_with_agent();
+    mark_agent_nonempty(&mut app, AgentId(0));
+    let second = insert_second_agent(&mut app);
+    mark_agent_nonempty(&mut app, second);
+    app.workspace_dashboard_enabled = true;
+    app.workspace_snapshot = Some(xai_grok_dashboard_store::WorkspaceSnapshot {
+        grouping: xai_grok_dashboard_store::Grouping::State,
+        members: vec![xai_grok_dashboard_store::Member {
+            session_id: xai_grok_dashboard_store::SessionId::new("test-session").unwrap(),
+            kind: xai_grok_dashboard_store::MemberKind::Build,
+            origin: xai_grok_dashboard_store::MemberOrigin::Local,
+            cwd: Some("/tmp".to_owned()),
+            title: Some("Saved".to_owned()),
+            model: None,
+            last_turn_summary: None,
+            is_worktree: false,
+            last_change_unix_ms: 1,
+            pin_rank: None,
+            order_rank: None,
+        }],
+        data_version: 1,
+    });
+    app.active_view = ActiveView::Agent(AgentId(0));
+    assert!(dispatch_dashboard_overlay_cycle(&mut app, 1).is_empty());
+    assert_eq!(app.active_view, ActiveView::Agent(AgentId(0)));
+}
 /// In leader mode the live FleetView roster is the source, so opening must
 /// fetch that roster immediately (not wait for the poll tick) and must NOT
 /// also fetch the local on-disk list.
@@ -4222,6 +4504,8 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         None,
         &[],
         false,
+        None,
+        false,
         Some(HeaderUpgradeCta {
             label: "Upgrade Account",
             pinned: true,
@@ -4271,6 +4555,8 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         None,
         &[],
         false,
+        None,
+        false,
         Some(HeaderUpgradeCta {
             label: "Upgrade Account",
             pinned: true,
@@ -4298,6 +4584,8 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         &registry,
         None,
         &[],
+        false,
+        None,
         false,
         Some(HeaderUpgradeCta {
             label: "Upgrade Account",
@@ -4333,6 +4621,8 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         &registry,
         None,
         &[],
+        false,
+        None,
         false,
         None,
     );
@@ -4371,6 +4661,21 @@ fn dashboard_begin_rename_on_subagent_row_sets_error_toast() {
         d.selected = Some(crate::views::dashboard::DashboardRowId::Subagent {
             parent: AgentId(0),
             child_session_id: "child".into(),
+        });
+    }
+    dispatch_dashboard_begin_rename(&mut app);
+    let d = app.dashboard.as_ref().unwrap();
+    assert!(d.rename.is_none());
+    assert!(d.error_toast.is_some());
+}
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_begin_rename_on_workspace_row_refuses() {
+    let mut app = test_app_with_agent();
+    open_dashboard(&mut app);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.selected = Some(crate::views::dashboard::DashboardRowId::Workspace {
+            session_id: "saved".into(),
         });
     }
     dispatch_dashboard_begin_rename(&mut app);
@@ -6034,6 +6339,8 @@ fn dashboard_peek_auto_opens_for_selected_row() {
         &[],
         false,
         None,
+        false,
+        None,
     );
     assert!(
         app.dashboard.as_ref().unwrap().peek.is_some(),
@@ -6049,6 +6356,8 @@ fn dashboard_peek_auto_opens_for_selected_row() {
         &reg,
         None,
         &[],
+        false,
+        None,
         false,
         None,
     );
@@ -6085,6 +6394,8 @@ fn dashboard_peek_box_grows_for_multiline_reply() {
                 &reg,
                 None,
                 &[],
+                false,
+                None,
                 false,
                 None,
             );

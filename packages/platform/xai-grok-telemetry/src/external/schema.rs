@@ -611,6 +611,7 @@ pub(crate) const BUILTIN_TOOL_NAMES: &[&str] = &[
     "todo_write",
     "task",
     "spawn_subagent",
+    "send_subagent_message",
     "web_search",
     "web_fetch",
     "lsp",
@@ -678,6 +679,8 @@ pub(crate) fn access_kind_label(k: events::AccessKind) -> &'static str {
         events::AccessKind::Grep => "grep",
         events::AccessKind::Mcp => "mcp",
         events::AccessKind::Web => "web",
+        events::AccessKind::AgentMessage => "agent_message",
+        events::AccessKind::Other => "other",
     }
 }
 
@@ -1172,4 +1175,17 @@ pub fn map_model_switched(ev: &events::ModelSwitched) -> Option<ExternalRecord> 
             .attr(ExternalKey::Success, ev.success)
             .attr_opt(ExternalKey::ErrorCode, ev.error_code.as_deref()),
     )
+}
+
+#[cfg(test)]
+mod access_kind_label_tests {
+    use super::*;
+
+    #[test]
+    fn agent_message_has_dedicated_label() {
+        assert_eq!(
+            access_kind_label(events::AccessKind::AgentMessage),
+            "agent_message"
+        );
+    }
 }

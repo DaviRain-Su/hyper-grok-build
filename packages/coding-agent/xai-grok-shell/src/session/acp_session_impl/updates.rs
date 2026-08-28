@@ -523,6 +523,11 @@ impl SessionActor {
     ///
     /// Must NOT be called from within `run_session()` — the flush goes through
     /// `event_tx`, which is consumed by the same select loop (deadlock / 5s timeout).
+    #[tracing::instrument(
+        name = "session.flush_to_disk",
+        skip_all,
+        fields(session_id = %self.session_info.id.0)
+    )]
     pub(super) async fn flush_to_disk(&self) -> std::io::Result<()> {
         if let Err(e) = crate::session::replay_events::flush_replay_actor(&self.event_tx).await {
             tracing::warn!(?e, "flush_replay_actor failed");

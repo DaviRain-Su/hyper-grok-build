@@ -1,9 +1,9 @@
 [package]
 license = "Apache-2.0"
 edition.workspace = true
-name = "xai-grok-home"
+name = "xai-dirs"
 version = "0.1.0"
-description = "Single source of truth for resolving the grok home directory ($GROK_HOME or <home>/.grok)"
+description = "Home-directory resolution generally: USERPROFILE-first home_dir, plus grok-home ($GROK_HOME or <home>/.grok)"
 
 [dependencies]
 dirs = { workspace = true }

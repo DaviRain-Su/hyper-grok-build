@@ -116,6 +116,8 @@ impl std::error::Error for RuleParseError {}
 ///   - `Grep(...)` / `Glob(...)` -> `ToolFilter::Grep`
 ///   - `WebFetch(...)` -> `ToolFilter::WebFetch`
 ///   - `WebSearch(...)` -> `ToolFilter::WebSearch`
+///   - `AgentMessage(...)` / `SendSubagentMessage(...)` -> `ToolFilter::AgentMessage`
+///   - legacy `SendAgentMessage(...)` remains accepted for persisted policy compatibility
 ///   - No prefix / bare pattern -> `ToolFilter::Any`
 ///
 /// `WebFetch` patterns support a `domain:` prefix (e.g., `WebFetch(domain:example.com)`)
@@ -292,6 +294,9 @@ pub(crate) fn tool_name_to_filter(name: &str) -> Option<ToolFilter> {
         "Grep" | "Glob" => Some(ToolFilter::Grep),
         "WebFetch" => Some(ToolFilter::WebFetch),
         "WebSearch" => Some(ToolFilter::WebSearch),
+        "AgentMessage" | "SendSubagentMessage" | "SendAgentMessage" => {
+            Some(ToolFilter::AgentMessage)
+        }
         _ => None,
     }
 }
@@ -355,8 +360,23 @@ pub(crate) fn strip_bash_colon_wildcard(pattern: String) -> String {
 mod tests {
     use super::*;
 
-    /// `mcp__…` rule spellings (the `.claude/settings.json` form) map onto
-    /// `ToolFilter::Mcp` globs over Grok's qualified `<server>__<tool>` names.
+    #[test]
+    fn parses_agent_message_filter_forms_including_legacy_alias() {
+        for (rule_str, action) in [
+            ("AgentMessage", RuleAction::Ask),
+            ("SendSubagentMessage(*)", RuleAction::Ask),
+            ("SendAgentMessage", RuleAction::Deny),
+            ("SendAgentMessage", RuleAction::Ask),
+            ("SendAgentMessage(*)", RuleAction::Deny),
+            ("SendAgentMessage(*)", RuleAction::Ask),
+        ] {
+            let rule = parse_permission_rule(rule_str, action).unwrap();
+            assert_eq!(rule.action, action, "{rule_str}");
+            assert_eq!(rule.tool, ToolFilter::AgentMessage, "{rule_str}");
+            assert!(rule.pattern.is_none(), "{rule_str}");
+        }
+    }
+
     #[test]
     fn parse_claude_mcp_rule_forms() {
         for (rule_str, expected_pattern) in [

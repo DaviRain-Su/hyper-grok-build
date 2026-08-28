@@ -5,7 +5,7 @@ use crate::config::{AGENT_TASK_CLASSIFIER_RE, short_tool_name, tool_id_eq, tool_
 use crate::config::{AgentDefinition, BuiltinAgentName, PermissionMode, PromptMode};
 use crate::discovery::{SubagentEntry, SubagentSource};
 use crate::error::AgentBuildError;
-use crate::prompt::context::PromptContext;
+use crate::prompt::context::{PromptAudience, PromptContext};
 use crate::system_reminder::ReminderPolicy;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -99,6 +99,7 @@ pub struct AgentBuilder {
     app_builder_deployer_config:
         xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig,
     write_file_enabled: bool,
+    active_agent_messages_enabled: bool,
     subagents_enabled: bool,
     background_workflows_enabled: bool,
     ask_user_question_enabled: bool,
@@ -239,6 +240,7 @@ impl AgentBuilder {
             video_gen_config: Default::default(),
             app_builder_deployer_config: Default::default(),
             write_file_enabled: true,
+            active_agent_messages_enabled: false,
             subagents_enabled: false,
             background_workflows_enabled: false,
             ask_user_question_enabled: true,
@@ -544,6 +546,11 @@ impl AgentBuilder {
         self.write_file_enabled = enabled;
         self
     }
+    /// Enable or disable the `send_subagent_message` tool (default: disabled).
+    pub fn with_active_agent_messages_enabled(mut self, enabled: bool) -> Self {
+        self.active_agent_messages_enabled = enabled;
+        self
+    }
     /// Enable or disable subagent (task tool) support.
     ///
     /// When disabled, the `TaskTool` is stripped from the
@@ -768,6 +775,26 @@ impl AgentBuilder {
                     .push((&xai_grok_tools::implementations::opencode::OpenCodeWriteTool).into());
             }
             ensure_plan_mode_tools(&mut tool_config);
+        }
+        let active_agent_message = xai_grok_tools::registry::types::ToolConfig::for_tool::<
+            xai_grok_tools::implementations::grok_build::SendSubagentMessageTool,
+        >();
+        let is_active_agent_message = |tool: &xai_grok_tools::registry::types::ToolConfig| {
+            tool.kind == Some(ToolKind::ActiveAgentMessage) || tool.id == active_agent_message.id
+        };
+        let can_inject_active_agent_message = self.active_agent_messages_enabled
+            && self.prompt_audience == PromptAudience::Primary
+            && definition.inject_default_tools;
+        if can_inject_active_agent_message {
+            if !tool_config.tools.iter().any(is_active_agent_message) {
+                tool_config.tools.push(active_agent_message);
+            }
+        } else if !self.active_agent_messages_enabled
+            || self.prompt_audience != PromptAudience::Primary
+        {
+            tool_config
+                .tools
+                .retain(|tool| !is_active_agent_message(tool));
         }
         if self.memory_backend.is_none() {
             let grok_build_ns = xai_grok_tools::types::tool::ToolNamespace::GrokBuild.to_string();
@@ -1366,6 +1393,118 @@ fn resolve_shell_for_prompt() -> String {
 mod tests {
     use super::*;
     use crate::config::AgentScope;
+    async fn active_agent_message_tool_count(enabled: Option<bool>, predeclared: bool) -> usize {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        let mut definition = crate::config::AgentDefinition::default_grok_build();
+        if predeclared {
+            definition.tool_config.tools.push(
+                xai_grok_tools::registry::types::ToolConfig::for_tool::<
+                    xai_grok_tools::implementations::grok_build::SendSubagentMessageTool,
+                >(),
+            );
+        }
+        let mut builder = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(definition);
+        if let Some(enabled) = enabled {
+            builder = builder.with_active_agent_messages_enabled(enabled);
+        }
+        builder
+            .build()
+            .await
+            .expect("agent should build")
+            .tool_definitions()
+            .await
+            .iter()
+            .filter(|definition| definition.function.name == "send_subagent_message")
+            .count()
+    }
+    #[tokio::test]
+    async fn active_agent_messages_default_and_false_are_absent() {
+        assert_eq!(active_agent_message_tool_count(None, false).await, 0);
+        assert_eq!(active_agent_message_tool_count(Some(false), false).await, 0);
+        assert_eq!(active_agent_message_tool_count(None, true).await, 0);
+        assert_eq!(active_agent_message_tool_count(Some(false), true).await, 0);
+    }
+    #[tokio::test]
+    async fn active_agent_messages_true_is_present_exactly_once() {
+        assert_eq!(active_agent_message_tool_count(Some(true), false).await, 1);
+    }
+    #[tokio::test]
+    async fn active_agent_messages_predeclared_is_not_duplicated() {
+        assert_eq!(active_agent_message_tool_count(Some(true), true).await, 1);
+    }
+    #[tokio::test]
+    async fn active_agent_messages_are_absent_from_child_toolsets() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        let mut definition = crate::config::AgentDefinition::default_grok_build();
+        definition
+            .tool_config
+            .tools
+            .push(xai_grok_tools::registry::types::ToolConfig::for_tool::<
+                xai_grok_tools::implementations::grok_build::SendSubagentMessageTool,
+            >());
+        let definitions = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(definition)
+        .with_active_agent_messages_enabled(true)
+        .with_prompt_audience(PromptAudience::Subagent)
+        .build()
+        .await
+        .expect("child agent should build")
+        .tool_definitions()
+        .await;
+        assert!(
+            definitions
+                .iter()
+                .all(|definition| definition.function.name != "send_subagent_message")
+        );
+    }
+    #[tokio::test]
+    async fn active_agent_messages_do_not_modify_curated_toolsets() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        let mut definition = crate::config::AgentDefinition::default_grok_build();
+        definition.inject_default_tools = false;
+        let build = |enabled| {
+            AgentBuilder::new(
+                std::env::temp_dir(),
+                Arc::new(LocalTerminalBackend::new()),
+                ToolNotificationHandle::noop(),
+            )
+            .from_definition(definition.clone())
+            .with_active_agent_messages_enabled(enabled)
+            .with_subagents_enabled(true)
+            .with_background_workflows_enabled(true)
+        };
+        let baseline = build(false)
+            .build()
+            .await
+            .expect("baseline curated agent should build")
+            .tool_definitions()
+            .await;
+        let enabled = build(true)
+            .build()
+            .await
+            .expect("active-message curated agent should build")
+            .tool_definitions()
+            .await;
+        let baseline_names: Vec<&str> = baseline
+            .iter()
+            .map(|definition| definition.function.name.as_str())
+            .collect();
+        let enabled_names: Vec<&str> = enabled
+            .iter()
+            .map(|definition| definition.function.name.as_str())
+            .collect();
+        assert_eq!(enabled_names, baseline_names);
+        assert!(!enabled_names.contains(&"send_subagent_message"));
+    }
     fn entry(name: &str, desc: &str, source: SubagentSource) -> SubagentEntry {
         SubagentEntry {
             name: name.to_string(),

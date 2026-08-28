@@ -10,13 +10,23 @@ use crate::session::signals::TurnDeltaSnapshot;
 use agent_client_protocol as acp;
 use tokio::sync::oneshot;
 /// Structured context for a cancelled turn, replacing stringly-typed JSON.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+/// This is the wire shape of `cancellationContext` on the turn-end rails and
+/// of the AfterTurn hook payload's `cancellation_context`; clients
+/// deserialize into this same type. Keys are snake_case on purpose: that is
+/// the shape already shipped to AfterTurn hook consumers, and the convention
+/// for fields hooks receive. Absent fields are skipped.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct CancellationContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hook_name: Option<String>,
     /// What triggered the cancel (e.g. `"send_now"`, `"esc"`, `"mouse"`);
     /// surfaced as `cancelTrigger` on the turn-end `_meta`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub trigger: Option<String>,
 }
 /// Failure surface of a `/btw` side question. Kept typed until the ACP
@@ -94,6 +104,18 @@ impl PromptCompletionKind {
             Self::MaxTurnsReached { .. } => Some(MAX_TURNS_REACHED_CATEGORY.to_string()),
             Self::StationarityEnded => Some(ACTION_STATIONARITY_CATEGORY.to_string()),
             Self::Completed | Self::Rewound | Self::RemovedFromQueue => None,
+        }
+    }
+    /// The completion's `_meta.cancellationContext` (hook name, reason,
+    /// trigger), stamped beside `cancellationCategory` so a client can show
+    /// WHY a turn was blocked without scraping annotations. Additive: shipped
+    /// clients ignore unknown `_meta` keys.
+    pub fn cancellation_context_meta(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::Cancelled {
+                context: Some(ctx), ..
+            } => serde_json::to_value(ctx).ok(),
+            _ => None,
         }
     }
 }
@@ -309,16 +331,32 @@ pub enum SessionCommand {
         admission: Option<TaskWakeAdmission>,
         tool_overrides_update: Option<xai_grok_sampling_types::ToolOverridesUpdate>,
         respond_to: oneshot::Sender<PromptTurnResult>,
-        /// Optional oneshot fired after the user message has been appended to
-        /// chat history and a persistence flush barrier has completed, before
-        /// LLM inference begins. Used by callers that need to ensure
-        /// `chat_history.jsonl` includes the prompt before trace snapshots or
-        /// `session/load`.
+        /// Optional initial-child readiness. Carried onto the queued item and
+        /// resolved only when that exact row is promoted, or closed on removal.
+        prompt_admitted: Option<oneshot::Sender<()>>,
+        /// Optional oneshot fired once the prompt's persistence is settled,
+        /// before LLM inference begins: after the user message has been
+        /// appended to chat history and a flush barrier has completed — or
+        /// immediately when a `UserPromptSubmit` hook blocked the prompt, in
+        /// which case nothing was stored and there is nothing to flush. Used
+        /// by callers that need `chat_history.jsonl` settled before trace
+        /// snapshots or `session/load`; a blocked prompt never appears there.
         persist_ack: Option<oneshot::Sender<()>>,
         /// Pre-parsed prompt content blocks from `parse_prompt`, sent back to the
         /// caller so it can use the fully-rendered prompt for metadata.json without
         /// re-parsing. The session sends on this channel right after parsing.
         parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
+    },
+    /// Admit an owning root's model-authored message as an ordinary protected turn.
+    ParentAgentMessage {
+        delivery:
+            xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageDelivery,
+        #[allow(private_interfaces)]
+        receipt_sink: tokio::sync::mpsc::Sender<crate::agent::subagent::PromptTurnReceipt>,
+        parent_telemetry_ctx: xai_grok_telemetry::TelemetryCtx,
+        respond_to: oneshot::Sender<
+            xai_grok_tools::implementations::grok_build::task::coordinator::ActiveMessageAdmission,
+        >,
     },
     SessionMode {
         session_mode: acp::SessionModeId,
@@ -828,7 +866,7 @@ pub enum SessionCommand {
     ///
     /// Fired by the client after a turn completes. The session builds a
     /// compact text-only transcript of the recent conversation, makes one
-    /// tool-free model call (default `grok-build-0.1` when available via
+    /// tool-free model call (default `grok-4.6` when available via
     /// `model_override`, else the session model), sanitizes the output, and
     /// returns the predicted prompt via `respond_to`. Best-effort: any
     /// failure returns `None`.
@@ -838,7 +876,7 @@ pub enum SessionCommand {
     },
     /// Rewrite a raw memory note into well-structured markdown via a one-shot
     /// LLM call. The session uses `prepare_chat_completion()` with
-    /// `grok-build` model, low temperature, and capped output tokens.
+    /// `grok-4.6` model, low temperature, and capped output tokens.
     RewriteMemoryNote {
         raw_text: String,
         context_summary: String,

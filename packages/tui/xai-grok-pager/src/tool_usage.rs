@@ -121,6 +121,7 @@ impl ToolCategory {
             ToolCallBlock::WebSearch(_) => Self::WebSearch,
             ToolCallBlock::IntegrationSearch(_) | ToolCallBlock::UseTool(_) => Self::Other,
             ToolCallBlock::MemorySearch(_)
+            | ToolCallBlock::SentMessage(_)
             | ToolCallBlock::Other(_)
             | ToolCallBlock::Lifecycle(_) => Self::Other,
         }
@@ -139,6 +140,8 @@ pub enum BlockStatus {
     Success,
     /// Tool failed with an error.
     Failed,
+    /// Tool completed without a confirmed success or rejection.
+    Unconfirmed,
     /// Tool is currently running/streaming.
     Running,
 }
@@ -176,6 +179,11 @@ impl CategoryStats {
     /// Number of failed operations.
     pub fn failed_count(&self) -> usize {
         *self.by_status.get(&BlockStatus::Failed).unwrap_or(&0)
+    }
+
+    /// Number of operations whose delivery outcome is unconfirmed.
+    pub fn unconfirmed_count(&self) -> usize {
+        *self.by_status.get(&BlockStatus::Unconfirmed).unwrap_or(&0)
     }
 
     /// Number of running operations.
@@ -319,7 +327,10 @@ impl ToolUsageStats {
                     let category = ToolCategory::from_tool_block(tc);
                     let status = if entry.is_running {
                         BlockStatus::Running
-                    } else if !Self::tool_block_is_success(tc) {
+                    } else if matches!(tc, ToolCallBlock::SentMessage(message) if message.is_unconfirmed())
+                    {
+                        BlockStatus::Unconfirmed
+                    } else if Self::tool_block_is_failure(tc) {
                         BlockStatus::Failed
                     } else {
                         BlockStatus::Success
@@ -387,24 +398,23 @@ impl ToolUsageStats {
         stats
     }
 
-    /// Check if a tool block completed successfully.
-    ///
-    /// Each ToolCallBlock variant has an is_success() method or error field.
-    fn tool_block_is_success(tc: &ToolCallBlock) -> bool {
+    /// Check if a tool block completed with a definite failure.
+    fn tool_block_is_failure(tc: &ToolCallBlock) -> bool {
         match tc {
-            ToolCallBlock::Execute(b) => b.is_success(),
-            ToolCallBlock::Read(b) => b.is_success(),
-            ToolCallBlock::Edit(b) => b.is_success(),
-            ToolCallBlock::Search(b) => b.is_success(),
-            ToolCallBlock::ListDir(b) => b.is_success(),
-            ToolCallBlock::WebFetch(b) => b.is_success(),
-            ToolCallBlock::WebSearch(b) => b.is_success(),
-            ToolCallBlock::IntegrationSearch(b) => b.is_success(),
-            ToolCallBlock::UseTool(b) => b.is_success(),
-            ToolCallBlock::MemorySearch(b) => b.is_success(),
-            ToolCallBlock::Skill(b) => b.is_success(),
-            ToolCallBlock::Other(b) => b.is_success(),
-            ToolCallBlock::Lifecycle(_) => true,
+            ToolCallBlock::Execute(b) => !b.is_success(),
+            ToolCallBlock::Read(b) => !b.is_success(),
+            ToolCallBlock::Edit(b) => !b.is_success(),
+            ToolCallBlock::Search(b) => !b.is_success(),
+            ToolCallBlock::ListDir(b) => !b.is_success(),
+            ToolCallBlock::WebFetch(b) => !b.is_success(),
+            ToolCallBlock::WebSearch(b) => !b.is_success(),
+            ToolCallBlock::IntegrationSearch(b) => !b.is_success(),
+            ToolCallBlock::UseTool(b) => !b.is_success(),
+            ToolCallBlock::MemorySearch(b) => !b.is_success(),
+            ToolCallBlock::SentMessage(b) => b.is_failure(),
+            ToolCallBlock::Skill(b) => !b.is_success(),
+            ToolCallBlock::Other(b) => !b.is_success(),
+            ToolCallBlock::Lifecycle(_) => false,
         }
     }
 
@@ -421,6 +431,7 @@ impl ToolUsageStats {
             ToolCallBlock::IntegrationSearch(b) => b.elapsed_ms(),
             ToolCallBlock::UseTool(b) => b.elapsed_ms(),
             ToolCallBlock::MemorySearch(b) => b.elapsed_ms(),
+            ToolCallBlock::SentMessage(b) => b.elapsed_ms(),
             ToolCallBlock::Skill(b) => b.elapsed_ms(),
             ToolCallBlock::Other(b) => b.elapsed_ms(),
             ToolCallBlock::Lifecycle(_) => None,
@@ -468,6 +479,28 @@ mod tests {
     fn test_block_status_default() {
         let status = BlockStatus::default();
         assert_eq!(status, BlockStatus::Success);
+    }
+
+    #[test]
+    fn unconfirmed_sent_message_is_not_counted_as_failed() {
+        let mut scrollback = ScrollbackState::new();
+        scrollback.push_block(RenderBlock::ToolCall(ToolCallBlock::SentMessage(
+            crate::scrollback::blocks::tool::SentMessageToolCallBlock::new(
+                crate::scrollback::blocks::tool::SentMessagePresentation::Unconfirmed {
+                    reason: "delivery could not be confirmed".into(),
+                },
+                Some("sub-1".into()),
+                Some("follow up".into()),
+            ),
+        )));
+
+        let stats = ToolUsageStats::from_scrollback(&scrollback);
+        let other = stats
+            .categories
+            .get(&ToolCategory::Other)
+            .expect("other stats");
+        assert_eq!(other.failed_count(), 0);
+        assert_eq!(other.unconfirmed_count(), 1);
     }
 
     #[test]
@@ -588,15 +621,15 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_block_is_success() {
+    fn test_tool_block_is_failure() {
         let success = ExecuteToolCallBlock::new("echo test");
-        assert!(ToolUsageStats::tool_block_is_success(
+        assert!(!ToolUsageStats::tool_block_is_failure(
             &ToolCallBlock::Execute(success)
         ));
 
         let mut failed = ExecuteToolCallBlock::new("bad");
         failed.set_error(Some("error".into()));
-        assert!(!ToolUsageStats::tool_block_is_success(
+        assert!(ToolUsageStats::tool_block_is_failure(
             &ToolCallBlock::Execute(failed)
         ));
     }

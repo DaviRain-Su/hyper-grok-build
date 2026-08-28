@@ -74,6 +74,10 @@ path = "src/bin/pty_scenario.rs"
 name = "scroll-matrix"
 path = "src/bin/scroll_matrix.rs"
 
+[[bin]]
+name = "startup-tui-probe"
+path = "src/bin/startup_tui_probe.rs"
+
 # pty_bench scenario runner — produces a standalone binary the CI pipeline
 # pre-compiles and executes directly against a release pager artifact.
 # Lives here (not in the pager crate) so it can share the harness source

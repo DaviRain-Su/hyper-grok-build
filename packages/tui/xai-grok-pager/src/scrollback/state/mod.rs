@@ -1454,6 +1454,7 @@ impl ScrollbackState {
                 RenderBlock::ToolCall(ToolCallBlock::WebFetch(b)) => b.finish(),
                 RenderBlock::ToolCall(ToolCallBlock::WebSearch(b)) => b.finish(),
                 RenderBlock::ToolCall(ToolCallBlock::MemorySearch(b)) => b.finish(),
+                RenderBlock::ToolCall(ToolCallBlock::SentMessage(b)) => b.finish(),
                 RenderBlock::ToolCall(ToolCallBlock::Other(b)) => b.finish(),
                 _ => {}
             }

@@ -1118,19 +1118,19 @@
             .draw(&mut buf, area, Some(overlay), &style, None, None)
             .post_flush_escapes
             .expect("first preview");
-        assert!(first_escape.as_str().contains("a=t"));
+        assert!(first_escape.as_str().contains("a=T"));
         let _ = first_escape.commit();
         let second_escape = second
             .draw(&mut buf, area, Some(overlay), &style, None, None)
             .post_flush_escapes
             .expect("second preview");
-        assert!(second_escape.as_str().contains("a=t"));
+        assert!(second_escape.as_str().contains("a=T"));
         let _ = second_escape.commit();
         let first_again = first
             .draw(&mut buf, area, Some(overlay), &style, None, None)
             .post_flush_escapes
             .expect("first preview again");
-        assert!(first_again.as_str().contains("a=t"));
+        assert!(first_again.as_str().contains("a=T"));
     }
 
     #[test]

@@ -2,6 +2,8 @@
 //! arms, and the free helpers only the loop consumes.
 #![allow(clippy::items_after_test_module)]
 use super::*;
+use xai_grok_telemetry::instrument_task;
+use xai_grok_telemetry::region::Parent;
 /// The `YoloToggled` event to emit after `set_yolo_mode(requested)`, given the
 /// previous state and the post-call ACTUAL state (read back via
 /// `is_yolo_mode()`). Returns `Some(actual)` only on a real change.
@@ -227,7 +229,7 @@ pub(super) async fn run_session(
     fs_watch_caps: fs_watch::FsWatchCapabilities,
 ) {
     let (completion_tx, mut completion_rx) =
-        mpsc::unbounded_channel::<(String, PromptTurnResult)>();
+        mpsc::unbounded_channel::<super::tasks_cancel::TurnCompletionMsg>();
     let mut turn_end_queue = super::turn_end_hooks::TurnEndQueue::spawn(session.clone());
     tracing::debug!("fs_notify_config: {:?}", fs_notify_config);
     let mut replay_buffer = ReplayBuffer::new(session.buffering_settings.clone());
@@ -284,6 +286,12 @@ pub(super) async fn run_session(
     {
         let s = session.clone();
         tokio::task::spawn_local(async move { s.maybe_notify_git_branch().await });
+    }
+    if session.startup_hints.is_subagent {
+        tracing::info!("session_context_snapshot: skipped (subagent)");
+    } else {
+        session.wait_for_mcp_initialized().await;
+        session.emit_session_context_snapshot().await;
     }
     tokio::task::spawn_local(super::status_line::run_status_emitter(Arc::downgrade(
         &session,
@@ -544,9 +552,11 @@ pub(super) async fn run_session(
                         SessionCommand::Initialize { system_prompt } => {
                             session.initialize(system_prompt).await;
                             let s = session.clone();
-                            let handle = tokio::task::spawn_local(async move {
-                                s.build_prefix_background().await
-                            });
+                            let handle = tokio::task::spawn_local(instrument_task!(
+                                "session.prefix_task",
+                                Parent::Inherit,
+                                async move { s.build_prefix_background().await }
+                            ));
                             session.deferred_prefix.arm(handle);
                         }
                         SessionCommand::ReplaceSystemPrompt { system_prompt } => {
@@ -582,7 +592,7 @@ pub(super) async fn run_session(
                         SessionCommand::SetToolOverrides { overrides } => {
                             session.set_tool_overrides(overrides);
                         }
-                        SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, admission, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx } => {
+                        SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, admission, tool_overrides_update, respond_to, prompt_admitted, persist_ack, parsed_prompt_tx } => {
                             let origin = super::PromptOrigin::from_prompt_id(&prompt_id);
                             let (actor_admitted, task_wake_fallback) = match admission {
                                 Some(admission) => {
@@ -607,6 +617,13 @@ pub(super) async fn run_session(
                                 }
                                 let mut state = session.state.lock().await;
                                 state.notifications_suppressed = false;
+                                if state.take_hook_block_hold() {
+                                    xai_grok_telemetry::unified_log::info(
+                                        "shell.prompt.hook_block_hold_released",
+                                        Some(session.session_info.id.0.as_ref()),
+                                        Some(serde_json::json!({ "reason": "user_intake" })),
+                                    );
+                                }
                                 xai_grok_telemetry::unified_log::info(
                                     "shell.task_wake.gate_cleared",
                                     Some(session.session_info.id.0.as_ref()),
@@ -643,12 +660,6 @@ pub(super) async fn run_session(
                                     "auto-wake: session actor received synthetic prompt"
                                 );
                             }
-                            // Adopt the caller's trace context so session.handle_prompt
-                            // is linked to agent.prompt across the channel boundary.
-                            if let Some(ref tp) = traceparent {
-                                let meta = serde_json::json!({ "traceparent": tp });
-                                xai_file_utils::trace_context::link_current_span_to_meta(&meta);
-                            }
                             let (trace_gcs_config, artifact_tracker) = match artifact_upload_ctx {
                                 Some(tu) => (Some(tu.gcs_config), Some(tu.artifact_tracker)),
                                 None => (None, None),
@@ -671,12 +682,30 @@ pub(super) async fn run_session(
                                     respond_to,
                                     persist_ack,
                                     parsed_prompt_tx,
+                                    initial_child_prompt_ready: prompt_admitted,
+                                    traceparent,
                                 })
                                 .await;
                             if cancel_for_send_now {
                                 session.cancel_turn_for_send_now(&mut replay_buffer).await;
                             }
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+                        }
+                        SessionCommand::ParentAgentMessage {
+                            delivery,
+                            receipt_sink,
+                            parent_telemetry_ctx,
+                            respond_to,
+                        } => {
+                            session
+                                .admit_parent_agent_message(
+                                    delivery,
+                                    receipt_sink,
+                                    parent_telemetry_ctx,
+                                    respond_to,
+                                    completion_tx.clone(),
+                                )
+                                .await;
                         }
                         SessionCommand::SessionMode { session_mode, responds_to } => {
                             session.handle_session_mode(session_mode).await;
@@ -775,13 +804,14 @@ pub(super) async fn run_session(
                             let _ = respond_to.send(result);
                         }
                         SessionCommand::GetHooksList { respond_to } => {
-                            use crate::extensions::hooks::hook_spec_to_info;
+                            use crate::extensions::hooks::hook_spec_to_info_with;
 
+                            let disabled = xai_grok_hooks::trust::DisabledHooks::load();
                             let hooks = match &*session.hook_registry.borrow() {
                                 Some(registry) => registry
                                     .all_hooks()
                                     .iter()
-                                    .map(|spec| hook_spec_to_info(spec))
+                                    .map(|spec| hook_spec_to_info_with(spec, &disabled))
                                     .collect(),
                                 None => Vec::new(),
                             };
@@ -934,21 +964,31 @@ pub(super) async fn run_session(
                             session.record_reparented_goal_turn_task_ids(task_ids);
                         }
                         SessionCommand::RemoveQueuedPrompt { id, expected_version, owner } => {
-                            session.handle_remove_queued_prompt(&id, expected_version, owner.as_deref()).await;
+                            // Releases below are gated on the handler reporting a real
+                            // mutation: a stale/foreign no-op is not re-engagement.
+                            if session.handle_remove_queued_prompt(&id, expected_version, owner.as_deref()).await {
+                                session.release_hook_block_hold("queue_remove").await;
+                            }
                             // Re-kick: delete-while-editing keeps the hold until remove clears it.
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::ReorderQueue { ordered_ids } => {
-                            session.handle_reorder_queue(&ordered_ids).await;
+                            if session.handle_reorder_queue(&ordered_ids).await {
+                                session.release_hook_block_hold("queue_reorder").await;
+                            }
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::ClearQueue { owner } => {
-                            session.handle_clear_queue(owner.as_deref()).await;
+                            if session.handle_clear_queue(owner.as_deref()).await {
+                                session.release_hook_block_hold("queue_clear").await;
+                            }
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::EditQueuedPrompt { id, new_text, editor } => {
-                            // Edit clears the hold; re-kick so a previously held front can start.
-                            session.handle_edit_queued_prompt(&id, new_text, editor.as_deref()).await;
+                            // Re-kick so a previously held front can start.
+                            if session.handle_edit_queued_prompt(&id, new_text, editor.as_deref()).await {
+                                session.release_hook_block_hold("queue_edit").await;
+                            }
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::HoldEdit { id } => {
@@ -957,15 +997,21 @@ pub(super) async fn run_session(
                             session.handle_hold_edit(id).await;
                         }
                         SessionCommand::ReleaseEdit { id } => {
+                            // No hook-hold release: ReleaseEdit also fires on a
+                            // cancelled editor, and a peek is not re-engagement.
+                            // The save path (EditQueuedPrompt) releases.
                             session.handle_release_edit(&id).await;
                             // Unblocks an editable front that was parked under edit hold.
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::InterjectQueuedPrompt { id, expected_version, owner, new_text } => {
                             // Send-now: the handler promoted the row; cancel the running turn and start it.
-                            let cancel_for_send_now = session.handle_interject_queued_prompt(&id, expected_version, owner.as_deref(), new_text.as_deref()).await;
-                            if cancel_for_send_now {
+                            let send_now = session.handle_interject_queued_prompt(&id, expected_version, owner.as_deref(), new_text.as_deref()).await;
+                            if send_now.cancel_running_turn {
                                 session.cancel_turn_for_send_now(&mut replay_buffer).await;
+                            }
+                            if send_now.mutated {
+                                session.release_hook_block_hold("queue_interject").await;
                             }
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
@@ -1683,11 +1729,16 @@ pub(super) async fn run_session(
                             let _ = respond_to.send(session.client_hooks.borrow().clone());
                         }
                         SessionCommand::SnapshotToolDefinitions { respond_to } => {
-                            // Use the SAME helper the turn uses so the snapshot can
-                            // never drift from the parent turn's tool list. Excludes
-                            // the structured-output tool (the turn appends that later).
+                            // Verbatim mirrors inherit the parent schema for radix-cache reuse,
+                            // minus root-only ActiveAgentMessage tools (same strip as rebuilt).
                             let defs = session.prepare_tool_definitions_inner().await;
                             let specs = session.turn_base_tool_specs(&defs).await;
+                            let bridge = session.agent.borrow().tool_bridge().clone();
+                            let specs = child_tool_projection::child_safe_tool_specs(
+                                specs,
+                                child_tool_projection::ChildToolProjection::VerbatimMirror,
+                                |name| bridge.tool_kind(name),
+                            );
                             let _ = respond_to.send(specs);
                         }
                         SessionCommand::SetClientHooks { hooks } => {
@@ -2077,9 +2128,11 @@ pub(super) async fn run_session(
                                     respond_to,
                                     persist_ack: None,
                                     parsed_prompt_tx: None,
+                                    initial_child_prompt_ready: None,
                                     queue_meta: None,
                                     queue_mutation_policy: QueueMutationPolicy::hidden(),
                                     send_now: false,
+                                    traceparent: None,
                                 });
                             }
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
@@ -2134,9 +2187,11 @@ pub(super) async fn run_session(
                                     respond_to,
                                     persist_ack: None,
                                     parsed_prompt_tx: None,
+                                    initial_child_prompt_ready: None,
                                     queue_meta: None,
                                     queue_mutation_policy: QueueMutationPolicy::hidden(),
                                     send_now: false,
+                                    traceparent: None,
                                 });
                             }
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
@@ -2253,7 +2308,12 @@ pub(super) async fn run_session(
                 // Prefer cmd_rx when both are already waiting so a queued
                 // hold/edit can land before turn-end promote (biased select).
                 maybe_completion = completion_rx.recv() => {
-                    let Some((prompt_id, result)) = maybe_completion else {
+                    let Some(super::tasks_cancel::TurnCompletionMsg {
+                        prompt_id,
+                        result,
+                        elapsed_ms,
+                    }) = maybe_completion
+                    else {
                         // Completion channel closed: full feedback teardown so
                         // final signal sync + upload drain still run (cancel
                         // alone no longer force-syncs — shutdown owns that).
@@ -2285,7 +2345,8 @@ pub(super) async fn run_session(
                         })
                     );
                     let completed_prompt_id = prompt_id.clone();
-                    let owned_completion = session.handle_completion(prompt_id, result).await;
+                    let owned_completion =
+                        session.handle_completion(prompt_id, result, elapsed_ms).await;
                     // Drain any monitor events that were routed to the mid-turn buffer
                     // but arrived after the turn ended (race between is_turn_active and buffer push).
                     session.drain_monitor_buffer_to_pending().await;
@@ -2308,8 +2369,19 @@ pub(super) async fn run_session(
                     // as `SessionCommand::Interject` (no live turn's buffer
                     // can be stolen mid-stream), and both cancel paths drain
                     // the buffer before their completion arrives.
-                    if session.flush_stranded_interjections().await > 0 {
+                    let flushed_interjections = session.flush_stranded_interjections().await;
+                    if flushed_interjections > 0 {
                         tracing::info!("Flushed stranded interjection(s) into prompt turns");
+                        // Typed before the block verdict was visible, so they
+                        // stay under the hook-block hold instead of auto-running;
+                        // the notice keeps them from being parked silently.
+                        if session.state.lock().await.hook_block_held() {
+                            session
+                                .send_hook_annotation(&format!(
+                                    "\u{26a0} {flushed_interjections} interjection(s) joined the held queue. Send a prompt to resume."
+                                ))
+                                .await;
+                        }
                     }
                     SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                     // If no user prompt started, check for pending notifications

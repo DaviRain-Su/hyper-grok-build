@@ -47,6 +47,42 @@ pub enum QueueRowOrigin {
     Server,
 }
 
+/// Capabilities projected from a server queue row's wire kind.
+/// Unknown kinds stay editable/sendable for backward compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ServerRowCapabilities {
+    can_mutate: bool,
+}
+
+impl ServerRowCapabilities {
+    const EDITABLE: Self = Self { can_mutate: true };
+    const PROTECTED: Self = Self { can_mutate: false };
+
+    pub(crate) fn from_wire_kind(kind: &str) -> Self {
+        if kind == "parent_agent_message" {
+            Self::PROTECTED
+        } else {
+            Self::EDITABLE
+        }
+    }
+
+    pub(crate) fn can_edit(self) -> bool {
+        self.can_mutate
+    }
+
+    pub(crate) fn can_delete(self) -> bool {
+        self.can_mutate
+    }
+
+    pub(crate) fn can_reorder(self) -> bool {
+        self.can_mutate
+    }
+
+    pub(crate) fn can_send_now(self) -> bool {
+        self.can_mutate
+    }
+}
+
 /// A resolved reference to a queue row, used by the edit handlers to route by
 /// origin. Returned by [`QueuePane::row_ref`].
 #[derive(Debug, Clone)]
@@ -81,6 +117,8 @@ pub struct QueuedPromptEntry {
     server_id: Option<String>,
     /// Server queue-entry version (for versioned removes); 0 for local.
     version: u64,
+    /// Server-only mutation/send capabilities; local rows are always editable.
+    capabilities: ServerRowCapabilities,
     /// Cached styled content (rebuilt with width in `rebuild_styled_for_width`).
     styled: Line<'static>,
 }
@@ -97,7 +135,8 @@ fn synth_server_id(prompt_id: &str) -> u64 {
     h.finish() | (1 << 63)
 }
 
-/// Map a shared-queue wire `kind` string to the display [`QueueEntryKind`].
+/// Map a shared-queue wire `kind` string to the local display kind only.
+/// Server-only capabilities are projected separately by [`ServerRowCapabilities`].
 /// Unknown kinds fall back to a plain prompt.
 pub fn kind_from_wire(kind: &str) -> QueueEntryKind {
     match kind {
@@ -135,6 +174,7 @@ impl QueuedPromptEntry {
             origin: QueueRowOrigin::Local,
             server_id: None,
             version: 0,
+            capabilities: ServerRowCapabilities::EDITABLE,
             styled,
         }
     }
@@ -163,6 +203,7 @@ impl QueuedPromptEntry {
             origin: QueueRowOrigin::Server,
             server_id: Some(wire.id.clone()),
             version: wire.version,
+            capabilities: ServerRowCapabilities::from_wire_kind(&wire.kind),
             styled,
         }
     }
@@ -612,6 +653,14 @@ impl QueuePane {
             })
     }
 
+    /// Internal capabilities for the selected merged row.
+    pub(crate) fn row_capabilities(&self, id: u64) -> Option<ServerRowCapabilities> {
+        self.entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.capabilities)
+    }
+
     /// Whether the pane should be visible in the layout.
     pub fn is_visible(&self) -> bool {
         self.overlay.visible && !self.entries.is_empty()
@@ -653,21 +702,28 @@ impl QueuePane {
         registry: &crate::actions::ActionRegistry,
     ) -> Option<QueueEvent> {
         let id = self.selected_id()?;
+        let capabilities = self.row_capabilities(id)?;
         if registry.matches_id(crate::actions::ActionId::InterjectPrompt, key) {
-            return Some(QueueEvent::ForceInterject { id });
+            return capabilities
+                .can_send_now()
+                .then_some(QueueEvent::ForceInterject { id });
         }
         match key.code {
-            KeyCode::Char('x') | KeyCode::Delete | KeyCode::Backspace => {
-                Some(QueueEvent::DeleteSelected { id })
-            }
-            KeyCode::Char('e') | KeyCode::Enter => Some(QueueEvent::EditSelected { id }),
+            KeyCode::Char('x') | KeyCode::Delete | KeyCode::Backspace => capabilities
+                .can_delete()
+                .then_some(QueueEvent::DeleteSelected { id }),
+            KeyCode::Char('e') | KeyCode::Enter => capabilities
+                .can_edit()
+                .then_some(QueueEvent::EditSelected { id }),
             KeyCode::Char('J')
                 if key.modifiers.contains(KeyModifiers::SHIFT)
                     || key.modifiers.contains(KeyModifiers::NONE) =>
             {
                 // Shift+J or uppercase J (same thing in practice)
                 if key.code == KeyCode::Char('J') {
-                    Some(QueueEvent::SwapDown { id })
+                    capabilities
+                        .can_reorder()
+                        .then_some(QueueEvent::SwapDown { id })
                 } else {
                     None
                 }
@@ -677,7 +733,9 @@ impl QueuePane {
                     || key.modifiers.contains(KeyModifiers::NONE) =>
             {
                 if key.code == KeyCode::Char('K') {
-                    Some(QueueEvent::SwapUp { id })
+                    capabilities
+                        .can_reorder()
+                        .then_some(QueueEvent::SwapUp { id })
                 } else {
                     None
                 }
@@ -1009,7 +1067,9 @@ impl QueuePane {
 
                 let cancel_label = "[cancel]";
                 let cancel_w = cancel_label.len() as u16;
-                if let Some(cancel_x) = fits(right, cancel_w) {
+                if entry.capabilities.can_delete()
+                    && let Some(cancel_x) = fits(right, cancel_w)
+                {
                     right = cancel_x;
                     let cancel_style = if self.delete_button.is_hovered_for(entry.id) {
                         Style::default().fg(theme.accent_error)
@@ -1019,48 +1079,50 @@ impl QueuePane {
                     buf.set_string_safe(cancel_x, screen_y, cancel_label, cancel_style);
                     self.delete_button
                         .bind(Rect::new(cancel_x, screen_y, cancel_w, 1), entry.id);
+                }
 
-                    // [edit] sits flush against [cancel] (no gap) — a gap
-                    // would let the queued message behind the row leak through
-                    // the seam. Unlike [Send now] it renders regardless of
-                    // turn state — the keyboard `e` edit works either way.
-                    let edit_label = "[edit]";
-                    let edit_w = edit_label.len() as u16;
-                    if let Some(edit_x) = fits(right, edit_w) {
-                        right = edit_x;
-                        let edit_style = if self.edit_button.is_hovered_for(entry.id) {
+                // [edit] sits flush against [cancel] (no gap) — a gap
+                // would let the queued message behind the row leak through
+                // the seam. Unlike [Send now] it renders regardless of
+                // turn state — the keyboard `e` edit works either way.
+                let edit_label = "[edit]";
+                let edit_w = edit_label.len() as u16;
+                if entry.capabilities.can_edit()
+                    && let Some(edit_x) = fits(right, edit_w)
+                {
+                    right = edit_x;
+                    let edit_style = if self.edit_button.is_hovered_for(entry.id) {
+                        Style::default().fg(theme.text_primary)
+                    } else {
+                        btn_style
+                    };
+                    buf.set_string_safe(edit_x, screen_y, edit_label, edit_style);
+                    self.edit_button
+                        .bind(Rect::new(edit_x, screen_y, edit_w, 1), entry.id);
+                }
+
+                if is_turn_running && entry.capabilities.can_send_now() {
+                    // Compact action wording; same mouse hit-test as before
+                    // (force-interject). Leftmost in the chain, flush
+                    // against [edit] for the same no-seam reason.
+                    let interject_label = "[Send now]";
+                    let interject_w = interject_label.len() as u16;
+                    if let Some(interject_x) = fits(right, interject_w) {
+                        // Brighten the fg on hover (same hover color as the
+                        // [Dashboard] button) so it reads as clickable.
+                        let interject_style = if self.send_now.is_hovered_for(entry.id) {
                             Style::default().fg(theme.text_primary)
                         } else {
                             btn_style
                         };
-                        buf.set_string_safe(edit_x, screen_y, edit_label, edit_style);
-                        self.edit_button
-                            .bind(Rect::new(edit_x, screen_y, edit_w, 1), entry.id);
-                    }
-
-                    if is_turn_running {
-                        // Compact action wording; same mouse hit-test as before
-                        // (force-interject). Leftmost in the chain, flush
-                        // against [edit] for the same no-seam reason.
-                        let interject_label = "[Send now]";
-                        let interject_w = interject_label.len() as u16;
-                        if let Some(interject_x) = fits(right, interject_w) {
-                            // Brighten the fg on hover (same hover color as the
-                            // [Dashboard] button) so it reads as clickable.
-                            let interject_style = if self.send_now.is_hovered_for(entry.id) {
-                                Style::default().fg(theme.text_primary)
-                            } else {
-                                btn_style
-                            };
-                            buf.set_string_safe(
-                                interject_x,
-                                screen_y,
-                                interject_label,
-                                interject_style,
-                            );
-                            self.send_now
-                                .bind(Rect::new(interject_x, screen_y, interject_w, 1), entry.id);
-                        }
+                        buf.set_string_safe(
+                            interject_x,
+                            screen_y,
+                            interject_label,
+                            interject_style,
+                        );
+                        self.send_now
+                            .bind(Rect::new(interject_x, screen_y, interject_w, 1), entry.id);
                     }
                 }
             }
@@ -1116,6 +1178,76 @@ mod tests {
 
     fn local_prompt(id: u64, text: &str) -> QueuedPrompt {
         QueuedPrompt::plain(id, text, QueueEntryKind::Prompt)
+    }
+
+    #[test]
+    fn parent_message_wire_kind_is_protected() {
+        let mut wire = wire("parent-message-msg-1", "status update", 1);
+        wire.kind = "parent_agent_message".into();
+        let mut pane = QueuePane::new();
+        pane.sync_from_merged(
+            &Default::default(),
+            &[wire],
+            None,
+            None,
+            &Default::default(),
+        );
+        let id = pane.entry_ids()[0];
+        assert_eq!(
+            kind_from_wire("parent_agent_message"),
+            QueueEntryKind::Prompt
+        );
+        let capabilities = pane.row_capabilities(id).expect("protected parent row");
+        assert!(!capabilities.can_edit());
+        assert!(!capabilities.can_delete());
+        assert!(!capabilities.can_reorder());
+        assert!(!capabilities.can_send_now());
+        pane.list_state.select_by_id(id);
+        let registry = crate::actions::ActionRegistry::defaults();
+        for key in [
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(pane.handle_key(&key, &registry), None);
+        }
+
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf, true, &LayoutConfig::default(), None, true);
+        assert!(pane.edit_button.rect.is_none());
+        assert!(pane.delete_button.rect.is_none());
+        assert!(pane.send_now.rect.is_none());
+        for col in 0..area.width {
+            assert_eq!(pane.edit_click(col, area.y), None);
+            assert_eq!(pane.delete_click(col, area.y), None);
+            assert_eq!(pane.send_now_click(col, area.y), None);
+        }
+    }
+
+    #[test]
+    fn ordinary_and_unknown_server_rows_keep_default_capabilities() {
+        for kind in ["prompt", "future_server_kind"] {
+            let mut wire = wire("server-prompt", "ordinary prompt", 1);
+            wire.kind = kind.into();
+            let mut pane = QueuePane::new();
+            pane.sync_from_merged(
+                &Default::default(),
+                &[wire],
+                None,
+                None,
+                &Default::default(),
+            );
+            let capabilities = pane
+                .row_capabilities(pane.entry_ids()[0])
+                .expect("server row");
+            assert!(capabilities.can_edit(), "{kind}");
+            assert!(capabilities.can_delete(), "{kind}");
+            assert!(capabilities.can_reorder(), "{kind}");
+            assert!(capabilities.can_send_now(), "{kind}");
+        }
     }
 
     #[test]

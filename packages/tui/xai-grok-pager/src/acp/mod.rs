@@ -8,6 +8,7 @@ pub mod meta;
 pub mod model_state;
 pub(crate) mod router;
 pub mod spawn;
+mod subagent_message;
 pub mod tracker;
 mod version_mismatch;
 
@@ -552,7 +553,10 @@ async fn initialize(
         )
         .meta(build_initialize_meta(flags).as_object().cloned());
 
-    let resp: acp::InitializeResponse = acp_send(req, tx).await?;
+    let resp: acp::InitializeResponse = {
+        let _timer = xai_grok_telemetry::instrumentation::timer("acp_init.initialize_roundtrip");
+        acp_send(req, tx).await?
+    };
 
     // Check if this is a grok-shell agent
     let is_grok_shell = resp

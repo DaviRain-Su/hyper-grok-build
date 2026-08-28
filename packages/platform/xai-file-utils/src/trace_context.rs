@@ -2,6 +2,17 @@ use opentelemetry::global;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+/// Add an OTEL link from `span` to the current span without parenting it.
+pub fn link_span_to_current(span: &tracing::Span) {
+    use opentelemetry::trace::TraceContextExt;
+
+    let current = tracing::Span::current();
+    if current.is_none() {
+        return;
+    }
+    span.add_link(current.context().span().span_context().clone());
+}
+
 /// Extract the current span's W3C `traceparent` string for propagation
 /// across channel/task boundaries where span context is lost.
 pub fn current_traceparent() -> Option<String> {
@@ -93,18 +104,20 @@ pub fn span_from_meta_traceparent(
     span
 }
 
-/// Link the current span to a W3C `traceparent` carried inside a JSON `_meta`
-/// (or top-level) object. Call this at the top of a `#[tracing::instrument]`
-/// function so the span created by the macro becomes a child of the client's
-/// distributed trace.
-pub fn link_current_span_to_meta(meta: &serde_json::Value) {
+/// Link `span` to `_meta.traceparent`. Must run before the span is entered.
+pub fn link_span_to_meta(span: &tracing::Span, meta: &serde_json::Value) {
     if let Some(ctx) = meta
         .get("traceparent")
         .and_then(|v| v.as_str())
         .and_then(extract_context)
     {
-        let _ = tracing::Span::current().set_parent(ctx);
+        let _ = span.set_parent(ctx);
     }
+}
+
+/// Link the current span to `_meta.traceparent`.
+pub fn link_current_span_to_meta(meta: &serde_json::Value) {
+    link_span_to_meta(&tracing::Span::current(), meta);
 }
 
 fn extract_context(traceparent: &str) -> Option<opentelemetry::Context> {

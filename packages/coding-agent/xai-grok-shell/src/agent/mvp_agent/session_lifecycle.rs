@@ -120,7 +120,7 @@ impl MvpAgent {
             self.remove_session_terminal(id, SessionLiveState::Completed);
         }
         xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
-            self.subagent_event_tx.clone(),
+            self.subagent_event_tx.event_sender().0,
         )
         .teardown_session_and_drain(&id.0, stage_budget(deadline, DRAIN_SUBAGENTS_WAIT))
         .await;
@@ -481,7 +481,7 @@ impl MvpAgent {
     pub(crate) async fn registry_snapshot(&self) -> RegistrySnapshot {
         let subagents =
             xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
-                self.subagent_event_tx.clone(),
+                self.subagent_event_tx.event_sender().0,
             )
             .registry_counts()
             .await;

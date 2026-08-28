@@ -13,7 +13,8 @@ use crate::event::HookEventEnvelope;
 use crate::result::{HookDecision, HttpInfo, StopHookOutcome};
 
 use super::{
-    GateKind, HookRunOutput, HookRunnerResult, RunContext, StopHookJson, stop_json_to_outcome,
+    GateKind, HookRunOutput, HookRunnerResult, PromptHookJson, RunContext, StopHookJson,
+    prompt_json_to_block, stop_json_to_outcome,
 };
 
 const RESPONSE_PREVIEW_MAX: usize = 200;
@@ -294,6 +295,7 @@ pub async fn run_http_hook(
     let result = match mode {
         GateKind::Tool => parse_http_blocking_result(&response_text, status, &spec.name),
         GateKind::Stop => parse_http_stop_result(&response_text, status, &spec.name),
+        GateKind::Prompt => parse_http_prompt_result(&response_text, status, &spec.name),
         GateKind::Observe => HookRunnerResult::Success,
     };
     (result, elapsed, http_info)
@@ -326,6 +328,42 @@ fn parse_http_stop_result(
                 "could not parse HTTP stop hook response JSON, treating as allow-stop"
             );
             HookRunnerResult::Stop(StopHookOutcome::default())
+        }
+    }
+}
+
+/// HTTP analogue of `command::parse_prompt_result`: a 2xx JSON body with
+/// `decision: "block"` blocks; any other 2xx body allows; a non-2xx response
+/// is a failure (callers fail open).
+fn parse_http_prompt_result(
+    response_text: &str,
+    status: reqwest::StatusCode,
+    hook_name: &str,
+) -> HookRunnerResult {
+    if !status.is_success() {
+        return HookRunnerResult::Failed(format!("HTTP status {status}"));
+    }
+    let trimmed = response_text.trim();
+    if trimmed.is_empty() {
+        return HookRunnerResult::Success;
+    }
+    match serde_json::from_str::<PromptHookJson>(trimmed) {
+        // HTTP hooks have no stderr channel, so there is no fallback reason.
+        Ok(json) => match prompt_json_to_block(&json, hook_name, None) {
+            Ok(Some(reason)) => HookRunnerResult::Block {
+                reason,
+                hook_name: hook_name.to_string(),
+            },
+            Ok(None) => HookRunnerResult::Success,
+            Err(err) => HookRunnerResult::Failed(err),
+        },
+        Err(e) => {
+            tracing::warn!(
+                hook_name = %hook_name,
+                error = %e,
+                "could not parse HTTP prompt hook response JSON, treating as allow"
+            );
+            HookRunnerResult::Success
         }
     }
 }
@@ -462,6 +500,68 @@ mod tests {
             r#"{"detail":"Not Found"}"#,
             StatusCode::NOT_FOUND,
             "test-hook",
+        );
+        assert!(matches!(result, HookRunnerResult::Failed(_)));
+    }
+
+    #[test]
+    fn http_prompt_block_json() {
+        let result = parse_http_prompt_result(
+            r#"{"decision":"block","reason":"policy says no"}"#,
+            StatusCode::OK,
+            "prompt-hook",
+        );
+        match result {
+            HookRunnerResult::Block { reason, hook_name } => {
+                assert_eq!(reason, "policy says no");
+                assert_eq!(hook_name, "prompt-hook");
+            }
+            other => panic!("expected Block (prompt block), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn http_prompt_block_without_reason_names_hook() {
+        let result =
+            parse_http_prompt_result(r#"{"decision":"block"}"#, StatusCode::OK, "prompt-hook");
+        match result {
+            HookRunnerResult::Block { reason, .. } => {
+                assert!(reason.contains("prompt-hook"))
+            }
+            other => panic!("expected Block (prompt block), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn http_prompt_allows_on_success_without_verdict() {
+        for body in [
+            "",
+            "plain text",
+            "{}",
+            r#"{"hookSpecificOutput":{"additionalContext":"ctx"}}"#,
+            "not json at all",
+        ] {
+            let result = parse_http_prompt_result(body, StatusCode::OK, "prompt-hook");
+            assert!(
+                matches!(result, HookRunnerResult::Success),
+                "body {body:?} must allow"
+            );
+        }
+    }
+
+    #[test]
+    fn http_prompt_unknown_decision_fails() {
+        let result =
+            parse_http_prompt_result(r#"{"decision":"deny"}"#, StatusCode::OK, "prompt-hook");
+        assert!(matches!(result, HookRunnerResult::Failed(_)));
+    }
+
+    #[test]
+    fn http_prompt_error_status_fails_regardless_of_body() {
+        let result = parse_http_prompt_result(
+            r#"{"decision":"block","reason":"x"}"#,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "prompt-hook",
         );
         assert!(matches!(result, HookRunnerResult::Failed(_)));
     }

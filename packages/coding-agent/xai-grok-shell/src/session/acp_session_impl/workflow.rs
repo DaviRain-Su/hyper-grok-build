@@ -10,6 +10,8 @@ impl SessionActor {
         crate::session::workflow::registry::WorkflowRegistry,
         Vec<crate::session::workflow::registry::WorkflowListing>,
     ) {
+        #[cfg(test)]
+        crate::session::slash_authority::record_workflow_discovery_call();
         crate::session::workflow::registry::workflow_snapshot(Some(std::path::Path::new(
             self.session_info.cwd.as_str(),
         )))

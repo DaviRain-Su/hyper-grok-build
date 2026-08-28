@@ -16,6 +16,7 @@ use crate::selection::{
 };
 
 /// Re-runs [`select_top_level_watch_dirs`] so the running decision matches startup.
+#[tracing::instrument(name = "fsnotify.reconcile_watches", skip_all)]
 pub(crate) fn reconcile_top_level_watches(
     debouncer: &mut Debouncer<notify::RecommendedWatcher, NoCache>,
     watched: &mut HashSet<PathBuf>,
@@ -87,6 +88,7 @@ pub(crate) fn arm_pending_chunk(
 }
 
 /// Per-dir mode: watch a newly created directory subtree.
+#[tracing::instrument(name = "fsnotify.add_subtree_watches", level = "debug", skip_all)]
 pub(crate) fn add_subtree_watches(
     debouncer: &mut Debouncer<notify::RecommendedWatcher, NoCache>,
     watched: &mut HashSet<PathBuf>,
@@ -155,6 +157,7 @@ pub(crate) fn add_subtree_watches(
 /// deleted dirs (`IN_IGNORED`), but the explicit unwatch keeps notify's
 /// path-keyed bookkeeping clean and — crucially for renames — frees the watch
 /// descriptor *before* the destination path is re-watched.
+#[tracing::instrument(name = "fsnotify.prune_subtree_watches", level = "debug", skip_all)]
 pub(crate) fn prune_subtree_watches(
     debouncer: &mut Debouncer<notify::RecommendedWatcher, NoCache>,
     watched: &mut HashSet<PathBuf>,

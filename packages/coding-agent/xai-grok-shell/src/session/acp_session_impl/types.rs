@@ -82,7 +82,7 @@ pub(crate) enum TurnOutcome {
     /// The category distinguishes the cause for analytics.
     Cancelled {
         category: Option<crate::session::events::CancellationCategory>,
-        context: Option<serde_json::Value>,
+        context: Option<crate::session::commands::CancellationContext>,
     },
     /// The `--max-turns` limit was reached after a tool-execution cycle.
     MaxTurnsReached { limit: usize },

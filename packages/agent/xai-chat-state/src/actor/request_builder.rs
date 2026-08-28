@@ -125,6 +125,9 @@ impl ChatStateActor {
             request_compat: self.state.sampling_config.request_compat.clone(),
             bedrock_request_metadata: Default::default(),
             bedrock_headers: Default::default(),
+            // Default: callers that can use partial output opt into
+            // `CompletePartial`.
+            length_policy: xai_grok_sampling_types::LengthPolicy::Fail,
         }
     }
 }

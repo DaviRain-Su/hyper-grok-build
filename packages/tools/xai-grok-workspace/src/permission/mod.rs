@@ -64,6 +64,8 @@ pub use auto_mode::{
     is_auto_mode_allowlisted_access, is_auto_mode_allowlisted_tool_name,
     parse_classifier_model_output, parse_classifier_model_text, permission_decision_args,
 };
+#[cfg(test)]
+pub(crate) use hub_permission::build_permission_payload_for_test;
 pub use hub_permission::{
     PermissionHookTransport, ToolServerPermissionTransport, access_kind_for_hub_tool,
     hitl_permission_live_enabled, prompt_outcome_allows, request_permission_via_hub,
@@ -87,6 +89,7 @@ pub use prompter::{
     ENABLE_ALWAYS_APPROVE_OPTION_ID, MCP_TOOL_NAME_DELIMITER, McpScopeSelection, McpToolPermission,
     PromptOutcome, PromptOutcomeKind, is_enable_always_approve_option,
     mcp_pretty_name_if_qualified, mcp_titleize_segment, mcp_tool_action, mcp_tool_display_name,
+    tool_name_for_access as prompter_tool_name_for_access,
 };
 pub use shell_access::{ProtectedEditPermission, ProtectedEditReason};
 pub use state::PermissionState;

@@ -1,8 +1,46 @@
 //! Executes the existing single-prompt child attempt while its session actor is live.
 use super::*;
-use crate::session::commands::{
-    PromptCompletionKind, PromptTurnResult as SubagentPromptTurnResult,
-};
+use crate::session::commands::PromptTurnResult as SubagentPromptTurnResult;
+use std::future::Future;
+/// Outcome of the bounded wait for an initial child prompt to become running.
+#[derive(Debug)]
+pub(super) enum InitialChildPromptReadiness<T> {
+    Cancelled,
+    Admitted,
+    AttemptCompleted(T),
+    TimedOut,
+}
+impl<T> InitialChildPromptReadiness<T> {
+    /// Tear-down taxonomy for an unpromoted child. Only the admission
+    /// deadline is a timeout; cancel and a failed `started` promotion stay cancelled.
+    pub(super) fn unpromoted_disposition(&self) -> UnpromotedChildDisposition {
+        match self {
+            Self::TimedOut => UnpromotedChildDisposition::AdmissionTimedOut,
+            Self::Cancelled | Self::Admitted | Self::AttemptCompleted(_) => {
+                UnpromotedChildDisposition::Cancelled
+            }
+        }
+    }
+}
+/// Deterministic precedence: cancellation, then a successful readiness ack,
+/// then the attempt result, then the admission deadline.
+pub(super) async fn wait_initial_child_prompt_readiness<Fut, T>(
+    cancelled: impl Future<Output = ()>,
+    readiness: oneshot::Receiver<()>,
+    attempt: &mut Fut,
+    timeout: std::time::Duration,
+) -> InitialChildPromptReadiness<T>
+where
+    Fut: Future<Output = T> + Unpin,
+{
+    tokio::select! {
+        biased;
+        _ = cancelled => InitialChildPromptReadiness::Cancelled,
+        Ok(()) = readiness => InitialChildPromptReadiness::Admitted,
+        outcome = &mut *attempt => InitialChildPromptReadiness::AttemptCompleted(outcome),
+        _ = tokio::time::sleep(timeout) => InitialChildPromptReadiness::TimedOut,
+    }
+}
 pub(super) struct OneTurnAttemptInput<'a> {
     pub child_handle: &'a SessionHandle,
     pub request: &'a SubagentRequest,
@@ -13,6 +51,7 @@ pub(super) struct OneTurnAttemptInput<'a> {
     pub gcs_upload_method: Option<&'a crate::session::repo_changes::UploadMethod>,
     pub cancel_token: CancellationToken,
     pub child_run_started_at: std::time::Instant,
+    pub prompt_admitted: oneshot::Sender<()>,
 }
 pub(super) struct OneTurnTraceCapture {
     pub before_copy_rx:
@@ -33,6 +72,7 @@ pub(super) struct OneTurnUsageInput<'a> {
     pub parent_cmd_tx: Option<&'a mpsc::UnboundedSender<SessionCommand>>,
     pub parent_prompt_id: Option<&'a str>,
 }
+#[tracing::instrument(skip_all)]
 pub(super) async fn run_one_turn_attempt(
     mut input: OneTurnAttemptInput<'_>,
 ) -> OneTurnAttemptOutcome {
@@ -80,24 +120,32 @@ pub(super) async fn run_one_turn_attempt(
         admission: None,
         tool_overrides_update: None,
         respond_to: prompt_tx,
+        prompt_admitted: Some(input.prompt_admitted),
         persist_ack: None,
         parsed_prompt_tx: None,
     });
     let mut turn_token_totals = None;
-    let mut cancellation_may_hide_usage = false;
     let wait_outcome =
         await_subagent_turn_or_cancellation(prompt_rx, input.cancel_token.clone()).await;
     let duration_ms = input.child_run_started_at.elapsed().as_millis() as u64;
-    let result = match wait_outcome {
+    let (result, cancellation_may_hide_usage) = match wait_outcome {
         SubagentWaitOutcome::Cancelled => {
             let (tool_calls, turns) = signals_snapshot_counts(input.child_handle).await;
-            cancellation_may_hide_usage = turns > 0 || tool_calls > 0;
-            SubagentResult {
-                success: false,
-                cancelled: true,
-                error: Some("Subagent was cancelled".to_string()),
-                ..base_result(&input, tool_calls, turns, duration_ms)
-            }
+            (
+                SubagentResult {
+                    success: false,
+                    cancelled: true,
+                    error: Some("Subagent was cancelled".to_string()),
+                    ..base_result(
+                        input.request,
+                        input.worktree_path,
+                        tool_calls,
+                        turns,
+                        duration_ms,
+                    )
+                },
+                turns > 0 || tool_calls > 0,
+            )
         }
         SubagentWaitOutcome::TurnResult(turn_result) => {
             let was_cancelled = input.cancel_token.is_cancelled();
@@ -121,7 +169,7 @@ pub(super) async fn run_one_turn_attempt(
             let final_text = input
                 .child_handle
                 .chat_state_handle
-                .get_last_assistant_text()
+                .get_last_assistant_text_in_turn()
                 .await
                 .unwrap_or_default();
             let result_tokens = input
@@ -129,116 +177,57 @@ pub(super) async fn run_one_turn_attempt(
                 .chat_state_handle
                 .get_total_tokens()
                 .await;
-            match *turn_result {
-                Ok(Ok(crate::session::commands::PromptTurnOk {
-                    completion_kind: PromptCompletionKind::Cancelled { category, context },
-                    ..
-                })) => {
-                    cancellation_may_hide_usage = true;
-                    SubagentResult {
-                        success: false,
-                        cancelled: true,
-                        error: Some(super::cancellation_error_message(
-                            category,
-                            context.as_ref(),
-                        )),
-                        output: text_or_summary(final_text, || {
-                            format!(
-                                "Subagent '{}' ({}) was cancelled. {tool_calls} tool calls, \
-                                 {turns} turns.",
-                                input.request.description.as_str(),
-                                input.request.subagent_type.as_str()
-                            )
-                        }),
-                        tokens_used: result_tokens,
-                        output_usage_incomplete: true,
-                        ..base_result(&input, tool_calls, turns, duration_ms)
-                    }
-                }
-                Ok(Ok(crate::session::commands::PromptTurnOk {
-                    completion_kind: PromptCompletionKind::MaxTurnsReached { limit },
-                    ..
-                })) => SubagentResult {
-                    success: false,
-                    cancelled: true,
-                    error: Some(format!("max turns reached (limit: {limit})")),
-                    output: text_or_summary(final_text, || {
-                        format!(
-                            "Subagent '{}' ({}) hit max-turns limit ({limit}). {tool_calls} \
-                             tool calls, {turns} turns.",
-                            input.request.description.as_str(),
-                            input.request.subagent_type.as_str()
-                        )
-                    }),
-                    tokens_used: result_tokens,
-                    output_usage_incomplete: true,
-                    ..base_result(&input, tool_calls, turns, duration_ms)
+            let success_summary = || {
+                format!(
+                    "Subagent '{}' ({}) completed successfully. {tool_calls} tool calls, \
+                     {turns} turns.",
+                    input.request.description.as_str(),
+                    input.request.subagent_type.as_str()
+                )
+            };
+            let max_turns_summary = |limit| {
+                format!(
+                    "Subagent '{}' ({}) hit max-turns limit ({limit}). {tool_calls} tool calls, \
+                     {turns} turns.",
+                    input.request.description.as_str(),
+                    input.request.subagent_type.as_str()
+                )
+            };
+            let cancelled_summary = || {
+                format!(
+                    "Subagent '{}' ({}) was cancelled. {tool_calls} tool calls, {turns} turns.",
+                    input.request.description.as_str(),
+                    input.request.subagent_type.as_str()
+                )
+            };
+            let folded = super::prompt_turn_result::reduce_prompt_turn_result(
+                super::prompt_turn_result::PromptTurnResultInput {
+                    result: base_result(
+                        input.request,
+                        input.worktree_path,
+                        tool_calls,
+                        turns,
+                        duration_ms,
+                    ),
+                    turn_result: *turn_result,
+                    mode: super::prompt_turn_result::PromptTurnResultMode::Initial {
+                        requires_structured_output: input
+                            .request
+                            .runtime_overrides
+                            .output_schema
+                            .is_some(),
+                    },
+                    final_text,
+                    was_cancelled,
+                    summaries: super::prompt_turn_result::PromptTurnResultSummaries {
+                        success: &success_summary,
+                        max_turns: &max_turns_summary,
+                        cancelled: &cancelled_summary,
+                    },
+                    result_tokens,
                 },
-                Ok(Ok(crate::session::commands::PromptTurnOk {
-                    structured_output, ..
-                })) => {
-                    let wanted_schema = input.request.runtime_overrides.output_schema.is_some();
-                    let (success, error, output) = match (wanted_schema, structured_output) {
-                        (true, Some(Ok(value))) => (true, None, Arc::from(value.to_string())),
-                        (true, Some(Err(error))) => (
-                            false,
-                            Some(format!("structured output validation failed: {error}")),
-                            Arc::from(final_text),
-                        ),
-                        (true, None) => (
-                            false,
-                            Some("structured output requested but none produced".to_string()),
-                            Arc::from(final_text),
-                        ),
-                        (false, _) => (
-                            true,
-                            None,
-                            text_or_summary(final_text, || {
-                                format!(
-                                    "Subagent '{}' ({}) completed successfully. {tool_calls} \
-                                     tool calls, {turns} turns.",
-                                    input.request.description.as_str(),
-                                    input.request.subagent_type.as_str()
-                                )
-                            }),
-                        ),
-                    };
-                    SubagentResult {
-                        success,
-                        error,
-                        output,
-                        tokens_used: result_tokens,
-                        output_usage_incomplete: true,
-                        ..base_result(&input, tool_calls, turns, duration_ms)
-                    }
-                }
-                Ok(Err(error)) => {
-                    cancellation_may_hide_usage = was_cancelled;
-                    SubagentResult {
-                        success: false,
-                        cancelled: was_cancelled,
-                        error: Some(if was_cancelled {
-                            "Subagent was cancelled".to_string()
-                        } else {
-                            format!("Session error: {error}")
-                        }),
-                        ..base_result(&input, tool_calls, turns, duration_ms)
-                    }
-                }
-                Err(_) => {
-                    cancellation_may_hide_usage = was_cancelled;
-                    SubagentResult {
-                        success: false,
-                        cancelled: was_cancelled,
-                        error: Some(if was_cancelled {
-                            "Subagent was cancelled".to_string()
-                        } else {
-                            "Child session dropped unexpectedly".to_string()
-                        }),
-                        ..base_result(&input, tool_calls, turns, duration_ms)
-                    }
-                }
-            }
+            );
+            (folded.result, folded.cancellation_may_hide_usage)
         }
     };
     OneTurnAttemptOutcome {
@@ -331,27 +320,110 @@ pub(super) async fn capture_and_fold_one_turn_usage(
     .await
 }
 fn base_result(
-    input: &OneTurnAttemptInput<'_>,
+    request: &SubagentRequest,
+    worktree_path: Option<&Path>,
     tool_calls: u32,
     turns: u32,
     duration_ms: u64,
 ) -> SubagentResult {
     SubagentResult {
-        subagent_id: input.request.id.clone(),
-        child_session_id: input.request.id.clone(),
+        subagent_id: request.id.clone(),
+        child_session_id: request.id.clone(),
         tool_calls,
         turns,
         duration_ms,
-        worktree_path: input
-            .worktree_path
-            .map(|path| path.to_string_lossy().into_owned()),
+        worktree_path: worktree_path.map(|path| path.to_string_lossy().into_owned()),
         ..Default::default()
     }
 }
-fn text_or_summary(final_text: String, summary: impl FnOnce() -> String) -> Arc<str> {
-    if final_text.is_empty() {
-        Arc::from(summary())
-    } else {
-        Arc::from(final_text)
+#[cfg(test)]
+mod initial_child_prompt_readiness_tests {
+    use super::{
+        InitialChildPromptReadiness, UnpromotedChildDisposition,
+        wait_initial_child_prompt_readiness,
+    };
+    use tokio::sync::oneshot;
+    use tokio_util::sync::CancellationToken;
+    #[tokio::test]
+    async fn simultaneous_readiness_and_attempt_prefers_readiness() {
+        let (tx, rx) = oneshot::channel();
+        tx.send(()).expect("readiness already has a waiter");
+        let mut attempt = Box::pin(async { "attempt" });
+        let outcome = wait_initial_child_prompt_readiness(
+            std::future::pending::<()>(),
+            rx,
+            &mut attempt,
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(outcome, InitialChildPromptReadiness::Admitted));
+        assert_eq!(attempt.await, "attempt");
+    }
+    #[tokio::test]
+    async fn simultaneous_cancel_beats_readiness() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let (tx, rx) = oneshot::channel();
+        tx.send(()).expect("readiness already has a waiter");
+        let mut attempt = Box::pin(std::future::pending::<()>());
+        let outcome = wait_initial_child_prompt_readiness(
+            cancel.cancelled(),
+            rx,
+            &mut attempt,
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(outcome, InitialChildPromptReadiness::Cancelled));
+    }
+    #[tokio::test]
+    async fn attempt_without_ack_keeps_the_real_result() {
+        let (_tx, rx) = oneshot::channel::<()>();
+        let mut attempt = Box::pin(async { 7u8 });
+        let outcome = wait_initial_child_prompt_readiness(
+            std::future::pending::<()>(),
+            rx,
+            &mut attempt,
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            InitialChildPromptReadiness::AttemptCompleted(7)
+        ));
+    }
+    #[tokio::test]
+    async fn zero_timeout_without_ready_branches_times_out() {
+        let (_tx, rx) = oneshot::channel::<()>();
+        let mut attempt = Box::pin(std::future::pending::<()>());
+        let outcome = wait_initial_child_prompt_readiness(
+            std::future::pending::<()>(),
+            rx,
+            &mut attempt,
+            std::time::Duration::ZERO,
+        )
+        .await;
+        assert!(matches!(outcome, InitialChildPromptReadiness::TimedOut));
+    }
+    #[test]
+    fn timed_out_readiness_maps_to_admission_timed_out() {
+        assert_eq!(
+            InitialChildPromptReadiness::<()>::TimedOut.unpromoted_disposition(),
+            UnpromotedChildDisposition::AdmissionTimedOut
+        );
+    }
+    #[test]
+    fn cancelled_and_failed_promotion_map_to_cancelled() {
+        assert_eq!(
+            InitialChildPromptReadiness::<()>::Cancelled.unpromoted_disposition(),
+            UnpromotedChildDisposition::Cancelled
+        );
+        assert_eq!(
+            InitialChildPromptReadiness::<()>::Admitted.unpromoted_disposition(),
+            UnpromotedChildDisposition::Cancelled
+        );
+        assert_eq!(
+            InitialChildPromptReadiness::AttemptCompleted(()).unpromoted_disposition(),
+            UnpromotedChildDisposition::Cancelled
+        );
     }
 }

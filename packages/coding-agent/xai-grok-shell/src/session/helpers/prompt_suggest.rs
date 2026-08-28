@@ -24,21 +24,21 @@ use crate::session::helpers::chat::floor_char_boundary;
 /// fast model: falling back to the session model would multiply the per-turn
 /// cost of the feature and add reasoning-model latency for a throwaway
 /// prediction.
-pub(crate) const DEFAULT_SUGGEST_MODEL: &str = "grok-build-0.1";
+pub(crate) const DEFAULT_SUGGEST_MODEL: &str = "grok-4.6";
 
 /// Resolve the model for one suggestion request, or `None` to skip the
 /// request entirely (controlled disable).
 ///
 /// Precedence: env pin > config.toml/remote pin > client hint (the request's
 /// `model` param) > [`DEFAULT_SUGGEST_MODEL`]. Every tier except the env pin
-/// is catalog-guarded via `in_catalog`: [`DEFAULT_SUGGEST_MODEL`]
-/// (`grok-build-0.1`) is API-key-only and excluded from OAuth catalogs, so
-/// firing it (or any unavailable pin) would send a doomed per-turn request
-/// that can never render ghost text. Skipping keeps the per-turn cost at
-/// zero; deliberately NOT a session-model fallback — a per-turn background
-/// call must stay on a small cheap model. The env pin bypasses the guard so
-/// `GROK_PROMPT_SUGGESTIONS_MODEL` keeps working for models the catalog does
-/// not list (mirrors the pager, which forwards the env value unchecked).
+/// is catalog-guarded via `in_catalog`: firing a model this shell cannot
+/// sample (the default, or any unavailable pin) would send a doomed
+/// per-turn request that can never render ghost text. Skipping keeps the
+/// per-turn cost at zero; deliberately NOT a session-model fallback — a
+/// per-turn background call must stay on a small cheap model. The env pin
+/// bypasses the guard so `GROK_PROMPT_SUGGESTIONS_MODEL` keeps working for
+/// models the catalog does not list (mirrors the pager, which forwards the
+/// env value unchecked).
 pub(crate) fn effective_suggest_model(
     pin: &PromptSuggestModelPin,
     client_hint: Option<&str>,
@@ -328,7 +328,7 @@ mod tests {
                 .as_deref(),
             Some(DEFAULT_SUGGEST_MODEL)
         );
-        // OAuth catalogs exclude grok-build-0.1 → skip the request entirely,
+        // A catalog without the default → skip the request entirely,
         // never a doomed call (and never the session model).
         assert_eq!(
             effective_suggest_model(&Pin::Unpinned, None, |_| false),

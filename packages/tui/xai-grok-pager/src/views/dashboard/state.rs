@@ -41,6 +41,11 @@ pub enum DashboardRowId {
     Roster {
         session_id: String,
     },
+    /// A saved dashboard-v2 workspace member that is not loaded in this
+    /// process. PR 3 renders it read-only; later PRs add load/archive actions.
+    Workspace {
+        session_id: String,
+    },
 }
 
 impl DashboardRowId {
@@ -48,6 +53,10 @@ impl DashboardRowId {
     /// subagents are read-only in this version.
     pub fn is_subagent(&self) -> bool {
         matches!(self, Self::Subagent { .. })
+    }
+
+    pub fn is_workspace(&self) -> bool {
+        matches!(self, Self::Workspace { .. })
     }
 
     pub(crate) fn matches_top_level_agent(&self, agent_id: AgentId) -> bool {
@@ -74,7 +83,7 @@ pub(crate) fn scrollback_mut_for_row<'a>(
             .get_mut(parent)
             .and_then(|p| p.subagent_views.get_mut(child_session_id))
             .map(|c| &mut c.scrollback),
-        DashboardRowId::Roster { .. } => None,
+        DashboardRowId::Roster { .. } | DashboardRowId::Workspace { .. } => None,
     }
 }
 
@@ -90,7 +99,7 @@ pub(crate) fn scrollback_available_for_row(
         } => agents
             .get(parent)
             .is_some_and(|p| p.subagent_views.contains_key(child_session_id)),
-        DashboardRowId::Roster { .. } => false,
+        DashboardRowId::Roster { .. } | DashboardRowId::Workspace { .. } => false,
     }
 }
 
@@ -1311,7 +1320,7 @@ impl SessionIdResolver {
             }
             // Roster-only rows are ephemeral (not locally hosted) and are
             // never persisted across restarts.
-            DashboardRowId::Roster { .. } => None,
+            DashboardRowId::Roster { .. } | DashboardRowId::Workspace { .. } => None,
         }
     }
 }

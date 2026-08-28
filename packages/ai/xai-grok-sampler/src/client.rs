@@ -4286,14 +4286,40 @@ impl SamplingClient {
     }
 
     /// Backend-aware streaming call that collects the full response.
+    ///
+    /// Honors the request's [`LengthPolicy`](xai_grok_sampling_types::LengthPolicy)
+    /// like the actor path: under the default `Fail`, a `Length` stop is an
+    /// error, so side callers (autocomplete, memory notes, summaries) never
+    /// persist a silently truncated result. Under `CompletePartial` the
+    /// same salvage gate as `drive_l2` applies: empty Length and Length
+    /// carrying tool calls still fail.
     pub async fn conversation_collect(
         &self,
         mut request: ConversationRequest,
     ) -> Result<ConversationResponse> {
         self.apply_conversation_defaults(&mut request)?;
         let reasoning_model_identity = request.reasoning_model_identity.clone();
+        self.conversation_collect_with_idle_timeout(request, std::time::Duration::from_secs(300))
+            .await
+            .map(|mut response| {
+                for item in &mut response.items {
+                    if let xai_grok_sampling_types::ConversationItem::Assistant(assistant) = item {
+                        assistant.reasoning_model_identity = reasoning_model_identity.clone();
+                    }
+                }
+                response
+            })
+    }
+
+    /// [`Self::conversation_collect`] with a caller-chosen idle timeout, for
+    /// short side calls (autocomplete, memory notes) that must give up fast.
+    pub async fn conversation_collect_with_idle_timeout(
+        &self,
+        request: ConversationRequest,
+        idle_timeout: std::time::Duration,
+    ) -> Result<ConversationResponse> {
         let request_id = crate::types::RequestId::random();
-        let idle_timeout = std::time::Duration::from_secs(300);
+        let length_policy = request.length_policy;
         let result = match self.api_backend() {
             ApiBackend::ChatCompletions => {
                 let (raw, meta) = self.conversation_stream(request).await?;
@@ -4339,16 +4365,34 @@ impl SamplingClient {
                 crate::stream::collect_response(events).await
             }
         };
-        result
-            .map(|(mut response, _metrics)| {
-                for item in &mut response.items {
-                    if let xai_grok_sampling_types::ConversationItem::Assistant(assistant) = item {
-                        assistant.reasoning_model_identity = reasoning_model_identity.clone();
-                    }
-                }
-                response
-            })
-            .map_err(stream_collect_error)
+        let response = result
+            .map(|(response, _metrics)| response)
+            .map_err(stream_collect_error)?;
+        apply_length_policy(length_policy, response)
+    }
+}
+
+/// Applies the request's [`xai_grok_sampling_types::LengthPolicy`] to a
+/// collected response: fails a `Length` stop the policy rejects, logs the
+/// salvage breadcrumb otherwise. The single gate shared by `drive_l2` and
+/// the direct-collect path so the two cannot drift.
+pub(crate) fn apply_length_policy(
+    policy: xai_grok_sampling_types::LengthPolicy,
+    response: xai_grok_sampling_types::ConversationResponse,
+) -> Result<xai_grok_sampling_types::ConversationResponse> {
+    use xai_grok_sampling_types::LengthVerdict;
+    match policy.verdict(&response) {
+        LengthVerdict::Pass => Ok(response),
+        LengthVerdict::Fail => Err(SamplingError::MaxTokensTruncation),
+        LengthVerdict::Salvage => {
+            // Breadcrumb for "why did the user get half an answer".
+            tracing::info!(
+                content_len = response.assistant().map_or(0, |a| a.content.len()),
+                completion_tokens = response.usage.as_ref().map(|u| u.completion_tokens),
+                "salvaging Length-truncated response per LengthPolicy::CompletePartial"
+            );
+            Ok(response)
+        }
     }
 }
 

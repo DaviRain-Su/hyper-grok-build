@@ -97,6 +97,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 notifications_suppressed: false,
                 rewindable: false,
                 front_message_committed: false,
+                hook_block_hold: Default::default(),
                 nudges_used_this_session: 0,
             });
             let (chat_event_tx, _) = tokio::sync::mpsc::unbounded_channel();

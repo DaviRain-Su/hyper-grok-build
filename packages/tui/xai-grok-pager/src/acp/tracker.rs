@@ -304,6 +304,18 @@ pub(crate) fn is_phase_transition(
 ) -> bool {
     prev.map(phase_key) != next.map(phase_key)
 }
+/// Agent-visible output kinds. Shared by the live tracker (output epoch) and
+/// replay-marker synthesis so a new visible update cannot change one rail
+/// without the other.
+pub(crate) fn is_agent_output_update(update: &acp::SessionUpdate) -> bool {
+    matches!(
+        update,
+        acp::SessionUpdate::AgentMessageChunk(_)
+            | acp::SessionUpdate::AgentThoughtChunk(_)
+            | acp::SessionUpdate::ToolCall(_)
+            | acp::SessionUpdate::ToolCallUpdate(_)
+    )
+}
 impl TurnActivity {
     /// Short, stable label for telemetry / profiling logs.
     pub fn as_label(&self) -> &'static str {
@@ -979,13 +991,7 @@ impl AcpUpdateTracker {
             }
             self.last_stream_start_ms = Some(new_start);
         }
-        let is_agent_output = matches!(
-            &update,
-            acp::SessionUpdate::AgentMessageChunk(_)
-                | acp::SessionUpdate::AgentThoughtChunk(_)
-                | acp::SessionUpdate::ToolCall(_)
-                | acp::SessionUpdate::ToolCallUpdate(_)
-        );
+        let is_agent_output = is_agent_output_update(&update);
         if is_agent_output && !matches!(&update, acp::SessionUpdate::ToolCallUpdate(_)) {
             self.writing_tool_call = None;
             self.writing_tool_names.clear();
@@ -2140,6 +2146,9 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
                 );
             }
             RenderBlock::ToolCall(ToolCallBlock::UseTool(block))
+        }
+        _ if crate::acp::subagent_message::is_tool(tc) => {
+            crate::acp::subagent_message::to_block(tc)
         }
         _ if matches!(
             extract_raw_field(tc, "variant").as_deref(),

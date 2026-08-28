@@ -131,11 +131,18 @@ pub const DEFAULT_STOP_GATE_TIMEOUT_SECS: u64 = 600;
 
 pub const DEFAULT_STOP_GATE_TIMEOUT_MS: u64 = DEFAULT_STOP_GATE_TIMEOUT_SECS * 1000;
 
+/// Prompt gates run before every prompt, so a stuck hook stalls the session.
+/// 30s bounds that stall while leaving room for real validation work.
+pub const DEFAULT_PROMPT_GATE_TIMEOUT_SECS: u64 = 30;
+
+pub const DEFAULT_PROMPT_GATE_TIMEOUT_MS: u64 = DEFAULT_PROMPT_GATE_TIMEOUT_SECS * 1000;
+
 fn default_timeout_ms(event: crate::event::HookEventName) -> u64 {
-    if event.traits().gate == crate::event::GateKind::Stop {
-        DEFAULT_STOP_GATE_TIMEOUT_MS
-    } else {
-        DEFAULT_TIMEOUT_MS
+    use crate::event::GateKind;
+    match event.traits().gate {
+        GateKind::Stop => DEFAULT_STOP_GATE_TIMEOUT_MS,
+        GateKind::Prompt => DEFAULT_PROMPT_GATE_TIMEOUT_MS,
+        GateKind::Observe | GateKind::Tool => DEFAULT_TIMEOUT_MS,
     }
 }
 
@@ -218,6 +225,14 @@ pub fn expand_env_skipping_runner_vars(input: &str) -> String {
     )
 }
 
+impl HookSpec {
+    /// Pinned by admin/server-managed policy and therefore not user-disableable;
+    /// see [`HookProvenance::is_managed_policy`].
+    pub fn is_managed_policy(&self) -> bool {
+        self.layer.is_managed_policy()
+    }
+}
+
 /// Namespace prefixes stamped on hook names, matched by [`hook_origin`]. Shared
 /// so a rename can't silently reclassify a tier.
 pub const GLOBAL_HOOK_PREFIX: &str = "global/";
@@ -245,7 +260,9 @@ pub fn hook_origin(spec: &HookSpec) -> HookOrigin {
     match spec.layer {
         HookProvenance::SystemManaged => HookOrigin::SystemManaged,
         HookProvenance::Managed => HookOrigin::Managed,
-        HookProvenance::Requirements => HookOrigin::Requirements,
+        // Both requirements tiers display as the requirements origin; only
+        // the policy exemption distinguishes root-owned from `$GROK_HOME`.
+        HookProvenance::Requirements | HookProvenance::UserRequirements => HookOrigin::Requirements,
         HookProvenance::User => HookOrigin::UserConfig,
         HookProvenance::Plugin => HookOrigin::Plugin,
         HookProvenance::Unknown => HookOrigin::Unknown,
@@ -624,6 +641,43 @@ mod tests {
     use super::*;
     use crate::test_support::with_env_var;
 
+    /// The managed-policy predicate covers exactly the admin/server tiers.
+    /// The `match` (no wildcard) fails to compile when a new `HookProvenance`
+    /// variant is added, forcing an explicit decision here.
+    #[test]
+    fn is_managed_policy_covers_root_owned_tiers_only() {
+        fn expected(layer: HookProvenance) -> bool {
+            match layer {
+                // Root-owned tiers only. `$GROK_HOME` tiers (Managed,
+                // UserRequirements) are user-writable and must NOT grant
+                // the exemption.
+                HookProvenance::SystemManaged | HookProvenance::Requirements => true,
+                HookProvenance::Managed
+                | HookProvenance::UserRequirements
+                | HookProvenance::User
+                | HookProvenance::File
+                | HookProvenance::Plugin
+                | HookProvenance::Unknown => false,
+            }
+        }
+        for layer in [
+            HookProvenance::SystemManaged,
+            HookProvenance::Managed,
+            HookProvenance::Requirements,
+            HookProvenance::UserRequirements,
+            HookProvenance::User,
+            HookProvenance::File,
+            HookProvenance::Plugin,
+            HookProvenance::Unknown,
+        ] {
+            assert_eq!(
+                layer.is_managed_policy(),
+                expected(layer),
+                "is_managed_policy wrong for {layer:?}"
+            );
+        }
+    }
+
     fn config_layer(source_name: &str, toml_src: &str) -> xai_grok_config::HookConfigLayer {
         let value: toml::Value = toml::from_str(toml_src).unwrap();
         let hooks = value.get("hooks").cloned().unwrap();
@@ -783,6 +837,9 @@ mod tests {
                 ],
                 "SubagentStop": [
                     { "hooks": [{ "type": "command", "command": "sub.sh" }] }
+                ],
+                "UserPromptSubmit": [
+                    { "hooks": [{ "type": "command", "command": "gate.sh" }] }
                 ]
             }
         }"#;
@@ -791,6 +848,7 @@ mod tests {
         for spec in &specs {
             let expected = match spec.event {
                 HookEventName::Stop | HookEventName::SubagentStop => DEFAULT_STOP_GATE_TIMEOUT_MS,
+                HookEventName::UserPromptSubmit => DEFAULT_PROMPT_GATE_TIMEOUT_MS,
                 _ => DEFAULT_TIMEOUT_MS,
             };
             assert_eq!(spec.timeout_ms, expected, "event {}", spec.event);

@@ -303,6 +303,12 @@ pub enum Action {
         server: Option<SharedQueueTarget>,
         text: String,
     },
+    /// Resolution of the hard-modal blocked-prompt card.
+    PromptBlockAnswered {
+        /// The local queue row the blocked prompt was requeued into.
+        row_id: u64,
+        choice: PromptBlockChoice,
+    },
     /// Focus the prompt pane.
     FocusPrompt,
     /// Focus the scrollback pane (leave prompt).
@@ -1225,6 +1231,13 @@ mod permission_mode_kind_tests {
         }
     }
 }
+/// What the user chose on the hard-modal blocked-prompt card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptBlockChoice {
+    Edit,
+    Resend,
+    Discard,
+}
 /// What the user chose on the `/feedback` trace-consent question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedbackTraceChoice {
@@ -1661,6 +1674,15 @@ pub enum Effect {
     /// FleetView roster. Issued while the dashboard is open and NOT in leader
     /// mode so the dashboard shows idle sessions instead of being empty.
     FetchDashboardSessions,
+    /// Lazily open dashboard v2's process-owned SQLite store and read its
+    /// initial snapshot off the event-loop thread.
+    LoadWorkspaceSnapshot { db_path: std::path::PathBuf },
+    /// Apply one coalesced dashboard-v2 adoption/metadata batch through the
+    /// process-owned store connection.
+    UpsertWorkspaceMembers {
+        store: xai_grok_dashboard_store::WorkspaceStore,
+        members: Vec<xai_grok_dashboard_store::NewMember>,
+    },
     /// Load card detail for a specific session (lazy, reads chat history from disk).
     LoadCardDetail {
         /// Surface whose row expansion requested the detail.
@@ -2357,7 +2379,7 @@ pub enum Effect {
     FetchPromptSuggestion {
         agent_id: AgentId,
         generation: u64,
-        /// Suggestion model resolved by the pager (`grok-build-0.1` when the
+        /// Suggestion model resolved by the pager (`grok-4.6` when the
         /// catalog offers it); `None` = shell falls back to the session model.
         model: Option<String>,
         session_id: Option<String>,
@@ -2469,6 +2491,12 @@ impl TaskResult {
                 | TaskResult::WorktreeForked { .. }
         )
     }
+}
+#[derive(Debug)]
+pub struct WorkspaceMemberUpsertFailure {
+    pub session_id: String,
+    pub error: String,
+    pub retryable: bool,
 }
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -2661,6 +2689,28 @@ pub enum TaskResult {
     /// failure yields an empty list (silent — the next poll retries).
     DashboardSessionsLoaded {
         sessions: Vec<crate::app::roster::RosterEntry>,
+    },
+    /// Dashboard v2's process-owned store and initial consistent view.
+    WorkspaceSnapshotLoaded {
+        store: xai_grok_dashboard_store::WorkspaceStore,
+        snapshot: xai_grok_dashboard_store::WorkspaceSnapshot,
+    },
+    /// Dashboard v2 store open or initial snapshot failed.
+    WorkspaceSnapshotFailed {
+        error: String,
+    },
+    /// A dashboard-v2 write batch finished and returned the sole store handle.
+    WorkspaceMembersUpserted {
+        store: xai_grok_dashboard_store::WorkspaceStore,
+        snapshot: Result<xai_grok_dashboard_store::WorkspaceSnapshot, String>,
+        failures: Vec<WorkspaceMemberUpsertFailure>,
+        attempted: Vec<xai_grok_dashboard_store::NewMember>,
+    },
+    /// The blocking workspace writer panicked or was cancelled, losing its
+    /// moved handle; reopen the store before any further writes.
+    WorkspaceMembersUpsertTaskFailed {
+        db_path: std::path::PathBuf,
+        error: String,
     },
     /// Card detail loaded for a session in the picker.
     CardDetailLoaded {

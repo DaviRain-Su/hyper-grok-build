@@ -52,6 +52,7 @@ pub(super) fn dispatch_interject_on(
     // even when there is no active session, matching the prompt/bash/
     // feedback/remember paths.
     agent.ephemeral_tip.clear_on_submit();
+    agent.release_hook_block_hold();
 
     let Some(session_id) = agent.session.session_id.clone() else {
         agent.show_toast(NO_SESSION_NOTICE);
@@ -114,6 +115,7 @@ pub(super) fn dispatch_send_prompt_now(
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
+    agent.release_hook_block_hold();
 
     // Mid-outage guard (mirrors the plain prompt path): the producers already
     // consumed the payload (composer text / queue row), so requeue it locally

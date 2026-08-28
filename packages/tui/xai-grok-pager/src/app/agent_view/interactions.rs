@@ -560,7 +560,7 @@ impl AgentView {
                         }
                     }
                     KeyCode::Char('y') if key.modifiers.is_empty() => {
-                        if !qv.is_on_freeform_row() {
+                        if !qv.is_prompt_blocked() && !qv.is_on_freeform_row() {
                             let cursor = qv.cursor();
                             let active = qv.active_tab;
                             if let Some(question) = qv.questions.get(active)
@@ -1068,6 +1068,15 @@ impl AgentView {
     /// view opened, so typed "additional context" doesn't leak into the
     /// main prompt. Also clears any stashed (tab-hidden) question view.
     fn dismiss_question_view(&mut self) -> InputOutcome {
+        if self.question_view.as_ref().is_some_and(|qv| {
+            matches!(
+                qv.local_kind,
+                Some(crate::views::question_view::LocalQuestionKind::PromptBlocked { .. })
+            )
+        }) {
+            self.show_toast("Your prompt is blocked — choose Edit, Resend, or Discard");
+            return InputOutcome::Changed;
+        }
         let follows_skip_submit = self.question_view.as_ref().is_some_and(|qv| {
             matches!(
                 qv.local_kind,
@@ -1083,6 +1092,9 @@ impl AgentView {
             self.restore_card_prompt(qv.stashed_prompt);
         }
         self.cleanup_question_state();
+        if self.question_view.is_none() {
+            crate::app::turn_completion::reopen_blocked_card_if_held(self);
+        }
         InputOutcome::Changed
     }
     /// Retract an interaction modal (permission / question / plan-approval) that
@@ -1255,6 +1267,9 @@ impl AgentView {
         self.record_question_pause(&qv);
         self.restore_card_prompt(qv.stashed_prompt);
         self.cleanup_question_state();
+        if self.question_view.is_none() {
+            crate::app::turn_completion::reopen_blocked_card_if_held(self);
+        }
         if skipped {
             return InputOutcome::Changed;
         }
@@ -1275,10 +1290,8 @@ impl AgentView {
         }
         self.record_question_pause(&qv);
         if let Some(kind) = qv.local_kind.take() {
-            let is_doctor_fix = matches!(
-                kind,
-                crate::views::question_view::LocalQuestionKind::DoctorFix { .. }
-            );
+            use crate::views::question_view::LocalQuestionKind;
+            let answered_blocked_card = matches!(kind, LocalQuestionKind::PromptBlocked { .. });
             // Hyper community free-usage escapes need `&mut self` (clear sticky
             // block + toast). Detect before the pure `translate_local_submit`.
             if !skipped
@@ -1315,29 +1328,30 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
             }
-            let outcome = if skipped && is_doctor_fix {
-                let crate::views::question_view::LocalQuestionKind::DoctorFix { target, .. } = kind
-                else {
-                    unreachable!("doctor fix checked above")
-                };
-                InputOutcome::Action(Action::DoctorFixCancelled(target))
-            } else if skipped {
-                use crate::views::question_view::LocalQuestionKind;
-                match kind {
-                    LocalQuestionKind::FeedbackTrace { report, images } => {
-                        InputOutcome::Action(Action::SendFeedback {
-                            text: report,
-                            images,
-                            trace: Some(crate::app::actions::FeedbackTraceChoice::NoUpload),
-                        })
-                    }
-                    kind => translate_local_submit(&qv, kind, skipped),
+            let outcome = match (skipped, kind) {
+                (true, kind @ LocalQuestionKind::PromptBlocked { .. }) => {
+                    qv.local_kind = Some(kind);
+                    self.question_view = Some(qv);
+                    self.show_toast("Your prompt is blocked — choose Edit, Resend, or Discard");
+                    return InputOutcome::Changed;
                 }
-            } else {
-                translate_local_submit(&qv, kind, skipped)
+                (true, LocalQuestionKind::DoctorFix { target, .. }) => {
+                    InputOutcome::Action(Action::DoctorFixCancelled(target))
+                }
+                (true, LocalQuestionKind::FeedbackTrace { report, images }) => {
+                    InputOutcome::Action(Action::SendFeedback {
+                        text: report,
+                        images,
+                        trace: Some(crate::app::actions::FeedbackTraceChoice::NoUpload),
+                    })
+                }
+                (skipped, kind) => translate_local_submit(&qv, kind, skipped),
             };
             self.prompt.restore(qv.stashed_prompt);
             self.cleanup_question_state();
+            if !answered_blocked_card && self.question_view.is_none() {
+                crate::app::turn_completion::reopen_blocked_card_if_held(self);
+            }
             return outcome;
         }
         let response = if skipped {
@@ -1348,6 +1362,9 @@ impl AgentView {
         qv.send_ext_response(response);
         self.prompt.restore(qv.stashed_prompt);
         self.cleanup_question_state();
+        if self.question_view.is_none() {
+            crate::app::turn_completion::reopen_blocked_card_if_held(self);
+        }
         let action = if skipped {
             "interview_skip"
         } else {
@@ -1458,6 +1475,9 @@ impl AgentView {
         qv.send_ext_response(response);
         self.prompt.restore(qv.stashed_prompt);
         self.cleanup_question_state();
+        if self.question_view.is_none() {
+            crate::app::turn_completion::reopen_blocked_card_if_held(self);
+        }
         PeekAnswerOutcome::Submitted
     }
 }
@@ -1500,6 +1520,8 @@ mod cancel_turn_mouse_tests {
                 available_commands_generation: 0,
                 available_tools: None,
                 model_switch_pending: false,
+                hook_block_hold: false,
+                blocked_prompt: None,
                 user_model_preference: None,
                 deferred_model_switch: None,
                 bg_tasks: std::collections::BTreeMap::new(),

@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
+use xai_grok_telemetry::region;
+use xai_grok_telemetry::region::Parent;
 
 use agent_client_protocol as acp;
 use futures::StreamExt;
@@ -1471,7 +1473,15 @@ impl xai_tool_runtime::Tool for McpErasedTool {
         _ctx: xai_tool_runtime::ToolCallContext,
         raw: serde_json::Value,
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
+        let call_span = xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+            "mcp.tool_call",
+            server_name = %self.tool.server_name,
+            tool_name = %self.tool.name,
+            reconnect = tracing::field::Empty,
+            auth_retry = tracing::field::Empty,
+        ));
         let mcp_call_start = std::time::Instant::now();
+        let state_lock_span = region!("mcp.state_lock", Parent::Explicit(call_span.span()));
         let (client, event_writer) = {
             let state = self.tool.mcp_state.lock().await;
             let c = Arc::clone(state.get_client(&self.tool.server_name).ok_or_else(|| {
@@ -1482,6 +1492,7 @@ impl xai_tool_runtime::Tool for McpErasedTool {
             })?);
             (c, state.event_writer().clone())
         };
+        state_lock_span.close();
 
         let server = &self.tool.server_name;
         let tool = &self.tool.name;
@@ -1523,6 +1534,9 @@ impl xai_tool_runtime::Tool for McpErasedTool {
             }
             Err(e) => Err(e),
         };
+        call_span.span().record("reconnect", reconnect_attempted);
+        call_span.span().record("auth_retry", auth_retry_attempted);
+        call_span.close();
 
         let call_result = match dispatch_result {
             Ok(result) => result,
@@ -3717,6 +3731,12 @@ impl McpClient {
     }
 
     /// Run the MCP handshake (no lock held).
+    #[tracing::instrument(
+        name = "mcp.serve",
+        skip_all,
+        parent = None,
+        fields(server = %self.server_name)
+    )]
     async fn try_handshake(
         &self,
         pending: PendingTransport,
@@ -4580,6 +4600,7 @@ pub async fn start_mcp_server(
             cmd.kill_on_drop(true).args(&spawn_args);
             apply_stdio_env(&mut cmd, &env, ctx.session_id);
             xai_grok_tools::util::detach_command(&mut cmd);
+            xai_grok_sandbox::child_net::restrict_child_network(&mut cmd);
 
             let (transport, stderr_handle) = SafeTokioChildProcess::spawn(
                 cmd,

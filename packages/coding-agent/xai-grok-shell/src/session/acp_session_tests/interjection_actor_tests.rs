@@ -27,7 +27,8 @@ async fn queue_send_now_keeps_prompt_block_images_on_promoted_row() {
 
             let cancel = actor
                 .handle_interject_queued_prompt("p1", 0, None, None)
-                .await;
+                .await
+                .cancel_running_turn;
             assert!(cancel, "promotion behind a running turn requests cancel");
 
             let state = actor.state.lock().await;

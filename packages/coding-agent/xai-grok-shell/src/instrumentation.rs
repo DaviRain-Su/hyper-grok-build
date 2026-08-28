@@ -35,6 +35,9 @@ pub fn finalize_and_exit(code: i32) -> ! {
         "Exiting process"
     );
     let _ = finalize();
+    if let Some(path) = xai_grok_telemetry::span_profile::finalize() {
+        eprintln!("span profile written to {}", path.display());
+    }
     xai_grok_telemetry::otel_layer::shutdown_otel();
     // Flush the --debug firehose; this exits via process::exit, bypassing main's flush.
     xai_grok_telemetry::debug_log::flush();

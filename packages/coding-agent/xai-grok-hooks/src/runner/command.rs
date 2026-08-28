@@ -23,8 +23,8 @@ use crate::event::HookEventEnvelope;
 use crate::result::{HookDecision, StopHookOutcome};
 
 use super::{
-    GateHookJson, GateKind, HookRunnerResult, RunContext, StopHookJson, gate_json_to_decision,
-    stop_json_to_outcome,
+    GateHookJson, GateKind, HookRunnerResult, PromptHookJson, RunContext, StopHookJson,
+    gate_json_to_decision, prompt_json_to_block, stop_json_to_outcome,
 };
 
 /// Maximum bytes to capture from hook stdout or stderr (64 KB).
@@ -159,6 +159,7 @@ pub async fn run_command_hook(
     // Detach from the controlling terminal so children (e.g. GPG pinentry)
     // can't open /dev/tty and corrupt the TUI display.
     xai_grok_tools::util::detach_command(&mut cmd);
+    xai_grok_sandbox::child_net::restrict_child_network(&mut cmd);
 
     // Spawn the child process.
     //
@@ -325,6 +326,9 @@ pub async fn run_command_hook(
                 }
                 GateKind::Stop => {
                     parse_stop_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
+                }
+                GateKind::Prompt => {
+                    parse_prompt_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
                 }
             }
         }
@@ -835,6 +839,97 @@ fn parse_stop_result(
     }
 }
 
+/// Parse the result of a `UserPromptSubmit` gate hook from stdout, stderr,
+/// and exit code. A prompt block is [`HookRunnerResult::Block`]; the reason
+/// is user-facing, never model context.
+///
+/// * **JSON `decision: "block"` (any exit code)**: block, with `reason` (or
+///   stderr, then a generic message) as the block message.
+/// * **no JSON verdict + exit 2**: block, with full trimmed stderr as the
+///   message. Exit 2 wins over JSON that renders no verdict AND over JSON
+///   with an invalid `decision` value (tool denies keep one stderr line, but
+///   a prompt block message is the user's only feedback and may be
+///   multi-line).
+/// * **no JSON verdict + exit 0**: allow; stdout is discarded.
+/// * **invalid `decision` value without exit 2**: failure, so typos surface.
+/// * **no JSON verdict + any other exit code**: failure (callers fail open).
+fn parse_prompt_result(
+    stdout: &str,
+    stderr: &str,
+    exit_code: i32,
+    hook_name: &str,
+    elapsed: Duration,
+) -> (HookRunnerResult, Duration) {
+    let stderr_message = {
+        let trimmed = stderr.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    };
+    let trimmed = stdout.trim();
+    if !trimmed.is_empty() {
+        match serde_json::from_str::<PromptHookJson>(trimmed) {
+            Ok(json) => match prompt_json_to_block(&json, hook_name, stderr_message.as_deref()) {
+                // A JSON block is honored on any exit code (fail-safe).
+                Ok(Some(reason)) => {
+                    return (
+                        HookRunnerResult::Block {
+                            reason,
+                            hook_name: hook_name.to_string(),
+                        },
+                        elapsed,
+                    );
+                }
+                // No verdict: the exit code decides below (exit 2 still blocks).
+                Ok(None) => {}
+                Err(err) => {
+                    // Exit 2 wins over invalid JSON: a gate must not fail open
+                    // when the hook signalled a block, so the hook still
+                    // blocks and the validation failure is logged.
+                    if exit_code == GATE_EXIT_CODE {
+                        tracing::warn!(
+                            hook_name,
+                            hook_failure = %err,
+                            "prompt hook JSON is invalid but exit 2 still blocks"
+                        );
+                    } else {
+                        return (
+                            HookRunnerResult::Failed(append_stderr_line(&err, stderr)),
+                            elapsed,
+                        );
+                    }
+                }
+            },
+            Err(err) => {
+                if trimmed.starts_with('{') {
+                    tracing::warn!(
+                        hook_name,
+                        error = %err,
+                        "prompt hook stdout looks like JSON but failed to parse; falling back to the exit code"
+                    );
+                }
+            }
+        }
+    }
+    match exit_code {
+        0 => (HookRunnerResult::Success, elapsed),
+        GATE_EXIT_CODE => (
+            HookRunnerResult::Block {
+                reason: stderr_message.unwrap_or_else(|| {
+                    format!("Prompt blocked by hook '{hook_name}' (exit code {GATE_EXIT_CODE})")
+                }),
+                hook_name: hook_name.to_string(),
+            },
+            elapsed,
+        ),
+        _ => (
+            HookRunnerResult::Failed(append_stderr_line(
+                &format!("hook '{hook_name}' failed with exit code {exit_code}"),
+                stderr,
+            )),
+            elapsed,
+        ),
+    }
+}
+
 /// Truncate output bytes to MAX_OUTPUT_BYTES and convert to a lossy UTF-8 string.
 fn truncate_output(bytes: &[u8]) -> String {
     if bytes.len() <= MAX_OUTPUT_BYTES {
@@ -1266,6 +1361,155 @@ mod tests {
                 }),
             }
         );
+    }
+
+    fn prompt_block_reason(result: HookRunnerResult) -> String {
+        match result {
+            HookRunnerResult::Block { reason, .. } => reason,
+            other => panic!("expected Block (prompt block), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_json_block_honored_on_any_exit_code() {
+        for exit_code in [0, 1, 2, 127] {
+            let (result, _) = parse_prompt_result(
+                r#"{"decision":"block","reason":"policy says no"}"#,
+                "",
+                exit_code,
+                "p",
+                Duration::ZERO,
+            );
+            assert_eq!(
+                prompt_block_reason(result),
+                "policy says no",
+                "exit code {exit_code}"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_json_block_reason_falls_back_to_stderr_then_generic() {
+        let (result, _) = parse_prompt_result(
+            r#"{"decision":"block"}"#,
+            "explained on stderr\n",
+            0,
+            "p",
+            Duration::ZERO,
+        );
+        assert_eq!(prompt_block_reason(result), "explained on stderr");
+
+        let (result, _) =
+            parse_prompt_result(r#"{"decision":"block"}"#, "", 0, "p", Duration::ZERO);
+        assert_eq!(prompt_block_reason(result), "Prompt blocked by hook 'p'");
+    }
+
+    #[test]
+    fn prompt_exit_2_blocks_with_full_multiline_stderr() {
+        let (result, _) = parse_prompt_result(
+            "",
+            "policy violated:\n- no prod deploys on friday\n",
+            2,
+            "p",
+            Duration::ZERO,
+        );
+        assert_eq!(
+            prompt_block_reason(result),
+            "policy violated:\n- no prod deploys on friday"
+        );
+
+        let (result, _) = parse_prompt_result("", "", 2, "p", Duration::ZERO);
+        assert_eq!(
+            prompt_block_reason(result),
+            "Prompt blocked by hook 'p' (exit code 2)"
+        );
+    }
+
+    #[test]
+    fn prompt_exit_2_wins_over_json_without_verdict() {
+        // Exit 2 blocks even when stdout JSON renders no verdict
+        // (`decision` absent).
+        let (result, _) = parse_prompt_result(
+            r#"{"hookSpecificOutput":{"additionalContext":"ctx"}}"#,
+            "blocked anyway",
+            2,
+            "p",
+            Duration::ZERO,
+        );
+        assert_eq!(prompt_block_reason(result), "blocked anyway");
+    }
+
+    #[test]
+    fn prompt_allow_on_exit_0_discards_stdout() {
+        for stdout in [
+            "",
+            "plain context text",
+            "{}",
+            r#"{"hookSpecificOutput":{"additionalContext":"ctx","sessionTitle":"t"}}"#,
+        ] {
+            let (result, _) = parse_prompt_result(stdout, "", 0, "p", Duration::ZERO);
+            assert!(
+                matches!(result, HookRunnerResult::Success),
+                "stdout {stdout:?} must allow"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_unknown_decision_is_failure() {
+        // `deny` is tool-gate vocabulary; the prompt gate accepts only `block`.
+        for stdout in [r#"{"decision":"deny"}"#, r#"{"decision":"allow"}"#] {
+            let (result, _) = parse_prompt_result(stdout, "", 0, "p", Duration::ZERO);
+            assert!(
+                matches!(result, HookRunnerResult::Failed(_)),
+                "stdout {stdout:?} must fail so typos surface"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_approve_decision_renders_no_verdict() {
+        // An allow vocabulary accepted from ported hooks: same as omitting
+        // `decision` — exit 0 allows, and exit 2 still blocks.
+        let (result, _) =
+            parse_prompt_result(r#"{"decision":"approve"}"#, "", 0, "p", Duration::ZERO);
+        assert!(matches!(result, HookRunnerResult::Success));
+        let (result, _) = parse_prompt_result(
+            r#"{"decision":"approve"}"#,
+            "blocked anyway\n",
+            2,
+            "p",
+            Duration::ZERO,
+        );
+        assert_eq!(prompt_block_reason(result), "blocked anyway");
+    }
+
+    #[test]
+    fn prompt_exit_2_wins_over_invalid_decision_json() {
+        // Exit 2 blocks even when the JSON fails validation, so a hook that
+        // emits `allow` while exiting 2 still blocks (and counts as Blocked,
+        // not Failed, in telemetry).
+        for stdout in [r#"{"decision":"allow"}"#, r#"{"decision":"deny"}"#] {
+            let (result, _) =
+                parse_prompt_result(stdout, "still blocked\n", 2, "p", Duration::ZERO);
+            assert_eq!(
+                prompt_block_reason(result),
+                "still blocked",
+                "stdout {stdout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_other_exit_codes_fail_open() {
+        let (result, _) = parse_prompt_result("", "boom\n", 1, "p", Duration::ZERO);
+        match result {
+            HookRunnerResult::Failed(error) => assert!(
+                error.contains("exit code 1") && error.contains("boom"),
+                "prompt failure must carry exit code AND stderr text, got: {error}"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     #[test]

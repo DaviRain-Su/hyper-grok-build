@@ -521,7 +521,7 @@ pub(crate) struct ModelOverrideConfig {
     pub web_search: String,
     /// `None` = current model.
     pub session_summary: Option<String>,
-    /// Compiled default (`grok-build`) when unset locally, remotely, and via env.
+    /// Compiled default (`grok-4.6`) when unset locally, remotely, and via env.
     pub image_description: Option<String>,
     /// Next-prompt suggestion model pin. Unlike the other overrides this does
     /// NOT fill a compiled default — see [`PromptSuggestModelPin`].
@@ -545,14 +545,13 @@ impl Default for ModelOverrideConfig {
 /// Unlike the other auxiliary overrides this does not collapse to a plain
 /// model string: the consumer (`handle_suggest_prompt`) must distinguish
 /// an explicit pin from "unpinned" (where the client hint and the built-in
-/// `grok-build-0.1` default apply), and whether the pin came from the env
+/// `grok-4.6` default apply), and whether the pin came from the env
 /// escape hatch. Every effective model except an env pin is catalog-guarded —
-/// when the model is not in the shell's catalog (e.g. `grok-build-0.1` for
-/// OAuth users, whose catalogs exclude it) the per-turn suggestion request is
-/// skipped entirely rather than fired doomed. The env pin is deliberately
-/// exempt so `GROK_PROMPT_SUGGESTIONS_MODEL` keeps working for models a
-/// catalog does not list (mirrors the pager, which forwards the env value
-/// without checking its catalog).
+/// when the model is not in the shell's catalog the per-turn suggestion
+/// request is skipped entirely rather than fired doomed. The env pin is
+/// deliberately exempt so `GROK_PROMPT_SUGGESTIONS_MODEL` keeps working for
+/// models a catalog does not list (mirrors the pager, which forwards the
+/// env value without checking its catalog).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum PromptSuggestModelPin {
     /// `GROK_PROMPT_SUGGESTIONS_MODEL` — used verbatim, bypasses the
@@ -580,7 +579,7 @@ fn non_empty_model_override(value: Option<&str>) -> Option<String> {
 impl ModelOverrideConfig {
     /// CLI flag > env var > config.toml > remote settings > compiled default.
     /// `image_description` and `session_summary` always resolve to `Some(_)`
-    /// (default `grok-build`), never the session model.
+    /// (default `grok-4.6`), never the session model.
     /// `prompt_suggestion` resolves to a [`PromptSuggestModelPin`] instead of
     /// a model string (no CLI flag; the default and the catalog guard live at
     /// the consumer, `handle_suggest_prompt`).
@@ -1428,6 +1427,29 @@ fn apply_requirements_inner(
     }
     enforced
 }
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+enum BwrapStartup<T> {
+    ReexecRequired(T),
+    ReexecOptional(T),
+    Verify,
+    Refuse,
+    Continue,
+}
+#[cfg(target_os = "linux")]
+fn route_bwrap_startup<T>(
+    command: Option<T>,
+    is_inside_bwrap: bool,
+    requires_bwrap: bool,
+) -> BwrapStartup<T> {
+    match command {
+        Some(command) if requires_bwrap => BwrapStartup::ReexecRequired(command),
+        Some(command) => BwrapStartup::ReexecOptional(command),
+        None if requires_bwrap && is_inside_bwrap => BwrapStartup::Verify,
+        None if requires_bwrap => BwrapStartup::Refuse,
+        None => BwrapStartup::Continue,
+    }
+}
 /// Resolve sandbox profile and apply OS-level enforcement. Called once at startup.
 ///
 /// `cli_profile` is the resumed/forced base profile (a resumed session's saved
@@ -1470,7 +1492,10 @@ pub fn apply_sandbox(
     let requires_hook_write_deny =
         xai_grok_sandbox::requires_hook_write_deny(&sandbox_profile, &workspace);
     #[cfg(target_os = "linux")]
-    let requires_bwrap = requires_read_deny || requires_hook_write_deny;
+    let requires_data_write_deny =
+        xai_grok_sandbox::requires_data_write_deny(&sandbox_profile, &workspace);
+    #[cfg(target_os = "linux")]
+    let requires_bwrap = requires_read_deny || requires_hook_write_deny || requires_data_write_deny;
     #[cfg(target_os = "linux")]
     {
         let refuse_unprotected = |cause: &str| {
@@ -1479,24 +1504,27 @@ pub fn apply_sandbox(
                  {cause} Refusing to start with denied paths unprotected."
             );
         };
-        match xai_grok_sandbox::bwrap_reexec_for_profile(&sandbox_profile, &workspace) {
-            Some(mut cmd) => {
+        let command = xai_grok_sandbox::bwrap_reexec_for_profile(&sandbox_profile, &workspace);
+        match route_bwrap_startup(command, xai_grok_sandbox::is_inside_bwrap(), requires_bwrap) {
+            BwrapStartup::ReexecRequired(mut cmd) => {
                 use std::os::unix::process::CommandExt;
                 let err = cmd.exec();
-                if requires_bwrap {
-                    refuse_unprotected(&format!(
-                        "bwrap exec failed: {err}. Install bubblewrap with \
-                         `apt install -y bubblewrap`."
-                    ));
-                    std::process::exit(1);
-                }
+                refuse_unprotected(&format!(
+                    "bwrap exec failed: {err}. Install bubblewrap with \
+                     `apt install -y bubblewrap`."
+                ));
+                std::process::exit(1);
+            }
+            BwrapStartup::ReexecOptional(mut cmd) => {
+                use std::os::unix::process::CommandExt;
+                let err = cmd.exec();
                 eprintln!(
                     "WARNING: bwrap exec failed: {err}. \
                      Falling back to Landlock sandbox. \
                      Install bubblewrap: apt install -y bubblewrap"
                 );
             }
-            None if requires_bwrap && xai_grok_sandbox::is_inside_bwrap() => {
+            BwrapStartup::Verify => {
                 if requires_hook_write_deny
                     && let Err(e) = xai_grok_sandbox::verify_hook_write_deny_enforced()
                 {
@@ -1507,15 +1535,39 @@ pub fn apply_sandbox(
                     );
                     std::process::exit(1);
                 }
+                if requires_read_deny
+                    && let Err(e) =
+                        xai_grok_sandbox::verify_read_deny_enforced(&sandbox_profile, &workspace)
+                {
+                    eprintln!(
+                        "error: sandbox reports bwrap but required read-deny mounts \
+                         are not in effect ({e}); refusing to start \
+                         (possible __GROK_INSIDE_BWRAP spoof)"
+                    );
+                    std::process::exit(1);
+                }
+                if requires_data_write_deny
+                    && let Err(e) = xai_grok_sandbox::verify_data_write_deny_enforced(
+                        &sandbox_profile,
+                        &workspace,
+                    )
+                {
+                    eprintln!(
+                        "error: sandbox reports bwrap but the required /data write-deny \
+                         mount is not in effect ({e}); refusing to start \
+                         (possible __GROK_INSIDE_BWRAP spoof)"
+                    );
+                    std::process::exit(1);
+                }
             }
-            None if requires_bwrap => {
+            BwrapStartup::Refuse => {
                 refuse_unprotected(
-                    "the deny list could not be prepared; see the error above \
+                    "the required bwrap plan could not be prepared; see the error above \
                      for the specific cause.",
                 );
                 std::process::exit(1);
             }
-            None => {}
+            BwrapStartup::Continue => {}
         }
     }
     if sandbox_profile != xai_grok_sandbox::ProfileName::Off {
@@ -1532,12 +1584,7 @@ pub fn apply_sandbox(
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            #[cfg(target_os = "macos")]
             let unappliable = requires_protection && !sandbox.is_applied();
-            #[cfg(target_os = "linux")]
-            let unappliable = requires_protection
-                && !sandbox.is_applied()
-                && !xai_grok_sandbox::is_inside_bwrap();
             if unappliable {
                 eprintln!(
                     "error: could not apply the '{}' sandbox profile; see the \

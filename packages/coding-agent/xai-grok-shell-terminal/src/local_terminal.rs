@@ -120,6 +120,7 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
         // (This also makes the child its own session/group leader, which the
         // ProcessGroup attach below relies on.)
         xai_grok_tools::util::detach_command(&mut cmd);
+        xai_grok_sandbox::child_net::restrict_child_network(&mut cmd);
 
         #[allow(clippy::disallowed_methods)]
         // process-group-killed on the request timeout; an unreapable (D-state)

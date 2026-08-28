@@ -413,18 +413,26 @@ pub(crate) struct UserInfo {
 /// server-side which fails at high volume.  Skipping them here forces
 /// affected users to re-authenticate via OIDC on next launch.
 pub fn lookup_auth(map: &AuthStore, scope: &str) -> Option<GrokAuth> {
-    let auth = map.get(scope).cloned().or_else(|| {
-        if scope == LEGACY_SCOPE {
-            None
-        } else {
-            map.get(LEGACY_SCOPE).cloned()
-        }
-    })?;
+    let auth = map
+        .get(scope)
+        .cloned()
+        .or_else(|| inherited_lookup(map, scope))?;
     if auth.auth_mode == AuthMode::WebLogin {
         tracing::info!("auth: ignoring legacy WebLogin token — re-authentication required");
         return None;
     }
     Some(auth)
+}
+
+/// Falls back to a scope the active backend inherits, skipping the one already tried.
+fn inherited_lookup(map: &AuthStore, scope: &str) -> Option<GrokAuth> {
+    use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
+
+    ActiveAuthBackend::default()
+        .inherited_scopes()
+        .iter()
+        .filter(|inherited| **inherited != scope)
+        .find_map(|inherited| map.get(*inherited).cloned())
 }
 
 /// Early-invalidation buffer. Override with `GROK_AUTH_EARLY_INVALIDATION_SECS`

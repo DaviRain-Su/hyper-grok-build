@@ -1,5 +1,6 @@
-//! Single source of truth for the grok home directory: `$GROK_HOME` or
-//! `<home>/.grok`. Shared by `xai-grok-config` and `xai-fast-worktree`.
+//! Home-directory resolution generally: USERPROFILE-first `home_dir`, plus
+//! grok-home (`$GROK_HOME` or `<home>/.grok`). Shared by `xai-grok-config`
+//! and `xai-fast-worktree`.
 //!
 //! Which function to call:
 //! - [`grok_home`]: the usual choice, a cached, created path to build on.

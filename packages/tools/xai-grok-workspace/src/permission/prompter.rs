@@ -380,6 +380,7 @@ pub struct AcpPrompter {
     /// Generic bash options for non-TUI clients - shows complete command with approve/reject always
     generic_bash_options: IndexMap<acp::PermissionOptionId, acp::PermissionOption>,
     fallback_options: IndexMap<acp::PermissionOptionId, acp::PermissionOption>,
+    agent_message_options: IndexMap<acp::PermissionOptionId, acp::PermissionOption>,
     /// Per-session `events.jsonl` writer. [`request`](Self::request) emits a
     /// `PermissionRequested` at prompt-start and a paired `PermissionResolved`
     /// at decision-time through it. `EventWriter::noop()` when events recording
@@ -551,6 +552,25 @@ impl AcpPrompter {
             ),
         );
 
+        let agent_message_options = IndexMap::from([
+            (
+                acp::PermissionOptionId::new("allow-once"),
+                acp::PermissionOption::new(
+                    "allow-once",
+                    "Yes, send once".to_owned(),
+                    acp::PermissionOptionKind::AllowOnce,
+                ),
+            ),
+            (
+                acp::PermissionOptionId::new("reject-once"),
+                acp::PermissionOption::new(
+                    "reject-once",
+                    REJECT_ONCE_LABEL.to_owned(),
+                    acp::PermissionOptionKind::RejectOnce,
+                ),
+            ),
+        ]);
+
         Self {
             session_id,
             gateway,
@@ -559,6 +579,7 @@ impl AcpPrompter {
             bash_options,
             generic_bash_options,
             fallback_options,
+            agent_message_options,
             // Defaults to noop: in the live (shell) permission path the shell's
             // own `EventTracker` already emits Permission* events, so the prompter
             // must NOT double-emit. A workspace-server-side caller that owns the
@@ -665,6 +686,7 @@ impl AcpPrompter {
     ) -> IndexMap<acp::PermissionOptionId, acp::PermissionOption> {
         match access {
             AccessKind::Edit(_) => self.edit_options.clone(),
+            AccessKind::AgentMessage { .. } => self.agent_message_options.clone(),
             AccessKind::Bash(bash_command) => {
                 // For GrokTUI clients, use the fancy interactive options with term selection
                 // For generic clients (web, etc.), use simpler options that work without
@@ -943,7 +965,7 @@ impl Drop for ResolvedOnDrop<'_> {
 /// permission manager calls this for the `tool_name` component of its
 /// `(tool_name, access_kind, access_detail)` derivation, so the two cannot
 /// drift.
-pub(crate) fn tool_name_for_access(access: &AccessKind) -> String {
+pub fn tool_name_for_access(access: &AccessKind) -> String {
     match access {
         AccessKind::Read(_) => "read_file".to_owned(),
         AccessKind::Grep { .. } => "grep".to_owned(),
@@ -952,6 +974,9 @@ pub(crate) fn tool_name_for_access(access: &AccessKind) -> String {
         AccessKind::MCPTool { name, .. } => format!("mcp:{name}"),
         AccessKind::WebFetch(_) => "web_fetch".to_owned(),
         AccessKind::WebSearch(_) => "web_search".to_owned(),
+        AccessKind::AgentMessage { .. } => {
+            xai_grok_tools::implementations::grok_build::SEND_SUBAGENT_MESSAGE_TOOL_NAME.to_owned()
+        }
     }
 }
 
@@ -1069,7 +1094,9 @@ fn map_selected_outcome(
                     } else {
                         PromptOutcome::AllowAlways
                     }
-                } else if option_id.0.as_ref() == ALLOW_EDITS_SESSION_OPTION_ID {
+                } else if option_id.0.as_ref() == ALLOW_EDITS_SESSION_OPTION_ID
+                    && matches!(access, AccessKind::Edit(_))
+                {
                     // The edit prompt's "Yes, allow all edits during this session".
                     // Treat as session-scoped only (in-memory). Do not persist.
                     PromptOutcome::AllowEditsForSession
@@ -1569,6 +1596,39 @@ mod tests {
     }
 
     #[test]
+    fn agent_message_options_are_one_call_only() {
+        let p = prompter_with_gate(ClientType::GrokPager, true);
+        let access = AccessKind::AgentMessage {
+            subagent_id: "sub-1".to_owned(),
+        };
+        let opts = p.build_options(&access);
+        let ids: Vec<&str> = opts.keys().map(|id| id.0.as_ref()).collect();
+
+        assert!(ids.contains(&ENABLE_ALWAYS_APPROVE_OPTION_ID));
+        assert!(ids.contains(&"allow-once"));
+        assert!(ids.contains(&"reject-once"));
+        assert!(!ids.contains(&ALLOW_EDITS_SESSION_OPTION_ID));
+        assert!(
+            !ids.iter()
+                .any(|id| id.contains("always") && *id != ENABLE_ALWAYS_APPROVE_OPTION_ID)
+        );
+    }
+
+    #[test]
+    fn agent_message_approval_maps_to_one_call() {
+        let p = prompter_with_gate(ClientType::GrokPager, true);
+        let access = AccessKind::AgentMessage {
+            subagent_id: "sub-1".to_owned(),
+        };
+        let opts = p.build_options(&access);
+
+        assert!(matches!(
+            outcome_for(&opts, "allow-once", None, &access),
+            PromptOutcome::AllowOnce
+        ));
+    }
+
+    #[test]
     fn gate_off_keeps_edit_session_allow() {
         // The edit session allow is governed separately, not by this gate.
         let p = prompter_with_gate(ClientType::GrokPager, false);
@@ -1931,6 +1991,12 @@ mod tests {
         let p = prompter(ClientType::GrokPager);
         let cases: Vec<(&str, AccessKind)> = vec![
             ("edit", AccessKind::Edit("write".to_owned())),
+            (
+                "agent_message",
+                AccessKind::AgentMessage {
+                    subagent_id: "sub-1".to_owned(),
+                },
+            ),
             ("bash", AccessKind::Bash("ls".to_owned())),
             (
                 "mcp",
@@ -2029,6 +2095,12 @@ mod tests {
         assert_eq!(
             tool_name_for_access(&AccessKind::Bash("ls".into())),
             "run_terminal_command"
+        );
+        assert_eq!(
+            tool_name_for_access(&AccessKind::AgentMessage {
+                subagent_id: "sub-1".into(),
+            }),
+            "send_subagent_message"
         );
         assert_eq!(
             tool_name_for_access(&AccessKind::MCPTool {

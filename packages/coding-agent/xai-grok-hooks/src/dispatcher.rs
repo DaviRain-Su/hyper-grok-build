@@ -1,7 +1,7 @@
 use crate::config::HookSpec;
 use crate::discovery::HookRegistry;
 use crate::event::{HookEventEnvelope, HookEventName};
-use crate::result::{HookDecision, HookRunResult};
+use crate::result::{HookDecision, HookRunResult, PromptDecision};
 use crate::runner::{self, GateKind, HookRunnerResult, RunContext};
 
 fn dispatch_span(event: HookEventName, hook_count: usize) -> tracing::Span {
@@ -18,18 +18,28 @@ fn dispatch_span(event: HookEventName, hook_count: usize) -> tracing::Span {
 }
 
 /// Disabled/trust-disabled specs record a `Skipped` result; a matcher miss
-/// records nothing.
+/// records nothing. Managed-policy hooks ignore both disable signals (logged),
+/// so admin policy cannot be skipped.
 fn eligible_or_record_skip(
     spec: &HookSpec,
     match_value: Option<&str>,
     results: &mut Vec<HookRunResult>,
+    disabled: &crate::trust::DisabledHooks,
 ) -> bool {
-    if !spec.enabled || crate::trust::is_hook_disabled(&spec.name) {
-        tracing::info!(hook_name = %spec.name, "hook skipped (disabled)");
-        results.push(HookRunResult::Skipped {
-            hook_name: spec.name.clone(),
-        });
-        return false;
+    if !spec.enabled || disabled.contains(&spec.name) {
+        if spec.is_managed_policy() {
+            tracing::info!(
+                hook_name = %spec.name,
+                layer = spec.layer.as_str(),
+                "managed-policy hook cannot be disabled; running anyway"
+            );
+        } else {
+            tracing::info!(hook_name = %spec.name, "hook skipped (disabled)");
+            results.push(HookRunResult::Skipped {
+                hook_name: spec.name.clone(),
+            });
+            return false;
+        }
     }
     crate::matcher::matcher_allows(spec.matcher.as_ref(), match_value)
 }
@@ -48,78 +58,95 @@ pub struct PreToolUseResult {
     pub results: Vec<HookRunResult>,
 }
 
-/// Dispatch a `pre_tool_use` event against all matching hooks.
+/// Outcome of [`dispatch_sequential_gate`]: the first terminal verdict (if
+/// any) plus per-hook execution details.
+struct SequentialGateOutcome {
+    /// The blocking hook's `(name, reason)`. `None` when every hook allowed,
+    /// failed (fail-open), or was skipped.
+    block: Option<(String, String)>,
+    /// Last `updatedInput` from an allowing hook. `None` on a block: a
+    /// denied call never applies rewrites.
+    updated_input: Option<InputRewrite>,
+    results: Vec<HookRunResult>,
+}
+
+/// Shared driver for the sequential first-terminal-verdict gates
+/// (`pre_tool_use`, `user_prompt_submit`).
 ///
-/// Runs hooks sequentially in config order. Only an explicit `deny`
-/// decision from a hook stops the chain and blocks the tool call.
+/// Runs matching hooks sequentially in config order. Only an explicit
+/// deny/block decision from a hook stops the chain.
 ///
 /// Hook failures (timeouts, crashes, command-not-found, env-var
 /// pre-spawn refusals, malformed output) are **fail-open**: the failure
 /// is logged and surfaced in the per-hook results for the UI scrollback,
-/// but the tool call continues as if the hook had allowed it. Grok
+/// but the gated action continues as if the hook had allowed it. Grok
 /// runs in protected environments where induced-failure bypass of
 /// security hooks is not part of the threat model; the previous
 /// fail-closed posture over-blocked innocent tool calls when
 /// hooks timed out or had unrelated configuration errors.
 ///
-/// Returns `Allow` if no hooks match, all hooks allow, or all failing
-/// hooks are non-blocking by virtue of this fail-open policy.
-pub async fn dispatch_pre_tool_use(
+/// `block_verb` prefixes the user-visible per-hook detail — each gate's own
+/// wire vocabulary ("denied" for the tool gate, "blocked" for the prompt
+/// gate).
+async fn dispatch_sequential_gate(
     registry: &HookRegistry,
+    event: HookEventName,
+    gate: GateKind,
+    block_verb: &str,
     envelope: &HookEventEnvelope,
     ctx: &RunContext<'_>,
-) -> PreToolUseResult {
-    let hooks = registry.hooks_for(HookEventName::PreToolUse);
+) -> SequentialGateOutcome {
+    let hooks = registry.hooks_for(event);
     if hooks.is_empty() {
-        return PreToolUseResult {
-            decision: HookDecision::Allow,
+        return SequentialGateOutcome {
+            block: None,
             updated_input: None,
             results: Vec::new(),
         };
     }
 
-    let span = dispatch_span(HookEventName::PreToolUse, hooks.len());
+    let span = dispatch_span(event, hooks.len());
     let _enter = span.enter();
 
     let match_value = envelope.payload.match_value().map(str::to_string);
     let mut run_results = Vec::new();
     let mut updated_input: Option<InputRewrite> = None;
+    // One disabled-hooks read per dispatch, not one per spec.
+    let disabled = crate::trust::DisabledHooks::load();
 
     for spec in hooks {
-        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut run_results) {
+        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut run_results, &disabled) {
             continue;
         }
 
         let _hook_span = tracing::info_span!(
             "hook.run",
             hook_name = %spec.name,
-            hook_event = %HookEventName::PreToolUse,
+            hook_event = %event,
         )
         .entered();
 
-        let (result, elapsed, http_info) =
-            runner::run_hook(spec, envelope, ctx, GateKind::Tool).await;
+        let (result, elapsed, http_info) = runner::run_hook(spec, envelope, ctx, gate).await;
 
         match result {
-            HookRunnerResult::Deny { reason, .. } => {
+            // Each gate's parser speaks its own protocol word for the
+            // terminal verdict; the driver treats them identically.
+            HookRunnerResult::Deny { reason, .. } | HookRunnerResult::Block { reason, .. } => {
                 tracing::info!(
                     hook_name = %spec.name,
                     elapsed_ms = elapsed.as_millis() as u64,
                     reason = %reason,
-                    "hook denied"
+                    "gate hook blocked"
                 );
                 run_results.push(HookRunResult::Blocked {
                     hook_name: spec.name.clone(),
-                    detail: format!("denied: {reason}"),
+                    detail: format!("{block_verb}: {reason}"),
                     elapsed,
                     http_info,
                 });
                 record_dispatch_counts(&span, &run_results);
-                return PreToolUseResult {
-                    decision: HookDecision::Deny {
-                        reason,
-                        hook_name: spec.name.clone(),
-                    },
+                return SequentialGateOutcome {
+                    block: Some((spec.name.clone(), reason)),
                     updated_input: None,
                     results: run_results,
                 };
@@ -154,11 +181,11 @@ pub async fn dispatch_pre_tool_use(
                     hook_name = %spec.name,
                     elapsed_ms = elapsed.as_millis() as u64,
                     hook_failure = %err,
-                    "hook failed; ignoring (fail-open)"
+                    "gate hook failed; ignoring (fail-open)"
                 );
                 run_results.push(HookRunResult::Failed {
                     hook_name: spec.name.clone(),
-                    error: err.clone(),
+                    error: err,
                     elapsed,
                     http_info,
                 });
@@ -179,10 +206,72 @@ pub async fn dispatch_pre_tool_use(
     }
 
     record_dispatch_counts(&span, &run_results);
-    PreToolUseResult {
-        decision: HookDecision::Allow,
+    SequentialGateOutcome {
+        block: None,
         updated_input,
         results: run_results,
+    }
+}
+
+/// Dispatch a `pre_tool_use` event against all matching hooks: sequential,
+/// first `deny` wins, failures fail open (see [`dispatch_sequential_gate`]).
+/// Also returns the last `updatedInput` from an allowing hook.
+pub async fn dispatch_pre_tool_use(
+    registry: &HookRegistry,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+) -> PreToolUseResult {
+    let outcome = dispatch_sequential_gate(
+        registry,
+        HookEventName::PreToolUse,
+        GateKind::Tool,
+        "denied",
+        envelope,
+        ctx,
+    )
+    .await;
+    PreToolUseResult {
+        decision: match outcome.block {
+            Some((hook_name, reason)) => HookDecision::Deny { reason, hook_name },
+            None => HookDecision::Allow,
+        },
+        updated_input: outcome.updated_input,
+        results: outcome.results,
+    }
+}
+
+/// Result of a `user_prompt_submit` gate dispatch: the verdict plus per-hook
+/// execution details (for scrollback enrichment). A `Block` reason is
+/// user-facing, never model context.
+pub struct PromptGateResult {
+    pub decision: PromptDecision,
+    pub results: Vec<HookRunResult>,
+}
+
+/// Dispatch a `user_prompt_submit` gate against all matching hooks:
+/// sequential, first block wins, failures fail open (see
+/// [`dispatch_sequential_gate`]). An `updatedInput` has no meaning for
+/// prompts and is discarded.
+pub async fn dispatch_prompt_gate(
+    registry: &HookRegistry,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+) -> PromptGateResult {
+    let outcome = dispatch_sequential_gate(
+        registry,
+        HookEventName::UserPromptSubmit,
+        GateKind::Prompt,
+        "blocked",
+        envelope,
+        ctx,
+    )
+    .await;
+    PromptGateResult {
+        decision: match outcome.block {
+            Some((hook_name, reason)) => PromptDecision::Block { reason, hook_name },
+            None => PromptDecision::Allow,
+        },
+        results: outcome.results,
     }
 }
 
@@ -295,9 +384,10 @@ pub async fn dispatch_stop(
 
     let mut out = StopDispatchResult::default();
     let match_value = envelope.payload.match_value().map(str::to_string);
+    let disabled = crate::trust::DisabledHooks::load();
 
     for spec in hooks {
-        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results) {
+        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled) {
             continue;
         }
 
@@ -367,7 +457,8 @@ pub async fn dispatch_stop(
             }
             HookRunnerResult::Success
             | HookRunnerResult::Allow { .. }
-            | HookRunnerResult::Deny { .. } => {
+            | HookRunnerResult::Deny { .. }
+            | HookRunnerResult::Block { .. } => {
                 out.results.push(HookRunResult::Success {
                     hook_name: spec.name.clone(),
                     elapsed,
@@ -402,9 +493,10 @@ pub async fn dispatch_non_blocking(
 
     let match_value = envelope.payload.match_value().map(str::to_string);
     let mut results = Vec::with_capacity(hooks.len());
+    let disabled = crate::trust::DisabledHooks::load();
 
     for spec in hooks {
-        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut results) {
+        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut results, &disabled) {
             continue;
         }
 
@@ -449,6 +541,7 @@ pub async fn dispatch_non_blocking(
             }
             HookRunnerResult::Allow { .. }
             | HookRunnerResult::Deny { .. }
+            | HookRunnerResult::Block { .. }
             | HookRunnerResult::Stop(_) => {
                 tracing::info!(
                     hook_name = %spec.name,
@@ -688,6 +781,91 @@ mod tests {
             }
             ref other => panic!("expected Deny, got {other:?}"),
         }
+    }
+
+    fn prompt_submit_envelope() -> HookEventEnvelope {
+        HookEventEnvelope {
+            hook_event_name: HookEventName::UserPromptSubmit,
+            session_id: "test-session".into(),
+            cwd: "/tmp".into(),
+            workspace_root: "/tmp".into(),
+            timestamp: "2025-01-01T00:00:00Z".into(),
+            transcript_path: None,
+            client_identifier: None,
+            prompt_id: Some("p-1".into()),
+            permission_mode: None,
+            payload: HookPayload::UserPromptSubmit {
+                prompt: Some("deploy to prod".into()),
+                subagent_type: None,
+            },
+        }
+    }
+
+    fn make_prompt_spec(name: &str, script: &str) -> HookSpec {
+        let mut spec = make_command_spec(name, None, true, script);
+        spec.event = HookEventName::UserPromptSubmit;
+        spec
+    }
+
+    #[tokio::test]
+    async fn prompt_gate_blocks_on_exit_2_with_stderr_reason() {
+        let spec = make_prompt_spec("prompt-gate", "echo 'no prod deploys' >&2; exit 2");
+        let registry = registry_from_specs(vec![spec]);
+        let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+        match result.decision {
+            PromptDecision::Block {
+                ref reason,
+                ref hook_name,
+            } => {
+                assert_eq!(reason, "no prod deploys");
+                assert_eq!(hook_name, "prompt-gate");
+            }
+            ref other => panic!("expected Block, got {other:?}"),
+        }
+        assert!(
+            matches!(result.results[0], HookRunResult::Blocked { .. }),
+            "a block must record HookRunResult::Blocked for telemetry"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_gate_json_block_short_circuits_later_hooks() {
+        let first = make_prompt_spec(
+            "first",
+            "echo '{\"decision\":\"block\",\"reason\":\"stop right there\"}'",
+        );
+        let second = make_prompt_spec("second", "exit 0");
+        let registry = registry_from_specs(vec![first, second]);
+        let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+        match result.decision {
+            PromptDecision::Block {
+                ref reason,
+                ref hook_name,
+            } => {
+                assert_eq!(reason, "stop right there");
+                assert_eq!(hook_name, "first");
+            }
+            ref other => panic!("expected Block, got {other:?}"),
+        }
+        assert_eq!(result.results.len(), 1, "the second hook must not run");
+    }
+
+    #[tokio::test]
+    async fn prompt_gate_failure_fails_open() {
+        let spec = make_prompt_spec("broken", "echo 'oops' >&2; exit 1");
+        let registry = registry_from_specs(vec![spec]);
+        let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+        assert_eq!(result.decision, PromptDecision::Allow);
+        assert!(matches!(result.results[0], HookRunResult::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn prompt_gate_allows_and_discards_stdout() {
+        let spec = make_prompt_spec("context-only", "echo 'extra context the model never sees'");
+        let registry = registry_from_specs(vec![spec]);
+        let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+        assert_eq!(result.decision, PromptDecision::Allow);
+        assert!(matches!(result.results[0], HookRunResult::Success { .. }));
     }
 
     #[tokio::test]
@@ -1219,6 +1397,72 @@ mod tests {
                 Some(*expected),
                 "hub_hook_kind wrong for {event:?}"
             );
+        }
+    }
+    /// AC: names written into the disabled-hooks mechanism (via the real
+    /// `trust::disable_hook` API) have no effect on managed-policy hooks,
+    /// while a user hook with the same treatment is filtered as before. The
+    /// display predicate agrees with the dispatcher.
+    #[test]
+    fn disabled_hooks_file_cannot_skip_managed_policy_hook() {
+        // Injected snapshot — no env vars or filesystem: `grok_home()` is
+        // OnceLock-cached, so a temp `GROK_HOME` cannot be trusted to
+        // redirect the real disabled-hooks file in this test binary.
+        let disabled = crate::trust::DisabledHooks::from_names([
+            "requirements/system:pre_tool_use[0].hooks[0]".to_string(),
+            "global/user-hook".to_string(),
+        ]);
+
+        let mut results = Vec::new();
+        let mut managed = make_command_spec(
+            "requirements/system:pre_tool_use[0].hooks[0]",
+            None,
+            true,
+            "echo ok",
+        );
+        managed.layer = crate::config::HookProvenance::Requirements;
+        assert!(
+            eligible_or_record_skip(&managed, None, &mut results, &disabled),
+            "managed-policy hook must remain eligible despite a disabled-hooks entry"
+        );
+        assert!(results.is_empty());
+
+        let user = make_command_spec("global/user-hook", None, true, "echo ok");
+        assert!(
+            !eligible_or_record_skip(&user, None, &mut results, &disabled),
+            "a user hook with the same disabled-hooks treatment must be filtered"
+        );
+        assert!(matches!(results[0], HookRunResult::Skipped { .. }));
+
+        // Display surfaces agree with the dispatcher: the stale entry
+        // shows the user hook as disabled but never the managed hook.
+        assert!(
+            !crate::trust::hook_disabled_for_display_with(&managed, &disabled),
+            "managed-policy hooks must never display as disabled"
+        );
+        assert!(crate::trust::hook_disabled_for_display_with(
+            &user, &disabled
+        ));
+    }
+
+    /// The exemption holds on the real dispatch path, not just the
+    /// eligibility helper: a managed hook whose spec is flagged disabled
+    /// still runs and its deny still blocks.
+    #[tokio::test]
+    async fn managed_policy_hook_runs_via_dispatch_even_when_flagged_disabled() {
+        let mut spec = make_command_spec(
+            "requirements/system:pre_tool_use[0].hooks[0]",
+            None,
+            false, // flagged disabled — must be ignored for managed policy
+            "echo '{\"decision\":\"deny\",\"reason\":\"managed policy\"}'; exit 2",
+        );
+        spec.layer = crate::config::HookProvenance::Requirements;
+        let registry = registry_from_specs(vec![spec]);
+        let envelope = pre_tool_use_envelope("run_terminal_cmd");
+        let result = dispatch_pre_tool_use(&registry, &envelope, &run_ctx()).await;
+        match result.decision {
+            HookDecision::Deny { ref reason, .. } => assert_eq!(reason, "managed policy"),
+            ref other => panic!("managed hook must have run and denied, got {other:?}"),
         }
     }
 }

@@ -208,6 +208,12 @@ pub(crate) fn permission_outcome(decision: &Decision) -> PermissionOutcome {
 /// `tool.decision` span), so mode/wait/source are never re-derived — the span and
 /// product rails cannot observe different shell state. Content-free analytics
 /// come from [`manager_permission_analytics`].
+pub(crate) fn canonical_permission_tool_name(
+    access: &xai_grok_workspace::permission::AccessKind,
+) -> String {
+    xai_grok_workspace::permission::prompter_tool_name_for_access(access)
+}
+
 pub(crate) fn permission_decision_payload(
     tool_name: String,
     access_kind: events::AccessKind,
@@ -314,6 +320,108 @@ mod permission_analytics_tests {
             Some(ev),
             resolved,
         )
+    }
+
+    #[test]
+    fn renamed_agent_message_keeps_canonical_product_and_external_identity() {
+        let access = xai_grok_workspace::permission::AccessKind::AgentMessage {
+            subagent_id: "sub-1".into(),
+        };
+        let canonical = canonical_permission_tool_name(&access);
+        assert_eq!(canonical, "send_subagent_message");
+        assert_ne!(canonical, "relay_to_subagent");
+
+        let event = PermissionEvent {
+            tool_id: "tc-message".into(),
+            tool_name: canonical.clone(),
+            access_kind: "agent_message".into(),
+            access_detail: Some("sub-1".into()),
+            yolo_mode: false,
+            auto_approved: false,
+            user_prompted: true,
+            decision: "allow".into(),
+            prompt_outcome: Some("allow_once".into()),
+            reject_reason: None,
+            timestamp: Utc::now(),
+            subagent_session_id: None,
+            subagent_type: None,
+            subagent_description: None,
+            permission_mode: Some("ask".into()),
+            decision_reason: Some("needs_user".into()),
+            classifier_source: None,
+            classifier_latency_ms: None,
+            auto_denials_consecutive: None,
+            auto_denials_total: None,
+            wait_ms: Some(1),
+            queue_depth: Some(1),
+            security_findings: None,
+            classifier_verdict: None,
+            remember_tool_approvals: Some(true),
+        };
+        let decision = Decision::Allow;
+        let resolved =
+            resolved_decision_telemetry(Some(&event), &decision, PermissionMode::Ask, 0, false);
+        let payload = permission_decision_payload(
+            canonical,
+            events::AccessKind::AgentMessage,
+            &decision,
+            None,
+            Some(&event),
+            resolved,
+        );
+        assert_eq!(payload.tool_name, "send_subagent_message");
+        assert_eq!(
+            serde_json::to_value(payload.access_kind).unwrap(),
+            serde_json::json!("agent_message")
+        );
+    }
+
+    #[test]
+    fn agent_message_payload_keeps_dedicated_identity() {
+        let event = PermissionEvent {
+            tool_id: "tc-message".into(),
+            tool_name: "send_subagent_message".into(),
+            access_kind: "agent_message".into(),
+            access_detail: Some("sub-1".into()),
+            yolo_mode: false,
+            auto_approved: false,
+            user_prompted: true,
+            decision: "allow".into(),
+            prompt_outcome: Some("allow_once".into()),
+            reject_reason: None,
+            timestamp: Utc::now(),
+            subagent_session_id: None,
+            subagent_type: None,
+            subagent_description: None,
+            permission_mode: Some("ask".into()),
+            decision_reason: Some("needs_user".into()),
+            classifier_source: None,
+            classifier_latency_ms: None,
+            auto_denials_consecutive: None,
+            auto_denials_total: None,
+            wait_ms: Some(1),
+            queue_depth: Some(1),
+            security_findings: None,
+            classifier_verdict: None,
+            remember_tool_approvals: Some(true),
+        };
+        let decision = Decision::Allow;
+        let resolved =
+            resolved_decision_telemetry(Some(&event), &decision, PermissionMode::Ask, 0, false);
+        let payload = permission_decision_payload(
+            event.tool_name.clone(),
+            events::AccessKind::AgentMessage,
+            &decision,
+            None,
+            Some(&event),
+            resolved,
+        );
+
+        assert_eq!(payload.tool_name, "send_subagent_message");
+        assert_eq!(
+            serde_json::to_value(payload.access_kind).unwrap(),
+            serde_json::json!("agent_message")
+        );
     }
 
     #[test]

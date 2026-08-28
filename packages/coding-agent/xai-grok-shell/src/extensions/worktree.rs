@@ -146,6 +146,7 @@ fn log_effective_worktree_type(
         "WORKTREE_REQUEST_SHELL: resolved effective worktree type"
     );
 }
+#[tracing::instrument(name = "ext.worktree", skip_all, fields(method = %args.method))]
 pub async fn handle(
     agent: &MvpAgent,
     ops: &xai_grok_workspace::WorkspaceOps,

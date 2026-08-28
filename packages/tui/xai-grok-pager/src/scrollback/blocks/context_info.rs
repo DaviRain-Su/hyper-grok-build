@@ -40,6 +40,7 @@ use xai_grok_shell::session::{ContextInfo, count_detail};
 /// ◈ Tool definitions  5.6k tokens  (0.6%) · 12 tools
 /// ◈ Skills            2.4k tokens  (0.2%) · 21 skills
 /// ◈ MCP servers        320 tokens  (0.1%) ·  4 servers
+/// ◈ AGENTS.md          1.1k tokens  (0.1%) ·  2 files
 ///
 /// Auto-compact at 85% · ~812k tokens remaining
 ///
@@ -1062,6 +1063,7 @@ mod tests {
         snap.usage_categories = vec![
             TokenUsageCategory::skills_listing(&"x".repeat(9_600), 21),
             TokenUsageCategory::mcp_servers(&"y".repeat(1_200), 4),
+            TokenUsageCategory::agents_md(&"z".repeat(4_400), 2),
         ];
         let block = ContextInfoBlock::new(snap, "grok-4");
         let theme = test_theme();
@@ -1074,6 +1076,10 @@ mod tests {
         assert!(
             all.contains("MCP servers") && all.contains("4 servers"),
             "mcp row missing:\n{all}"
+        );
+        assert!(
+            all.contains("AGENTS.md") && all.contains("2 files"),
+            "agents.md row missing:\n{all}"
         );
         assert!(all.contains("\u{00b7} 12 tools"), "tools count:\n{all}");
         let (_, tools, _, total) = count_bar_glyphs(&lines, BarLayout::WIDE);

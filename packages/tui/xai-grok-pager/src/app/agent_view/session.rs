@@ -139,6 +139,8 @@ impl AgentView {
             unexpected_replay_drops: 0,
             late_replay_until: None,
             replayed_terminal_prompts: HashSet::new(),
+            replayed_visible_prompts: HashSet::new(),
+            replayed_bash_prompts: HashSet::new(),
             failed_wake_marker_for: None,
             running_wake_turn: None,
             finished_wake_prompts: HashSet::new(),
@@ -498,6 +500,8 @@ impl AgentView {
         self.clear_minimal_btw_lifecycle();
         self.session.loading_replay = true;
         self.replayed_terminal_prompts.clear();
+        self.replayed_visible_prompts.clear();
+        self.replayed_bash_prompts.clear();
         self.unexpected_replay_drops = 0;
         self.late_replay_until = None;
         self.running_wake_turn = None;
@@ -577,6 +581,7 @@ impl AgentView {
             self.scrollback.remove_entry(rid);
         }
         self.session.model_switch_pending = false;
+        self.release_hook_block_hold();
         self.pending_adoption_updates.clear();
         let stash = self.take_replay_rebuilt_state();
         self.session_reload = Some(SessionReload {

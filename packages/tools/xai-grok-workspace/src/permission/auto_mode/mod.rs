@@ -472,7 +472,9 @@ impl HeuristicPermissionClassifier {
             // defense-in-depth fallback so the user is prompted rather than
             // silently auto-approving; non-allowlisted MCP tools land
             // here too.
-            AccessKind::Edit(_) | AccessKind::MCPTool { .. } => ClassifierVerdict::Block,
+            AccessKind::Edit(_) | AccessKind::MCPTool { .. } | AccessKind::AgentMessage { .. } => {
+                ClassifierVerdict::Block
+            }
             AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => {
                 ClassifierVerdict::Allow
             }
@@ -1192,7 +1194,9 @@ pub enum AutoFastPath {
 ///
 /// Auto mode accepts ALL file edits by product decision (no workspace
 /// restriction) — deliberately broader than in-workspace-only
-/// acceptEdits. Explicit deny / policy is enforced by the caller before this.
+/// acceptEdits. Typed AgentMessage is Allowed here so a spoofed tool
+/// name cannot grant a different access kind. Explicit deny / policy
+/// is caller-owned and runs before this.
 pub fn auto_mode_fast_path(
     access: &AccessKind,
     tool_name: &str,
@@ -1207,6 +1211,11 @@ pub fn auto_mode_fast_path(
     // Auto mode accepts ALL file edits by product decision (no workspace
     // restriction), so any edit fast-path-Allows regardless of path.
     if matches!(access, AccessKind::Edit(_)) {
+        return AutoFastPath::Allow;
+    }
+    // Typed AgentMessage only: a spoofed `send_subagent_message` name on
+    // another access kind must not ride this exception.
+    if matches!(access, AccessKind::AgentMessage { .. }) {
         return AutoFastPath::Allow;
     }
     // Exact no-op commands never need the classifier (temperature-0 verdicts
@@ -1259,7 +1268,7 @@ pub fn classifier_output_json_schema() -> serde_json::Value {
             },
             "shouldBlock": {
                 "type": "boolean",
-                "description": "True if the action must be blocked; false if it may be auto-allowed."
+                "description": "True if the action must wait for the user; false if it may be auto-allowed."
             },
             "reason": {
                 "type": "string",
@@ -1378,6 +1387,7 @@ pub fn build_classifier_messages(
         AccessKind::MCPTool { .. } => "mcp",
         AccessKind::WebFetch(_) => "web_fetch",
         AccessKind::WebSearch(_) => "web_search",
+        AccessKind::AgentMessage { .. } => "agent_message",
     };
     let proposed_action =
         format!("tool: {tool_name}\naccess_kind: {access_kind}\ndetail: {detail}");
@@ -1627,6 +1637,8 @@ impl PermissionClassifier for LlmPermissionClassifier {
                 }
             } else if let Some(ref classify_text) = self.classify_text {
                 classify_text(messages).await
+            } else if matches!(access, AccessKind::AgentMessage { .. }) {
+                return ClassifierOutcome::heuristic(heuristic);
             } else {
                 return ClassifierVerdict::Unavailable.into();
             };
@@ -1707,8 +1719,51 @@ mod tests {
             AutoFastPath::Classify
         );
         assert_eq!(
+            auto_mode_fast_path(
+                &AccessKind::AgentMessage {
+                    subagent_id: "sub-1".into(),
+                },
+                "send_subagent_message",
+                false,
+            ),
+            AutoFastPath::Allow
+        );
+        assert_eq!(
+            auto_mode_fast_path(
+                &AccessKind::AgentMessage {
+                    subagent_id: "sub-1".into(),
+                },
+                "send_subagent_message",
+                true,
+            ),
+            AutoFastPath::PromptUser
+        );
+        assert_eq!(
             auto_mode_fast_path(&AccessKind::Bash("x".into()), "run_terminal_command", true),
             AutoFastPath::PromptUser
+        );
+    }
+
+    #[test]
+    fn fast_path_agent_message_is_typed_only() {
+        assert_eq!(
+            auto_mode_fast_path(
+                &AccessKind::Bash("cargo test".into()),
+                "send_subagent_message",
+                false,
+            ),
+            AutoFastPath::Classify,
+            "spoofed send_subagent_message must not Allow Bash"
+        );
+        assert_eq!(
+            auto_mode_fast_path(
+                &AccessKind::AgentMessage {
+                    subagent_id: "sub-1".into(),
+                },
+                "run_terminal_command",
+                false,
+            ),
+            AutoFastPath::Allow
         );
     }
 
@@ -1733,6 +1788,56 @@ mod tests {
                 "compound command {cmd:?} must not ride the no-op allowlist"
             );
         }
+    }
+
+    #[test]
+    fn builtin_classifier_blocks_agent_messages() {
+        let access = AccessKind::AgentMessage {
+            subagent_id: "sub-1".into(),
+        };
+        assert_eq!(
+            HeuristicPermissionClassifier::classify_sync(
+                "send_subagent_message",
+                &access,
+                Some("sub-1"),
+                &ClassifierContext::default(),
+            ),
+            ClassifierVerdict::Block
+        );
+    }
+
+    #[tokio::test]
+    async fn production_fallback_blocks_agent_message_without_side_query() {
+        let classifier = LlmPermissionClassifier::default();
+        let outcome = classifier
+            .classify(
+                "send_subagent_message",
+                &AccessKind::AgentMessage {
+                    subagent_id: "sub-1".into(),
+                },
+                Some("sub-1"),
+                ClassifierContext::default(),
+            )
+            .await;
+        assert_eq!(outcome.verdict(), ClassifierVerdict::Block);
+    }
+
+    #[test]
+    fn agent_message_classifier_prompt_uses_dedicated_identity() {
+        let messages = build_classifier_messages(
+            "send_subagent_message",
+            &AccessKind::AgentMessage {
+                subagent_id: "sub-1".into(),
+            },
+            Some("sub-1"),
+            &ClassifierContext::default(),
+            ClassifierPromptType::JustCommand,
+        );
+        let proposed = &messages.last().expect("proposed action").text;
+        assert!(proposed.contains("tool: send_subagent_message"));
+        assert!(proposed.contains("access_kind: agent_message"));
+        assert!(!proposed.contains("search_replace"));
+        assert!(!proposed.contains("access_kind: edit"));
     }
 
     #[tokio::test]

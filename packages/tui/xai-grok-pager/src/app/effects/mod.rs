@@ -28,7 +28,7 @@ use xai_acp_lib::{AcpAgentTx, acp_send};
 use xai_grok_telemetry::startup::{self, StartupPhase};
 use actions::{
     ClipboardPasteTarget, Effect, ProbedAttachment, SubagentKillOutcome,
-    SwitchModelError, TaskResult,
+    SwitchModelError, TaskResult, WorkspaceMemberUpsertFailure,
 };
 use actions::PermissionModeKind;
 use crate::views::usage_modal::SessionInfoField;
@@ -998,6 +998,86 @@ pub(crate) fn execute(
                         Err(_) => {
                             TaskResult::DashboardSessionsLoaded {
                                 sessions: vec![],
+                            }
+                        }
+                    }
+                });
+        }
+        Effect::LoadWorkspaceSnapshot { db_path } => {
+            tasks
+                .spawn(async move {
+                    match tokio::task::spawn_blocking(move || {
+                            let store = xai_grok_dashboard_store::WorkspaceStore::open(
+                                &db_path,
+                            )?;
+                            let snapshot = store.snapshot()?;
+                            Ok::<
+                                _,
+                                xai_grok_dashboard_store::StoreError,
+                            >((store, snapshot))
+                        })
+                        .await
+                    {
+                        Ok(Ok((store, snapshot))) => {
+                            TaskResult::WorkspaceSnapshotLoaded {
+                                store,
+                                snapshot,
+                            }
+                        }
+                        Ok(Err(error)) => {
+                            TaskResult::WorkspaceSnapshotFailed {
+                                error: error.to_string(),
+                            }
+                        }
+                        Err(error) => {
+                            TaskResult::WorkspaceSnapshotFailed {
+                                error: format!("workspace loader task failed: {error}"),
+                            }
+                        }
+                    }
+                });
+        }
+        Effect::UpsertWorkspaceMembers { store, members } => {
+            let db_path = store.path().to_path_buf();
+            tasks
+                .spawn(async move {
+                    match tokio::task::spawn_blocking(move || {
+                            let mut store = store;
+                            let mut failures = Vec::new();
+                            for member in members.iter().cloned() {
+                                let session_id = member.key.session_id.to_string();
+                                if let Err(error) = store.insert_member(member) {
+                                    let retryable = matches!(
+                                &error,
+                                xai_grok_dashboard_store::StoreError::Busy { .. }
+                            );
+                                    failures
+                                        .push(WorkspaceMemberUpsertFailure {
+                                            session_id,
+                                            error: error.to_string(),
+                                            retryable,
+                                        });
+                                }
+                            }
+                            let snapshot = store
+                                .snapshot()
+                                .map_err(|error| error.to_string());
+                            (store, snapshot, failures, members)
+                        })
+                        .await
+                    {
+                        Ok((store, snapshot, failures, attempted)) => {
+                            TaskResult::WorkspaceMembersUpserted {
+                                store,
+                                snapshot,
+                                failures,
+                                attempted,
+                            }
+                        }
+                        Err(error) => {
+                            TaskResult::WorkspaceMembersUpsertTaskFailed {
+                                db_path,
+                                error: format!("workspace writer task failed: {error}"),
                             }
                         }
                     }
@@ -4925,10 +5005,8 @@ fn session_info_fields(
         show_resolved_model,
     );
     push("Model", model_display.to_string(), true);
-    if xai_grok_shell::session::should_show_model_fingerprint(
-        info.data.show_model_fingerprint,
-        model,
-    ) && let Some(fp) = info.data.model_fingerprint.as_deref()
+    if info.data.show_model_fingerprint
+        && let Some(fp) = info.data.model_fingerprint.as_deref()
     {
         push("Model Hash", fp.to_string(), true);
     }

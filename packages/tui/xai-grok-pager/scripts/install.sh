@@ -311,13 +311,29 @@ fi
 # Fetch managed_config.toml + requirements.toml from server (deployment key only).
 if [ -n "$GROK_DEPLOYMENT_KEY" ]; then
     PROXY_URL="${GROK_PROXY_URL:-https://cli-chat-proxy.grok.com/v1}"
+    # Refuse cleartext / userinfo / empty-host proxies before attaching the key.
+    proxy_authority="${PROXY_URL#*://}"
+    proxy_authority="${proxy_authority%%[/?#]*}"
+    proxy_ok=
+    case "$PROXY_URL" in
+        [hH][tT][tT][pP][sS]://*)
+            case "$proxy_authority" in
+                ""|*@*) ;;
+                *) proxy_ok=1 ;;
+            esac
+            ;;
+    esac
+    if [ -z "$proxy_ok" ]; then
+        echo "Error: GROK_PROXY_URL must be an https:// URL." >&2
+        exit 1
+    fi
     echo "  Fetching deployment config..." >&2
     DEPLOY_RESPONSE=""
     AUTH_HEADER_FILE=$(mktemp 2>/dev/null) || AUTH_HEADER_FILE=""
     if [ -n "$AUTH_HEADER_FILE" ]; then
         chmod 600 "$AUTH_HEADER_FILE" 2>/dev/null || true
         printf 'Authorization: Bearer %s\n' "$GROK_DEPLOYMENT_KEY" > "$AUTH_HEADER_FILE"
-        DEPLOY_RESPONSE=$(curl -sS -f \
+        DEPLOY_RESPONSE=$(curl -sS -f --proto '=https' \
             -H "@${AUTH_HEADER_FILE}" \
             "${PROXY_URL}/deployment/config" 2>/dev/null) || DEPLOY_RESPONSE=""
         : > "$AUTH_HEADER_FILE" 2>/dev/null || true

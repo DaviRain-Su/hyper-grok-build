@@ -387,7 +387,7 @@ pub fn compute_peek_fields(
         }
         // Roster-only rows are not locally hosted — there is no local
         // `AgentView` to peek into.
-        DashboardRowId::Roster { .. } => None,
+        DashboardRowId::Roster { .. } | DashboardRowId::Workspace { .. } => None,
     }
 }
 
@@ -455,7 +455,7 @@ pub fn peek_model_and_mode(
             }
             None => default(),
         },
-        DashboardRowId::Roster { .. } => default(),
+        DashboardRowId::Roster { .. } | DashboardRowId::Workspace { .. } => default(),
     }
 }
 
@@ -1026,6 +1026,7 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
                     ToolCallBlock::IntegrationSearch(_) => Some("Tool search"),
                     ToolCallBlock::UseTool(_) => Some("Tool"),
                     ToolCallBlock::MemorySearch(_) => Some("Memory"),
+                    ToolCallBlock::SentMessage(_) => Some("Message"),
                     ToolCallBlock::Skill(_) => Some("Skill"),
                     ToolCallBlock::Other(_) => Some("Tool"),
                     // Lifecycle events aren't real tool calls — keep scanning.

@@ -161,7 +161,7 @@ Tools can be extended with [MCP servers](05-configuration.md#mcp-servers) for in
 Type `/` in the prompt to access commands. These provide quick actions without writing a full prompt:
 
 ```
-/model grok-build                 # Switch model
+/model grok-4.6                 # Switch model
 /compact                          # Compress conversation history
 /always-approve                   # Toggle always-approve mode
 /new                              # Start a new session
@@ -196,7 +196,7 @@ grok --rules "Always use TypeScript. Prefer functional components."
 grok --yolo
 
 # Use a specific model
-grok -m grok-build
+grok -m grok-4.6
 
 # Resume a previous session
 grok --resume <session-id>

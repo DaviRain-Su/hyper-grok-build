@@ -449,17 +449,41 @@ pub struct BlockOutput {
     pub lines: Vec<BlockLine>,
 }
 
-/// Rare copy-only source bytes omitted from an Edit header's visible row.
+/// Rare selection metadata for source bytes omitted from a visible row and
+/// for making a semantically non-empty blank source row reachable.
 /// TODO: Copy the absolute Read/Edit target for a full painted-path drag; partial drags copy painted columns only to keep highlight and clipboard aligned.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct SelectionBoundary {
     prefix: String,
     suffix: String,
+    has_empty_row_anchor: bool,
 }
 
 impl SelectionBoundary {
     pub(crate) fn new(prefix: String, suffix: String) -> Self {
-        Self { prefix, suffix }
+        Self {
+            prefix,
+            suffix,
+            has_empty_row_anchor: false,
+        }
+    }
+
+    /// Make an otherwise empty source row reachable through its first blank
+    /// terminal cell without painting or copying a placeholder.
+    pub(crate) fn empty_row_anchor(prefix: String, suffix: String) -> Self {
+        Self {
+            prefix,
+            suffix,
+            has_empty_row_anchor: true,
+        }
+    }
+
+    pub(crate) fn anchored_cols(&self, cols: Range<u16>) -> Range<u16> {
+        if self.has_empty_row_anchor && cols.is_empty() {
+            cols.start..cols.start.saturating_add(1)
+        } else {
+            cols
+        }
     }
 
     pub(crate) fn apply(

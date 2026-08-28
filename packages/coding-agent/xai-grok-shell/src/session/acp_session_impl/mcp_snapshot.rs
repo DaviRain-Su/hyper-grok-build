@@ -322,6 +322,7 @@ impl SessionActor {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub(super) async fn wait_for_mcp_handshakes_bounded(&self, timeout: std::time::Duration) {
         let notified = self.mcp_handshakes_done.notified();
         tokio::pin!(notified);

@@ -101,6 +101,7 @@ fn event_loop_handle() -> Result<Handle, FsNotifyError> {
 ///
 /// `config` is honored only when a watcher is actually created; a live watcher
 /// for the same directory is reused as-is regardless of the requested config.
+#[tracing::instrument(name = "fsnotify.watcher_install", skip_all)]
 pub fn shared(cwd: PathBuf, config: FsConfig) -> Result<Arc<FsEventSource>, FsNotifyError> {
     let key = canonical_key(&cwd);
 

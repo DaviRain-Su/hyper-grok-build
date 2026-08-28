@@ -47,6 +47,10 @@ pub(super) struct PromptCompletePayload {
     /// blocked-by-hook marker); stamped top-level, absent on older shells.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) cancellation_category: Option<String>,
+    /// Structured detail of a hook-denied cancel (hook name, reason) for the
+    /// blocked-prompt card; stamped top-level, absent on older shells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) cancellation_context: Option<serde_json::Value>,
     /// `_meta` extension point — parsed defensively as a trigger fallback.
     #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub(super) meta: Option<serde_json::Value>,
@@ -78,6 +82,17 @@ impl PromptCompletePayload {
                 .as_str()
         })
     }
+
+    /// The hook-denied detail (hook name, reason), wherever it was stamped:
+    /// top-level with `_meta` fallback, like the category. `None` on older
+    /// shells / non-hook cancels.
+    pub(super) fn cancellation_context(&self) -> Option<&serde_json::Value> {
+        self.cancellation_context.as_ref().or_else(|| {
+            self.meta
+                .as_ref()?
+                .get(super::super::turn_completion::CANCELLATION_CONTEXT_KEY)
+        })
+    }
 }
 
 pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
@@ -90,6 +105,32 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
 
     let running_prompt_id = changed.running_prompt_id.clone();
     let session_id = changed.session_id.clone();
+
+    let sid = acp::SessionId::new(session_id.clone());
+    let session_match = find_session_match(app, &sid);
+    if let Some(SessionMatch::Child(parent_id)) = session_match {
+        let snapshot = changed.entries;
+        if snapshot.is_empty() {
+            app.shared_prompt_queues.remove(&session_id);
+        } else {
+            app.shared_prompt_queues
+                .insert(session_id.clone(), snapshot.clone());
+        }
+
+        // Child queues are read-only mirrors; root reconciliation and turn
+        // lifecycle below must not run for them.
+        let is_active_parent = is_matched_agent_active(app, parent_id);
+        let Some(parent) = app.agents.get_mut(&parent_id) else {
+            return false;
+        };
+        let is_active = is_active_parent && parent.active_subagent.as_deref() == Some(&session_id);
+        let Some(child) = parent.subagent_views.get_mut(&session_id) else {
+            return false;
+        };
+        child.shared_queue = snapshot;
+        child.sync_queue_pane();
+        return is_active;
+    }
 
     // Prefer running_* fields on the payload (authoritative; present when a
     // turn is promoting). Fall back to the local mirror for older shells.
@@ -117,9 +158,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
         .or_else(|| running_entry.as_ref().map(|e| e.kind.clone()))
         .unwrap_or_else(|| "prompt".to_string());
 
-    // Resolve the owning agent before the queue is replaced.
-    let sid = acp::SessionId::new(session_id.clone());
-    let agent_id = match find_session_match(app, &sid) {
+    let agent_id = match session_match {
         Some(SessionMatch::Root(id)) => Some(id),
         _ => None,
     };
@@ -489,6 +528,7 @@ pub(super) fn handle_prompt_complete(notif: &acp::ExtNotification, app: &mut App
             agent_result: payload.agent_result.as_deref(),
             cancel_trigger: payload.cancel_trigger(),
             cancellation_category: payload.cancellation_category(),
+            cancellation_context: payload.cancellation_context(),
         },
     );
     let result = super::super::turn_completion::apply_terminal_outcome(outcome, app, id, is_active);

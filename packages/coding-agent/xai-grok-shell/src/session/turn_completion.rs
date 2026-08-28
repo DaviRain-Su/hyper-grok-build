@@ -20,6 +20,7 @@ pub(crate) fn build_turn_completed(
     stop_reason: serde_json::Value,
     agent_result: serde_json::Value,
     usage: Option<crate::extensions::notification::PromptUsage>,
+    elapsed_ms: Option<u64>,
 ) -> SessionUpdate {
     SessionUpdate::TurnCompleted {
         prompt_id,
@@ -29,6 +30,7 @@ pub(crate) fn build_turn_completed(
             other => Some(json_to_string(other)),
         },
         usage,
+        elapsed_ms,
     }
 }
 
@@ -53,6 +55,7 @@ mod tests {
             serde_json::json!("end_turn"),
             serde_json::Value::Null,
             None,
+            Some(1500),
         );
         assert_eq!(
             update,
@@ -61,6 +64,7 @@ mod tests {
                 stop_reason: "end_turn".into(),
                 agent_result: None,
                 usage: None,
+                elapsed_ms: Some(1500),
             }
         );
     }
@@ -73,6 +77,7 @@ mod tests {
             serde_json::json!("error"),
             serde_json::json!("connection reset"),
             None,
+            Some(0),
         );
         assert_eq!(
             update,
@@ -81,6 +86,7 @@ mod tests {
                 stop_reason: "error".into(),
                 agent_result: Some("connection reset".into()),
                 usage: None,
+                elapsed_ms: Some(0),
             }
         );
     }
@@ -92,6 +98,7 @@ mod tests {
             serde_json::json!("cancelled"),
             serde_json::Value::Null,
             None,
+            Some(42),
         );
         assert!(matches!(
             update,
@@ -111,6 +118,7 @@ mod tests {
             serde_json::json!(42),
             serde_json::json!({ "k": "v" }),
             None,
+            Some(7),
         );
         assert_eq!(
             update,
@@ -119,7 +127,26 @@ mod tests {
                 stop_reason: "42".into(),
                 agent_result: Some("{\"k\":\"v\"}".into()),
                 usage: None,
+                elapsed_ms: Some(7),
             }
         );
+    }
+
+    #[test]
+    fn missing_elapsed_stays_none() {
+        let update = build_turn_completed(
+            "p-5".into(),
+            serde_json::json!("cancelled"),
+            serde_json::Value::Null,
+            None,
+            None,
+        );
+        assert!(matches!(
+            update,
+            SessionUpdate::TurnCompleted {
+                elapsed_ms: None,
+                ..
+            }
+        ));
     }
 }

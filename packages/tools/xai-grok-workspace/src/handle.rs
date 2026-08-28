@@ -2969,10 +2969,18 @@ impl WorkspaceHandle {
         }
         let new_depth = parent.depth.saturating_add(1);
         let new_fork_budget = parent.fork_budget.saturating_sub(1).min(config.max_depth);
-        let baseline = config
+        let mut baseline = config
             .tool_config
             .clone()
             .unwrap_or_else(|| (*parent.effective_tool_config()).clone());
+        let active_agent_message_id = xai_grok_tools::registry::types::ToolConfig::for_tool::<
+            xai_grok_tools::implementations::grok_build::SendSubagentMessageTool,
+        >()
+        .id;
+        baseline.tools.retain(|tool| {
+            tool.kind != Some(xai_grok_tools::types::tool::ToolKind::ActiveAgentMessage)
+                && tool.id != active_agent_message_id
+        });
         let cwd = config
             .cwd_override
             .clone()
@@ -3899,7 +3907,7 @@ fn build_session_routed_handlers(
     toolset: &xai_grok_tools::registry::types::FinalizedToolset,
     ws: &WorkspaceHandle,
 ) -> Vec<Arc<dyn xai_computer_hub_sdk::ToolServerHandler>> {
-    let tool_kinds = toolset.tool_kinds();
+    let tool_kinds = toolset.tool_kind_map();
     let mut seen = std::collections::HashSet::new();
     let mut handlers = Vec::new();
     for def in toolset.tool_definitions() {
@@ -3910,15 +3918,17 @@ fn build_session_routed_handlers(
             );
             continue;
         }
+        let semantic_kind = tool_kinds.get(&def.function.name).copied();
         let mut desc = xai_tool_types::ToolDescription::new(
             def.function.name.clone(),
             def.function.description.clone().unwrap_or_default(),
         );
         desc.arguments_schema = Some(def.function.parameters.clone());
-        desc.kind = tool_kinds.get(&def.function.name).cloned();
+        desc.kind = semantic_kind.map(|kind| kind.as_key().to_owned());
         match crate::hub::SessionRoutedToolHandler::new(
             def.function.name.clone(),
             desc,
+            semantic_kind,
             Some(def.function.parameters.clone()),
             ws.clone(),
         ) {

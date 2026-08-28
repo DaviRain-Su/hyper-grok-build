@@ -34,6 +34,15 @@ fn install_sh_path() -> Option<PathBuf> {
     script_path("install.sh")
 }
 
+fn desktop_install_sh_path() -> Option<PathBuf> {
+    dunce::canonicalize(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../frontend/apps/grok-desktop/scripts/install.sh"),
+    )
+    .ok()
+    .filter(|p| p.exists())
+}
+
 fn host_platform() -> String {
     let os = if cfg!(target_os = "macos") {
         "macos"
@@ -64,6 +73,11 @@ while [ $# -gt 0 ]; do
     --head) head=1 ;;
     -o) shift; out="$1" ;;
     -w) shift; [ "$1" = '%{{http_code}}' ] && want_code=1 ;;
+    # Do not let --proto '=https' or -H value steal the URL argv.
+    --proto=*) ;;
+    --proto) shift ;;
+    -H) shift ;;
+    --connect-timeout|--retry|-m) shift ;;
     -*) : ;;
     *) url="$1" ;;
   esac
@@ -403,6 +417,122 @@ fn install_urls_on_fake_host(script: &str, host: FakeHost) -> Option<String> {
 }
 
 const INSTALL_SCRIPTS: [&str; 2] = ["install.sh", "install-enterprise.sh"];
+
+const BAD_PROXY_URLS: &[&str] = &[
+    "http://127.0.0.1:9/v1",
+    "HTTP://evil.example/v1",
+    "https://",
+    "https:///v1",
+    "https://user:pass@evil.example/v1",
+    "https://user:pass@[::1]/v1",
+    "ftp://evil.example/v1",
+];
+
+const GOOD_PROXY_URLS: &[&str] = &[
+    "https://proxy.example.com/v1",
+    "https://proxy.example.com:443/v1",
+    "https://[::1]/v1",
+];
+
+fn run_with_proxy_url(script: &Path, proxy_url: &str) -> (bool, String, bool) {
+    let fakedir = tempfile::tempdir().unwrap();
+    write_fake_curl(fakedir.path());
+    let url_log = fakedir.path().join("urls.log");
+    let home = tempfile::tempdir().unwrap();
+    let path_env = format!("{}:/usr/bin:/bin", fakedir.path().display());
+    let status = Command::new("/bin/bash")
+        .arg(script)
+        .arg("0.1.181")
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", &path_env)
+        .env("SHELL", "/bin/bash")
+        .env("GROK_BIN_DIR", home.path().join(".grok").join("bin"))
+        .env("GROK_CHANNEL", "stable")
+        .env("GROK_DEPLOYMENT_KEY", "test-deployment-key-must-not-leak")
+        .env("GROK_PROXY_URL", proxy_url)
+        .env("FAKE_MODE", "full")
+        .env("FAKE_URL_LOG", &url_log)
+        .status()
+        .expect("spawn bash install script");
+    let urls = std::fs::read_to_string(&url_log).unwrap_or_default();
+    let managed = home.path().join(".grok/managed_config.toml").exists();
+    (status.success(), urls, managed)
+}
+
+fn assert_no_credentialed_proxy_request(label: &str, proxy_url: &str, urls: &str) {
+    assert!(
+        !urls.contains("/deployment/config")
+            && !urls.contains("/grok-cli/update")
+            && !urls.contains("127.0.0.1")
+            && !urls.contains("evil.example"),
+        "{label}: must not issue credentialed proxy request for {proxy_url:?}, urls:\n{urls}"
+    );
+}
+
+#[test]
+fn install_scripts_refuse_bad_proxy_url_for_deployment_key() {
+    let Some(pager_install) = script_path("install.sh") else {
+        eprintln!("skipping: install.sh not found relative to crate; run under cargo");
+        return;
+    };
+    let desktop = desktop_install_sh_path()
+        .expect("desktop install.sh must resolve when pager install.sh is present");
+
+    let mut scripts: Vec<(&str, PathBuf)> = vec![
+        ("install.sh", pager_install),
+        ("desktop install.sh", desktop),
+    ];
+    if let Some(enterprise) = script_path("install-enterprise.sh") {
+        scripts.insert(1, ("install-enterprise.sh", enterprise));
+    }
+
+    for (label, script_file) in &scripts {
+        for proxy_url in BAD_PROXY_URLS {
+            let (ok, urls, managed) = run_with_proxy_url(script_file, proxy_url);
+            assert!(
+                !ok,
+                "{label}: GROK_PROXY_URL={proxy_url:?} must fail closed"
+            );
+            assert_no_credentialed_proxy_request(label, proxy_url, &urls);
+            assert!(
+                !managed,
+                "{label}: must not write managed_config.toml for {proxy_url:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn install_scripts_allow_custom_https_proxy_url() {
+    let Some(pager_install) = script_path("install.sh") else {
+        eprintln!("skipping: install.sh not found relative to crate; run under cargo");
+        return;
+    };
+    let desktop = desktop_install_sh_path()
+        .expect("desktop install.sh must resolve when pager install.sh is present");
+
+    let mut scripts: Vec<(&str, PathBuf)> = vec![
+        ("install.sh", pager_install),
+        ("desktop install.sh", desktop),
+    ];
+    if let Some(enterprise) = script_path("install-enterprise.sh") {
+        scripts.insert(1, ("install-enterprise.sh", enterprise));
+    }
+    for (label, script_file) in &scripts {
+        for proxy_url in GOOD_PROXY_URLS {
+            let (ok, urls, _managed) = run_with_proxy_url(script_file, proxy_url);
+            assert!(
+                ok,
+                "{label}: custom https GROK_PROXY_URL={proxy_url:?} must succeed"
+            );
+            assert!(
+                urls.contains("proxy.example.com") || urls.contains("[::1]"),
+                "{label}: must request custom https proxy {proxy_url:?}, urls:\n{urls}"
+            );
+        }
+    }
+}
 
 /// A Rosetta shell (uname says macos/x86_64, sysctl says Apple Silicon) must
 /// download the native arm64 artifact; a genuine Intel Mac (sysctl key

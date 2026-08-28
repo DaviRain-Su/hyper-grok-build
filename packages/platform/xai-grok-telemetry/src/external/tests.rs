@@ -276,6 +276,10 @@ fn tool_name_sanitization() {
     assert_eq!(schema::sanitize_tool_name("memory_search"), "memory_search");
     assert_eq!(schema::sanitize_tool_name("memory_get"), "memory_get");
     assert_eq!(
+        schema::sanitize_tool_name("send_subagent_message"),
+        "send_subagent_message"
+    );
+    assert_eq!(
         schema::sanitize_tool_name("nebula__post_message"),
         "mcp_tool"
     );
@@ -719,6 +723,42 @@ fn mcp_connection_collapses_server_name_by_default() {
     assert_eq!(attr(ev, "mcp_server.name").as_deref(), Some("mcp_server"));
     assert_eq!(attr(ev, "error_type").as_deref(), Some("timeout"));
     assert!(!format!("{events:?}").contains("corp-internal-jira"));
+}
+
+#[test]
+fn agent_message_tool_decision_identity() {
+    let stream = build(gates_off());
+    emit_event_into(
+        &stream,
+        &events::PermissionDecisionPayload {
+            tool_name: "send_subagent_message".into(),
+            access_kind: events::AccessKind::AgentMessage,
+            decision: events::PermissionOutcome::Allow,
+            wait_ms: 10,
+            permission_mode: crate::enums::PermissionMode::Ask,
+            source: Some("allowed".into()),
+            subagent_session_id: None,
+            subagent_type: None,
+            manager_prompt_attempted: Some(true),
+            prompt_outcome: Some(events::PermissionPromptOutcome::Allow),
+            prompt_outcome_detail: Some(events::PermissionPromptOutcomeDetail::AllowOnce),
+            remember_tool_approvals: Some(true),
+            decision_reason: Some(events::PermissionDecisionReason::NeedsUser),
+            classifier_source: None,
+            classifier_verdict: None,
+            security_findings: None,
+            classifier_latency_ms: None,
+            auto_denials_consecutive: None,
+            auto_denials_total: None,
+        },
+    );
+    let events = exported_events(&stream);
+    let ev = &events[0];
+    assert_eq!(
+        attr(ev, "tool_name").as_deref(),
+        Some("send_subagent_message")
+    );
+    assert_eq!(attr(ev, "access_kind").as_deref(), Some("agent_message"));
 }
 
 #[test]

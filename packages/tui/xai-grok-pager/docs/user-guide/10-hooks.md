@@ -88,7 +88,7 @@ Events fire at three cadences: once per session (`SessionStart`, `SessionEnd`), 
 | Event | When it fires | Blocking? |
 |-------|---------------|-----------|
 | `SessionStart` | A session starts. Does not fire for a subagent's own session. | No |
-| `UserPromptSubmit` | You submit a prompt. | No |
+| `UserPromptSubmit` | You submit a prompt. | Yes: can block the prompt |
 | `PreToolUse` | A tool is about to run. | Yes: can deny |
 | `PostToolUse` | A tool completes successfully. | No |
 | `PostToolUseFailure` | A tool fails. | No |
@@ -103,7 +103,13 @@ Events fire at three cadences: once per session (`SessionStart`, `SessionEnd`), 
 | `PostCompact` | Conversation compaction completes. | No |
 | `SessionEnd` | The session ends. Carries `subagentType` for a child session, so a host can tell a child's teardown from its own. | No |
 
-`SubagentEnd` is accepted as an alias for `SubagentStop`. `PreToolUse` can block a tool call, and `Stop`/`SubagentStop` can block the agent from stopping (see [Stop Decision Control](#stop-decision-control)); every other event is passive.
+`SubagentEnd` is accepted as an alias for `SubagentStop`. `PreToolUse` can block a tool call, `UserPromptSubmit` can block a prompt (see below), and `Stop`/`SubagentStop` can block the agent from stopping (see [Stop Decision Control](#stop-decision-control)); every other event is passive.
+
+### UserPromptSubmit Decision Control
+
+A `UserPromptSubmit` hook can reject a prompt: exit 2 blocks (stderr becomes the message), and so does JSON `{"decision": "block", "reason": "..."}` on stdout, on any exit code. The reason is shown to you and is never added to the model's context. Only a prompt you typed can be blocked: auto-wake turns (task and subagent completions, scheduler fires) and subagent sessions run the hook observe-only. The default timeout for this event is 30 seconds; a timed-out or crashed hook fails open and the prompt proceeds.
+
+After a block, prompts already queued behind the blocked one do not auto-run: the queue holds until you act (send a prompt, or edit / remove / reorder / force-run a queued row). A blocked prompt is not recorded: it never enters the conversation history the model sees on later turns, the on-disk session record, or the session summary. It stays visible in the live scrollback and is held at the front of the queue for you to edit, resend, or discard — but after a session restart the blocked bubble is gone from the scrollback, exactly because nothing was stored. One deliberate exception: your client's local prompt history (the up-arrow recall) keeps the text, recorded at submit time before the hook runs, so a discarded prompt is still recoverable. One current limit: stdout of an allowing hook is discarded (no `additionalContext`).
 
 ### Cursor Hook Compatibility
 
@@ -388,7 +394,7 @@ Inside a subagent, the gate fires as `SubagentStop` (agent-frontmatter `Stop` ho
 - **Task types**: `backgroundTasks[].type` is only `shell`, `monitor`, or `subagent`; Claude's other labels (`workflow`, `teammate`, …) are not emitted.
 - **StopFailure classes**: grok emits six (`rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, `unknown`). Capacity errors (503/529) classify as `rate_limit`. A matcher on an error class grok does not emit never fires.
 - **Default timeout**: grok defaults observe hooks to 5 seconds, which is shorter than most. Set `timeout` explicitly on an imported hook that does real work.
-- **`UserPromptSubmit` is observe-only**: grok ignores its exit code and its stdout, so an imported prompt-validation hook silently stops blocking. Use `PreToolUse` to enforce.
+- **`UserPromptSubmit` blocks, with one gap**: exit 2 and `decision: "block"` reject the prompt like Claude, and a blocked prompt never enters the conversation history — but an allowing hook's stdout / `additionalContext` is discarded rather than added as context.
 - **`StopCancelled` is grok-specific**: a config that uses it is not portable to a runtime with no interrupt hook.
 - **`idle_prompt` fires on any turn end**: grok fires it after an interrupted or errored turn too, not only a completed one, because it reports a state rather than an outcome. Its `message` is display text and can change between releases, so match on `notificationType` instead.
 - **Subagent identity is `subagentType`, not `agent_type`**: grok puts it in the payload of the events that can fire inside a subagent, matching its own `SubagentStart`/`SubagentStop`, rather than in the common fields.

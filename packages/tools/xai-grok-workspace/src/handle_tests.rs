@@ -307,6 +307,37 @@ async fn build_session_routed_handlers_covers_finalized_toolset() {
     );
 }
 #[tokio::test]
+async fn build_session_routed_handlers_preserves_renamed_active_message_kind() {
+    let handle = make_handle();
+    let mut renamed = xai_grok_tools::registry::types::ToolConfig::for_tool::<
+        xai_grok_tools::implementations::grok_build::SendSubagentMessageTool,
+    >();
+    renamed.name_override = Some("relay_to_subagent".to_owned());
+    let session = handle
+        .create_session_with_config(
+            "sess-renamed-message",
+            None,
+            Some(ToolServerConfig {
+                tools: vec![renamed],
+                behavior_preset: None,
+            }),
+            CapabilityMode::All,
+            None,
+            false,
+        )
+        .expect("create renamed message session");
+    let handlers = build_session_routed_handlers(&session.toolset(), &handle);
+    let handler = handlers
+        .iter()
+        .find(|handler| handler.tool_id().as_str() == "relay_to_subagent")
+        .expect("renamed handler");
+    let description = handler.description();
+    assert_eq!(
+        description.kind.as_deref(),
+        Some(ToolKind::ActiveAgentMessage.as_key())
+    );
+}
+#[tokio::test]
 async fn build_session_routed_handlers_skips_invalid_client_name_without_panic() {
     let handle = make_handle();
     let mut renamed = tc("GrokBuild:read_file", Some(ToolKind::Read));
@@ -2610,6 +2641,44 @@ async fn fork_session_uses_main_session_when_parent_session_id_is_none() {
         .map(|t| t.id.clone())
         .collect();
     assert_eq!(baseline_ids, vec!["GrokBuild:read_file".to_string()]);
+}
+#[tokio::test]
+async fn fork_session_all_child_drops_root_only_tools() {
+    let handle = make_handle();
+    let mut custom = tc("GrokBuild:grep", None);
+    custom.name_override = Some("custom_kindless".to_owned());
+    let config = ToolServerConfig {
+        tools: vec![
+            tc("GrokBuild:read_file", Some(ToolKind::Read)),
+            custom,
+            tc("GrokBuild:list_dir", Some(ToolKind::ActiveAgentMessage)),
+            tc("GrokBuild:send_subagent_message", None),
+        ],
+        behavior_preset: None,
+    };
+    let child = handle
+        .fork_session(fork_cfg_with(
+            "all-child",
+            CapabilityMode::All,
+            Some(config),
+            Some("main"),
+        ))
+        .await
+        .expect("All child fork should succeed");
+    let effective_config = child.effective_tool_config();
+    let ids: Vec<&str> = effective_config
+        .tools
+        .iter()
+        .map(|tool| tool.id.as_str())
+        .collect();
+    assert_eq!(ids, ["GrokBuild:read_file", "GrokBuild:grep"]);
+    assert_eq!(
+        (
+            effective_config.tools[1].name_override.as_deref(),
+            effective_config.tools[1].kind,
+        ),
+        (Some("custom_kindless"), None)
+    );
 }
 #[tokio::test]
 async fn fork_session_uses_named_parent_when_parent_session_id_is_set() {

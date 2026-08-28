@@ -95,7 +95,7 @@ hook_events! {
     UserPromptSubmit {
         display: "user_prompt_submit",
         aliases: ["UserPromptSubmit", "user_prompt_submit", "beforeSubmitPrompt"],
-        traits: (Observe, Ignored, true),
+        traits: (Prompt, Ignored, true),
     },
     PreToolUse {
         display: "pre_tool_use",
@@ -203,6 +203,10 @@ pub enum GateKind {
     Tool,
     /// Stop decision control (`block`, `continue: false`, `additionalContext`).
     Stop,
+    /// Prompt decision control (`decision: "block"` + `reason`, exit 2). The
+    /// block reason is user-facing, never model context. Exit 2 blocks
+    /// regardless of JSON, and the default timeout is 30s.
+    Prompt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -751,6 +755,10 @@ mod tests {
 
         assert_eq!(HookEventName::PreToolUse.traits().gate, GateKind::Tool);
         assert_eq!(HookEventName::Stop.traits().gate, GateKind::Stop);
+        assert_eq!(
+            HookEventName::UserPromptSubmit.traits().gate,
+            GateKind::Prompt
+        );
         assert_eq!(HookEventName::SubagentStop.traits().gate, GateKind::Stop);
         assert_eq!(
             HookEventName::SubagentEnd.traits().gate,

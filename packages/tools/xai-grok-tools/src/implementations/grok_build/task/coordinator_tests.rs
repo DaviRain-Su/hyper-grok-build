@@ -2,10 +2,10 @@ use super::*;
 use crate::implementations::grok_build::task::admission::{LimitBehavior, SubagentLimits};
 use crate::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
 use crate::implementations::grok_build::task::types::{
-    SubagentCancelRequest, SubagentClearUsageNotAppliedRequest, SubagentCompletionsRequest,
-    SubagentListActiveRequest, SubagentLoopUnitActiveRequest, SubagentMarkUsageNotAppliedRequest,
-    SubagentOutstandingReply, SubagentOutstandingRequest, SubagentOwner, SubagentRegistryCounts,
-    SubagentRequest, SubagentSnapshotStatus,
+    ActiveAgentMessageRequest, SubagentCancelRequest, SubagentClearUsageNotAppliedRequest,
+    SubagentCompletionsRequest, SubagentListActiveRequest, SubagentLoopUnitActiveRequest,
+    SubagentMarkUsageNotAppliedRequest, SubagentOutstandingReply, SubagentOutstandingRequest,
+    SubagentOwner, SubagentRegistryCounts, SubagentRequest, SubagentSnapshotStatus,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -166,7 +166,7 @@ fn cancelled_result(request: &SubagentRequest) -> SubagentResult {
     }
 }
 
-fn request(id: &str, background: bool) -> SubagentRequest {
+pub(super) fn request(id: &str, background: bool) -> SubagentRequest {
     SubagentRequest {
         id: id.to_owned(),
         prompt: "work".to_owned(),
@@ -216,7 +216,7 @@ fn harness_with_options(
     wait_after_cancel: bool,
     config: CoordinatorConfig,
 ) -> Harness {
-    let (command_tx, command_rx) = mpsc::unbounded_channel();
+    let (command_tx, command_rx) = SubagentCoordinator::<TestRunner>::channel();
     let (start, _) = tokio::sync::broadcast::channel(4);
     let (finish, _) = tokio::sync::broadcast::channel(4);
     let (completion_tx, completions) = mpsc::unbounded_channel();
@@ -224,7 +224,7 @@ fn harness_with_options(
     let (started_tx, started) = mpsc::unbounded_channel();
     let (queue_wait_tx, queue_waits) = mpsc::unbounded_channel();
     let actor = tokio::spawn(
-        SubagentCoordinator::new(
+        SubagentCoordinator::from_channel(
             command_rx,
             TestRunner {
                 wait_before_start,
@@ -244,7 +244,7 @@ fn harness_with_options(
         // Unbound by default so tests can set request.parent_session_id
         // freely (e.g. nested reparent). ParentSession APIs must use
         // `parent_backend` so they stay session-scoped.
-        backend: ChannelBackend::new(command_tx),
+        backend: ChannelBackend::from_coordinator(command_tx),
         start,
         finish,
         completions,
@@ -258,7 +258,50 @@ fn harness_with_options(
 /// Session-bound backend for ParentSession cancel / admission on the default
 /// test parent (`"parent"`). Required because unbound cancel is rejected.
 fn parent_backend(harness: &Harness) -> ChannelBackend {
-    ChannelBackend::for_session(harness.backend.sender(), "parent")
+    ChannelBackend::for_coordinator_session(
+        harness
+            .backend
+            .coordinator_sender()
+            .expect("coordinator sender"),
+        "parent",
+    )
+}
+
+#[tokio::test]
+async fn active_message_rejects_owned_pending_child_until_promotion() {
+    let mut harness = harness(true, std::time::Duration::from_secs(5));
+    let backend = parent_backend(&harness);
+    let spawn = tokio::spawn({
+        let backend = backend.clone();
+        async move { backend.spawn(request("starting", true)).await }
+    });
+    harness
+        .requests
+        .recv()
+        .await
+        .expect("runner received child");
+
+    assert_eq!(
+        backend
+            .send_active_message(ActiveAgentMessageRequest::try_new("starting", "update").unwrap())
+            .await,
+        ActiveAgentMessageOutcome::NotActiveOrFinalizing
+    );
+
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("starting"));
+    assert_eq!(
+        backend
+            .send_active_message(
+                ActiveAgentMessageRequest::try_new("starting", "after ready").unwrap(),
+            )
+            .await,
+        ActiveAgentMessageOutcome::Unsupported,
+        "after promotion the coordinator must invoke the active child control"
+    );
+
+    spawn.abort();
+    harness.actor.abort();
 }
 
 async fn loop_unit_active(backend: &ChannelBackend, task_id: &str) -> bool {
@@ -1221,7 +1264,13 @@ async fn cancel_parent_session_does_not_touch_foreign_session() {
     let mut foreign = request("foreign-child", true);
     foreign.parent_session_id = "other-session".into();
     let foreign_spawn = tokio::spawn({
-        let backend = ChannelBackend::for_session(harness.backend.sender(), "other-session");
+        let backend = ChannelBackend::for_coordinator_session(
+            harness
+                .backend
+                .coordinator_sender()
+                .expect("coordinator sender"),
+            "other-session",
+        );
         async move { backend.spawn(foreign).await }
     });
     assert_eq!(
@@ -1353,7 +1402,13 @@ async fn cancel_parent_session_spares_nested_workflow_children() {
 
     // Nested spawns use a backend bound to the workflow child's session id
     // (production binds ChannelBackend::for_session to the child session).
-    let child_backend = ChannelBackend::for_session(harness.backend.sender(), "wf-child");
+    let child_backend = ChannelBackend::for_coordinator_session(
+        harness
+            .backend
+            .coordinator_sender()
+            .expect("coordinator sender"),
+        "wf-child",
+    );
 
     // Nested Task-owned spawn from the workflow child (reparented to root parent).
     let nested_active = request("nested-active", true);
@@ -1780,7 +1835,13 @@ async fn session_backend_cannot_query_or_cancel_foreign_child() {
     });
     assert_eq!(harness.started.recv().await.as_deref(), Some("scoped"));
 
-    let foreign = ChannelBackend::for_session(harness.backend.sender(), "foreign-parent");
+    let foreign = ChannelBackend::for_coordinator_session(
+        harness
+            .backend
+            .coordinator_sender()
+            .expect("coordinator sender"),
+        "foreign-parent",
+    );
     assert!(foreign.query("scoped", false, None).await.is_none());
     assert!(foreign.inspect("scoped").await.is_none());
     assert!(matches!(

@@ -17,6 +17,7 @@ fn args<'a>(
         last_turn_usage: None,
         prompt_usage: None,
         cancellation_category: None,
+        cancellation_context: None,
         cancel_trigger: None,
         structured_output: None,
     }

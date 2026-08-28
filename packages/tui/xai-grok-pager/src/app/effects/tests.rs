@@ -2898,12 +2898,12 @@ fn format_session_info_hides_model_hash_for_noncoding_without_flag() {
     assert!(!text.contains("Model Hash"));
 }
 #[test]
-fn format_session_info_shows_model_hash_for_coding_slug_without_flag() {
-    let mut info = make_session_info("grok-build", None, 1000, 10000);
+fn format_session_info_hides_model_hash_for_coding_slug_without_flag() {
+    let mut info = make_session_info("grok-4.6", None, 1000, 10000);
     info.data.model_fingerprint = Some("abc123".into());
     info.data.show_model_fingerprint = false;
     let text = format_session_info(&info, None, false, false, false);
-    assert!(text.contains("Model Hash: abc123"));
+    assert!(!text.contains("Model Hash"));
 }
 #[test]
 fn session_picker_summary_strips_skill_xml() {

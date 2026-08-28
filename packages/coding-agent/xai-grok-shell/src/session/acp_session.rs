@@ -115,12 +115,17 @@ mod rate_limit_waits;
 pub(crate) use rate_limit_waits::{
     RateLimitWaitBudget, RateLimitWaitConfig, RateLimitWaitDecision,
 };
+#[path = "acp_session_impl/active_agent_message_presentation.rs"]
+mod active_agent_message_presentation;
+use active_agent_message_presentation::*;
 #[path = "acp_session_impl/image_strip.rs"]
 mod image_strip;
 #[path = "acp_session_impl/interjection.rs"]
 mod interjection;
 #[path = "acp_session_impl/tool_calls.rs"]
 mod tool_calls;
+#[path = "acp_session_impl/workflow_write_smoke_check.rs"]
+mod workflow_write_smoke_check;
 pub(crate) use interjection::*;
 #[path = "acp_session_impl/laziness.rs"]
 mod laziness;
@@ -140,10 +145,11 @@ mod mcp;
 mod mcp_failed_reminder;
 #[path = "acp_session_impl/model_switch.rs"]
 mod model_switch;
+#[path = "acp_session_impl/parent_message.rs"]
+mod parent_message;
 #[path = "acp_session_impl/slash_exec.rs"]
 mod slash_exec;
 use super::PromptOrigin;
-use super::acp_types;
 use super::chat_persistence;
 use super::compaction_config;
 use super::memory_state;
@@ -154,6 +160,8 @@ use prompt_build::*;
 #[path = "acp_session_impl/session_mode.rs"]
 mod session_mode;
 use session_mode::*;
+#[path = "acp_session_impl/child_tool_projection.rs"]
+mod child_tool_projection;
 #[path = "acp_session_impl/sampler_turn.rs"]
 mod sampler_turn;
 use sampler_turn::*;
@@ -197,6 +205,8 @@ use turn_end_hooks::TurnEnd;
 #[path = "acp_session_impl/stop_gate.rs"]
 mod stop_gate;
 pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;
+#[path = "acp_session_impl/context_snapshot.rs"]
+mod context_snapshot;
 #[path = "acp_session_impl/recap.rs"]
 mod recap;
 #[path = "acp_session_impl/rewind.rs"]
@@ -251,6 +261,9 @@ pub(crate) struct InputItem {
     pub(crate) persist_ack: Option<oneshot::Sender<()>>,
     /// Pre-parsed prompt channel. See `SessionCommand::Prompt::parsed_prompt_tx`.
     pub(crate) parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
+    /// Fires when this exact row is promoted to the running turn. Dropped on
+    /// removal so a queued-but-never-started initial child prompt cannot ack.
+    pub(crate) initial_child_prompt_ready: Option<oneshot::Sender<()>>,
     /// Server-authoritative prompt-queue metadata. `Some` for
     /// user-originated prompts (they appear in the shared queue); `None` for
     /// synthetic / system inputs (auto-wake, nudges, notification drains).
@@ -261,6 +274,8 @@ pub(crate) struct InputItem {
     /// land behind earlier still-queued send-now prompts so stacked sends
     /// (e.g. during a goal turn, which promotes but never cancels) run FIFO.
     pub(crate) send_now: bool,
+    /// See [`SessionCommand::Prompt::traceparent`].
+    pub(crate) traceparent: Option<String>,
 }
 use crate::session::commands::{NotificationPriority, NotificationSource};
 /// Resolved tool names for goal-mode prompts.
@@ -351,6 +366,13 @@ pub(crate) struct State {
     /// user re-engagement. Set by an interactive stop, cleared by a user
     /// prompt.
     pub(crate) notifications_suppressed: bool,
+    /// A `UserPromptSubmit` hook blocked the previous prompt: the promoter
+    /// must not auto-start the next queued row, so follow-ups never run as if
+    /// the blocked prompt had succeeded. Released on user re-engagement (new
+    /// prompt intake, send-now, or a queue mutation that actually changed the
+    /// queue). All transitions go through [`State::arm_hook_block_hold`] /
+    /// [`State::take_hook_block_hold`]; read via [`State::hook_block_held`].
+    pub(crate) hook_block_hold: HookBlockHold,
     /// Active prompt is still rewindable until the first outbound
     /// prompt-scoped event is emitted; armed at promote, cleared at first
     /// output or by the rewind pop itself.
@@ -367,7 +389,24 @@ pub(crate) struct State {
     /// expectations.
     pub(crate) nudges_used_this_session: u32,
 }
+/// Queue hold after a prompt-gate block; see [`State::hook_block_hold`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum HookBlockHold {
+    #[default]
+    Ready,
+    Held,
+}
 impl State {
+    pub(crate) fn arm_hook_block_hold(&mut self) {
+        self.hook_block_hold = HookBlockHold::Held;
+    }
+    /// Clear the hold; returns whether it was armed (callers log the release).
+    pub(crate) fn take_hook_block_hold(&mut self) -> bool {
+        std::mem::take(&mut self.hook_block_hold) == HookBlockHold::Held
+    }
+    pub(crate) fn hook_block_held(&self) -> bool {
+        self.hook_block_hold == HookBlockHold::Held
+    }
     pub(crate) fn clear_pending_notifications(&mut self) {
         self.pending_notifications.clear();
     }
@@ -423,13 +462,16 @@ impl State {
 /// `maybe_fire_laziness_check` (the Layer 3 classifier).
 ///
 /// Returns `true` exactly when: no turn is running, no user prompt is
-/// queued, and an interactive stop has not suppressed notifications pending
-/// genuine user re-engagement. Idle *reporting* uses `state_is_busy` instead,
-/// because after an interrupt the session really is idle.
+/// queued, and neither an interactive stop nor a hook-block queue hold is
+/// pending genuine user re-engagement (an injection under the hold would
+/// queue a synthetic row that outruns the user's next prompt on release).
+/// Idle *reporting* uses `state_is_busy` instead, because after an interrupt
+/// the session really is idle.
 pub(crate) fn is_session_idle_for_injection(state: &State) -> bool {
     state.running_task.is_none()
         && state.pending_inputs.is_empty()
         && !state.notifications_suppressed
+        && !state.hook_block_held()
 }
 /// Predicate behind `SessionCommand::IsBusy`: the session has work in flight
 /// when a turn is running **or** inputs are queued. Consulted by the leader's
@@ -1300,6 +1342,11 @@ impl SessionActor {
     }
     /// Send an after-turn hook via the local workspace channel.
     /// Fire-and-forget — failures are logged but do not interrupt the turn.
+    #[tracing::instrument(
+        name = "session.after_turn",
+        skip_all,
+        fields(session_id = %self.session_info.id.0, turn_number = payload.turn_number)
+    )]
     async fn send_after_turn_event(&self, payload: xai_tool_protocol::turn_hook::AfterTurnPayload) {
         self.workspace_ops
             .on_after_turn(&self.session_id_string(), &payload)
@@ -1313,6 +1360,8 @@ impl SessionActor {
     /// shares the slice across both calls (see
     /// `send_available_commands_update`).
     async fn command_availability(&self) -> slash_commands::CommandAvailability {
+        #[cfg(test)]
+        crate::session::slash_authority::record_command_availability_call();
         let tool_names = self.registered_tool_names().await;
         let has_workflow_runs = !self.workflow_tracker().await.lock().list().is_empty();
         let availability = self.build_command_availability(&tool_names, has_workflow_runs);
@@ -1321,6 +1370,15 @@ impl SessionActor {
         }
         self.maybe_reconcile_active_goal_without_plan().await;
         availability
+    }
+    /// Compute command availability without workflow-manager reads or goal reconciliation.
+    async fn command_availability_for_skill_projection(
+        &self,
+    ) -> slash_commands::CommandAvailability {
+        #[cfg(test)]
+        crate::session::slash_authority::record_command_availability_call();
+        let tool_names = self.registered_tool_names().await;
+        self.build_local_command_availability(&tool_names)
     }
     /// Build the `CommandAvailability` snapshot from a precomputed slice
     /// of tool names plus the live session-scoped capability state.
@@ -1334,6 +1392,19 @@ impl SessionActor {
         tool_names: &[String],
         has_workflow_runs: bool,
     ) -> slash_commands::CommandAvailability {
+        let mut availability = self.build_local_command_availability(tool_names);
+        availability.goal = if self.goal_runs_on_workflow_engine() {
+            self.sync_goal_harness()
+        } else {
+            self.sync_goal_harness_from_tools(tool_names)
+        };
+        availability.workflow_management = has_workflow_runs;
+        availability
+    }
+    fn build_local_command_availability(
+        &self,
+        tool_names: &[String],
+    ) -> slash_commands::CommandAvailability {
         use xai_grok_tools::implementations::memory::{
             MEMORY_GET_TOOL_NAME, MEMORY_SEARCH_TOOL_NAME,
         };
@@ -1341,9 +1412,9 @@ impl SessionActor {
             .iter()
             .any(|n| n == MEMORY_SEARCH_TOOL_NAME || n == MEMORY_GET_TOOL_NAME);
         let goal = if self.goal_runs_on_workflow_engine() {
-            self.sync_goal_harness()
+            self.goal_enabled
         } else {
-            self.sync_goal_harness_from_tools(tool_names)
+            goal_slash_and_harness_available(self.goal_enabled, tool_names)
         };
         slash_commands::CommandAvailability {
             feedback: self.feedback_manager.is_enabled(),
@@ -1358,7 +1429,7 @@ impl SessionActor {
             workflows: tool_names.iter().any(|n| {
                 n == xai_grok_tools::implementations::grok_build::workflow::WORKFLOW_TOOL_NAME
             }),
-            workflow_management: has_workflow_runs,
+            workflow_management: false,
         }
     }
     /// Names of every tool registered with the session's tool bridge.
@@ -1556,6 +1627,9 @@ fn load_prompt_context_from_dir(
 #[cfg(test)]
 #[path = "acp_session_tests/client_hooks_tests.rs"]
 mod client_hooks_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/managed_hooks_tests.rs"]
+mod managed_hooks_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/replace_system_prompt_tests.rs"]
 mod replace_system_prompt_tests;
@@ -1802,6 +1876,9 @@ mod plan_mode_midturn_tests;
 #[path = "acp_session_tests/project_instructions_idempotence_tests.rs"]
 mod project_instructions_idempotence_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/prompt_gate_tests.rs"]
+mod prompt_gate_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/prompt_mode_transition_tests.rs"]
 mod prompt_mode_transition_tests;
 #[cfg(test)]
@@ -1823,6 +1900,9 @@ mod rewind_cross_compaction_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/rewind_synthetic_turn_tests.rs"]
 mod rewind_synthetic_turn_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/slash_authority_turn_tests.rs"]
+mod slash_authority_turn_tests;
 /// Pins the `SubagentFinished` usage-fold attribution gate.
 #[cfg(test)]
 #[path = "acp_session_tests/subagent_usage_fold_tests.rs"]

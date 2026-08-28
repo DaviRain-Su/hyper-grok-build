@@ -30,6 +30,12 @@ pub enum HookRunnerResult {
         reason: String,
         hook_name: String,
     },
+    /// A `user_prompt_submit` gate block — the prompt gate's own word for its
+    /// terminal verdict (`Deny` is the tool gate's).
+    Block {
+        reason: String,
+        hook_name: String,
+    },
     Stop(StopHookOutcome),
     Success,
     /// Failed: the caller fails open.
@@ -94,6 +100,48 @@ pub(crate) fn gate_json_to_decision(
             hook_name: hook_name.to_string(),
         }),
         Some("allow") | None => Ok(HookDecision::Allow),
+        Some(other) => Err(format!(
+            "unknown decision value '{other}' from hook '{hook_name}'"
+        )),
+    }
+}
+
+/// JSON from `UserPromptSubmit` gate hooks. The vocabulary for this event is
+/// `decision: "block"` + `reason`; to allow, the hook omits `decision`
+/// (`"approve"` is accepted as the same no-verdict, for ported hooks).
+/// Serde skips unknown fields, so hooks that emit `additionalContext` or
+/// `sessionTitle` parse cleanly — those behaviors are unsupported and the
+/// fields are discarded.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct PromptHookJson {
+    #[serde(default)]
+    pub decision: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Interpret a [`PromptHookJson`] as an optional block reason.
+///
+/// `decision: "block"` blocks; a missing `decision` renders no verdict, and
+/// so does `"approve"` — an allow vocabulary accepted from ported hooks
+/// (matching [`stop_json_to_outcome`]). Any other value is an error so
+/// typos surface instead of failing open. `fallback_reason` supplies the
+/// block message when the JSON carries none (command hooks pass stderr — the
+/// hook's feedback channel; HTTP hooks have no stderr and pass `None`).
+pub(crate) fn prompt_json_to_block(
+    json: &PromptHookJson,
+    hook_name: &str,
+    fallback_reason: Option<&str>,
+) -> Result<Option<String>, String> {
+    match json.decision.as_deref() {
+        Some("block") => Ok(Some(
+            json.reason
+                .clone()
+                .filter(|r| !r.trim().is_empty())
+                .or_else(|| fallback_reason.map(str::to_string))
+                .unwrap_or_else(|| format!("Prompt blocked by hook '{hook_name}'")),
+        )),
+        None | Some("approve") => Ok(None),
         Some(other) => Err(format!(
             "unknown decision value '{other}' from hook '{hook_name}'"
         )),

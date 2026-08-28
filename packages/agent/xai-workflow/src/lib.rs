@@ -41,4 +41,5 @@ pub use meta::{MetaError, PhaseMeta, WorkflowMeta, extract_meta};
 pub use run::{PauseKind, WorkflowOutcome};
 pub use validate::{
     ValidationError, ValidationReport, validate_script, validate_script_with_agent_budget,
+    validate_script_with_cancel,
 };

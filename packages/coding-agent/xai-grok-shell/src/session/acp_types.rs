@@ -446,6 +446,16 @@ impl TokenUsageCategory {
             detail: Some(count_detail(server_count as u64, "server")),
         }
     }
+
+    /// Row for discovered AGENTS.md / project-instruction files. `text` is
+    /// the rendered section from `Agent::agents_md_section`.
+    pub fn agents_md(text: &str, file_count: usize) -> Self {
+        Self {
+            label: "AGENTS.md".to_string(),
+            tokens: xai_token_estimation::estimate_tokens(text),
+            detail: Some(count_detail(file_count as u64, "file")),
+        }
+    }
 }
 
 /// Formats a count with a naively pluralized noun: `"1 skill"`, `"21 skills"`.
@@ -479,8 +489,8 @@ pub struct ContextInfo {
     /// always matches the actual trigger (e.g. 65 for grok-build in remote settings).
     #[serde(default = "default_auto_compact_threshold")]
     pub auto_compact_threshold_percent: u8,
-    /// Itemized usage rows (skills listing, MCP server listing). Empty on
-    /// partial snapshots.
+    /// Itemized usage rows (skills, workflows, MCP servers, AGENTS.md).
+    /// Empty on partial snapshots.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub usage_categories: Vec<TokenUsageCategory>,
 }
@@ -519,7 +529,9 @@ pub struct SessionInfoData {
     pub model_display_name: Option<String>,
     pub resolved_model_id: Option<String>,
     pub model_fingerprint: Option<String>,
-    /// Catalog opt-in to display the served-checkpoint fingerprint for this model.
+    /// Catalog opt-in to display checkpoint identity (the served fingerprint and
+    /// the resolved model ID) for this model. Sole control: the client keeps no
+    /// built-in per-slug default, so turning this off in the catalog hides both.
     #[serde(default)]
     pub show_model_fingerprint: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -533,16 +545,6 @@ pub struct SessionInfoData {
     #[serde(default)]
     pub turn_index: u64,
     pub context: ContextInfo,
-}
-
-/// Whether this model slug supports showing checkpoint identity (resolved model ID, fingerprint).
-pub(crate) fn is_coding_model_slug(model: &str) -> bool {
-    matches!(model, "grok-build" | "grok-4.5")
-}
-
-/// Display gate for the model fingerprint: server/catalog opt-in OR the built-in coding-slug default.
-pub fn should_show_model_fingerprint(catalog_flag: bool, model_slug: &str) -> bool {
-    catalog_flag || is_coding_model_slug(model_slug)
 }
 
 /// Calculate and format the model name for display.
@@ -644,6 +646,24 @@ pub struct StartupHints {
     /// intended to also drive a turn-end delivery gate later.
     #[serde(default)]
     pub delivery_tools: Vec<String>,
+    /// Client-declared answer for permission prompts, for headless surfaces
+    /// with no client attached on agent-initiated turns (monitor wakes,
+    /// scheduled tasks). Only `"alwaysAllow"` is honored: would-be prompts
+    /// resolve as allow at the manager's dispatch gate, matching the
+    /// allow-always answer an attended interactive client would give.
+    /// Clamped off by the managed always-approve pin; a configured
+    /// `defaultMode` wins (see `apply_permission_mode_hint`).
+    ///
+    /// Spawn-time structural: applied when the manager is created, i.e.
+    /// `session/new` and cold `session/load` — a session stamped at creation
+    /// keeps the policy for its resident lifetime, and a leader restart
+    /// re-applies it on the next load. Unlike `yoloMode` / `autoMode`, a warm
+    /// re-attach to an already-resident actor does NOT re-apply it, so
+    /// stamping a continue on a live `Ask` session is a no-op (known gap:
+    /// adopting an existing interactive session into unattended auto-allow
+    /// needs a runtime prompt-policy update on the manager).
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 impl StartupHints {
@@ -664,17 +684,6 @@ impl StartupHints {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn should_show_model_fingerprint_truth_table() {
-        // Catalog opt-in shows the fingerprint even for a non-coding slug.
-        assert!(should_show_model_fingerprint(true, "non-coding"));
-        // Coding slugs always show, even without the catalog flag.
-        assert!(should_show_model_fingerprint(false, "grok-build"));
-        assert!(should_show_model_fingerprint(false, "grok-4.5"));
-        // Non-coding slug without the flag stays hidden.
-        assert!(!should_show_model_fingerprint(false, "some-other"));
-    }
 
     /// Verify that the JSON payload Desktop sends (with `client_type: "desktop"`)
     /// deserializes correctly into `ClientFeedbackInput` and round-trips through
@@ -956,5 +965,10 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let roundtripped: TokenUsageCategory = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtripped, original);
+
+        let agents = TokenUsageCategory::agents_md("rules", 1);
+        assert_eq!(agents.label, "AGENTS.md");
+        assert_eq!(agents.detail.as_deref(), Some("1 file"));
+        assert!(agents.tokens > 0);
     }
 }

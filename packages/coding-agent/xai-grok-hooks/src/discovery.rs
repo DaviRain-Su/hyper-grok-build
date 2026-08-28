@@ -25,12 +25,15 @@ impl HookRegistry {
     }
 
     /// Returns true when any enabled hook is registered for `event` or its
-    /// alias spelling. Allocation-free guard for hot paths.
+    /// alias spelling (reads the disabled-hooks file for non-managed specs).
+    /// Managed-policy hooks always count as enabled (not user-disableable),
+    /// matching `dispatcher::eligible_or_record_skip`.
     pub fn has_enabled_hooks_for_canonical(&self, event: HookEventName) -> bool {
+        let disabled = crate::trust::DisabledHooks::load();
         let enabled = |specs: &[HookSpec]| {
             specs
                 .iter()
-                .any(|s| s.enabled && !crate::trust::is_hook_disabled(&s.name))
+                .any(|s| s.is_managed_policy() || (s.enabled && !disabled.contains(&s.name)))
         };
         let canonical = event.canonical();
         enabled(self.hooks_for(canonical))
@@ -97,6 +100,12 @@ impl HookRegistry {
             all.extend(self.hooks_for(*event));
         }
         all
+    }
+
+    /// Look up a spec by its full name, so disable/enable actions can consult
+    /// its provenance before mutating disabled-hooks state.
+    pub fn find_by_name(&self, name: &str) -> Option<&HookSpec> {
+        self.hooks.values().flatten().find(|s| s.name == name)
     }
 
     /// Rebuild the `matcher` field (serde skips it) from `configured_matcher`
@@ -215,10 +224,17 @@ pub fn collect_specs_from_sources(
 /// url_raw, configured_matcher) so a hook from several origins runs once; earlier
 /// specs win, so callers place higher-authority first. `timeout_ms`/`extra_env`
 /// are intentionally excluded from the key.
+///
+/// Exception: the copy with the highest [`HookProvenance::authority_rank`]
+/// wins regardless of arrival order. Otherwise a byte-identical hook in a
+/// user-writable layer (which loads earlier) would shadow the root-owned
+/// copy's provenance — and with it the no-disable rule and the pinned
+/// timeout/env. Rank ordering also settles managed-vs-managed pairs
+/// (`$GROK_HOME/requirements.toml` arrives before `/etc/grok`).
 pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
     let mut hooks: HashMap<HookEventName, Vec<HookSpec>> = HashMap::new();
-    let mut seen_content: std::collections::HashSet<(HookEventName, String, String, String)> =
-        std::collections::HashSet::new();
+    let mut seen_content: HashMap<(HookEventName, String, String, String), (HookEventName, usize)> =
+        HashMap::new();
     for spec in specs {
         let key = (
             spec.event.canonical(),
@@ -226,15 +242,37 @@ pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
             spec.url_raw.clone().unwrap_or_default(),
             spec.configured_matcher.clone().unwrap_or_default(),
         );
-        if seen_content.insert(key) {
-            hooks.entry(spec.event).or_default().push(spec);
-        } else {
-            tracing::debug!(
-                hook_name = %spec.name,
-                event = %spec.event,
-                matcher = ?spec.configured_matcher,
-                "hooks: skipping duplicate hook (same content + matcher already loaded from earlier source)"
-            );
+        match seen_content.get(&key) {
+            None => {
+                let event_specs = hooks.entry(spec.event).or_default();
+                seen_content.insert(key, (spec.event, event_specs.len()));
+                event_specs.push(spec);
+            }
+            Some(&(kept_event, kept_idx)) => {
+                let kept = hooks.get_mut(&kept_event).and_then(|v| v.get_mut(kept_idx));
+                if let Some(kept) = kept
+                    && spec.layer.authority_rank() > kept.layer.authority_rank()
+                {
+                    tracing::debug!(
+                        hook_name = %spec.name,
+                        replaced = %kept.name,
+                        "hooks: higher-authority copy of a duplicate hook wins over the earlier lower-tier copy"
+                    );
+                    let mut spec = spec;
+                    // Keep the registry invariant "specs live under their own
+                    // event key" when the duplicate pair used alias spellings
+                    // (SubagentStop vs SubagentEnd).
+                    spec.event = kept_event;
+                    *kept = spec;
+                } else {
+                    tracing::debug!(
+                        hook_name = %spec.name,
+                        event = %spec.event,
+                        matcher = ?spec.configured_matcher,
+                        "hooks: skipping duplicate hook (same content + matcher already loaded from earlier source)"
+                    );
+                }
+            }
         }
     }
     HookRegistry { hooks }
@@ -381,8 +419,11 @@ mod tests {
         .to_string()
     }
 
-    /// Drift guard: gate events must match the `blockingEvents` the agent
-    /// advertises (extensions/hooks.rs). A new gate event fails here.
+    /// Drift guard: a new gate event fails here so the agent's client-gate
+    /// advertisement (`blockingEvents` in extensions/hooks.rs) gets a
+    /// deliberate decision. `UserPromptSubmit` is a file-hook gate that is not
+    /// client-advertised yet: the client `x.ai/hooks/run` gate for it has not
+    /// shipped.
     #[test]
     fn gate_events_are_the_known_set() {
         use crate::event::GateKind;
@@ -397,6 +438,7 @@ mod tests {
             HookEventName::PreToolUse,
             HookEventName::Stop,
             HookEventName::SubagentStop,
+            HookEventName::UserPromptSubmit,
         ]
         .into_iter()
         .collect();
@@ -685,6 +727,113 @@ mod tests {
         assert_eq!(hooks.len(), 2);
         assert!(hooks[0].name.starts_with("global/"));
         assert!(hooks[1].name.starts_with("project/"));
+    }
+
+    /// A byte-identical duplicate must not launder a managed hook's provenance:
+    /// whichever order the copies arrive in, the surviving spec is the
+    /// managed-policy copy (so the no-disable rule and the pinned
+    /// timeout/env hold), while ordinary duplicates stay first-wins.
+    #[test]
+    fn dedup_keeps_the_managed_policy_copy_regardless_of_order() {
+        let spec = |name: &str, layer, timeout_ms| crate::config::HookSpec {
+            name: name.to_string(),
+            event: HookEventName::PreToolUse,
+            handler_type: crate::config::HandlerType::Command,
+            configured_matcher: None,
+            matcher: None,
+            enabled: true,
+            command: Some("pinned.sh".into()),
+            command_raw: Some("pinned.sh".to_string()),
+            url: None,
+            url_raw: None,
+            timeout_ms,
+            source_dir: std::path::PathBuf::from("/tmp"),
+            extra_env: std::collections::HashMap::new(),
+            layer,
+        };
+        use crate::config::HookProvenance;
+
+        // User copy first (the shadowing order): the root-owned copy wins.
+        let registry = registry_from_specs_deduped(vec![
+            spec("user:pre[0]", HookProvenance::User, 1),
+            spec(
+                "requirements/system:pre[0]",
+                HookProvenance::Requirements,
+                5000,
+            ),
+        ]);
+        let hooks = registry.hooks_for(HookEventName::PreToolUse);
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].layer, HookProvenance::Requirements);
+        assert_eq!(hooks[0].timeout_ms, 5000, "pinned copy's fields survive");
+        assert!(hooks[0].is_managed_policy());
+
+        // Root-owned copy first: unchanged (first-wins already keeps it).
+        let registry = registry_from_specs_deduped(vec![
+            spec(
+                "requirements/system:pre[0]",
+                HookProvenance::Requirements,
+                5000,
+            ),
+            spec("user:pre[0]", HookProvenance::User, 1),
+        ]);
+        let hooks = registry.hooks_for(HookEventName::PreToolUse);
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].layer, HookProvenance::Requirements);
+
+        // Managed-vs-managed pair: `$GROK_HOME/requirements.toml` arrives
+        // before `/etc/grok`, but the root-owned tier outranks it — the
+        // exemption and pinned fields must not resolve under the
+        // user-writable copy.
+        let registry = registry_from_specs_deduped(vec![
+            spec(
+                "requirements/user:pre[0]",
+                HookProvenance::UserRequirements,
+                1,
+            ),
+            spec("system_managed:pre[0]", HookProvenance::SystemManaged, 5000),
+        ]);
+        let hooks = registry.hooks_for(HookEventName::PreToolUse);
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].layer, HookProvenance::SystemManaged);
+        assert_eq!(hooks[0].timeout_ms, 5000);
+        assert!(hooks[0].is_managed_policy());
+    }
+
+    /// Managed-policy hooks count as enabled for the stop-gate hot-path guard
+    /// even when their name is in the disabled-hooks state; user hooks honor it.
+    #[test]
+    fn has_enabled_hooks_counts_managed_hooks_despite_disable_state() {
+        let mut spec = crate::config::HookSpec {
+            name: "requirements/system:stop[0].hooks[0]".to_string(),
+            event: HookEventName::Stop,
+            handler_type: crate::config::HandlerType::Command,
+            configured_matcher: None,
+            matcher: None,
+            enabled: false, // disable signal — must be ignored for managed policy
+            command: Some("stop.sh".into()),
+            command_raw: Some("stop.sh".to_string()),
+            url: None,
+            url_raw: None,
+            timeout_ms: 5000,
+            source_dir: std::path::PathBuf::from("/tmp"),
+            extra_env: std::collections::HashMap::new(),
+            layer: crate::config::HookProvenance::Requirements,
+        };
+        let mut registry = HookRegistry::default();
+        registry.append_specs(vec![spec.clone()]);
+        assert!(
+            registry.has_enabled_hooks_for_canonical(HookEventName::Stop),
+            "managed-policy hook must count as enabled"
+        );
+
+        spec.layer = crate::config::HookProvenance::File;
+        let mut registry = HookRegistry::default();
+        registry.append_specs(vec![spec]);
+        assert!(
+            !registry.has_enabled_hooks_for_canonical(HookEventName::Stop),
+            "a disabled file hook must not count"
+        );
     }
 
     #[test]

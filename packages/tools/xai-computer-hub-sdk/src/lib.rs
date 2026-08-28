@@ -28,6 +28,7 @@ pub(crate) mod cancel;
 pub mod connection;
 pub(crate) mod connection_borrow;
 pub mod demux;
+pub mod discovery;
 pub(crate) mod donate_pump;
 pub mod error;
 pub mod handshake;

@@ -1667,7 +1667,12 @@ impl AgentView {
                             .iter()
                             .filter(|h| h.source_dir == *source)
                             .collect();
-                        let any_enabled = group_hooks.iter().any(|h| !h.disabled);
+                        // Direction comes from the unpinned hooks only
+                        // (all-pinned groups read enabled) — shared with the
+                        // button-label mirror so the two can't drift.
+                        let any_enabled = crate::views::extensions_modal::hook_group_any_enabled(
+                            group_hooks.iter().copied(),
+                        );
                         let hook_names: Vec<String> =
                             group_hooks.iter().map(|h| h.name.clone()).collect();
                         let action = xai_hooks_plugins_types::HooksAction::ToggleSource {
@@ -2468,6 +2473,7 @@ mod extensions_action_target_tests {
             timeout_ms: 0,
             source_dir: source_dir.into(),
             disabled,
+            pinned: false,
         }
     }
 
@@ -3025,6 +3031,7 @@ mod extensions_modal_confirmation_tests {
             timeout_ms: 0,
             source_dir: source_dir.into(),
             disabled: false,
+            pinned: false,
         }
     }
 

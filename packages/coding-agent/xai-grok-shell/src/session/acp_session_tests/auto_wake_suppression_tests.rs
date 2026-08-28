@@ -115,6 +115,7 @@ fn pending_notification_cap_keeps_newest_entries() {
         notifications_suppressed: true,
         rewindable: false,
         front_message_committed: false,
+        hook_block_hold: Default::default(),
         nudges_used_this_session: 0,
     };
     for index in 0..(MAX_PENDING_NOTIFICATIONS + 3) {
@@ -1441,7 +1442,7 @@ async fn drain_drops_goal_turn_origin_when_status_none_and_marks_reported() {
                     .push(bash_completed_notification("bg-goal"));
             }
             let (completion_tx, _completion_rx) =
-                tokio::sync::mpsc::unbounded_channel::<(String, PromptTurnResult)>();
+                tokio::sync::mpsc::unbounded_channel::<TurnCompletionMsg>();
             std::sync::Arc::clone(&actor)
                 .maybe_drain_notifications(completion_tx)
                 .await;
@@ -1494,7 +1495,7 @@ async fn reparented_harness_subagent_task_suppressed_when_status_not_active() {
                     .push(bash_completed_notification("bg-skeptic"));
             }
             let (completion_tx, _completion_rx) =
-                tokio::sync::mpsc::unbounded_channel::<(String, PromptTurnResult)>();
+                tokio::sync::mpsc::unbounded_channel::<TurnCompletionMsg>();
             std::sync::Arc::clone(&actor)
                 .maybe_drain_notifications(completion_tx)
                 .await;

@@ -1063,7 +1063,10 @@ impl SessionActor {
                     category: Some(
                         crate::session::events::CancellationCategory::PermissionCancelled,
                     ),
-                    context: Some(serde_json::json!({ "error": e.to_string() })),
+                    context: Some(crate::session::commands::CancellationContext {
+                        reason: Some(e.to_string()),
+                        ..Default::default()
+                    }),
                 }
             })?;
 
@@ -1073,10 +1076,11 @@ impl SessionActor {
                     category: Some(
                         crate::session::events::CancellationCategory::PermissionRejected,
                     ),
-                    context: Some(serde_json::json!({
-                        "tool_name": tool_name,
-                        "reason": reason,
-                    })),
+                    context: Some(crate::session::commands::CancellationContext {
+                        tool_name: Some(tool_name),
+                        reason: Some(reason),
+                        ..Default::default()
+                    }),
                 });
             }
             ToolLoop::Cancelled => {

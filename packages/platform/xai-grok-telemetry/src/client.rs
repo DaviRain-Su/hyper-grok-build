@@ -376,7 +376,16 @@ pub async fn track(event_name: &str, request_id: &str, ctx: &UserContext, mut me
         props.insert("language".into(), json!(ctx.language));
         props.insert("locale".into(), json!("English"));
 
-        let _ = mixpanel.track(event_name, Some(props)).await;
+        match mixpanel.track(event_name, Some(props)).await {
+            Ok(()) => {
+                if event_name.ends_with("session_context_snapshot") {
+                    tracing::info!(event = %event_name, "mixpanel track ok");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, event = %event_name, "mixpanel track failed");
+            }
+        }
     }
 }
 

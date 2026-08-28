@@ -102,8 +102,8 @@ Rename the current session. Alias: `/title`.
 Switch models. Accepts a model ID or display name (case-insensitive), and for reasoning models you can add an effort level as a second argument. Alias: `/m`.
 
 ```
-/model grok-build
-/model Grok Build
+/model grok-4.6
+/model Grok 4.6
 /model Reasoning X high
 ```
 

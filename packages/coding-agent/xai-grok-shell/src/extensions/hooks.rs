@@ -21,7 +21,12 @@ struct ListRequest {
     session_id: String,
 }
 
-pub(crate) fn hook_spec_to_info(spec: &xai_grok_hooks::config::HookSpec) -> HookInfo {
+/// Builds the DTO against a pre-loaded disabled-hooks snapshot — the bulk
+/// list/notification passes load once per pass, not once per hook.
+pub(crate) fn hook_spec_to_info_with(
+    spec: &xai_grok_hooks::config::HookSpec,
+    disabled: &xai_grok_hooks::trust::DisabledHooks,
+) -> HookInfo {
     use xai_grok_hooks::event::HookEventName;
 
     let event = match spec.event {
@@ -73,7 +78,8 @@ pub(crate) fn hook_spec_to_info(spec: &xai_grok_hooks::config::HookSpec) -> Hook
         url: url_display,
         timeout_ms: spec.timeout_ms,
         source_dir: spec.source_dir.display().to_string(),
-        disabled: xai_grok_hooks::trust::is_hook_disabled(&spec.name),
+        disabled: xai_grok_hooks::trust::hook_disabled_for_display_with(spec, disabled),
+        pinned: spec.is_managed_policy(),
     }
 }
 
@@ -282,8 +288,8 @@ mod tests {
     use xai_grok_hooks::config::HookSpec;
     use xai_grok_hooks::event::HookEventName;
 
-    /// Minimal `HookSpec` for `hook_spec_to_info` tests (`handler_type` is unused;
-    /// the DTO derives it from `url`).
+    /// Minimal `HookSpec` for `hook_spec_to_info_with` tests (`handler_type` is
+    /// unused; the DTO derives it from `url`).
     fn make_spec(
         command_raw: Option<&str>,
         command: Option<&str>,
@@ -312,8 +318,10 @@ mod tests {
     /// the DTO; then the resolved value, else `None`. Same for `command` and `url`.
     #[test]
     fn hook_spec_to_info_display_precedence() {
-        let command =
-            |raw, resolved| hook_spec_to_info(&make_spec(raw, resolved, None, None)).command;
+        let no_disabled = xai_grok_hooks::trust::DisabledHooks::from_names([]);
+        let command = |raw, resolved| {
+            hook_spec_to_info_with(&make_spec(raw, resolved, None, None), &no_disabled).command
+        };
         assert_eq!(
             command(Some("${VAR}/x"), Some("/resolved/x")).as_deref(),
             Some("${VAR}/x")
@@ -324,7 +332,9 @@ mod tests {
         );
         assert!(command(None, None).is_none());
 
-        let url = |raw, resolved| hook_spec_to_info(&make_spec(None, None, raw, resolved)).url;
+        let url = |raw, resolved| {
+            hook_spec_to_info_with(&make_spec(None, None, raw, resolved), &no_disabled).url
+        };
         assert_eq!(
             url(
                 Some("https://${HOST}/p?token=${TOKEN}"),

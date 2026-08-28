@@ -1219,6 +1219,7 @@ pub fn take_adoptable_worktrees() -> Vec<AdoptableWorktree> {
 /// This is a **synchronous** function intended to be called via
 /// `tokio::task::spawn_blocking` so it runs on the thread pool and
 /// never competes with the agent's single-threaded `LocalSet`.
+#[tracing::instrument(skip_all)]
 pub fn cleanup_stale_pool_worktrees(source_git_root: Option<&Path>) {
     // Run the expensive directory walk + git worktree remove at most once.
     // Adoptable candidates are stored in ADOPTABLE_CACHE for WorktreePool::new().

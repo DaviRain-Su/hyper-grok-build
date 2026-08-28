@@ -522,6 +522,28 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowWordSelectTip => dispatch_show_word_select_tip(app),
         Action::AcceptWordSelectTip => dispatch_accept_word_select_tip(app),
         Action::DrainQueue => dispatch_drain_queue(app),
+        Action::PromptBlockAnswered { row_id, choice } => {
+            use crate::app::actions::PromptBlockChoice;
+            with_active_agent(app, |agent| match choice {
+                PromptBlockChoice::Edit => {
+                    agent.enter_queue_edit(row_id, false, None);
+                }
+                PromptBlockChoice::Resend => {
+                    agent.release_hook_block_hold();
+                }
+                PromptBlockChoice::Discard => {
+                    if let Some(removed) = agent.remove_local_queue_row(row_id) {
+                        for image in &removed.images {
+                            crate::prompt_images::cleanup_temp_file(image);
+                        }
+                    }
+                }
+            });
+            match choice {
+                PromptBlockChoice::Edit => vec![],
+                PromptBlockChoice::Resend | PromptBlockChoice::Discard => dispatch_drain_queue(app),
+            }
+        }
         Action::QueueRemoveShared {
             id,
             expected_version,

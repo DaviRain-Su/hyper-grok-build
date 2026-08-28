@@ -8,6 +8,249 @@
 
 use super::*;
 
+use xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend;
+use xai_grok_tools::implementations::grok_build::task::types::{
+    ActiveAgentMessageOutcome, ActiveAgentMessageRequest, SubagentCancelOutcome,
+    SubagentDescribeOutcome, SubagentRequest, SubagentResult, SubagentSnapshot,
+    SubagentValidateTypeOutcome,
+};
+
+struct FixedActiveMessageBackend {
+    outcome: ActiveAgentMessageOutcome,
+}
+
+#[async_trait::async_trait]
+impl SubagentBackend for FixedActiveMessageBackend {
+    async fn spawn(
+        &self,
+        _: SubagentRequest,
+    ) -> Result<SubagentResult, xai_tool_runtime::ToolError> {
+        Err(xai_tool_runtime::ToolError::custom(
+            "unsupported",
+            "spawn unsupported",
+        ))
+    }
+
+    async fn query(&self, _: &str, _: bool, _: Option<u64>) -> Option<SubagentSnapshot> {
+        None
+    }
+
+    async fn send_active_message(&self, _: ActiveAgentMessageRequest) -> ActiveAgentMessageOutcome {
+        self.outcome.clone()
+    }
+
+    async fn cancel(&self, _: &str) -> SubagentCancelOutcome {
+        SubagentCancelOutcome::NotFound
+    }
+
+    async fn validate_type(&self, _: &str, _: &str) -> SubagentValidateTypeOutcome {
+        SubagentValidateTypeOutcome::ValidationUnavailable
+    }
+
+    async fn describe_subagent_type(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: &str,
+    ) -> SubagentDescribeOutcome {
+        SubagentDescribeOutcome::Unavailable
+    }
+}
+
+fn active_message_call(id: &str, text: &str) -> crate::sampling::types::ToolCallResponse {
+    crate::sampling::types::ToolCallResponse {
+        id: id.to_owned(),
+        kind: "function".to_owned(),
+        function: crate::sampling::types::ToolCallFunction::new(
+            "send_subagent_message",
+            serde_json::json!({ "subagent_id": "child", "text": text }).to_string(),
+        ),
+    }
+}
+
+fn unrelated_tool_call(id: &str) -> crate::sampling::types::ToolCallResponse {
+    crate::sampling::types::ToolCallResponse {
+        id: id.to_owned(),
+        kind: "function".to_owned(),
+        function: crate::sampling::types::ToolCallFunction::new(
+            "todo_write",
+            r#"{"todos":[{"id":"t1","content":"do","status":"completed"}]}"#,
+        ),
+    }
+}
+
+async fn execute_with_captured_active_message_events(
+    actor: &SessionActor,
+    call: crate::sampling::types::ToolCallResponse,
+) -> Vec<crate::session::telemetry::ActiveAgentMessageEvent> {
+    let (result, events) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::session::telemetry::capture_product_events(actor.execute_tool_calls(vec![call])),
+    )
+    .await
+    .expect("generic tool completion must not hang");
+    result.expect("generic tool completion must not error");
+    events
+}
+
+fn active_message_event_names(
+    events: &[crate::session::telemetry::ActiveAgentMessageEvent],
+) -> Vec<&'static str> {
+    events
+        .iter()
+        .map(|event| match event {
+            crate::session::telemetry::ActiveAgentMessageEvent::Completed(_) => {
+                "active_agent_message_completed"
+            }
+            crate::session::telemetry::ActiveAgentMessageEvent::LimitHit(_) => {
+                "active_agent_message_limit_hit"
+            }
+            crate::session::telemetry::ActiveAgentMessageEvent::Settled(_) => {
+                "active_agent_message_settled"
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn active_message_outputs_distinguish_uncertain_from_proved_rejection() {
+    use xai_grok_tools::implementations::grok_build::send_subagent_message::SendSubagentMessageOutput;
+    use xai_grok_tools::types::output::ToolOutput;
+
+    for (label, output, expected) in [
+        (
+            "uncertain",
+            SendSubagentMessageOutput::AdmissionUncertain,
+            "unconfirmed",
+        ),
+        (
+            "deadline_rejected",
+            SendSubagentMessageOutput::NotAcceptedBeforeDeadline,
+            "error",
+        ),
+        (
+            "channel_closed",
+            SendSubagentMessageOutput::ChannelClosed,
+            "error",
+        ),
+    ] {
+        let output = ToolOutput::SendSubagentMessage(output);
+        let result: Result<ToolRunResult, xai_tool_runtime::ToolError> = Ok(ToolRunResult {
+            prompt_text: output.to_prompt_format(),
+            output,
+            effective_tool_name: None,
+        });
+        assert_eq!(
+            super::tool_calls::tool_output_span_outcome(&result),
+            expected,
+            "{label}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn generic_tool_completion_chokepoint_has_exact_active_message_cardinality() {
+    use xai_grok_tools::implementations::grok_build::task::backend::SubagentBackendResource;
+    use xai_grok_tools::implementations::grok_build::task::types::{
+        MAX_ACTIVE_AGENT_MESSAGE_BYTES, SubagentDepthCounter,
+    };
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor =
+                super::support::create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = super::support::test_agent_with_active_message_tool().await;
+            actor
+                .workspace_ops
+                .bind_local_session(
+                    &actor.session_id_string(),
+                    actor.tool_context.cwd.as_path().to_path_buf(),
+                    actor.tool_context.hunk_tracker_handle.clone(),
+                    actor.agent.borrow().tool_bridge().toolset(),
+                    None,
+                )
+                .expect("bind_local_session must succeed");
+            actor
+                .agent
+                .borrow()
+                .tool_bridge()
+                .update_resource(SubagentDepthCounter(0))
+                .await;
+
+            for (id, text, outcome, expected) in [
+                (
+                    "accepted",
+                    "follow up".to_owned(),
+                    ActiveAgentMessageOutcome::Accepted {
+                        message_id: "message-1".to_owned(),
+                    },
+                    vec!["active_agent_message_completed"],
+                ),
+                (
+                    "admission-uncertain",
+                    "follow up".to_owned(),
+                    ActiveAgentMessageOutcome::AdmissionUncertain,
+                    vec!["active_agent_message_completed"],
+                ),
+                (
+                    "deadline-rejected",
+                    "follow up".to_owned(),
+                    ActiveAgentMessageOutcome::NotAcceptedBeforeDeadline,
+                    vec!["active_agent_message_completed"],
+                ),
+                (
+                    "channel-closed",
+                    "follow up".to_owned(),
+                    ActiveAgentMessageOutcome::ChannelClosed,
+                    vec!["active_agent_message_completed"],
+                ),
+                (
+                    "oversize",
+                    "x".repeat(MAX_ACTIVE_AGENT_MESSAGE_BYTES + 1),
+                    ActiveAgentMessageOutcome::Unsupported,
+                    vec![
+                        "active_agent_message_completed",
+                        "active_agent_message_limit_hit",
+                    ],
+                ),
+                (
+                    "empty",
+                    String::new(),
+                    ActiveAgentMessageOutcome::Unsupported,
+                    vec!["active_agent_message_completed"],
+                ),
+            ] {
+                actor
+                    .agent
+                    .borrow()
+                    .tool_bridge()
+                    .update_resource(SubagentBackendResource(std::sync::Arc::new(
+                        FixedActiveMessageBackend { outcome },
+                    )))
+                    .await;
+                let events = execute_with_captured_active_message_events(
+                    &actor,
+                    active_message_call(id, &text),
+                )
+                .await;
+                assert_eq!(active_message_event_names(&events), expected);
+            }
+
+            let events = execute_with_captured_active_message_events(
+                &actor,
+                unrelated_tool_call("unrelated"),
+            )
+            .await;
+            assert!(events.is_empty());
+        })
+        .await;
+}
+
 #[tokio::test]
 async fn test_parallel_dispatch_basic() {
     // Ordering correctness: verify that futures::future::join_all preserves
@@ -195,7 +438,48 @@ fn lock_path_for_args_matches_grok_build_file_path() {
         "old_string": "foo",
         "new_string": "bar",
     });
-    assert_eq!(lock_path_for_args(&args), Some("/repo/src/main.rs"));
+    assert_eq!(
+        lock_path_for_args(&args, Path::new("/cwd")),
+        Some("/repo/src/main.rs".to_owned())
+    );
+}
+
+#[test]
+fn lock_path_for_args_normalizes_relative_aliases() {
+    let cwd = Path::new("/repo");
+    let direct = serde_json::json!({ "file_path": "src/main.rs" });
+    let dotted = serde_json::json!({ "file_path": "./src/main.rs" });
+    let parent = serde_json::json!({ "file_path": "src/tmp/../main.rs" });
+    let absolute = serde_json::json!({ "file_path": "/repo/src/main.rs" });
+
+    let expected = Some("/repo/src/main.rs".to_owned());
+    assert_eq!(lock_path_for_args(&direct, cwd), expected);
+    assert_eq!(lock_path_for_args(&dotted, cwd), expected);
+    assert_eq!(lock_path_for_args(&parent, cwd), expected);
+    assert_eq!(lock_path_for_args(&absolute, cwd), expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn lock_path_for_args_canonicalizes_symlink_aliases() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("real");
+    let alias = directory.path().join("alias");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(real.join("main.rs"), "fn main() {}").unwrap();
+    symlink(&real, &alias).unwrap();
+
+    for filename in ["main.rs", "not-created-yet.rs"] {
+        let real_args = serde_json::json!({ "file_path": real.join(filename) });
+        let alias_args = serde_json::json!({ "file_path": alias.join(filename) });
+        assert_eq!(
+            lock_path_for_args(&real_args, directory.path()),
+            lock_path_for_args(&alias_args, directory.path()),
+            "{filename}"
+        );
+    }
 }
 
 #[test]
@@ -206,7 +490,10 @@ fn lock_path_for_args_matches_path_arg() {
         "old_string": "foo",
         "new_string": "bar",
     });
-    assert_eq!(lock_path_for_args(&args), Some("/repo/src/main.rs"));
+    assert_eq!(
+        lock_path_for_args(&args, Path::new("/cwd")),
+        Some("/repo/src/main.rs".to_owned())
+    );
 }
 
 #[test]
@@ -215,7 +502,10 @@ fn lock_path_for_args_matches_grok_build_target_file() {
     let args = serde_json::json!({
         "target_file": "/repo/src/main.rs",
     });
-    assert_eq!(lock_path_for_args(&args), Some("/repo/src/main.rs"));
+    assert_eq!(
+        lock_path_for_args(&args, Path::new("/cwd")),
+        Some("/repo/src/main.rs".to_owned())
+    );
 }
 
 #[test]
@@ -227,9 +517,15 @@ fn lock_path_for_args_returns_none_for_pathless_tools() {
         "command": "ls -la",
         "description": "list",
     });
-    assert_eq!(lock_path_for_args(&args), None);
-    assert_eq!(lock_path_for_args(&serde_json::json!({})), None);
-    assert_eq!(lock_path_for_args(&serde_json::json!(null)), None);
+    assert_eq!(lock_path_for_args(&args, Path::new("/cwd")), None);
+    assert_eq!(
+        lock_path_for_args(&serde_json::json!({}), Path::new("/cwd")),
+        None
+    );
+    assert_eq!(
+        lock_path_for_args(&serde_json::json!(null), Path::new("/cwd")),
+        None
+    );
 }
 
 #[test]
@@ -237,9 +533,9 @@ fn lock_path_for_args_ignores_non_string_path_values() {
     // Defensive: if a model emits a non-string, treat as no lock rather
     // than panicking or coercing — the tool layer will reject it.
     let args = serde_json::json!({"file_path": 42});
-    assert_eq!(lock_path_for_args(&args), None);
+    assert_eq!(lock_path_for_args(&args, Path::new("/cwd")), None);
     let args = serde_json::json!({"path": ["/a", "/b"]});
-    assert_eq!(lock_path_for_args(&args), None);
+    assert_eq!(lock_path_for_args(&args, Path::new("/cwd")), None);
 }
 
 #[test]
@@ -259,8 +555,14 @@ fn lock_path_for_args_buckets_parallel_compat_strreplace_to_same_lock() {
         "old_string": "baz",
         "new_string": "qux",
     });
-    assert_eq!(lock_path_for_args(&call_a), lock_path_for_args(&call_b));
-    assert_eq!(lock_path_for_args(&call_a), Some("/repo/src/main.rs"));
+    assert_eq!(
+        lock_path_for_args(&call_a, Path::new("/cwd")),
+        lock_path_for_args(&call_b, Path::new("/cwd"))
+    );
+    assert_eq!(
+        lock_path_for_args(&call_a, Path::new("/cwd")),
+        Some("/repo/src/main.rs".to_owned())
+    );
 
     // Cross-file calls must bucket independently so they keep running
     // concurrently — otherwise we'd serialize unrelated edits and tank
@@ -270,7 +572,10 @@ fn lock_path_for_args_buckets_parallel_compat_strreplace_to_same_lock() {
         "old_string": "x",
         "new_string": "y",
     });
-    assert_ne!(lock_path_for_args(&call_a), lock_path_for_args(&call_c));
+    assert_ne!(
+        lock_path_for_args(&call_a, Path::new("/cwd")),
+        lock_path_for_args(&call_c, Path::new("/cwd"))
+    );
 }
 
 #[test]
@@ -291,7 +596,10 @@ fn lock_path_for_args_buckets_grok_build_and_compat_to_same_lock_for_same_file()
         "old_string": "c",
         "new_string": "d",
     });
-    assert_eq!(lock_path_for_args(&grok), lock_path_for_args(&compat));
+    assert_eq!(
+        lock_path_for_args(&grok, Path::new("/cwd")),
+        lock_path_for_args(&compat, Path::new("/cwd"))
+    );
 }
 
 /// Regression: skill-discovery reminders must land after all tool results, not mid-batch.

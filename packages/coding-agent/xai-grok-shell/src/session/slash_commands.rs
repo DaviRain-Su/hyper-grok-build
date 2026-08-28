@@ -16,7 +16,16 @@ pub(crate) struct BuiltinCommand {
     /// commands that map to `BuiltinGate::AlwaysOn` are never gated.
     pub gate: BuiltinGate,
     workflow_projection: WorkflowProjection,
-    resolve: fn(args: &str) -> BuiltinAction,
+    /// Whether untrusted model input may invoke this exact canonical entry.
+    /// The authority resolver ignores aliases and requires `AlwaysOn` as a
+    /// second fail-closed condition.
+    pub(crate) model_authored_eligibility: ModelAuthoredEligibility,
+    pub(super) resolve: fn(args: &str) -> BuiltinAction,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelAuthoredEligibility {
+    Denied,
+    ExactCanonical,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkflowProjection {
@@ -49,6 +58,15 @@ pub(crate) enum BuiltinGate {
     WorkflowLaunches,
     WorkflowManagement,
 }
+fn resolve_compact(args: &str) -> BuiltinAction {
+    BuiltinAction::Compact {
+        user_context: if args.is_empty() {
+            None
+        } else {
+            Some(args.to_string())
+        },
+    }
+}
 /// All built-in slash commands. Order here = display order in autocomplete.
 pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     BuiltinCommand {
@@ -56,21 +74,17 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Compress conversation history to save context window",
         argument_hint: Some("optional context about what to preserve"),
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::ExactCanonical,
         gate: BuiltinGate::AlwaysOn,
         workflow_projection: WorkflowProjection::None,
-        resolve: |args| BuiltinAction::Compact {
-            user_context: if args.is_empty() {
-                None
-            } else {
-                Some(args.to_string())
-            },
-        },
+        resolve: resolve_compact,
     },
     BuiltinCommand {
         name: "always-approve",
         description: "Toggle always-approve mode (skip all permission prompts)",
         argument_hint: Some("on|off"),
         aliases: &["yolo"],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::AlwaysOn,
         workflow_projection: WorkflowProjection::None,
         resolve: |args| BuiltinAction::SetYolo {
@@ -85,6 +99,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Flush conversation memory to disk now",
         argument_hint: None,
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Memory,
         workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::FlushMemory,
@@ -94,6 +109,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Run memory consolidation (merge session logs into organized topics)",
         argument_hint: None,
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Memory,
         workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::Dream,
@@ -103,6 +119,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Browse, view, and manage your memories",
         argument_hint: Some("on|off"),
         aliases: &["mem"],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::MemoryConfigured,
         workflow_projection: WorkflowProjection::None,
         resolve: |args| {
@@ -119,6 +136,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Show context window usage and session stats",
         argument_hint: None,
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::AlwaysOn,
         workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::ContextInfo,
@@ -128,6 +146,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Trust this project for hook execution",
         argument_hint: None,
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Hooks,
         workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::HooksTrust,
@@ -137,6 +156,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Show hooks loaded in this session",
         argument_hint: None,
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Hooks,
         workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::HooksList,
@@ -146,6 +166,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Add a custom hook file or directory",
         argument_hint: Some("path to hook file or directory"),
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Hooks,
         workflow_projection: WorkflowProjection::None,
         resolve: |args| BuiltinAction::HooksAdd {
@@ -157,6 +178,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Remove a custom hook file or directory path",
         argument_hint: Some("path to hook file or directory"),
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Hooks,
         workflow_projection: WorkflowProjection::None,
         resolve: |args| BuiltinAction::HooksRemove {
@@ -168,6 +190,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Remove trust for the current project",
         argument_hint: None,
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Hooks,
         workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::HooksUntrust,
@@ -177,6 +200,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Manage plugins (list, reload, trust, add, remove)",
         argument_hint: Some("list | reload | trust <path> | add <path> | remove <path>"),
         aliases: &["plugin"],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Plugins,
         workflow_projection: WorkflowProjection::None,
         resolve: |args| {
@@ -229,6 +253,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Reload plugins from disk (alias for /plugins reload)",
         argument_hint: None,
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Plugins,
         workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::PluginsReload,
@@ -238,6 +263,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Manage the scheme live runtime (status, redefine, eval, commit, discard, recover)",
         argument_hint: Some("status | redefine <plugin> <event> <lambda> | eval <expr> | commit | discard | recover"),
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Plugins,
         workflow_projection: WorkflowProjection::None,
         resolve: |args| {
@@ -269,6 +295,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Show session details (model, turns, context usage)",
         argument_hint: None,
         aliases: &["status", "info"],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::AlwaysOn,
         workflow_projection: WorkflowProjection::None,
         resolve: |_args| BuiltinAction::SessionInfo,
@@ -278,6 +305,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Send feedback about the current session",
         argument_hint: Some("feedback text"),
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Feedback,
         workflow_projection: WorkflowProjection::None,
         resolve: |args| BuiltinAction::Feedback {
@@ -289,6 +317,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Research with bounded parallel agents, cross-check evidence, and write a cited report",
         argument_hint: Some("<query>"),
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::WorkflowLaunches,
         workflow_projection: WorkflowProjection::ExactName,
         resolve: |args| BuiltinAction::DeepResearch {
@@ -302,6 +331,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
             "<name> [--agent-budget N] [--effort LEVEL] [args] | runs | pause|resume|stop|save [name]",
         ),
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::WorkflowManagement,
         workflow_projection: WorkflowProjection::None,
         resolve: |args| {
@@ -341,6 +371,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Set, manage, or check an autonomous goal",
         argument_hint: Some("<objective> [--budget <tokens>] | status | pause | resume | clear"),
         aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Goal,
         workflow_projection: WorkflowProjection::None,
         resolve: |args| {
@@ -401,6 +432,7 @@ const PROMPT_COMMANDS: &[BuiltinCommand] = &[BuiltinCommand {
     description: "Run a prompt on a recurring interval",
     argument_hint: Some("[interval] <prompt>"),
     aliases: &[],
+    model_authored_eligibility: ModelAuthoredEligibility::Denied,
     gate: BuiltinGate::Scheduler,
     workflow_projection: WorkflowProjection::None,
     resolve: |_| unreachable!("/loop is dispatched via the PROMPT_COMMANDS path in resolve()"),
@@ -644,8 +676,12 @@ pub(crate) fn is_reserved_slash_name(name: &str) -> bool {
 }
 struct EffectiveCommandCatalog<'a> {
     builtins: Vec<&'a BuiltinCommand>,
-    skills: Vec<SkillCommand<'a>>,
+    skills: EffectiveSkillCatalog<'a>,
     workflows: Vec<&'a crate::session::workflow::registry::WorkflowListing>,
+}
+struct EffectiveSkillCatalog<'a> {
+    commands: Vec<SkillCommand<'a>>,
+    taken: HashSet<String>,
 }
 struct SkillCommand<'a> {
     name: String,
@@ -677,17 +713,8 @@ fn workflow_meta(workflow: &crate::session::workflow::registry::WorkflowListing)
     }
     meta
 }
-impl<'a> EffectiveCommandCatalog<'a> {
-    fn build(
-        skills: &'a [SkillInfo],
-        availability: CommandAvailability,
-        workflows: &'a [crate::session::workflow::registry::WorkflowListing],
-    ) -> Self {
-        let builtins: Vec<_> = BUILTIN_COMMANDS
-            .iter()
-            .chain(PROMPT_COMMANDS.iter())
-            .filter(|builtin| availability.allows(builtin.gate))
-            .collect();
+impl<'a> EffectiveSkillCatalog<'a> {
+    fn build(skills: &'a [SkillInfo], builtins: &[&BuiltinCommand]) -> Self {
         let mut taken: HashSet<String> = builtins
             .iter()
             .flat_map(|builtin| {
@@ -708,7 +735,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
                 .entry(slash_key(&format_skill_name(skill)))
                 .or_default() += 1;
         }
-        let mut effective_skills = Vec::new();
+        let mut commands = Vec::new();
         for skill in candidates {
             let bare_key = slash_key(&skill.name);
             let name = if bare_counts.get(&bare_key) == Some(&1) && !taken.contains(&bare_key) {
@@ -727,9 +754,31 @@ impl<'a> EffectiveCommandCatalog<'a> {
                 qualified
             };
             taken.insert(name.clone());
-            effective_skills.push(SkillCommand { name, skill });
+            commands.push(SkillCommand { name, skill });
         }
         taken.extend(bare_counts.keys().cloned());
+        Self { commands, taken }
+    }
+    fn skill_exact(&self, name: &str) -> Option<&'a SkillInfo> {
+        self.commands
+            .iter()
+            .find(|command| command.name == name)
+            .map(|command| command.skill)
+    }
+}
+impl<'a> EffectiveCommandCatalog<'a> {
+    fn build(
+        skills: &'a [SkillInfo],
+        availability: CommandAvailability,
+        workflows: &'a [crate::session::workflow::registry::WorkflowListing],
+    ) -> Self {
+        let builtins: Vec<_> = BUILTIN_COMMANDS
+            .iter()
+            .chain(PROMPT_COMMANDS.iter())
+            .filter(|builtin| availability.allows(builtin.gate))
+            .collect();
+        let effective_skills = EffectiveSkillCatalog::build(skills, &builtins);
+        let taken = &effective_skills.taken;
         let effective_workflows = if availability.allows(BuiltinGate::WorkflowLaunches) {
             let mut counts: HashMap<String, usize> = HashMap::new();
             for workflow in workflows {
@@ -760,11 +809,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
     }
     /// Skill by its advertised (effective) name.
     fn skill(&self, name: &str) -> Option<&'a SkillInfo> {
-        let key = slash_key(name);
-        self.skills
-            .iter()
-            .find(|command| command.name == key)
-            .map(|command| command.skill)
+        self.skills.skill_exact(&slash_key(name))
     }
     /// Advertised name, else the canonical qualified form. Leading-token
     /// only — mid-prose `/word` matches advertised names so an unadvertised
@@ -773,6 +818,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
         self.skill(name).or_else(|| {
             let key = slash_key(name);
             self.skills
+                .commands
                 .iter()
                 .find(|command| slash_key(&format_skill_name(command.skill)) == key)
                 .map(|command| command.skill)
@@ -804,7 +850,7 @@ pub(super) fn available_commands(
     let catalog = EffectiveCommandCatalog::build(skills, availability, workflows);
     let mut commands = Vec::with_capacity(
         catalog.builtins.len()
-            + catalog.skills.len()
+            + catalog.skills.commands.len()
             + catalog.workflows.len()
             + wasm_commands.len()
             + scheme_commands.len(),
@@ -818,7 +864,7 @@ pub(super) fn available_commands(
             }))
             .meta(exact_workflow_projection(builtin, workflows).map(workflow_meta))
     }));
-    commands.extend(catalog.skills.iter().map(|command| {
+    commands.extend(catalog.skills.commands.iter().map(|command| {
         let skill = command.skill;
         let mut meta_map = serde_json::Map::new();
         meta_map.insert("scope".into(), serde_json::json!(skill.scope));
@@ -1691,9 +1737,45 @@ pub(super) async fn build_skill_information_for_refs(
         .collect();
     Some(build_skill_information(&skill_blocks, &refs))
 }
+/// Resolve one exact leading slash against only the child-visible skill catalog.
+///
+/// The caller must supply the same local availability snapshot used by child
+/// advertisement and prove the child can load skill content. No builtin, alias,
+/// workflow, or other dynamic command is dispatched here.
+pub(super) fn resolve_model_authored_skill(
+    prompt_blocks: Vec<acp::ContentBlock>,
+    command_name: &str,
+    args: &str,
+    skills: &[SkillInfo],
+    availability: CommandAvailability,
+    has_skill_loader: bool,
+) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
+    let builtins: Vec<_> = BUILTIN_COMMANDS
+        .iter()
+        .chain(PROMPT_COMMANDS.iter())
+        .filter(|builtin| availability.allows(builtin.gate))
+        .collect();
+    let catalog = EffectiveSkillCatalog::build(skills, &builtins);
+    let Some(skill) = catalog.skill_exact(command_name) else {
+        return Ok(prompt_blocks);
+    };
+    if !has_skill_loader {
+        return Ok(prompt_blocks);
+    }
+    Err(SlashCommandOutcome::InvokeSkill {
+        blocks: prompt_blocks,
+        skills: vec![ParsedSkillRef {
+            name: command_name.to_string(),
+            args: args.to_string(),
+            skill_path: skill.path.clone(),
+            qualified_name: format_skill_name(skill),
+            plugin_name: skill.plugin_name.clone(),
+        }],
+    })
+}
 /// Resolve prompt blocks as a slash command.
 /// `Ok(blocks)` = not a command, pass through. `Err(outcome)` = matched.
-pub(super) fn resolve(
+pub(super) fn resolve_human_intent(
     prompt_blocks: Vec<acp::ContentBlock>,
     skills: &[SkillInfo],
     availability: CommandAvailability,
@@ -1703,7 +1785,13 @@ pub(super) fn resolve(
     wasm_commands: &[xai_grok_extension_api::WasmCommandDescriptor],
     scheme_commands: &[xai_grok_extension_api::SchemeCommandDescriptor],
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
-    let Some((command_name, args)) = parse_slash_prefix(&prompt_blocks) else {
+    let crate::session::slash_authority::AuthorityResolution::HumanIntent { command_name, args } =
+        crate::session::slash_authority::resolve(
+            crate::session::InputAuthority::HumanIntent,
+            &prompt_blocks,
+            BUILTIN_COMMANDS,
+        )
+    else {
         return Ok(prompt_blocks);
     };
     let command_key = slash_key(command_name);
@@ -1788,29 +1876,6 @@ pub(super) fn resolve(
         }));
     }
     Ok(prompt_blocks)
-}
-/// Extract `(name, args)` if the first text block starts with `/`.
-///
-/// - `"/compact keep auth"` → `Some(("compact", "keep auth"))`
-/// - `"please run /commit"` → `None` (not at start)
-fn parse_slash_prefix(prompt_blocks: &[acp::ContentBlock]) -> Option<(&str, &str)> {
-    let text = prompt_blocks.iter().find_map(|b| {
-        if let acp::ContentBlock::Text(t) = b {
-            Some(t.text.as_str())
-        } else {
-            None
-        }
-    })?;
-    let trimmed = text.trim();
-    let without_slash = trimmed.strip_prefix('/')?;
-    let (name, args) = match without_slash.find(char::is_whitespace) {
-        Some(idx) => (&without_slash[..idx], without_slash[idx..].trim()),
-        None => (without_slash, ""),
-    };
-    if name.is_empty() {
-        return None;
-    }
-    Some((name, args))
 }
 /// Build the `/loop` prompt blocks for the shell client.
 ///

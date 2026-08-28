@@ -1,7 +1,9 @@
-//! Session-level telemetry helpers: permission analytics, hook/skill labels, harness snapshot.
+//! Session-level telemetry helpers: product analytics and harness snapshots.
 
+mod active_agent_message;
 mod permission;
 
+pub(crate) use active_agent_message::*;
 pub(crate) use permission::*;
 
 use xai_grok_telemetry::events::SessionHarness;

@@ -3983,3 +3983,31 @@ fn from_remote_gated_requires_xai_auth_for_writeback() {
         StorageMode::Local
     );
 }
+#[test]
+#[cfg(target_os = "linux")]
+fn required_bwrap_routes_fail_closed() {
+    assert_eq!(
+        route_bwrap_startup(Some(()), false, true),
+        BwrapStartup::ReexecRequired(())
+    );
+    assert_eq!(
+        route_bwrap_startup::<()>(None, false, true),
+        BwrapStartup::Refuse
+    );
+    assert_eq!(
+        route_bwrap_startup::<()>(None, true, true),
+        BwrapStartup::Verify
+    );
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn optional_bwrap_routes_can_degrade() {
+    assert_eq!(
+        route_bwrap_startup(Some(()), false, false),
+        BwrapStartup::ReexecOptional(())
+    );
+    assert_eq!(
+        route_bwrap_startup::<()>(None, false, false),
+        BwrapStartup::Continue
+    );
+}

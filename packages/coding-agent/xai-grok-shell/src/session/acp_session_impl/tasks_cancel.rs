@@ -94,28 +94,67 @@ pub(crate) struct TurnInputRequest {
     pub(crate) json_schema: Option<serde_json::Value>,
     pub(crate) persist_ack: Option<oneshot::Sender<()>>,
     pub(crate) parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
+    pub(crate) traceparent: Option<String>,
+}
+
+/// Completion-channel payload: prompt id, turn result, elapsed ms from `started_at`.
+/// `elapsed_ms` is `None` when no running task supplied a start time.
+pub(crate) struct TurnCompletionMsg {
+    pub(crate) prompt_id: String,
+    pub(crate) result: PromptTurnResult,
+    pub(crate) elapsed_ms: Option<u64>,
 }
 
 pub(crate) struct AgentTask {
     pub(crate) prompt_id: String,
     pub(crate) handle: tokio::task::AbortHandle,
+    /// Monotonic start of this running turn; complete and cancel both read it.
+    pub(crate) started_at: std::time::Instant,
+}
+
+/// Saturating `Instant` delta in ms. No panic on overflow.
+pub(crate) fn elapsed_ms_saturating(start: std::time::Instant, now: std::time::Instant) -> u64 {
+    u64::try_from(now.saturating_duration_since(start).as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod elapsed_ms_tests {
+    use super::elapsed_ms_saturating;
+
+    #[test]
+    fn elapsed_ms_saturating_uses_injected_instants() {
+        let start = std::time::Instant::now();
+        let later = start + std::time::Duration::from_millis(42);
+        assert_eq!(elapsed_ms_saturating(start, later), 42);
+        assert_eq!(elapsed_ms_saturating(later, start), 0);
+    }
 }
 
 impl AgentTask {
+    #[cfg(test)]
+    pub(crate) fn new(prompt_id: &str, handle: tokio::task::AbortHandle) -> Self {
+        Self {
+            prompt_id: prompt_id.to_string(),
+            handle,
+            started_at: std::time::Instant::now(),
+        }
+    }
+
     pub(super) fn new_prompt(
         session: Arc<SessionActor>,
         request: TurnInputRequest,
-        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+        completion_tx: mpsc::UnboundedSender<TurnCompletionMsg>,
     ) -> Self {
-        let prompt_id = request.prompt_id.clone();
+        let started_at = std::time::Instant::now();
         Self {
-            prompt_id,
-            // Box the task future so the large `handle_prompt` state machine
-            // is heap-allocated when the LocalSet task is created (not stacked
+            prompt_id: request.prompt_id.clone(),
+            started_at,
+            // Box the task future so the large turn state machine is
+            // heap-allocated when the LocalSet task is created (not stacked
             // into the spawn frame). Same root cause as the auth_retry_budget
             // stack overflow: composing huge async fns without boxing.
             handle: tokio::task::spawn_local(Box::pin(async move {
-                run_task(session.clone(), request, completion_tx).await
+                run_task(session, request, completion_tx, started_at).await
             }))
             .abort_handle(),
         }
@@ -177,28 +216,17 @@ fn front_is_rewind_poppable(front: Option<&InputItem>) -> bool {
 async fn run_task(
     session: Arc<SessionActor>,
     request: TurnInputRequest,
-    completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+    completion_tx: mpsc::UnboundedSender<TurnCompletionMsg>,
+    started_at: std::time::Instant,
 ) {
     let prompt_id = request.prompt_id.clone();
-    // `handle_prompt` pins its own large future from a thin never-inlined
-    // frame (see turn.rs `box_turn_future` / docs/test-isolation.md §8.3).
-    let result = session
-        .handle_prompt(
-            &request.prompt_id,
-            request.prompt_blocks,
-            request.prompt_mode,
-            request.trace_gcs_config,
-            request.artifact_tracker,
-            request.client_identifier,
-            request.screen_mode,
-            request.verbatim,
-            request.send_now,
-            request.json_schema,
-            request.persist_ack,
-            request.parsed_prompt_tx,
-        )
-        .await;
-    let _ = completion_tx.send((prompt_id, result));
+    let result = session.handle_turn_input(request).await;
+    let elapsed_ms = elapsed_ms_saturating(started_at, std::time::Instant::now());
+    let _ = completion_tx.send(TurnCompletionMsg {
+        prompt_id,
+        result,
+        elapsed_ms: Some(elapsed_ms),
+    });
 }
 
 impl SessionActor {
@@ -303,7 +331,17 @@ impl SessionActor {
         if let Some(gate) = &self.tool_context.task_wake_suppressed {
             gate.set(false);
         }
-        self.state.lock().await.notifications_suppressed = false;
+        {
+            let mut state = self.state.lock().await;
+            state.notifications_suppressed = false;
+            if state.take_hook_block_hold() {
+                xai_grok_telemetry::unified_log::info(
+                    "shell.prompt.hook_block_hold_released",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({ "reason": "send_now" })),
+                );
+            }
+        }
         xai_grok_telemetry::unified_log::info(
             "shell.task_wake.gate_cleared",
             Some(self.session_info.id.0.as_ref()),
@@ -383,6 +421,7 @@ impl SessionActor {
         }
     }
 
+    #[tracing::instrument(name = "session.cancel", skip_all, fields(trigger = ?options.trigger.as_ref().map(crate::session::CancelTrigger::kind)))]
     pub(super) async fn cancel_running_task(
         &self,
         options: crate::session::CancelOptions,
@@ -521,16 +560,27 @@ impl SessionActor {
             );
         }
 
-        if cancel_subagents {
-            // Abort the producer first so it cannot enqueue more TaskTool work
-            // after the ParentSession sweep. Keep the task slot for prompt-id
-            // attribution below; cleanup will take+abort again (idempotent).
-            {
-                let state = self.state.lock().await;
+        // Sample before abort + teardown awaits so persisted cancel elapsed is
+        // turn runtime, not post-abort kill/token work. `None` when no running
+        // task supplies a start time (do not persist `Some(0)`).
+        let cancel_elapsed_ms = {
+            let state = self.state.lock().await;
+            let cancel_elapsed_ms = state
+                .running_task
+                .as_ref()
+                .map(|t| elapsed_ms_saturating(t.started_at, std::time::Instant::now()));
+            if cancel_subagents {
+                // Abort the producer first so it cannot enqueue more TaskTool work
+                // after the ParentSession sweep. Keep the task slot for prompt-id
+                // attribution below; cleanup will take+abort again (idempotent).
                 if let Some(task) = state.running_task.as_ref() {
                     self.abort_turn_task(task, self.turn_report.epoch());
                 }
             }
+            cancel_elapsed_ms
+        };
+
+        if cancel_subagents {
             // Then cancel every non-workflow session child (incl. prior turns)
             // and close spawn admission until the next turn opens it.
             self.cancel_all_session_subagents();
@@ -907,6 +957,8 @@ impl SessionActor {
                 Some(crate::session::commands::meta_category_str(
                     crate::session::events::CancellationCategory::MidTurnAbort,
                 )),
+                None,
+                cancel_elapsed_ms,
             )
             .await;
         }
@@ -1009,6 +1061,7 @@ impl SessionActor {
     }
 
     /// Kill the foreground commands this cancel owns. A subagent kills only its own, never the parent's or a sibling's on the shared backend.
+    #[tracing::instrument(name = "cancel.kill_foreground", skip_all)]
     async fn kill_foreground_commands_for_cancel(&self) {
         if self.startup_hints.is_subagent {
             self.agent

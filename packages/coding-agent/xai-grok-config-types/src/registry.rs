@@ -44,6 +44,8 @@ pub enum Feature {
     AutoWake,
     /// Save a finished subagent's working copy into the repo as a git ref, restored on resume.
     SubagentWorktreeSnapshot,
+    /// Send model-authored follow-ups to an owned active descendant.
+    ActiveAgentMessages,
 }
 
 /// How one feature is written on each surface it can be set from.
@@ -209,6 +211,14 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "GROK_SUBAGENT_WORKTREE_SNAPSHOT",
         default_enabled: false,
         remote: Some(|settings| settings.subagent_worktree_snapshot_enabled),
+    },
+    FeatureSpec {
+        id: Feature::ActiveAgentMessages,
+        key: "active_agent_messages",
+        path: "features.active_agent_messages",
+        env: "GROK_ACTIVE_AGENT_MESSAGES",
+        default_enabled: false,
+        remote: Some(|settings| settings.active_agent_messages_enabled),
     },
 ];
 

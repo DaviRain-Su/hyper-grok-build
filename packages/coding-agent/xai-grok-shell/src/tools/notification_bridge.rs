@@ -470,6 +470,7 @@ async fn handle_notification(
                             },
                         }),
                         respond_to,
+                        prompt_admitted: None,
                         persist_ack: None,
                         parsed_prompt_tx: None,
                     })

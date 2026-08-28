@@ -36,6 +36,7 @@ impl From<WorktreeType> for ShellWorktreeType {
 ///
 /// When `git_ref` is set, forces a clean checkout of that ref (same as the
 /// manual `create_from_worktree_sync` path used by `grok -w --ref`).
+#[tracing::instrument(skip_all)]
 async fn create_worktree_for_resume(
     source_cwd: &str,
     copy_mode: WorktreeCopyMode,
@@ -69,6 +70,7 @@ async fn create_worktree_for_resume(
     }
 }
 /// Best-effort cleanup of a worktree created during a failed resume flow.
+#[tracing::instrument(skip_all)]
 async fn cleanup_worktree_on_failure(source_cwd: &str, worktree_path: &str) {
     let wt = std::path::Path::new(worktree_path);
     if !wt.exists() {

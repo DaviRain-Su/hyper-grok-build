@@ -1,4 +1,5 @@
 use crate::auth::AuthManager;
+use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
 use crate::util::grok_auth_credentials::GrokAuthCredentials;
 use reqwest::RequestBuilder;
 use std::sync::Arc;
@@ -30,6 +31,9 @@ impl std::fmt::Debug for WireValidBearerResolver {
 }
 impl xai_grok_sampler::BearerResolver for WireValidBearerResolver {
     fn current_bearer(&self) -> Option<String> {
+        if !ActiveAuthBackend::default().is_xai_authority() {
+            return None;
+        }
         self.0.current_wire_valid().map(|a| a.key)
     }
 }
@@ -65,6 +69,7 @@ impl HttpAuth for ShellAuthCredentialProvider {
     fn apply(&self, builder: RequestBuilder, base_url: &str) -> RequestBuilder {
         let mut creds = self.static_credentials.clone();
         if creds.deployment_key.is_none()
+            && ActiveAuthBackend::default().is_xai_authority()
             && let Some(auth) = self.auth_manager.current_wire_valid()
         {
             creds.user_token = Some(auth.key);
@@ -87,7 +92,10 @@ impl AuthCredentialProvider for ShellAuthCredentialProvider {
         let team_id = identity.as_ref().and_then(|a| a.team_id.clone());
         let organization_id = identity.as_ref().and_then(|a| a.organization_id.clone());
         let api_key_id = api_key_id_for(identity.as_ref());
-        let token = self.auth_manager.current_wire_valid().map(|a| a.key);
+        let token = ActiveAuthBackend::default()
+            .is_xai_authority()
+            .then(|| self.auth_manager.current_wire_valid().map(|a| a.key))
+            .flatten();
         CredentialSnapshot {
             token,
             user_id,
@@ -296,6 +304,10 @@ impl std::fmt::Debug for OtelAuthCredentialProvider {
 }
 impl HttpAuth for OtelAuthCredentialProvider {
     fn apply(&self, builder: RequestBuilder, base_url: &str) -> RequestBuilder {
+        if self.deployment_key.load().is_none() && !ActiveAuthBackend::default().is_xai_authority()
+        {
+            return builder;
+        }
         let snapshot = self.snapshot_inner();
         let mut creds = GrokAuthCredentials::new(None);
         if self.deployment_key.load().is_some() {
@@ -338,11 +350,18 @@ impl OtelAuthCredentialProvider {
 #[async_trait::async_trait]
 impl AuthCredentialProvider for OtelAuthCredentialProvider {
     fn snapshot(&self) -> CredentialSnapshot {
+        if self.deployment_key.load().is_none() && !ActiveAuthBackend::default().is_xai_authority()
+        {
+            return CredentialSnapshot::default();
+        }
         self.snapshot_inner()
     }
     fn has_usable_credential(&self) -> bool {
         if self.deployment_key.load().is_some() {
             return true;
+        }
+        if !ActiveAuthBackend::default().is_xai_authority() {
+            return false;
         }
         self.load_state().0.has_usable_token()
     }

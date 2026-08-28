@@ -1547,8 +1547,8 @@ fn turn_end_fetches_prompt_suggestion_when_enabled() {
     };
     assert_eq!(*agent_id, id);
     assert!(session_id.is_some());
-    // No `grok-build-0.1` in the test catalog and no env override →
-    // `None` on the wire; the shell then uses its own `grok-build-0.1`
+    // No `grok-4.6` in the test catalog and no env override →
+    // `None` on the wire; the shell then uses its own `grok-4.6`
     // default (suggestion calls never use the session model).
     assert_eq!(*model, None);
 

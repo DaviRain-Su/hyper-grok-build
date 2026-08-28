@@ -25,6 +25,7 @@ impl MvpAgent {
     /// This is the narrow `pub(crate)` entry point for lazy index startup
     /// from `extensions/code_nav.rs`.  Callers must verify eligibility with
     /// [`code_nav_eligibility_for_request`] before calling this.
+    #[tracing::instrument(name = "code_nav.index_start", skip_all)]
     pub(crate) fn start_codebase_index_for_code_nav(
         &self,
         session_id: Option<&acp::SessionId>,

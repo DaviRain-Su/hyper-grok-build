@@ -23,6 +23,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true }
 http = { workspace = true }
 prometheus = { workspace = true, optional = true }
 prometheus-parse = { version = "0.2.5", optional = true }

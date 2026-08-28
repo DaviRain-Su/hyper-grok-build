@@ -98,6 +98,8 @@ const MAX_OIDC_DURATION: Duration = Duration::from_secs(24 * 3600);
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProactiveRefreshConfig {
     /// `GROK_WORKSPACE_OIDC_PROACTIVE_REFRESH_ENABLED`. Default `false`.
+    /// `false` keeps the SDK reactive provider (kill-switch for workspace-owned
+    /// proactive refresh). `true` selects the workspace-owned provider.
     pub enabled: bool,
     /// `GROK_WORKSPACE_OIDC_REFRESH_FRACTION`, open interval `(0, 1)`.
     pub fraction: f64,

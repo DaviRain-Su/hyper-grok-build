@@ -3625,14 +3625,6 @@ fn resolve_inherited_pool_missing_parent_returns_none() {
 /// mcpServers, but they do inherit already-connected parent servers.
 #[test]
 fn plugin_agents_inherit_parent_mcp_pool_by_default() {
-    assert!(
-            !super::agent_owned_mcp_servers_allowed(true),
-            "plugin agents must not declare agent-owned mcpServers"
-        );
-    assert!(
-            super::agent_owned_mcp_servers_allowed(false),
-            "non-plugin agents may declare agent-owned mcpServers"
-        );
     let pool = make_pool(&["atlassian", "github"]);
     let inherited = super::resolve_inherited_mcp_pool(
             Some(pool),

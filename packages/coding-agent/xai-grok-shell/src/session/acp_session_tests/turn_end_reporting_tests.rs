@@ -184,10 +184,7 @@ impl Harness {
             .current_prompt_id
             .lock()
             .expect("current_prompt_id mutex poisoned") = Some(prompt_id.to_string());
-        self.actor.state.lock().await.running_task = Some(AgentTask {
-            prompt_id: prompt_id.into(),
-            handle,
-        });
+        self.actor.state.lock().await.running_task = Some(AgentTask::new(prompt_id, handle));
     }
 
     async fn cancel(&self, trigger: CancelTrigger) -> super::tasks_cancel::CancelOutcome {
@@ -806,6 +803,7 @@ async fn a_completion_arriving_after_its_cancel_reports_nothing() {
                     usage: None,
                     tool_overrides: None,
                 }),
+                Some(0),
             )
             .await;
         h.drain_turn_ends().await;
@@ -837,6 +835,7 @@ async fn a_completion_reports_its_own_cancel_reason() {
             .handle_completion(
                 "p1".into(),
                 ok(PromptCompletionKind::MaxTurnsReached { limit: 1 }),
+                Some(0),
             )
             .await;
 
@@ -856,6 +855,7 @@ async fn a_completion_reports_its_own_cancel_reason() {
                         trigger: Some(format!("ctrl_c{}", "y".repeat(2000))),
                     }),
                 }),
+                Some(0),
             )
             .await;
         h.drain_turn_ends().await;

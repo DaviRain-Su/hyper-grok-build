@@ -1305,7 +1305,7 @@ impl MvpAgent {
             crate::agent::subagent::reconcile_orphaned_subagents_with_backend(
                 unfinished_subagents,
                 &xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
-                    self.subagent_event_tx.clone(),
+                    self.subagent_event_tx.event_sender().0,
                 ),
                 &session_dir,
                 session_id.0.as_ref(),

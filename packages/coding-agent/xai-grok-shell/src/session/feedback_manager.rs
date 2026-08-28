@@ -839,7 +839,7 @@ impl FeedbackManager {
     /// Run a background loop that periodically syncs signals.
     /// Also loads feedback heuristics config on startup.
     /// This should be spawned as a background task.
-    #[tracing::instrument(skip_all, fields(session_id = %self.session_id))]
+    #[tracing::instrument(skip_all, parent = None, fields(session_id = %self.session_id))]
     pub async fn run_sync_loop(self: Arc<Self>, cancel: tokio_util::sync::CancellationToken) {
         // Load config in background (non-blocking, errors logged)
         self.load_config().await;

@@ -74,6 +74,24 @@ async fn subagent_spawn_context_inherits_parent_permission_handle() {
         })
         .await;
 }
+#[tokio::test]
+async fn subagent_spawn_context_shares_active_message_parent_prompt_index() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("parent-telemetry");
+    let handle = make_test_handle("test-model", false, None);
+    let live_prompt_index = handle
+        .tool_context
+        .active_message_parent_prompt_index
+        .clone();
+    agent.insert_resident(&sid, handle);
+    let ctx = agent.build_subagent_spawn_context(sid.0.as_ref());
+    live_prompt_index.store(6, std::sync::atomic::Ordering::Release);
+    assert_eq!(
+        ctx.active_message_parent_prompt_index
+            .load(std::sync::atomic::Ordering::Acquire),
+        6,
+    );
+}
 /// A subagent shares the parent's `goal_loop_active_gate` Arc, so flipping the
 /// parent gate is observed through the child context (same allocation).
 #[tokio::test]

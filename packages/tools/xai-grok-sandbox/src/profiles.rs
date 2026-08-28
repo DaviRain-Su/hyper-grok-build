@@ -311,10 +311,7 @@ impl ProfileName {
         }
 
         // Kernel deny (read+write): macOS Seatbelt rules; Linux via bwrap bind-over.
-        // The effective deny set is the profile's own `deny` (custom profiles only;
-        // built-ins carry an empty `deny`). An empty set means there is nothing to
-        // enforce. Keying on emptiness rather than profile type avoids enforcing
-        // unintentional denies.
+        // Key on an empty deny set, not profile type, so nothing unintentional is enforced.
         //
         // Split exact paths from globs: exact paths keep the literal/subpath flow;
         // globs become anchored Seatbelt regexes on macOS (a no-op here on Linux,
@@ -337,7 +334,26 @@ impl ProfileName {
         workspace: &Path,
         config: &SandboxConfig,
     ) -> anyhow::Result<SandboxProfile> {
-        self.resolve(workspace, config)
+        let (profile, _) = self.resolve_profile_with_runtime_sockets(workspace, config)?;
+        Ok(profile)
+    }
+
+    /// Resolve the profile plus provenance for automatic runtime-socket entries.
+    pub(crate) fn resolve_profile_with_runtime_sockets(
+        &self,
+        workspace: &Path,
+        config: &SandboxConfig,
+    ) -> anyhow::Result<(SandboxProfile, Vec<PathBuf>)> {
+        let mut profile = self.resolve(workspace, config)?;
+        let mut runtime_socket_denies = Vec::new();
+        if profile.restrict_network {
+            crate::runtime_sockets::append_runtime_socket_denies(
+                &mut profile.deny,
+                &mut runtime_socket_denies,
+            )
+            .map_err(|error| anyhow::anyhow!("runtime-socket deny resolution failed: {error}"))?;
+        }
+        Ok((profile, runtime_socket_denies))
     }
 
     fn resolve(&self, workspace: &Path, config: &SandboxConfig) -> anyhow::Result<SandboxProfile> {
@@ -516,6 +532,7 @@ impl ProfileName {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::{network_inheritance_config, skip_if_host_hook_write_deny_unresolvable};
 
     #[test]
     fn parse_profile_names() {
@@ -569,21 +586,6 @@ mod tests {
         assert_eq!(p.to_string(), "my-custom");
     }
 
-    /// Hosts with a retargetable `$GROK_HOME/hooks` symlink (fail-closed under
-    /// write-deny) cannot resolve enforcing profiles against the real home.
-    fn skip_if_host_hook_write_deny_unresolvable() -> bool {
-        if !crate::hook_write_deny::profile_enforces_hook_write_deny(&ProfileName::Workspace) {
-            return false;
-        }
-        match crate::hook_write_deny::resolve_hook_write_deny_snapshot() {
-            Ok(_) => false,
-            Err(e) => {
-                eprintln!("skipping profile resolve test: host hook write-deny unresolvable ({e})");
-                true
-            }
-        }
-    }
-
     #[test]
     fn built_in_network_restriction_values() {
         if skip_if_host_hook_write_deny_unresolvable() {
@@ -600,53 +602,6 @@ mod tests {
         ] {
             let resolved = name.resolve_profile(&workspace, &config).unwrap();
             assert_eq!(resolved.restrict_network, expected, "{name}");
-        }
-    }
-
-    fn network_inheritance_config() -> SandboxConfig {
-        SandboxConfig {
-            profiles: HashMap::from([
-                (
-                    "strict-inherited".to_string(),
-                    ProfileConfig {
-                        extends: Some("strict".to_string()),
-                        restrict_network: None,
-                        read_only: vec![],
-                        read_write: vec![],
-                        deny: vec![],
-                    },
-                ),
-                (
-                    "read-only-inherited".to_string(),
-                    ProfileConfig {
-                        extends: Some("read-only".to_string()),
-                        restrict_network: None,
-                        read_only: vec![],
-                        read_write: vec![],
-                        deny: vec![],
-                    },
-                ),
-                (
-                    "strict-unrestricted".to_string(),
-                    ProfileConfig {
-                        extends: Some("strict".to_string()),
-                        restrict_network: Some(false),
-                        read_only: vec![],
-                        read_write: vec![],
-                        deny: vec![],
-                    },
-                ),
-                (
-                    "workspace-restricted".to_string(),
-                    ProfileConfig {
-                        extends: Some("workspace".to_string()),
-                        restrict_network: Some(true),
-                        read_only: vec![],
-                        read_write: vec![],
-                        deny: vec![],
-                    },
-                ),
-            ]),
         }
     }
 

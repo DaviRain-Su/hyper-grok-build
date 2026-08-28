@@ -226,7 +226,7 @@ mod tests {
             .status(status)
             .body(None::<Vec<u8>>)
             .expect("response builds");
-        tokio_tungstenite::tungstenite::Error::Http(resp)
+        tokio_tungstenite::tungstenite::Error::Http(Box::new(resp))
     }
 
     #[test]

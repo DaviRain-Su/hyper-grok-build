@@ -109,6 +109,8 @@ crates = [
 from = ["crates/codegen", "crates/common"]
 crates = [
   "xai-grok-paths",
+  "xai-dirs",
+  "xai-grok-dashboard-store",
   "xai-grok-env",
   "xai-grok-secrets",
   "xai-grok-extra-ca",

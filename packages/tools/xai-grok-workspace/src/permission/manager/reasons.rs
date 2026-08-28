@@ -21,6 +21,7 @@ pub const STATIC_ALLOWLIST: &str = "static_allowlist";
 pub const SAFE_COMMAND: &str = "safe_command";
 pub const SESSION_DENY: &str = "session_deny";
 pub const PROMPT_DENY: &str = "prompt_deny";
+pub const PROMPT_ALLOW: &str = "prompt_allow";
 pub const NEEDS_USER: &str = "needs_user";
 pub const BASH_REQUEST_FLOOR: &str = "bash_request_floor";
 pub const OPAQUE_SHELL: &str = "opaque_shell";
@@ -49,6 +50,7 @@ pub const ALL: &[&str] = &[
     SAFE_COMMAND,
     SESSION_DENY,
     PROMPT_DENY,
+    PROMPT_ALLOW,
     NEEDS_USER,
     BASH_REQUEST_FLOOR,
     OPAQUE_SHELL,

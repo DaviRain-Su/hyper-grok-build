@@ -193,10 +193,10 @@ struct SuggestPromptRequest {
     #[serde(default)]
     session_id: Option<String>,
     /// Client hint for the suggestion model (the pager sends its env
-    /// override, or `grok-build-0.1` when its catalog offers it). One tier
+    /// override, or `grok-4.6` when its catalog offers it). One tier
     /// of the shell-side resolution in
     /// `prompt_suggest::effective_suggest_model`: env > config.toml > remote
-    /// > this hint > `grok-build-0.1` default, catalog-guarded (a
+    /// > this hint > `grok-4.6` default, catalog-guarded (a
     /// non-sampleable effective model skips the request; the session model
     /// is never used).
     #[serde(default)]
@@ -213,7 +213,7 @@ struct SuggestPromptResponse {
 /// Upper bound on the suggestion round-trip. Turn-end prediction is not
 /// latency-critical (the user is reading the agent's reply — the idle window
 /// after a turn is typically long), but a hung call must not pin the oneshot
-/// forever. Reasoning models (e.g. `grok-build`) can take ~30s on a cold
+/// forever. Reasoning models (e.g. `grok-4.6`) can take ~30s on a cold
 /// cache; a late suggestion is still useful (the pager's generation guard
 /// and empty-prompt gating discard it if the user moved on).
 const SUGGEST_PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);

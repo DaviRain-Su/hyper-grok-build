@@ -3,6 +3,8 @@
 //! payload preparation.
 #![allow(clippy::items_after_test_module)]
 use super::*;
+use xai_grok_telemetry::region;
+use xai_grok_telemetry::region::Parent;
 /// Normalize a free-form name (e.g. an MCP server identifier) into a
 /// single safe filesystem segment.
 ///
@@ -542,6 +544,7 @@ impl SessionActor {
             });
         }
     }
+    #[tracing::instrument(skip_all)]
     pub(super) async fn build_user_message_prefix(&self) -> String {
         let display_path = self
             .display_cwd
@@ -894,6 +897,7 @@ impl SessionActor {
         );
         let join_fallback =
             strip_offload_notice(&bounded, &build_offload_notice(full_len, &file_path));
+        let offload_span = region!("turn.prompt_offload_write", Parent::Inherit);
         let offload = tokio::task::spawn_blocking(move || {
             write_offload_and_build(
                 &full_message,
@@ -903,6 +907,7 @@ impl SessionActor {
             )
         })
         .await;
+        offload_span.close();
         match offload {
             Ok(result) => result,
             Err(e) => {

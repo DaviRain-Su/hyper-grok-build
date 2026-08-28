@@ -84,11 +84,13 @@ impl SessionActor {
             respond_to,
             persist_ack: None,
             parsed_prompt_tx: None,
+            initial_child_prompt_ready: None,
             queue_meta: None,
             queue_mutation_policy: QueueMutationPolicy::hidden(),
             // Send-now semantics (see doc): a later real send-now must not
             // leapfrog this fallback in `queue_input`'s FIFO scan.
             send_now: front,
+            traceparent: None,
         };
         let mut state = self.state.lock().await;
         if front {

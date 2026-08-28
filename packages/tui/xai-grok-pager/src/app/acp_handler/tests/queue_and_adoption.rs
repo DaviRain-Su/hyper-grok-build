@@ -36,6 +36,93 @@
         assert!(app.shared_prompt_queue("sess-1").is_none());
     }
 
+    #[test]
+    fn child_queue_changed_routes_parent_message_to_child_and_clears_it() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "sess-child";
+        let notification =
+            |session_id: &str, entries: &[(&str, u64, &str)], running_prompt_id: Option<&str>| {
+                let (tx, _rx) = tokio::sync::oneshot::channel();
+                AcpClientMessage::ExtNotification(xai_acp_lib::AcpArgs {
+                    request: queue_changed_versioned(session_id, entries, running_prompt_id),
+                    response_tx: tx,
+                })
+            };
+
+        assert!(handle(
+            notification("sess-parent", &[("root-prompt", 1, "prompt")], None),
+            &mut app,
+        ));
+        assert!(handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        ));
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .active_subagent = Some(child_sid.to_string());
+
+        assert!(handle(
+            notification(
+                child_sid,
+                &[("parent-message-1", 1, "parent_agent_message")],
+                Some("child-running"),
+            ),
+            &mut app,
+        ));
+
+        let parent = &app.agents[&AgentId(0)];
+        assert_eq!(
+            parent
+                .shared_queue
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["root-prompt"],
+            "the root queue must stay unchanged",
+        );
+        assert!(
+            parent.session.current_prompt_id.is_none(),
+            "a child running id must not trigger root adoption",
+        );
+        assert!(app.pending_running_adoptions.is_empty());
+        assert!(app.pending_effects.is_empty());
+        let child = &parent.subagent_views[child_sid];
+        assert_eq!(
+            child
+                .shared_queue
+                .iter()
+                .map(|entry| (entry.id.as_str(), entry.kind.as_str(), entry.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(
+                "parent-message-1",
+                "parent_agent_message",
+                "text parent-message-1",
+            )],
+        );
+        assert_eq!(child.queue.entry_ids().len(), 1);
+        assert!(child.queue.is_visible());
+
+        assert!(handle(notification(child_sid, &[], None), &mut app));
+        let parent = &app.agents[&AgentId(0)];
+        assert_eq!(
+            parent
+                .shared_queue
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["root-prompt"],
+            "clearing the child must not affect root",
+        );
+        let child = &parent.subagent_views[child_sid];
+        assert!(child.shared_queue.is_empty());
+        assert!(child.queue.entry_ids().is_empty());
+        assert!(!child.queue.is_visible());
+    }
+
     /// When a server-origin row being edited disappears from a later
     /// broadcast (drained / removed by another client), the queue handler
     /// exits `EditingQueued` so the composer isn't stranded.

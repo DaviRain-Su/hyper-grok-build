@@ -47,6 +47,7 @@ pub enum RuleAction {
 /// Tool filter for permission rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum ToolFilter {
     #[default]
     Any,
@@ -56,4 +57,22 @@ pub enum ToolFilter {
     Grep,
     Mcp,
     WebFetch,
+    #[serde(rename = "agent_message", alias = "agentmessage")]
+    AgentMessage,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToolFilter;
+
+    #[test]
+    fn agent_message_wire_round_trips_and_unknown_is_rejected() {
+        let filter: ToolFilter = serde_json::from_str(r#""agent_message""#).unwrap();
+        assert_eq!(filter, ToolFilter::AgentMessage);
+        assert_eq!(
+            serde_json::to_string(&filter).unwrap(),
+            r#""agent_message""#
+        );
+        assert!(serde_json::from_str::<ToolFilter>(r#""future_tool""#).is_err());
+    }
 }

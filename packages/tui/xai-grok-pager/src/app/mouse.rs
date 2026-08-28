@@ -444,6 +444,13 @@ impl AgentView {
                     Some(AgentPane::Queue) => {
                         if let Some(id) = self.queue.delete_click(mouse.column, mouse.row) {
                             let (is_server, row) = self.resolve_queue_row(id);
+                            if row.as_ref().is_some_and(|row| {
+                                !self
+                                    .server_row_capabilities(row)
+                                    .is_some_and(|capabilities| capabilities.can_delete())
+                            }) {
+                                return InputOutcome::Changed;
+                            }
                             if is_server {
                                 if let (Some(_sid), Some(row)) =
                                     (self.session.session_id.as_ref(), row)
@@ -478,6 +485,13 @@ impl AgentView {
                                 || self.set_active_pane(AgentPane::Queue, false))
                         {
                             let (is_server, row) = self.resolve_queue_row(id);
+                            if row.as_ref().is_some_and(|row| {
+                                !self
+                                    .server_row_capabilities(row)
+                                    .is_some_and(|capabilities| capabilities.can_edit())
+                            }) {
+                                return InputOutcome::Changed;
+                            }
                             self.enter_queue_edit(id, is_server, row);
                             return InputOutcome::Changed;
                         }

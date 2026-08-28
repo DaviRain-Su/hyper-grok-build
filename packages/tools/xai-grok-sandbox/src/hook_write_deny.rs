@@ -1,7 +1,7 @@
 //! Grok-owned hook write-deny: plan, identity revalidation, and post-reexec checks.
 //! Namespace lockdown is in [`crate::child_net`].
 
-#[cfg(any(target_os = "linux", all(unix, test)))]
+#[cfg(any(target_os = "linux", all(unix, test), all(feature = "enforce", unix),))]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -390,7 +390,7 @@ pub fn verify_required_hook_write_denies(paths: &[PathBuf]) -> Result<(), HookWr
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_namespace_lockdown() -> Result<(), String> {
+pub(crate) fn ensure_namespace_lockdown() -> Result<(), String> {
     use std::sync::OnceLock;
     static INSTALLED: OnceLock<Result<(), String>> = OnceLock::new();
     INSTALLED
@@ -416,15 +416,24 @@ pub fn verify_hook_write_deny_enforced() -> Result<(), String> {
 }
 
 #[cfg(all(feature = "enforce", target_os = "linux"))]
-pub fn maybe_install_namespace_lockdown_inside_bwrap(profile: &ProfileName) -> Result<(), String> {
-    if profile_enforces_hook_write_deny(profile) && crate::is_inside_bwrap() {
+pub fn maybe_install_namespace_lockdown_inside_bwrap(
+    profile: &ProfileName,
+    workspace: &Path,
+) -> Result<(), String> {
+    let protects_mounts = crate::requires_hook_write_deny(profile, workspace)
+        || crate::requires_read_deny(profile, workspace)
+        || crate::requires_data_write_deny(profile, workspace);
+    if protects_mounts && crate::is_inside_bwrap() {
         ensure_namespace_lockdown()?;
     }
     Ok(())
 }
 
 #[cfg(all(feature = "enforce", unix, not(target_os = "linux")))]
-pub fn maybe_install_namespace_lockdown_inside_bwrap(_profile: &ProfileName) -> Result<(), String> {
+pub fn maybe_install_namespace_lockdown_inside_bwrap(
+    _profile: &ProfileName,
+    _workspace: &Path,
+) -> Result<(), String> {
     Ok(())
 }
 

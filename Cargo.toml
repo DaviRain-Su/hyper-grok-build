@@ -28,11 +28,12 @@ members = [
     "packages/coding-agent/xai-grok-config",
     "packages/coding-agent/xai-grok-config-types",
     "packages/coding-agent/xai-grok-dashboard",
+    "packages/platform/xai-grok-dashboard-store",
     "packages/tools/xai-grok-diag-server",
     "packages/platform/xai-grok-env",
     "packages/platform/xai-grok-extra-ca",
     "packages/tools/xai-grok-foreign-sessions",
-    "packages/platform/xai-grok-home",
+    "packages/platform/xai-dirs",
     "packages/coding-agent/xai-grok-hooks",
     "packages/extensions/xai-grok-extension-api",
     "packages/extensions/xai-grok-extension-macros",
@@ -291,7 +292,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-retry = "0.3"
 tokio-stream = { version = "0.1", features = ["net"] }
 token-source = "1.0.0"
-tokio-tungstenite = "0.27"
+tokio-tungstenite = "0.28"
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.9"
 toml_edit = "0.22"
@@ -334,6 +335,7 @@ xai-circuit-breaker = { path = "packages/platform/xai-circuit-breaker" }
 xai-compaction-transcript = { path = "packages/agent/xai-compaction-transcript" }
 xai-computer-hub-core = { path = "packages/tools/xai-computer-hub-core" }
 xai-computer-hub-sdk = { path = "packages/tools/xai-computer-hub-sdk" }
+xai-dirs = { path = "packages/platform/xai-dirs" }
 xai-fuzzy-file-search = { path = "packages/platform/xai-fuzzy-file-search" }
 xai-gix-status = { path = "packages/platform/xai-gix-status" }
 xai-grok-active-sessions = { path = "packages/coding-agent/xai-grok-active-sessions" }
@@ -343,6 +345,7 @@ xai-grok-auth = { path = "packages/ai/xai-grok-auth" }
 xai-grok-bundle = { path = "packages/coding-agent/xai-grok-bundle" }
 xai-grok-config = { path = "packages/coding-agent/xai-grok-config" }
 xai-grok-config-types = { path = "packages/coding-agent/xai-grok-config-types" }
+xai-grok-dashboard-store = { path = "packages/platform/xai-grok-dashboard-store" }
 xai-grok-diag-server = { path = "packages/tools/xai-grok-diag-server" }
 xai-grok-env = { path = "packages/platform/xai-grok-env" }
 xai-grok-extension-api = { path = "packages/extensions/xai-grok-extension-api" }
@@ -351,7 +354,6 @@ xai-grok-extension-runtime = { path = "packages/extensions/xai-grok-extension-ru
 xai-grok-extension-sdk = { path = "packages/extensions/xai-grok-extension-sdk" }
 xai-grok-extra-ca = { path = "packages/platform/xai-grok-extra-ca" }
 xai-grok-foreign-sessions = { path = "packages/tools/xai-grok-foreign-sessions" }
-xai-grok-home = { path = "packages/platform/xai-grok-home" }
 xai-grok-http = { path = "packages/ai/xai-grok-http" }
 xai-grok-markdown = { path = "packages/tui/xai-grok-markdown" }
 xai-grok-markdown-core = { path = "packages/tui/xai-grok-markdown-core" }

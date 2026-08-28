@@ -1427,9 +1427,11 @@ impl SessionActor {
                 respond_to,
                 persist_ack: None,
                 parsed_prompt_tx: None,
+                initial_child_prompt_ready: None,
                 queue_meta: None,
                 queue_mutation_policy: QueueMutationPolicy::hidden(),
                 send_now: false,
+                traceparent: None,
             });
         }
         if let Some(rec) = plan.strategy_rec.as_deref() {

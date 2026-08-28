@@ -42,6 +42,32 @@ impl SessionStarted {
     }
 }
 
+/// Itemized context occupancy once session setup (including MCP init) has
+/// finished. Category token fields are the model's tokenizer via
+/// `POST /v1/tokenize-text`. `used_tokens` / `message_tokens` stay the
+/// chat-state occupancy already shown in `/context`.
+#[derive(Serialize)]
+pub struct SessionContextSnapshot {
+    pub session_id: String,
+    pub model_id: String,
+    pub context_window: u64,
+    pub used_tokens: u64,
+    pub usage_pct: u8,
+    pub free_tokens: u64,
+    pub system_prompt_tokens: u64,
+    pub tool_definitions_tokens: u64,
+    pub tool_definitions_count: u64,
+    pub message_tokens: u64,
+    pub skills_tokens: u64,
+    pub skills_count: u64,
+    pub mcp_tokens: u64,
+    pub mcp_server_count: u64,
+    pub agents_md_tokens: u64,
+    pub agents_md_file_count: u64,
+    pub workflows_tokens: u64,
+    pub workflows_count: u64,
+}
+
 #[derive(Serialize)]
 pub struct Turn {
     pub session_id: String,
@@ -152,6 +178,61 @@ mod tests {
     use xai_file_utils::UploadMethod;
 
     use super::TraceUploadReason;
+
+    /// `session_context_snapshot` property keys are a Mixpanel dashboard
+    /// contract — pin the shape so a rename cannot silently break queries.
+    #[test]
+    fn session_context_snapshot_event_shape_is_stable() {
+        use crate::events::TelemetryEvent;
+        assert_eq!(
+            super::SessionContextSnapshot::NAME,
+            "session_context_snapshot"
+        );
+        let value = serde_json::to_value(super::SessionContextSnapshot {
+            session_id: "s1".to_string(),
+            model_id: "grok-4".to_string(),
+            context_window: 1_000_000,
+            used_tokens: 40_000,
+            usage_pct: 4,
+            free_tokens: 960_000,
+            system_prompt_tokens: 8_000,
+            tool_definitions_tokens: 5_000,
+            tool_definitions_count: 12,
+            message_tokens: 2_000,
+            skills_tokens: 27_000,
+            skills_count: 282,
+            mcp_tokens: 1_200,
+            mcp_server_count: 4,
+            agents_md_tokens: 3_400,
+            agents_md_file_count: 2,
+            workflows_tokens: 800,
+            workflows_count: 3,
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "session_id": "s1",
+                "model_id": "grok-4",
+                "context_window": 1_000_000,
+                "used_tokens": 40_000,
+                "usage_pct": 4,
+                "free_tokens": 960_000,
+                "system_prompt_tokens": 8_000,
+                "tool_definitions_tokens": 5_000,
+                "tool_definitions_count": 12,
+                "message_tokens": 2_000,
+                "skills_tokens": 27_000,
+                "skills_count": 282,
+                "mcp_tokens": 1_200,
+                "mcp_server_count": 4,
+                "agents_md_tokens": 3_400,
+                "agents_md_file_count": 2,
+                "workflows_tokens": 800,
+                "workflows_count": 3,
+            })
+        );
+    }
 
     /// The `grok-shell-doom_loop_recovery` Mixpanel event's name and
     /// property keys are dashboard contracts — pin them.

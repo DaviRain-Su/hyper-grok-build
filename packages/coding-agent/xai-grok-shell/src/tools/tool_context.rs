@@ -151,6 +151,8 @@ pub struct ToolContext {
     /// `noop()` and the fs-notify loop skips forwarding to avoid per-event cost.
     pub hunk_tracking_enabled: bool,
     pub prompt_index: Arc<tokio::sync::Mutex<usize>>,
+    /// Lock-free mirror used only for synchronous active-message parent attribution.
+    pub(crate) active_message_parent_prompt_index: Arc<std::sync::atomic::AtomicUsize>,
     /// Current subagent nesting depth for this session.
     /// Top-level sessions start at 0; child sessions are parent_depth + 1.
     pub subagent_depth: u32,
@@ -161,6 +163,9 @@ pub struct ToolContext {
         tokio::sync::mpsc::UnboundedSender<
             xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
         >,
+    >,
+    pub subagent_coordinator_sender: Option<
+        xai_grok_tools::implementations::grok_build::task::backend::SubagentCoordinatorSender,
     >,
     /// Shared LSP runtime — cloned cheaply (Arc) from parent to child.
     /// Same pattern as `fs` and `terminal`.
@@ -294,8 +299,10 @@ impl ToolContext {
             hunk_tracker_handle,
             hunk_tracking_enabled: true,
             prompt_index: Arc::new(tokio::sync::Mutex::new(0)),
+            active_message_parent_prompt_index: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             subagent_depth: 0,
             subagent_event_tx: None,
+            subagent_coordinator_sender: None,
             lsp: None,
             lsp_server_names: Vec::new(),
             is_turn_active: None,
@@ -389,8 +396,12 @@ mod tests {
                 hunk_tracker_handle: HunkTrackerHandle::noop(),
                 hunk_tracking_enabled: true,
                 prompt_index: Arc::new(tokio::sync::Mutex::new(0)),
+                active_message_parent_prompt_index: Arc::new(std::sync::atomic::AtomicUsize::new(
+                    0,
+                )),
                 subagent_depth: 0,
                 subagent_event_tx: None,
+                subagent_coordinator_sender: None,
                 lsp: None,
                 lsp_server_names: Vec::new(),
                 is_turn_active: None,

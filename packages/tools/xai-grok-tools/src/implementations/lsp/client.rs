@@ -397,6 +397,7 @@ impl LspClient {
             cmd.env(k, v);
         }
         xai_tty_utils::detach_std_command(&mut cmd);
+        xai_grok_sandbox::child_net::restrict_child_network_std(&mut cmd);
         cmd.envs(xai_tty_utils::pager_env());
         #[allow(clippy::disallowed_methods)] // enrolled by LspClient::enroll once started
         let mut child = cmd

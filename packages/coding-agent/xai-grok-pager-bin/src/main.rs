@@ -179,6 +179,7 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
     let registry = tracing_subscriber::registry()
         .with(fmt_layer.with_filter(env_filter))
         .with(xai_grok_telemetry::sampling_log::layer())
+        .with(xai_grok_telemetry::span_profile::layer(app_entrypoint))
         .with(xai_grok_telemetry::instrumentation::layer())
         .with(xai_grok_telemetry::hooks_log::layer())
         .with(xai_grok_telemetry::otel_layer::build_otel_layer(
@@ -255,6 +256,7 @@ fn run_web_dashboard(args: &DashboardArgs) -> Result<()> {
 
 /// `grok setup`: rendering + exit codes only; fetch logic lives in `xai_grok_shell::managed_config`.
 /// `json` prints the served configuration instead of installing it.
+#[tracing::instrument(level = "debug", skip_all)]
 async fn run_setup_command(json: bool) {
     use xai_grok_shell::managed_config::{self, SetupOutcome};
     if !managed_config::has_principal() {
@@ -317,6 +319,7 @@ async fn run_setup_command(json: bool) {
         }
     }
 }
+#[tracing::instrument(level = "debug", skip_all)]
 async fn run_leader_mgmt(args: LeaderMgmtArgs) -> Result<()> {
     match args.command {
         LeaderMgmtCommand::Kill => kill_leaders().await,
@@ -363,6 +366,7 @@ async fn run_leader_mgmt(args: LeaderMgmtArgs) -> Result<()> {
         }
     }
 }
+#[tracing::instrument(level = "debug", skip_all)]
 async fn kill_leaders() -> Result<()> {
     let leaders = xai_grok_shell::leader::discover_leaders().await;
     if leaders.is_empty() {
@@ -408,6 +412,7 @@ fn resolve_target(args: &LeaderTargetArgs) -> LeaderTarget {
         None => LeaderTarget::Environment(xai_grok_shell::env::GrokBuildEnvironment::Production),
     }
 }
+#[tracing::instrument(skip_all)]
 async fn connect_to_leader(
     args: &LeaderTargetArgs,
 ) -> Result<(LeaderDescriptor, xai_grok_shell::leader::LeaderClient)> {
@@ -521,6 +526,7 @@ fn env_flag_enabled(value: &str) -> bool {
 fn fetch_remote_settings() -> Option<xai_grok_shell::util::config::RemoteSettings> {
     join_early_prefetch(xai_grok_shell::agent::models::start_early_prefetch(None))
 }
+#[tracing::instrument(level = "debug", skip_all)]
 async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
     if matches!(
         &args.command,
@@ -589,6 +595,7 @@ fn ensure_workspace_caps(reg: &LeaderRegistration) -> Result<()> {
     }
     Ok(())
 }
+#[tracing::instrument(level = "debug", skip_all)]
 async fn connect_workspace_control(
     agent_config: &AgentConfig,
     target: &LeaderTargetArgs,
@@ -613,6 +620,7 @@ async fn connect_workspace_control(
         )
     })
 }
+#[tracing::instrument(level = "debug", skip_all)]
 async fn workspace_control(
     target: &LeaderTargetArgs,
     json: bool,
@@ -627,6 +635,7 @@ async fn workspace_control(
     client.cancel();
     Ok(())
 }
+#[tracing::instrument(level = "debug", skip_all)]
 async fn workspace_start(
     args: WorkspaceStartArgs,
     restart: bool,
@@ -966,6 +975,7 @@ fn parse_replay_response(msg: &str, expected_id: &serde_json::Value) -> Option<R
 /// "unknown session id" failures after a leader crash: the bridge declared
 /// the reconnect complete while the new leader was still loading the session,
 /// and the client's next `session/prompt` raced (and lost against) the load.
+#[tracing::instrument(level = "debug", skip_all)]
 async fn replay_request_until_response(
     tx: &tokio::sync::mpsc::UnboundedSender<String>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
@@ -1058,6 +1068,7 @@ fn replay_load_json(sid: &str, cached: &CachedSession) -> Option<String> {
 /// nothing to replay or every restore failed — callers emit
 /// `x.ai/leader_reconnected` with empty params in that case, signalling the
 /// external client to re-establish state itself.
+#[tracing::instrument(skip_all)]
 async fn replay_acp_state_after_reconnect(
     tx: &tokio::sync::mpsc::UnboundedSender<String>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
@@ -1123,8 +1134,15 @@ fn shutdown_and_flush_telemetry(exit_code: i32) -> ! {
     xai_grok_telemetry::sentry::flush_on_shutdown();
     xai_grok_telemetry::otel_layer::shutdown_otel();
     xai_grok_telemetry::debug_log::flush();
+    finalize_span_profile();
     std::process::exit(exit_code);
 }
+fn finalize_span_profile() {
+    if let Some(path) = xai_grok_telemetry::span_profile::finalize() {
+        eprintln!("grok: span profile written to {}", path.display());
+    }
+}
+#[tracing::instrument(level = "debug", skip_all)]
 async fn forward_stdio_line_to_leader(
     line: Vec<u8>,
     leader_tx: &tokio::sync::Mutex<tokio::sync::mpsc::UnboundedSender<String>>,
@@ -1160,6 +1178,7 @@ async fn forward_stdio_line_to_leader(
 const PLUGIN_DIR_LEADER_WARNING: &str = "grok: --plugin-dir is ignored in leader mode; run with --no-leader to \
      load per-process plugins";
 /// Run the `agent` subcommand, dispatching to the appropriate mode.
+#[tracing::instrument(level = "debug", skip_all)]
 async fn run_agent_command(
     agent_args: Box<xai_grok_pager::app::AgentArgs>,
     permission_mode_flag: Option<String>,
@@ -2073,6 +2092,7 @@ fn main() {
     xai_grok_telemetry::debug_log::flush();
     if let Err(e) = result {
         xai_tty_utils::restore_native_stderr();
+        finalize_span_profile();
         match e.downcast_ref::<xai_grok_pager::app::StartupFailure>() {
             Some(startup) => eprintln!("{}", startup.user_report()),
             None => eprintln!("Error: {e:#}"),
@@ -2080,7 +2100,9 @@ fn main() {
         drop(_sentry_guard);
         std::process::exit(1);
     }
+    finalize_span_profile();
 }
+#[tracing::instrument(level = "debug", skip_all)]
 async fn async_main(args: PagerArgs) -> Result<()> {
     // Record the main runtime handle so sync call sites with no runtime
     // context (e.g. the Kimi bearer resolver on a plain std thread) can run
@@ -2587,6 +2609,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
 /// because the target was already on disk) or the child failed does this
 /// fall back to a fresh blocking `grok update`, which itself resolves to
 /// "Already up to date" without downloading when the disk is current.
+#[tracing::instrument(level = "debug", skip_all)]
 async fn finish_update_on_exit(
     adopted: Option<tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>>,
     update_config: &UpdateConfig,
@@ -2728,6 +2751,7 @@ fn resolve_update_trigger(flag: Option<&str>, auto: bool) -> auto_update::CliUpd
         auto_update::CliUpdateTrigger::UserCommand
     }
 }
+#[tracing::instrument(level = "debug", skip_all)]
 async fn run_update_command(
     check: bool,
     json: bool,
@@ -2799,6 +2823,7 @@ async fn run_update_command(
 /// Best-effort and non-fatal: discovery/connect/control failures are logged and
 /// skipped. The leader re-checks the directional version guard authoritatively;
 /// the pager-side `live_info` check just avoids connecting to newer leaders.
+#[tracing::instrument(level = "debug", skip_all)]
 async fn signal_leaders_to_relaunch(installed_version: &str, allow_same_version: bool) {
     for d in xai_grok_shell::leader::discover_leaders().await {
         if d.classification != xai_grok_shell::leader::LeaderDiscoveryState::Reachable {

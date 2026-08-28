@@ -50,6 +50,17 @@ pub(crate) async fn test_grok_build_agent_with_todo() -> xai_grok_agent::Agent {
     use xai_grok_tools::registry::types::ToolConfig;
     test_agent_with_tools(vec![ToolConfig::for_tool::<TodoWriteTool>()]).await
 }
+#[cfg(test)]
+pub(crate) async fn test_agent_with_active_message_tool() -> xai_grok_agent::Agent {
+    use xai_grok_tools::implementations::grok_build::send_subagent_message::SendSubagentMessageTool;
+    use xai_grok_tools::implementations::grok_build::todo::TodoWriteTool;
+    use xai_grok_tools::registry::types::ToolConfig;
+    test_agent_with_tools(vec![
+        ToolConfig::for_tool::<SendSubagentMessageTool>(),
+        ToolConfig::for_tool::<TodoWriteTool>(),
+    ])
+    .await
+}
 /// Agent with the real `enter_plan_mode` + `exit_plan_mode` tools registered so
 /// `prepare_tool_call` can parse a genuine `exit_plan_mode` call.
 /// `exit_plan_mode` only finalizes when `enter_plan_mode` is also present.
@@ -221,6 +232,7 @@ pub(crate) async fn create_test_actor_with_terminal(
         notifications_suppressed: false,
         rewindable: false,
         front_message_committed: false,
+        hook_block_hold: Default::default(),
         nudges_used_this_session: 0,
     });
     let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -514,6 +526,7 @@ pub(crate) fn user_item_with_rx(
         respond_to,
         persist_ack: None,
         parsed_prompt_tx: None,
+        initial_child_prompt_ready: None,
         queue_meta: Some(crate::session::prompt_queue::QueueEntryMeta {
             id: id.to_string(),
             version: 0,
@@ -525,6 +538,7 @@ pub(crate) fn user_item_with_rx(
         }),
         queue_mutation_policy: QueueMutationPolicy::editable(),
         send_now: false,
+        traceparent: None,
     };
     (item, rx)
 }
@@ -558,9 +572,11 @@ pub(crate) fn input_with_origin_rx(
         respond_to,
         persist_ack: None,
         parsed_prompt_tx: None,
+        initial_child_prompt_ready: None,
         queue_meta: None,
         queue_mutation_policy: QueueMutationPolicy::hidden(),
         send_now: false,
+        traceparent: None,
     };
     (item, rx)
 }
@@ -583,13 +599,13 @@ pub(crate) fn queue_input_request(
 /// `LocalSet` (`spawn_local`).
 #[cfg(test)]
 pub(crate) fn running_task_stub(prompt_id: &str) -> AgentTask {
-    AgentTask {
-        prompt_id: prompt_id.to_string(),
-        handle: tokio::task::spawn_local(async {
+    AgentTask::new(
+        prompt_id,
+        tokio::task::spawn_local(async {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         })
         .abort_handle(),
-    }
+    )
 }
 #[cfg(test)]
 pub(crate) async fn build_actor() -> (

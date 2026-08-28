@@ -395,6 +395,7 @@ impl HubHandle {
 pub(crate) struct SessionRoutedToolHandler {
     tool_id: ToolId,
     desc: ToolDescription,
+    semantic_kind: Option<xai_grok_tools::types::tool::ToolKind>,
     schema: Option<Value>,
     workspace: WorkspaceHandle,
 }
@@ -402,18 +403,23 @@ impl SessionRoutedToolHandler {
     pub(crate) fn new(
         name: String,
         desc: ToolDescription,
+        semantic_kind: Option<xai_grok_tools::types::tool::ToolKind>,
         schema: Option<Value>,
         workspace: WorkspaceHandle,
     ) -> Result<Self, xai_tool_protocol::IdError> {
         Ok(Self {
             tool_id: ToolId::new(name)?,
             desc,
+            semantic_kind,
             schema,
             workspace,
         })
     }
     fn name(&self) -> &str {
         self.tool_id.as_str()
+    }
+    pub(crate) fn permission_access(&self, args: &Value) -> Option<crate::permission::AccessKind> {
+        crate::permission::access_kind_for_hub_tool(self.semantic_kind, self.name(), args)
     }
 }
 /// RAII guard that brackets a tool call's activity-tracker accounting.
@@ -499,7 +505,7 @@ impl ToolServerHandler for SessionRoutedToolHandler {
         let call_id = ctx.call_id.to_string();
         if crate::permission::hitl_permission_live_enabled()
             && !session.yolo_mode()
-            && let Some(access) = crate::permission::access_kind_for_hub_tool(self.name(), &args)
+            && let Some(access) = self.permission_access(&args)
         {
             let transport = self
                 .workspace
@@ -759,6 +765,7 @@ mod tests {
             tool_name.to_owned(),
             ToolDescription::new(tool_name.to_owned(), String::new()),
             None,
+            None,
             workspace.clone(),
         )
         .expect("test tool name is a valid ToolId")
@@ -770,12 +777,52 @@ mod tests {
             "not a tool id!".to_owned(),
             ToolDescription::new("not a tool id!".to_owned(), String::new()),
             None,
+            None,
             handle.clone(),
         );
         assert!(
             err.is_err(),
             "invalid name must be rejected at construction"
         );
+    }
+    #[tokio::test]
+    async fn renamed_active_message_handler_keeps_semantic_hitl_classification() {
+        let handle = crate::handle::tests::make_handle();
+        let mut config = xai_grok_tools::registry::types::ToolConfig::for_tool::<
+            xai_grok_tools::implementations::grok_build::SendSubagentMessageTool,
+        >();
+        config.name_override = Some("relay_to_subagent".to_owned());
+        assert_eq!(
+            config.kind,
+            Some(xai_grok_tools::types::tool::ToolKind::ActiveAgentMessage)
+        );
+        let model_name = config.name_override.clone().expect("name override");
+        let desc = ToolDescription::new(model_name.clone(), "relay");
+        let handler = SessionRoutedToolHandler::new(
+            model_name,
+            desc,
+            Some(ToolKind::ActiveAgentMessage),
+            None,
+            handle,
+        )
+        .expect("renamed handler");
+        let args = serde_json::json!({
+            "subagent_id": "sub-1",
+            "text": "private follow-up",
+        });
+        let access = handler
+            .permission_access(&args)
+            .expect("renamed semantic handler must remain guarded");
+        let crate::permission::AccessKind::AgentMessage { subagent_id } = &access else {
+            panic!("renamed semantic handler must use agent-message access")
+        };
+        assert_eq!(subagent_id, "sub-1");
+        assert!(!subagent_id.contains("private follow-up"));
+        let payload = crate::permission::build_permission_payload_for_test(&access, "tc");
+        assert_eq!(payload["tool_name"], "send_subagent_message");
+        assert_eq!(payload["subagent_id"], "sub-1");
+        assert!(payload.get("text").is_none());
+        assert!(payload.get("edit_file_paths").is_none());
     }
     #[tokio::test]
     async fn handler_tool_id_round_trips_the_validated_name() {

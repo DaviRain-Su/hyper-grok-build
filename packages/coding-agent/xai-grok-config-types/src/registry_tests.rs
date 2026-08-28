@@ -67,6 +67,10 @@ fn registered_settings() {
                 "subagent_worktree_snapshot",
                 ("GROK_SUBAGENT_WORKTREE_SNAPSHOT", false),
             ),
+            (
+                "active_agent_messages",
+                ("GROK_ACTIVE_AGENT_MESSAGES", false),
+            ),
         ]),
     );
 }
@@ -96,6 +100,7 @@ fn every_registered_feature_reads_its_own_remote_setting() {
             Feature::SubagentWorktreeSnapshot => {
                 settings.subagent_worktree_snapshot_enabled = Some(value)
             }
+            Feature::ActiveAgentMessages => settings.active_agent_messages_enabled = Some(value),
             // The one row with no remote tier, stated as such rather than as a
             // projection that reads nothing.
             Feature::BackendTools => {

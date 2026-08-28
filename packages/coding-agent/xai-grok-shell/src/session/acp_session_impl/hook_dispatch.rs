@@ -245,6 +245,8 @@ impl SessionActor {
             return;
         };
         let ctx = self.hook_run_ctx();
+        // Prompt-gate events go through dispatch_prompt_submit_hook;
+        // dispatch_non_blocking debug-asserts observe-only.
         let results =
             xai_grok_hooks::dispatcher::dispatch_non_blocking(&registry, event, &envelope, &ctx)
                 .await;
@@ -252,6 +254,44 @@ impl SessionActor {
             .await;
         self.emit_hook_executed_telemetry(&event.to_string(), tool_name, &results)
             .await;
+    }
+
+    /// Enforcement scope for a prompt-gate block: only a real user prompt on
+    /// a top-level session. The event fires for every origin, but synthetic
+    /// wakes and subagent sessions run the gate observe-only.
+    pub(super) fn should_enforce_prompt_block(
+        &self,
+        policy: &xai_agent_lifecycle::InputPolicy,
+    ) -> bool {
+        policy.authority.is_human_intent() && !self.startup_hints.is_subagent
+    }
+
+    /// Run the `UserPromptSubmit` prompt gate: observe client hooks, then the
+    /// on-disk registry, with the shared scrollback and telemetry side
+    /// effects. Returns the gate verdict; the caller decides whether to
+    /// enforce it (`Block` rejects the prompt).
+    pub(super) async fn dispatch_prompt_submit_hook(
+        &self,
+        payload: xai_grok_hooks::event::HookPayload,
+        prompt_id: Option<&str>,
+    ) -> xai_grok_hooks::result::PromptDecision {
+        let event = xai_grok_hooks::event::HookEventName::UserPromptSubmit;
+        if !self.may_have_hooks_for(event) {
+            return xai_grok_hooks::result::PromptDecision::Allow;
+        }
+        // Fires observe-only client hooks before (and independent of) the on-disk registry guard below.
+        let envelope = self.fire_hook(event, prompt_id.map(|s| s.to_string()), payload);
+        let Some(registry) = self.hook_registry.borrow().clone() else {
+            return xai_grok_hooks::result::PromptDecision::Allow;
+        };
+        let ctx = self.hook_run_ctx();
+        let gate =
+            xai_grok_hooks::dispatcher::dispatch_prompt_gate(&registry, &envelope, &ctx).await;
+        self.send_hook_execution(&event.to_string(), None, prompt_id, &gate.results)
+            .await;
+        self.emit_hook_executed_telemetry(&event.to_string(), None, &gate.results)
+            .await;
+        gate.decision
     }
 
     pub(super) async fn emit_hook_executed_telemetry(

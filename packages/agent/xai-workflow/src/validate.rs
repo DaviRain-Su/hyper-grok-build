@@ -39,10 +39,32 @@ pub fn validate_script(
     validate_script_with_agent_budget(script, args, crate::DEFAULT_AGENT_BUDGET)
 }
 
+pub fn validate_script_with_cancel(
+    script: &str,
+    args: Option<serde_json::Value>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<ValidationReport, ValidationError> {
+    validate_script_with_agent_budget_and_cancel(script, args, crate::DEFAULT_AGENT_BUDGET, cancel)
+}
+
 pub fn validate_script_with_agent_budget(
     script: &str,
     args: Option<serde_json::Value>,
     agent_budget: u64,
+) -> Result<ValidationReport, ValidationError> {
+    validate_script_with_agent_budget_and_cancel(
+        script,
+        args,
+        agent_budget,
+        tokio_util::sync::CancellationToken::new(),
+    )
+}
+
+fn validate_script_with_agent_budget_and_cancel(
+    script: &str,
+    args: Option<serde_json::Value>,
+    agent_budget: u64,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> Result<ValidationReport, ValidationError> {
     let meta = extract_meta(script)?;
 
@@ -119,7 +141,7 @@ pub fn validate_script_with_agent_budget(
         args: args.unwrap_or_else(default_probe_args),
         journal: Journal::new(None),
         host_tx,
-        cancel: tokio_util::sync::CancellationToken::new(),
+        cancel,
         max_ops: 10_000_000,
     });
     drop(host);
@@ -169,6 +191,19 @@ mod tests {
         .unwrap();
         assert_eq!(report.name, "t");
         assert!(report.outcome_ok);
+    }
+
+    #[test]
+    fn pre_cancelled_validation_stops_the_engine() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let error = validate_script_with_cancel(
+            "let meta = #{ name: \"cancelled\", description: \"d\" }; loop {}",
+            None,
+            cancel,
+        )
+        .expect_err("pre-cancelled validation must stop");
+        assert!(matches!(error, ValidationError::Run(_)));
     }
 
     #[test]

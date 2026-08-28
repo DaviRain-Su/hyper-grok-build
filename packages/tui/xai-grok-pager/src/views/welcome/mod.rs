@@ -3041,14 +3041,14 @@ mod tests {
         let before_write =
             crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, owner_id).unwrap();
         assert!(
-            !before_write.as_str().contains("a=t"),
+            !before_write.as_str().contains("a=T"),
             "constructing the clear must not commit ownership"
         );
         post_flush.write_to(&mut Vec::new()).unwrap();
         let after_write =
             crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, owner_id).unwrap();
         assert!(
-            after_write.as_str().contains("a=t"),
+            after_write.as_str().contains("a=T"),
             "writing the clear must commit ownership"
         );
     }

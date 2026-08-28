@@ -367,6 +367,7 @@ async fn protected_rows_reject_generic_mutations() {
                 !actor
                     .handle_interject_queued_prompt("parent", 0, None, Some("changed again"))
                     .await
+                    .cancel_running_turn
             );
             actor.handle_hold_edit("parent".into()).await;
             actor.handle_release_edit("parent").await;
@@ -623,6 +624,75 @@ async fn maybe_start_blocks_when_front_under_edit_hold() {
             {
                 let state = actor.state.try_lock().expect("no await since promote");
                 assert_eq!(state.running_prompt_id(), Some("p1"));
+                if let Some(task) = state.running_task.as_ref() {
+                    task.handle.abort();
+                }
+            }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_initial_child_prompt_does_not_ack_readiness() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state
+                    .pending_inputs
+                    .push_back(user_item("running", "alice"));
+                state.running_task = Some(running_task_stub("running"));
+            }
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let (respond_to, _prx) = oneshot::channel();
+            let mut request = queue_input_request(
+                vec![acp::ContentBlock::Text(acp::TextContent::new("child"))],
+                "child-prompt",
+                respond_to,
+            );
+            request.initial_child_prompt_ready = Some(ready_tx);
+            let _ = actor.queue_input(request).await;
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.clone().maybe_start_running_task(completion_tx).await;
+            assert!(
+                tokio::time::timeout(std::time::Duration::ZERO, ready_rx)
+                    .await
+                    .is_err(),
+                "queued but unpromoted prompt must not acknowledge readiness"
+            );
+            if let Some(task) = actor.state.lock().await.running_task.as_ref() {
+                task.handle.abort();
+            }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn exact_initial_child_prompt_promotion_acknowledges_readiness() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let (respond_to, _prx) = oneshot::channel();
+            let mut request = queue_input_request(
+                vec![acp::ContentBlock::Text(acp::TextContent::new("child"))],
+                "child-prompt",
+                respond_to,
+            );
+            request.initial_child_prompt_ready = Some(ready_tx);
+            let _ = actor.queue_input(request).await;
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.clone().maybe_start_running_task(completion_tx).await;
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::ZERO, ready_rx).await,
+                Ok(Ok(())),
+            );
+            {
+                let state = actor.state.try_lock().expect("uncontended");
+                assert_eq!(state.running_prompt_id(), Some("child-prompt"));
                 if let Some(task) = state.running_task.as_ref() {
                     task.handle.abort();
                 }
@@ -1289,13 +1359,6 @@ async fn interject_after_cancel_does_nothing_and_keeps_prompt_queued() {
                 state.pending_inputs.push_back(user_item("running", "A"));
                 state.running_task = Some(running_task_stub("running"));
                 state.pending_inputs.push_back(user_item("p1", "A"));
-                state.running_task = Some(AgentTask {
-                    prompt_id: "running".into(),
-                    handle: tokio::task::spawn_local(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                    })
-                    .abort_handle(),
-                });
             }
             *actor
                 .current_prompt_id
@@ -2458,7 +2521,8 @@ async fn queue_send_now_during_goal_routes_by_kind() {
 
             let cancel = actor
                 .handle_interject_queued_prompt("q1", 0, Some("A"), None)
-                .await;
+                .await
+                .cancel_running_turn;
             assert!(!cancel);
             let state = actor.state.lock().await;
             assert_eq!(
@@ -2480,7 +2544,8 @@ async fn queue_send_now_during_goal_routes_by_kind() {
 
             let cancel = actor
                 .handle_interject_queued_prompt("b1", 0, Some("A"), None)
-                .await;
+                .await
+                .cancel_running_turn;
             assert!(!cancel);
             let state = actor.state.lock().await;
             assert!(
@@ -2517,7 +2582,8 @@ async fn queue_send_now_promotes_row_and_requests_cancel() {
 
             let cancel = actor
                 .handle_interject_queued_prompt("b1", 0, Some("A"), Some("ls -la"))
-                .await;
+                .await
+                .cancel_running_turn;
             assert!(cancel, "promoting a row behind a running turn cancels it");
 
             let state = actor.state.lock().await;
@@ -2560,7 +2626,8 @@ async fn queue_send_now_idle_fronts_row_without_cancel() {
 
             let cancel = actor
                 .handle_interject_queued_prompt("q2", 0, Some("A"), None)
-                .await;
+                .await
+                .cancel_running_turn;
             assert!(!cancel, "no running turn — nothing to cancel");
 
             let state = actor.state.lock().await;
@@ -2654,6 +2721,7 @@ async fn stale_completion_does_not_clear_promoted_turns_running_task() {
                         usage: None,
                         tool_overrides: None,
                     }),
+                    Some(0),
                 )
                 .await;
 
@@ -3138,7 +3206,8 @@ async fn queue_send_now_never_cancels_uncommitted_front() {
 
             let cancel = actor
                 .handle_interject_queued_prompt("m2", 0, Some("client"), None)
-                .await;
+                .await
+                .cancel_running_turn;
             assert!(!cancel, "an uncommitted front must not be cancelled");
             let state = actor.state.lock().await;
             let order: Vec<&str> = state

@@ -343,9 +343,11 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
                         respond_to,
                         persist_ack: None,
                         parsed_prompt_tx: None,
+                        initial_child_prompt_ready: None,
                         queue_meta: None,
                         queue_mutation_policy: QueueMutationPolicy::hidden(),
                         send_now: false,
+                        traceparent: None,
                     });
             });
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;

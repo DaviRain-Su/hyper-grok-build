@@ -190,6 +190,7 @@ impl SearchIndexManager {
     /// Queue a bootstrap of all sessions (idempotent per root; repeat calls re-verify the
     /// on-disk marker). Sets `bootstrapping` eagerly so pollers see `true` before the background
     /// task starts.
+    #[tracing::instrument(name = "session_search.bootstrap", skip_all)]
     pub fn bootstrap_once(&self, root: PathBuf) {
         self.progress.begin_bootstrapping();
         let _ = self.tx.send(SearchManagerCmd::BootstrapOnce { root });
@@ -237,6 +238,7 @@ impl SearchIndexManager {
 
 /// Execute a session search query, waiting up to [`BOOTSTRAP_WAIT_TIMEOUT`]
 /// for a first-call bootstrap so the query runs against a populated index.
+#[tracing::instrument(name = "session_search.query", skip_all)]
 pub async fn execute_search(
     manager: Option<&SearchIndexManager>,
     root_dir: &Path,

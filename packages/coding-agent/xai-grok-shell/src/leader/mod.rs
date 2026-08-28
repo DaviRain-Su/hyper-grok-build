@@ -533,6 +533,7 @@ fn reachable_leader_pids(leaders: &[LeaderDescriptor]) -> Vec<(u32, String)> {
 /// running after leader mode was disabled by policy (`reason`). Emits unified_log
 /// (captured in unified.jsonl) so operators can attribute eviction kills; the `tracing`
 /// lines are kept for local debug. Errors are logged, never fatal.
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn kill_stale_reachable_leaders(reason: &'static str) {
     let targets = reachable_leader_pids(&discover_leaders().await);
     let discovered = targets.len();

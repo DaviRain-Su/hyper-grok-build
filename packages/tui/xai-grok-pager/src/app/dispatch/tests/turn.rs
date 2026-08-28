@@ -404,6 +404,7 @@ fn lost_cancel_is_resent_while_still_cancelling() {
             agent_result: None,
             cancel_trigger: None,
             cancellation_category: None,
+            cancellation_context: None,
             received_at: std::time::Instant::now(),
         });
     }
@@ -476,6 +477,7 @@ fn cancel_retry_reuses_recorded_subagent_choice() {
             agent_result: None,
             cancel_trigger: None,
             cancellation_category: None,
+            cancellation_context: None,
             received_at: std::time::Instant::now(),
         });
     assert!(reconcile_overdue_cancels(&mut app).is_none());
@@ -521,6 +523,7 @@ fn confirmed_stop_retry_does_not_rearm_auto_resend() {
             agent_result: None,
             cancel_trigger: None,
             cancellation_category: None,
+            cancellation_context: None,
             received_at: std::time::Instant::now(),
         });
     }
@@ -1782,6 +1785,7 @@ fn reconcile_error_formats_marker_and_defers_to_banner() {
                 agent_result: Some("boom".into()),
                 cancel_trigger: None,
                 cancellation_category: None,
+                cancellation_context: None,
                 received_at: std::time::Instant::now()
                     - (TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1)),
             });

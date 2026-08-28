@@ -1,6 +1,15 @@
+use super::super::types::{ActiveAgentMessageOutcome, ActiveAgentMessageRequest};
 use super::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+const TEST_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+async fn await_with_timeout<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(TEST_WAIT, future)
+        .await
+        .expect("backend test wait timed out")
+}
 
 /// Helper: receive the next event, match the expected variant, or panic.
 macro_rules! recv_event {
@@ -21,6 +30,94 @@ macro_rules! recv_event {
             ),
         }
     }};
+}
+
+struct BackendWithoutActiveMessages;
+
+struct BackendTestControl;
+
+impl super::super::coordinator::ChildControl for BackendTestControl {
+    type ProgressFuture = std::future::Ready<super::super::coordinator::SubagentProgress>;
+
+    fn progress(&self) -> Self::ProgressFuture {
+        std::future::ready(super::super::coordinator::SubagentProgress::default())
+    }
+
+    fn cancel(&self) {}
+}
+
+struct BackendTestRunner;
+
+impl super::super::coordinator::ChildRunner for BackendTestRunner {
+    type Control = BackendTestControl;
+    type CompletionData = ();
+    type RunFuture = super::super::coordinator::SendBoxFuture<
+        super::super::coordinator::ChildRunOutput<Self::CompletionData>,
+    >;
+    type ValidateFuture = super::super::coordinator::SendBoxFuture<SubagentValidateTypeOutcome>;
+    type DescribeFuture = super::super::coordinator::SendBoxFuture<SubagentDescribeOutcome>;
+
+    fn run(&self, _: super::super::coordinator::ChildRunRequest<Self::Control>) -> Self::RunFuture {
+        Box::pin(std::future::pending())
+    }
+
+    fn validate_type(&self, _: String, _: String) -> Self::ValidateFuture {
+        Box::pin(std::future::pending())
+    }
+
+    fn describe_type(&self, _: String, _: Option<String>, _: String) -> Self::DescribeFuture {
+        Box::pin(std::future::pending())
+    }
+
+    fn on_completed(&self, _: super::super::coordinator::ChildCompletion<Self::CompletionData>) {}
+}
+
+#[async_trait::async_trait]
+impl SubagentBackend for BackendWithoutActiveMessages {
+    async fn spawn(&self, _request: SubagentRequest) -> Result<SubagentResult, ToolError> {
+        Err(ToolError::custom("unsupported", "spawn unsupported"))
+    }
+
+    async fn query(
+        &self,
+        _id: &str,
+        _block: bool,
+        _timeout_ms: Option<u64>,
+    ) -> Option<SubagentSnapshot> {
+        None
+    }
+
+    async fn cancel(&self, _id: &str) -> SubagentCancelOutcome {
+        SubagentCancelOutcome::NotFound
+    }
+
+    async fn validate_type(
+        &self,
+        _subagent_type: &str,
+        _parent_session_id: &str,
+    ) -> SubagentValidateTypeOutcome {
+        SubagentValidateTypeOutcome::ValidationUnavailable
+    }
+
+    async fn describe_subagent_type(
+        &self,
+        _subagent_type: &str,
+        _harness_agent_type: Option<&str>,
+        _parent_session_id: &str,
+    ) -> SubagentDescribeOutcome {
+        SubagentDescribeOutcome::Unavailable
+    }
+}
+
+#[tokio::test]
+async fn backend_without_active_message_override_is_unsupported() {
+    let resource = SubagentBackendResource(Arc::new(BackendWithoutActiveMessages));
+    let request = ActiveAgentMessageRequest::try_new("sub-1", "follow up").unwrap();
+
+    assert_eq!(
+        resource.backend().send_active_message(request).await,
+        ActiveAgentMessageOutcome::Unsupported
+    );
 }
 
 #[tokio::test]
@@ -188,6 +285,124 @@ async fn channel_backend_query_not_found() {
     assert!(snap.is_none());
 
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn channel_backend_active_message_binds_parent_and_round_trips() {
+    let (sender, mut receiver) =
+        super::super::coordinator::SubagentCoordinator::<BackendTestRunner>::channel();
+    let backend = ChannelBackend::for_coordinator_session(sender, "bound-parent");
+    let send = tokio::spawn(async move {
+        backend
+            .send_active_message(ActiveAgentMessageRequest::try_new("sub-1", "follow up").unwrap())
+            .await
+    });
+
+    let ingress = await_with_timeout(receiver.active_messages.recv())
+        .await
+        .expect("active-message ingress closed");
+    let super::super::active_message::ActiveMessageIngress { request, permit } = ingress;
+    assert_eq!(request.parent_session_id, "bound-parent");
+    assert_eq!(request.request.subagent_id(), "sub-1");
+    assert_eq!(request.request.text().as_ref(), "follow up");
+    request
+        .respond_to
+        .send(ActiveAgentMessageOutcome::Accepted {
+            message_id: "message-1".to_owned(),
+        })
+        .unwrap();
+    drop(permit);
+
+    assert_eq!(
+        ActiveAgentMessageOutcome::Accepted {
+            message_id: "message-1".to_owned()
+        },
+        await_with_timeout(send).await.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn stalled_actor_flood_is_rejected_at_ingress_capacity() {
+    const CAPACITY: usize = 2;
+    let (sender, mut receiver) =
+        super::super::coordinator::SubagentCoordinatorReceiver::with_capacity(CAPACITY);
+    let backend = ChannelBackend::for_coordinator_session(sender, "parent");
+    let first = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            backend
+                .send_active_message(
+                    ActiveAgentMessageRequest::try_new("first", "follow up").unwrap(),
+                )
+                .await
+        }
+    });
+    let first_queued = await_with_timeout(receiver.active_messages.recv())
+        .await
+        .expect("first active message queued");
+    let second = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            backend
+                .send_active_message(
+                    ActiveAgentMessageRequest::try_new("second", "follow up").unwrap(),
+                )
+                .await
+        }
+    });
+    let second_queued = await_with_timeout(receiver.active_messages.recv())
+        .await
+        .expect("second active message queued");
+
+    assert_eq!(
+        ActiveAgentMessageOutcome::Saturated {
+            max_in_flight: CAPACITY,
+        },
+        await_with_timeout(backend.send_active_message(
+            ActiveAgentMessageRequest::try_new("overflow", "follow up").unwrap(),
+        ))
+        .await
+    );
+    assert!(receiver.active_messages.try_recv().is_err());
+    drop([first_queued, second_queued]);
+    assert_eq!(
+        ActiveAgentMessageOutcome::ChannelClosed,
+        await_with_timeout(first).await.unwrap()
+    );
+    assert_eq!(
+        ActiveAgentMessageOutcome::ChannelClosed,
+        await_with_timeout(second).await.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn legacy_raw_sender_clones_do_not_create_active_message_budgets() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<SubagentEvent>();
+    let first = ChannelBackend::for_session(tx.clone(), "parent");
+    let second = ChannelBackend::for_session(tx.clone(), "parent");
+
+    for backend in [first, second] {
+        assert_eq!(
+            ActiveAgentMessageOutcome::Unsupported,
+            backend
+                .send_active_message(
+                    ActiveAgentMessageRequest::try_new("child", "follow up").unwrap(),
+                )
+                .await
+        );
+    }
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn channel_backend_active_message_unbound_fails_closed() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<SubagentEvent>();
+    let backend = ChannelBackend::new(tx);
+    let outcome = backend
+        .send_active_message(ActiveAgentMessageRequest::try_new("sub-1", "follow up").unwrap())
+        .await;
+    assert_eq!(outcome, ActiveAgentMessageOutcome::NotFoundOrNotOwned);
+    assert!(rx.try_recv().is_err());
 }
 
 #[tokio::test]

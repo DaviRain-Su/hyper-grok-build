@@ -19,9 +19,20 @@ name = "nfs-create-latency-bench"
 path = "src/bin/nfs_create_latency_bench.rs"
 required-features = ["bench"]
 
+[[bin]]
+name = "worktree-lifecycle-bench"
+path = "src/bin/worktree_lifecycle_bench.rs"
+required-features = ["lifecycle-bench"]
+
 [features]
 default-bazel = ["metadata"]
 bench = []
+lifecycle-bench = [
+    "metadata",
+    "dep:sha2",
+    "dep:url",
+    "dep:uuid",
+]
 # SQLite metadata DB for worktree tracking.
 metadata = ["dep:rusqlite", "dep:xai-sqlite-journal"]
 
@@ -32,7 +43,7 @@ clap = { workspace = true }
 crossbeam = { workspace = true }
 dashmap = { workspace = true }
 dunce = { workspace = true }
-xai-grok-home = { workspace = true }
+xai-dirs = { workspace = true }
 gix = { workspace = true, features = ["status", "parallel"] }
 gix-status = { version = "0.30.0" }
 globset = { workspace = true }
@@ -45,6 +56,7 @@ rapidhash = "4.2.0"
 rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true, optional = true }
 tokio-util = { workspace = true }
 tempfile = { workspace = true }
 tracing = { workspace = true }
@@ -52,6 +64,8 @@ xai-gix-status = { workspace = true }
 xai-sqlite-journal = { workspace = true, optional = true }
 xai-tty-utils = { workspace = true }
 tracing-subscriber = { workspace = true }
+url = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

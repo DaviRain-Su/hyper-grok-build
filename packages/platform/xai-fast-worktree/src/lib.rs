@@ -84,8 +84,8 @@ pub use metrics::{
 pub use nfs::create_latency_stamp;
 pub use nfs::{
     CleanArtifactsReply, DetachReply, NfsAdopted, NfsCreateDecision, NfsStatusView,
-    NfsWorktreeClient, NfsWorktreeOpts, SalvageReply, dest_is_mountpoint, dest_is_nfs_mount,
-    source_is_linked_local_view,
+    NfsWorktreeClient, NfsWorktreeOpts, SalvageReply, dest_is_known_unmounted, dest_is_mountpoint,
+    dest_is_nfs_mount, source_is_linked_local_view,
 };
 pub fn local_salvage(
     _dest: &std::path::Path,

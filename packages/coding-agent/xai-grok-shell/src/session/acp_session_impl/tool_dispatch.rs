@@ -3,6 +3,7 @@
 //! parse-error formatting.
 
 use super::*;
+use std::path::PathBuf;
 
 /// Number of output lines to show in final bash mode output summary
 const BASH_MODE_FINAL_OUTPUT_LINES: usize = 10;
@@ -48,14 +49,45 @@ fn str_arg<'a>(args: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
 /// - `path` — alternate edit/read tools
 /// - `target_file` — grok_build (`read_file`, via `#[serde(rename)]`)
 ///
-/// Returning the same string for two calls in a batch causes them to share a
+/// Returning the same key for two calls in a batch causes them to share a
 /// `tokio::sync::Mutex` and therefore run sequentially in model-emitted order.
 /// Returning `None` lets the call run fully concurrently with everything else.
 ///
 /// `target_directory` is deliberately omitted — a directory listing isn't an
 /// edit and must not bucket into a file lock.
-pub(super) fn lock_path_for_args(args: &serde_json::Value) -> Option<&str> {
-    str_arg(args, &["file_path", "path", "target_file"])
+pub(super) fn lock_path_for_args(args: &serde_json::Value, cwd: &Path) -> Option<String> {
+    let input = Path::new(str_arg(args, &["file_path", "path", "target_file"])?);
+    let absolute = if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        cwd.join(input)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    let lock_path = canonicalize_existing_ancestor(&normalized).unwrap_or(normalized);
+    Some(lock_path.to_string_lossy().into_owned())
+}
+
+fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    loop {
+        if let Ok(mut canonical) = dunce::canonicalize(ancestor) {
+            suffix.reverse();
+            canonical.extend(suffix);
+            return Some(canonical);
+        }
+        suffix.push(ancestor.file_name()?.to_owned());
+        ancestor = ancestor.parent()?;
+    }
 }
 
 /// Pull the path a read/list tool targets and classify it against the store.
@@ -118,9 +150,16 @@ pub(super) fn backend_tool_call_status(result: Option<&serde_json::Value>) -> ac
     }
 }
 
-/// Temporary gate: only expose resolved model ID to the user for these models.
-pub(super) fn should_show_resolved_model(requested: &str, resolved: &str) -> bool {
-    requested != resolved && super::acp_types::is_coding_model_slug(requested)
+/// Expose the resolved model ID only when the backend actually routed elsewhere
+/// AND the catalog opted this model into checkpoint identity. Same
+/// `show_model_fingerprint` flag as the fingerprint itself, so one server-side
+/// setting governs both — the client keeps no per-slug default.
+pub(super) fn should_show_resolved_model(
+    requested: &str,
+    resolved: &str,
+    show_checkpoint_identity: bool,
+) -> bool {
+    show_checkpoint_identity && requested != resolved
 }
 
 /// Resolve the shell name for the system prompt `Shell:` field.

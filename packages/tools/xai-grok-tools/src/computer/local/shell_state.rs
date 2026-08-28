@@ -298,6 +298,7 @@ impl ShellState {
             .stderr(xai_tty_utils::null_stdio())
             .kill_on_drop(true);
         crate::util::detach_command(&mut cmd);
+        xai_grok_sandbox::child_net::restrict_child_network(&mut cmd);
         // Apply the policy before the `export -p` snapshot so the replayed state
         // is already filtered; otherwise the restore would undo it. No-op unless set.
         //

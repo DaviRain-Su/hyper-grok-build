@@ -30,9 +30,9 @@ pub use thinking::ThinkingBlock;
 pub use tool::{
     DiffLineOutput, DiffRenderConfig, DiscoveredTool, EditToolCallBlock, ExecuteToolCallBlock,
     IntegrationSearchToolCallBlock, LineRange, ListDirToolCallBlock, OtherToolCallBlock,
-    ReadToolCallBlock, SearchFileMatch, SearchLineMatch, SearchToolCallBlock, ToolCallBlock,
-    UseToolCallBlock, discovered_tool_action, render_diff_hunk_highlighted,
-    render_diff_hunks_highlighted,
+    ReadToolCallBlock, SearchFileMatch, SearchLineMatch, SearchToolCallBlock,
+    SentMessagePresentation, SentMessageToolCallBlock, ToolCallBlock, UseToolCallBlock,
+    discovered_tool_action, render_diff_hunk_highlighted, render_diff_hunks_highlighted,
 };
 pub use user::UserPromptBlock;
 pub use workflow::{WorkflowBlock, WorkflowBlockPhase, WorkflowBlockStatus};

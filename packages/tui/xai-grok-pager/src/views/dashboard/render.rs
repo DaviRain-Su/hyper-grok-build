@@ -8,7 +8,7 @@ use ratatui::text::Span;
 use unicode_width::UnicodeWidthStr;
 
 use super::layout::{MIN_DASHBOARD_WIDTH, compute_layout};
-use super::row::{DashboardRow, RowBadge, build_rows_with_roster};
+use super::row::{DashboardRow, RowBadge, build_rows_with_roster, build_rows_with_workspace};
 use super::state::{
     DashboardRowId, DashboardState, Filter, Focusable, Grouping, LocationPickerState, RenameDraft,
     RowState, SectionKey,
@@ -108,6 +108,9 @@ pub fn render_dashboard(
     // Leader-mode session roster (FleetView). Empty in non-leader mode,
     // which naturally gates the appended roster-only rows.
     roster: &[crate::app::roster::RosterEntry],
+    // Dashboard v2 reads membership exclusively from `workspace_snapshot`.
+    workspace_dashboard_enabled: bool,
+    workspace_snapshot: Option<&xai_grok_dashboard_store::WorkspaceSnapshot>,
     // Whether the local on-disk session roster is still being fetched
     // (non-leader mode). When true and there's nothing to show yet, the
     // empty body reads "Loading sessions…" instead of the "no agents
@@ -143,23 +146,33 @@ pub fn render_dashboard(
     // comparators that want to know what view the user came from (None
     // in fresh dashboard renders).
     let active: Option<AgentId> = None;
-    let rows = build_rows_with_roster(
-        agents,
-        &state.pinned,
-        &state.reorder,
-        active,
-        state.grouping,
-        &state.filter,
-        home,
-        roster,
-    );
+    let rows = if workspace_dashboard_enabled {
+        workspace_snapshot
+            .map(|snapshot| build_rows_with_workspace(agents, snapshot, home))
+            .unwrap_or_default()
+    } else {
+        build_rows_with_roster(
+            agents,
+            &state.pinned,
+            &state.reorder,
+            active,
+            state.grouping,
+            &state.filter,
+            home,
+            roster,
+        )
+    };
     // Chat-conversation roster rows can't be deleted from the dashboard
     // yet — record them so the `[✗]` and Ctrl+X arm both skip them.
-    state.conversation_row_ids = roster
-        .iter()
-        .filter(|e| e.origin.kind == "conversation")
-        .map(|e| e.session_id.clone())
-        .collect();
+    state.conversation_row_ids = if workspace_dashboard_enabled {
+        Default::default()
+    } else {
+        roster
+            .iter()
+            .filter(|e| e.origin.kind == "conversation")
+            .map(|e| e.session_id.clone())
+            .collect()
+    };
     state.reanchor_selection(&rows);
 
     // DO NOT GC pinned/reorder at render time. The old
@@ -2316,6 +2329,7 @@ fn render_row(
     let armed_delete = state.armed_delete_row_ref();
     let show_delete = !row.is_more_placeholder
         && !row.id.is_subagent()
+        && !row.id.is_workspace()
         && row.state.allows_delete()
         && !state.row_is_conversation(&row.id)
         && (state.hovered_row.as_ref() == Some(&row.id) || armed_delete == Some(&row.id));
@@ -2684,6 +2698,7 @@ fn render_narrow_rows(
             let armed_here = state.armed_delete_row_ref() == Some(&row.id);
             let show_delete = !row.is_more_placeholder
                 && !row.id.is_subagent()
+                && !row.id.is_workspace()
                 && row.state.allows_delete()
                 && !state.row_is_conversation(&row.id)
                 && (hovered || armed_here);
@@ -3263,7 +3278,9 @@ fn peeked_agent_cwd(
     let id = match row {
         super::DashboardRowId::TopLevel(id) => *id,
         super::DashboardRowId::Subagent { parent, .. } => *parent,
-        super::DashboardRowId::Roster { .. } => return None,
+        super::DashboardRowId::Roster { .. } | super::DashboardRowId::Workspace { .. } => {
+            return None;
+        }
     };
     agents.get(&id).map(|a| a.session.cwd.clone())
 }
@@ -3498,9 +3515,13 @@ fn render_footer(
         return;
     }
 
-    let show_ctrl_x = selected_state.is_some_and(|s| {
-        matches!(s, RowState::Working | RowState::NeedsInput) || s.allows_delete()
-    });
+    let show_ctrl_x = !state
+        .selected
+        .as_ref()
+        .is_some_and(DashboardRowId::is_workspace)
+        && selected_state.is_some_and(|s| {
+            matches!(s, RowState::Working | RowState::NeedsInput) || s.allows_delete()
+        });
     let stop_label = if matches!(
         selected_state,
         Some(RowState::Working | RowState::NeedsInput)

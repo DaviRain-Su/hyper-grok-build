@@ -49,6 +49,7 @@ const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
 pub type CompletionResult = Result<(ConversationResponse, InferenceLatencyStats), SamplingError>;
 
 /// Outcome of a single attempt within the retry loop.
+#[derive(Debug)]
 enum AttemptOutcome {
     /// Stream emitted [`SamplingEvent::Completed`] with a non-empty
     /// response.
@@ -567,6 +568,7 @@ async fn run_one_attempt(
         return AttemptOutcome::InitFailed { error };
     }
     let reasoning_model_identity = request.reasoning_model_identity.clone();
+    let length_policy = request.length_policy;
 
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
@@ -586,6 +588,7 @@ async fn run_one_attempt(
                 None,
                 FailedResponseCapture::default(),
                 output_observed,
+                length_policy,
             )
             .await
         }
@@ -627,6 +630,7 @@ async fn run_one_attempt(
                 doom_check,
                 failed_response,
                 output_observed,
+                length_policy,
             )
             .await
         }
@@ -652,6 +656,7 @@ async fn run_one_attempt(
                 None,
                 FailedResponseCapture::default(),
                 output_observed,
+                length_policy,
             )
             .await
         }
@@ -677,6 +682,7 @@ async fn run_one_attempt(
                 None,
                 FailedResponseCapture::default(),
                 output_observed,
+                length_policy,
             )
             .await
         }
@@ -702,6 +708,7 @@ async fn run_one_attempt(
                 None,
                 FailedResponseCapture::default(),
                 output_observed,
+                length_policy,
             )
             .await
         }
@@ -722,6 +729,7 @@ async fn run_one_attempt(
                 None,
                 FailedResponseCapture::default(),
                 output_observed,
+                length_policy,
             )
             .await
         }
@@ -774,9 +782,11 @@ async fn drive_l2(
     doom_check: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
     failed_response: FailedResponseCapture,
     output_observed: Arc<AtomicBool>,
+    length_policy: xai_grok_sampling_types::LengthPolicy,
 ) -> AttemptOutcome {
     let mut l2 = pin!(l2);
     let mut active_backend_tools = BTreeMap::<String, String>::new();
+    let mut await_first_output_span = Some(tracing::info_span!("sampling.await_first_output"));
     loop {
         tokio::select! {
             biased;
@@ -799,6 +809,7 @@ async fn drive_l2(
                         }
                     }
                     output_observed.store(true, Ordering::Relaxed);
+                    await_first_output_span.take();
                     // Doom outranks the truncation/empty classes: a confident
                     // loop poisons the attempt whatever else it looks like.
                     if let Some(policy) = doom_check {
@@ -813,12 +824,20 @@ async fn drive_l2(
                             };
                         }
                     }
-                    if response.stop_reason == Some(xai_grok_sampling_types::StopReason::Length) {
-                        return AttemptOutcome::Failed {
-                            error: SamplingError::MaxTokensTruncation,
-                            recovery_items: Vec::new(),
+                    // Fail-vs-salvage is centralized in `apply_length_policy`
+                    // (empty Length and Length with tool calls never
+                    // salvage). A salvaged response has no empty reason, so
+                    // it falls through to `Completed` below.
+                    let response =
+                        match crate::client::apply_length_policy(length_policy, *response) {
+                            Ok(response) => Box::new(response),
+                            Err(error) => {
+                                return AttemptOutcome::Failed {
+                                    error,
+                                    recovery_items: Vec::new(),
+                                };
+                            }
                         };
-                    }
                     // A content-filtered turn (Anthropic refusal, OpenAI
                     // content_filter stop reason) is legitimately content-less and
                     // deterministic — resampling it would retry-storm.
@@ -839,6 +858,7 @@ async fn drive_l2(
                             error: info.message.clone(),
                         });
                     }
+                    await_first_output_span.take();
                     let raw = captured
                         .lock()
                         .ok()
@@ -875,6 +895,7 @@ async fn drive_l2(
                             | SamplingEvent::BackendToolCallFailed { .. }
                     ) {
                         output_observed.store(true, Ordering::Relaxed);
+                        await_first_output_span.take();
                     }
                     let _ = event_tx.send(retag(other, &request_id));
                 }
@@ -1108,6 +1129,136 @@ mod tests {
     use super::*;
     use futures_util::stream;
     use xai_grok_sampling_types::ApiErrorCode;
+
+    fn length_completed_event(text: &str) -> SamplingEvent {
+        let response = xai_grok_sampling_types::ConversationResponse {
+            items: vec![xai_grok_sampling_types::ConversationItem::assistant(text)],
+            stop_reason: Some(xai_grok_sampling_types::StopReason::Length),
+            usage: None,
+            cost_usd_ticks: None,
+            message_chunks_emitted: 0,
+            doom_loop_signals: vec![],
+            stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
+        };
+        SamplingEvent::Completed {
+            request_id: RequestId::random(),
+            response: Box::new(response),
+            metrics: Default::default(),
+        }
+    }
+
+    async fn drive_length_event(
+        event: SamplingEvent,
+        policy: xai_grok_sampling_types::LengthPolicy,
+    ) -> AttemptOutcome {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        drive_l2(
+            stream::iter(vec![event]),
+            RequestId::random(),
+            &event_tx,
+            &CancellationToken::new(),
+            Arc::new(Mutex::new(None)),
+            None,
+            None,
+            FailedResponseCapture::default(),
+            Arc::new(AtomicBool::new(false)),
+            policy,
+        )
+        .await
+    }
+
+    /// Legacy policy: a Length completion fails with MaxTokensTruncation.
+    #[tokio::test]
+    async fn length_policy_fail_converts_completed_to_failed() {
+        let outcome = drive_length_event(
+            length_completed_event("partial"),
+            xai_grok_sampling_types::LengthPolicy::Fail,
+        )
+        .await;
+        match outcome {
+            AttemptOutcome::Failed { error, .. } => {
+                assert!(matches!(error, SamplingError::MaxTokensTruncation));
+            }
+            other => panic!("expected Failed(MaxTokensTruncation), got {other:?}"),
+        }
+    }
+
+    /// Salvage policy: a non-empty Length completion is delivered with its
+    /// partial content and the Length stop reason preserved.
+    #[tokio::test]
+    async fn length_policy_salvage_completes_with_partial_content() {
+        let outcome = drive_length_event(
+            length_completed_event("partial"),
+            xai_grok_sampling_types::LengthPolicy::CompletePartial,
+        )
+        .await;
+        match outcome {
+            AttemptOutcome::Completed { response, .. } => {
+                assert_eq!(response.assistant_text(), "partial");
+                assert_eq!(
+                    response.stop_reason,
+                    Some(xai_grok_sampling_types::StopReason::Length)
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// Salvage policy, response carrying tool calls: still fails (the
+    /// trailing call's arguments may be truncated). Pins the invariant that
+    /// stop_reason==Length implies no tool calls.
+    #[tokio::test]
+    async fn length_policy_salvage_with_tool_calls_still_fails() {
+        let event = {
+            let mut e = length_completed_event("partial");
+            let SamplingEvent::Completed { response, .. } = &mut e else {
+                unreachable!("helper builds Completed");
+            };
+            let Some(xai_grok_sampling_types::ConversationItem::Assistant(a)) =
+                response.items.last_mut()
+            else {
+                unreachable!("helper builds a trailing Assistant item");
+            };
+            a.tool_calls = vec![xai_grok_sampling_types::ToolCall {
+                id: "call_cut".into(),
+                name: "do_thing".into(),
+                arguments: "{\"x\": \"trunc".into(),
+            }];
+            e
+        };
+        let outcome = drive_length_event(
+            event,
+            xai_grok_sampling_types::LengthPolicy::CompletePartial,
+        )
+        .await;
+        match outcome {
+            AttemptOutcome::Failed { error, .. } => {
+                assert!(matches!(error, SamplingError::MaxTokensTruncation));
+            }
+            other => panic!("expected Failed(MaxTokensTruncation), got {other:?}"),
+        }
+    }
+
+    /// Salvage policy, empty response: still fails — never routed to the
+    /// Empty resample family (deterministic under a fixed cap; would
+    /// retry-storm).
+    #[tokio::test]
+    async fn length_policy_salvage_empty_still_fails() {
+        let outcome = drive_length_event(
+            length_completed_event(""),
+            xai_grok_sampling_types::LengthPolicy::CompletePartial,
+        )
+        .await;
+        match outcome {
+            AttemptOutcome::Failed { error, .. } => {
+                assert!(matches!(error, SamplingError::MaxTokensTruncation));
+            }
+            other => panic!("expected Failed(MaxTokensTruncation), got {other:?}"),
+        }
+    }
 
     #[test]
     fn synthesize_idle_timeout_extracts_elapsed_secs() {

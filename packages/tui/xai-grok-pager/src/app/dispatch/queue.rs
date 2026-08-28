@@ -317,6 +317,12 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         log_blocked("loading_replay", sid);
         return QueueDrain::blocked();
     }
+    // A hook blocked the previous prompt: park the local drip-feed queue
+    // until the user re-engages (see `hook_block_hold`).
+    if agent.session.hook_block_hold {
+        log_blocked("hook_block_hold", sid);
+        return QueueDrain::blocked();
+    }
     // Server-owned next turn: a non-running server row (including this
     // client's own in-flight send-now echo) drains shell-side — the
     // `queue/changed(running_prompt_id)` adoption starts it. Draining a LOCAL
@@ -1143,6 +1149,7 @@ pub(super) fn dispatch_queue_interject_shared(
                 if let Some(text) = &new_text {
                     agent.record_prompt_in_history(text);
                 }
+                agent.release_hook_block_hold();
                 agent.note_self_originated_prompt(&id);
                 arm_send_now_and_paint(agent, &id, new_text.as_deref());
             });
@@ -2004,6 +2011,29 @@ mod tests {
         let blocked = maybe_drain_queue(agent);
         assert!(blocked.effects.is_empty());
         assert!(blocked.page_flip_entry.is_none());
+    }
+
+    #[test]
+    fn drain_blocked_while_hook_hold_armed() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.enqueue_prompt("queued follow-up".into());
+        agent.session.hook_block_hold = true;
+
+        let held = maybe_drain_queue(agent);
+        assert!(held.effects.is_empty(), "a held queue must not drain");
+        assert_eq!(
+            agent.session.pending_prompts.len(),
+            1,
+            "the row stays queued"
+        );
+
+        agent.release_hook_block_hold();
+        let drained = maybe_drain_queue(agent);
+        assert!(
+            !drained.effects.is_empty(),
+            "a released queue drains normally"
+        );
     }
 
     /// Turn-start path: the leader/viewer adoption shim

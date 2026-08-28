@@ -25,6 +25,7 @@ pub(super) fn log_dashboard_attached(id: &DashboardRowId) {
         DashboardRowId::TopLevel(_) => "top_level",
         DashboardRowId::Subagent { .. } => "subagent",
         DashboardRowId::Roster { .. } => "roster",
+        DashboardRowId::Workspace { .. } => "workspace",
     };
     log_event(DashboardAgentAttached { kind });
 }

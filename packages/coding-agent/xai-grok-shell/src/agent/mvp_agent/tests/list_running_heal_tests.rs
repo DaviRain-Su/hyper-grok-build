@@ -103,9 +103,10 @@ fn drain_cancelled_finishes(
 }
 
 fn spawn_inspect_stub(
-    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<SubagentEvent>,
+    event_rx: xai_grok_tools::implementations::grok_build::task::coordinator::SubagentCoordinatorReceiver,
     inspect: Option<SubagentInspection>,
 ) {
+    let mut event_rx = event_rx.into_event_receiver();
     tokio::task::spawn_local(async move {
         while let Some(event) = event_rx.recv().await {
             if let SubagentEvent::Inspect(request) = event {

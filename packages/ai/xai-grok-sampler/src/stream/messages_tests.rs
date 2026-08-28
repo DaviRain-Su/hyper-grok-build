@@ -434,11 +434,75 @@ async fn pause_turn_and_unknown_stop_reasons_complete_as_stop() {
     }
 }
 
-/// Pins the model_context_window_exceeded decision: it stays in the
-/// max_tokens truncation class (fatal, non-retryable), not the
-/// context-length Api class.
+/// The most common wire cell: a plain `max_tokens` stop with text only
+/// completes with `stop_reason=Length` and the partial preserved.
 #[tokio::test]
-async fn model_context_window_exceeded_fails_as_max_tokens_truncation() {
+async fn max_tokens_text_only_completes_with_length_stop() {
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(text_block_start(0)),
+        Ok(text_delta(0, "cut answ")),
+        Ok(block_stop(0)),
+        Ok(message_delta_with_stop(messages::StopReason::MaxTokens)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    match evs.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            assert_eq!(response.stop_reason, Some(StopReason::Length));
+            assert_eq!(response.assistant_text(), "cut answ");
+        }
+        other => panic!("expected Completed(Length), got {other:?}"),
+    }
+}
+
+/// A max_tokens stop carrying a completed tool_use block keeps
+/// `stop_reason=Length` — the ToolCalls override must not mask the
+/// truncation (the block's arguments may be a silently-truncated prefix).
+#[tokio::test]
+async fn max_tokens_with_tool_use_keeps_length_stop() {
+    let tool_start = MessageStreamEvent::ContentBlockStart {
+        index: 0,
+        content_block: ContentBlock::ToolUse {
+            id: "call_cut".into(),
+            name: "do_thing".into(),
+            input: serde_json::json!({}),
+            cache_control: None,
+        },
+    };
+    let arg_delta = MessageStreamEvent::ContentBlockDelta {
+        index: 0,
+        delta: StreamDelta::InputJsonDelta {
+            partial_json: "{\"x\": \"trunc".into(),
+        },
+    };
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(tool_start),
+        Ok(arg_delta),
+        Ok(block_stop(0)),
+        Ok(message_delta_with_stop(messages::StopReason::MaxTokens)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    match evs.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            assert_eq!(response.stop_reason, Some(StopReason::Length));
+            assert_eq!(response.tool_calls().len(), 1, "tool call still carried");
+        }
+        other => panic!("expected Completed(Length), got {other:?}"),
+    }
+}
+
+/// Pins the model_context_window_exceeded decision: maps to the Length stop
+/// class and COMPLETES with the partial preserved — fail-vs-salvage belongs
+/// to `drive_l2`, not this transform.
+#[tokio::test]
+async fn model_context_window_exceeded_completes_with_length_stop() {
     let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
         Ok(message_start()),
         Ok(text_block_start(0)),
@@ -452,20 +516,16 @@ async fn model_context_window_exceeded_fails_as_max_tokens_truncation() {
     let raw = stream::iter(events).boxed();
     let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
 
-    assert!(
-        !evs.iter()
-            .any(|e| matches!(e, SamplingEvent::Completed { .. })),
-        "context-window truncation must not complete: {evs:?}"
-    );
     match evs.last().unwrap() {
-        SamplingEvent::Failed { error, .. } => {
+        SamplingEvent::Completed { response, .. } => {
+            assert_eq!(response.stop_reason, Some(StopReason::Length));
             assert_eq!(
-                error.kind,
-                crate::events::SamplingErrorKind::MaxTokensTruncation
+                response.assistant_text(),
+                "truncated answ",
+                "partial content must be preserved"
             );
-            assert!(!error.is_retryable, "truncation is deterministic");
         }
-        other => panic!("expected Failed(MaxTokensTruncation), got {other:?}"),
+        other => panic!("expected Completed(Length), got {other:?}"),
     }
 }
 

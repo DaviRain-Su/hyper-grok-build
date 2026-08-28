@@ -8,7 +8,6 @@ use crate::app::agent::AgentId;
 use crate::app::agent_view::{ActivePane, AgentView};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::app::cancel_latency::{CancelOrigin, TurnEnd};
-use crate::scrollback::blocks::SessionEvent;
 use std::time::Instant;
 use xai_grok_telemetry::events::CancellationScope;
 
@@ -638,7 +637,7 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
                 Some(trigger) => trigger == "send_now",
                 None => expected_send_now.is_some(),
             };
-        let elapsed = agent.turn_elapsed().unwrap_or_default();
+        let elapsed = agent.turn_elapsed();
         crate::unified_log::warn(
             "turn.end_reconciled_from_broadcast",
             agent.session.session_id.as_ref().map(|s| s.0.as_ref()),
@@ -651,30 +650,32 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
             })),
         );
 
+        // Before `finish_turn`: the blocked-prompt requeue reads
+        // `in_flight_prompt`, which finish_turn clears.
+        crate::app::turn_completion::note_hook_blocked_turn(
+            agent,
+            Some(pending.prompt_id.as_str()),
+            pending.cancellation_category.as_deref(),
+            pending.cancellation_context.as_ref(),
+        );
         agent.session.finish_turn(&mut agent.scrollback);
-        let event = if was_cancelling {
-            // Send-now cancel renders no marker (the new prompt is the next turn).
-            (!send_now_cancel).then(|| {
-                crate::app::turn_completion::cancelled_turn_event(
-                    pending.cancellation_category.as_deref(),
-                    elapsed,
-                )
-            })
+        let elapsed_ms = crate::app::turn_completion::duration_to_elapsed_ms(elapsed);
+        let stop = if was_cancelling {
+            crate::app::turn_completion::TurnStopReason::Cancelled
         } else {
-            match pending.stop_reason.as_deref() {
-                // Rate limits drive a dedicated driver UX via the retry
-                // notifications (already delivered); no extra marker.
-                Some("rate_limit") => None,
-                Some("error") => crate::app::turn_completion::turn_failed_event(
-                    &agent.scrollback,
-                    pending.agent_result.as_deref(),
-                    elapsed,
-                ),
-                _ => Some(SessionEvent::TurnCompleted {
-                    elapsed: Some(elapsed),
-                }),
-            }
+            crate::app::turn_completion::TurnStopReason::from(pending.stop_reason.as_deref())
         };
+        let event = crate::app::turn_completion::terminal_marker(
+            crate::app::turn_completion::TerminalMarkerInput {
+                stop,
+                elapsed_ms,
+                agent_result: pending.agent_result.as_deref(),
+                send_now_cancel,
+                cancellation_category: pending.cancellation_category.as_deref(),
+                error_banner_present: !was_cancelling
+                    && crate::app::dispatch::scrollback_has_recent_error_banner(&agent.scrollback),
+            },
+        );
         crate::app::turn_completion::push_turn_terminal_marker(
             agent,
             event,

@@ -44,8 +44,8 @@ fn tool_execution_span(
         tool_result_size_bytes = tracing::field::Empty,
     )
 }
-/// Stamp the dispatch outcome on `span` and close it, returning whether the call
-/// succeeded. Takes the span by value: these fields are recorded exactly once.
+/// Stamp the dispatch outcome on `span` and close it. Takes the span by value:
+/// these fields are recorded exactly once.
 fn record_tool_span_outcome(
     span: tracing::Span,
     result: &Result<ToolRunResult, xai_tool_runtime::ToolError>,
@@ -58,9 +58,28 @@ fn record_tool_span_outcome(
         Err(_) => (false, 0),
     };
     span.record("success", success);
-    span.record("outcome", if success { "success" } else { "error" });
+    span.record("outcome", tool_output_span_outcome(result));
     span.record("tool_result_size_bytes", result_size);
     success
+}
+/// Closed span/log projection for typed tool output. Delivery uncertainty is
+/// successful dispatch but remains explicitly `unconfirmed`, never `error`.
+pub(super) fn tool_output_span_outcome(
+    result: &Result<ToolRunResult, xai_tool_runtime::ToolError>,
+) -> &'static str {
+    use xai_grok_tools::implementations::grok_build::send_subagent_message::SendSubagentMessageDisposition;
+    match result {
+        Ok(tool_result) => match &tool_result.output {
+            ToolsToolOutput::SendSubagentMessage(output) => match output.disposition() {
+                SendSubagentMessageDisposition::Accepted => "success",
+                SendSubagentMessageDisposition::Rejected => "error",
+                SendSubagentMessageDisposition::Unconfirmed => "unconfirmed",
+            },
+            output if output.is_error() => "error",
+            _ => "success",
+        },
+        Err(_) => "error",
+    }
 }
 /// Blocking wait tools that should abort when a mid-turn interjection is pending.
 fn is_interruptible_wait_tool(tool_name: &str, args: &serde_json::Value) -> bool {
@@ -592,19 +611,40 @@ impl SessionActor {
         if approved.iter().any(|p| p.tool_name == "search_tool") {
             self.retry_auth_required_servers().await;
         }
-        let write_paths: std::collections::HashSet<String> = approved
+        let dispatch_cwd = self.tool_context.cwd.to_path_buf();
+        let lock_args: Vec<_> = {
+            let toolset = self.agent.borrow().tool_bridge().toolset();
+            approved
+                .iter()
+                .map(|prepared| {
+                    toolset.remap_params(&prepared.tool_name, prepared.parsed_args.clone())
+                })
+                .collect()
+        };
+        let lock_cwd = dispatch_cwd.clone();
+        let lock_paths = tokio::task::spawn_blocking(move || {
+            lock_args
+                .iter()
+                .map(|args| lock_path_for_args(args, &lock_cwd))
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "file-lock path resolution failed");
+            vec![None; approved.len()]
+        });
+        let write_paths: std::collections::HashSet<_> = approved
             .iter()
-            .filter(|prepared| !prepared.is_read_only)
-            .filter_map(|prepared| lock_path_for_args(&prepared.parsed_args).map(str::to_owned))
+            .zip(&lock_paths)
+            .filter(|(prepared, _)| !prepared.is_read_only)
+            .filter_map(|(_, path)| path.clone())
             .collect();
         let file_locks = {
             let mut map: std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>> =
                 std::collections::HashMap::new();
-            for prepared in &approved {
-                if let Some(fp) = lock_path_for_args(&prepared.parsed_args)
-                    && write_paths.contains(fp)
-                {
-                    map.entry(fp.to_owned())
+            for path in lock_paths.iter().flatten() {
+                if write_paths.contains(path) {
+                    map.entry(path.clone())
                         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
                 }
             }
@@ -612,6 +652,60 @@ impl SessionActor {
         };
         let shared_recovery = Arc::new(tokio::sync::OnceCell::<bool>::const_new());
         let workspace_ops = self.workspace_ops.clone();
+        let workflow_smoke_check_cwd = self.tool_context.cwd.to_path_buf();
+        let workflow_smoke_check_display_cwd = self.display_cwd.get().map(std::path::PathBuf::from);
+        let workflow_smoke_check_session_dir =
+            crate::session::persistence::session_dir(&self.session_info);
+        let workflow_smoke_check_enabled = self.background_workflows_enabled;
+        let (
+            workflow_template_param_names,
+            workflow_tool_name,
+            workflow_script_path_param,
+            workflow_validate_only_param,
+        ) = {
+            let toolset = self.agent.borrow().tool_bridge().toolset();
+            let param_names = toolset.template_param_names();
+            (
+                param_names.clone(),
+                toolset
+                    .tool_name_for_kind(xai_grok_tools::types::tool::ToolKind::Workflow)
+                    .unwrap_or_else(|| "workflow".to_owned()),
+                workflow_write_smoke_check::workflow_param_name("script_path", &param_names),
+                workflow_write_smoke_check::workflow_param_name("validate_only", &param_names),
+            )
+        };
+        let workflow_smoke_check_indices = workflow_write_smoke_check::last_smoke_check_indices(
+            approved.iter().enumerate().map(|(idx, prepared)| {
+                let kind = self
+                    .agent
+                    .borrow()
+                    .tool_bridge()
+                    .tool_kind(&prepared.tool_name);
+                let path_param_names = kind
+                    .map(|kind| {
+                        workflow_write_smoke_check::path_param_names_for_kind(
+                            kind,
+                            &workflow_template_param_names,
+                        )
+                    })
+                    .unwrap_or_default();
+                let path = workflow_write_smoke_check::authored_workflow_arg_path(
+                    kind,
+                    &prepared.parsed_args,
+                    &path_param_names,
+                )
+                .map(|input| {
+                    lock_paths
+                        .get(idx)
+                        .and_then(|path| path.clone())
+                        .unwrap_or_else(|| input.to_owned())
+                });
+                (idx, path)
+            }),
+        );
+        let workflow_smoke_check_permits = Arc::new(tokio::sync::Semaphore::new(
+            workflow_write_smoke_check::MAX_CONCURRENT_CHECKS,
+        ));
         let pending_interjections = self.pending_interjections.clone();
         let session_id: Arc<str> = Arc::from(&*self.session_info.id.0);
         let dispatch_futures: Vec<_> = approved
@@ -623,12 +717,39 @@ impl SessionActor {
                 let shared_recovery = Arc::clone(&shared_recovery);
                 let workspace_ops = workspace_ops.clone();
                 let session_id = session_id.clone();
+                let workflow_smoke_check_cwd = workflow_smoke_check_cwd.clone();
+                let workflow_smoke_check_display_cwd = workflow_smoke_check_display_cwd.clone();
+                let workflow_smoke_check_session_dir = workflow_smoke_check_session_dir.clone();
+                let workflow_smoke_check_permits = Arc::clone(&workflow_smoke_check_permits);
+                let workflow_smoke_check_this_call = workflow_smoke_check_indices.contains(&idx);
+                let workflow_tool_name = workflow_tool_name.clone();
+                let workflow_script_path_param = workflow_script_path_param.clone();
+                let workflow_validate_only_param = workflow_validate_only_param.clone();
                 let pending_interjections = pending_interjections.clone();
                 let blocking_wait_depth = self.tool_context.blocking_wait_depth.clone();
                 let interruptible =
                     is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args);
-                let lock = lock_path_for_args(&prepared.parsed_args)
-                    .and_then(|fp| file_locks.get(fp).cloned());
+                let authored_tool_kind = self
+                    .agent
+                    .borrow()
+                    .tool_bridge()
+                    .tool_kind(&prepared.tool_name);
+                let authored_path_param_names = authored_tool_kind
+                    .map(|kind| {
+                        workflow_write_smoke_check::path_param_names_for_kind(
+                            kind,
+                            &self
+                                .agent
+                                .borrow()
+                                .tool_bridge()
+                                .toolset()
+                                .template_param_names(),
+                        )
+                    })
+                    .unwrap_or_default();
+                let lock = lock_paths[idx]
+                    .as_ref()
+                    .and_then(|path| file_locks.get(path).cloned());
                 let tools_execute_span = tracing::Span::current();
                 async move {
                     let exec_start = std::time::Instant::now();
@@ -645,13 +766,62 @@ impl SessionActor {
                         let workspace_ops = workspace_ops.clone();
                         let session_id = session_id.clone();
                         let lock = lock.clone();
+                        let workflow_smoke_check_cwd = workflow_smoke_check_cwd.clone();
+                        let workflow_smoke_check_display_cwd =
+                            workflow_smoke_check_display_cwd.clone();
+                        let workflow_smoke_check_session_dir =
+                            workflow_smoke_check_session_dir.clone();
+                        let workflow_smoke_check_permits =
+                            Arc::clone(&workflow_smoke_check_permits);
+                        let authored_path_param_names = authored_path_param_names.clone();
+                        let workflow_tool_name = workflow_tool_name.clone();
+                        let workflow_script_path_param = workflow_script_path_param.clone();
+                        let workflow_validate_only_param = workflow_validate_only_param.clone();
                         async move {
-                            let _guard = if let Some(ref l) = lock {
-                                Some(l.lock().await)
-                            } else {
-                                None
+                            let result = {
+                                let _guard = if let Some(ref l) = lock {
+                                    Some(l.lock().await)
+                                } else {
+                                    None
+                                };
+                                dispatch_tool(&workspace_ops, &prepared, &session_id).await
                             };
-                            dispatch_tool(&workspace_ops, &prepared, &session_id).await
+                            let mut result = result;
+                            let snapshot =
+                                if workflow_smoke_check_enabled && workflow_smoke_check_this_call {
+                                    workflow_write_smoke_check::snapshot_authored_workflow(
+                                        authored_tool_kind,
+                                        &prepared.parsed_args,
+                                        &authored_path_param_names,
+                                        &workflow_smoke_check_cwd,
+                                        workflow_smoke_check_display_cwd.as_deref(),
+                                        &workflow_smoke_check_session_dir,
+                                    )
+                                    .await
+                                } else {
+                                    None
+                                };
+                            let failure = match snapshot {
+                                Some(Ok(snapshot)) => {
+                                    workflow_write_smoke_check::check_snapshot(
+                                        snapshot,
+                                        &workflow_smoke_check_permits,
+                                    )
+                                    .await
+                                }
+                                Some(Err(failure)) => Some(failure),
+                                None => None,
+                            };
+                            if let (Ok(tool_result), Some(failure)) = (&mut result, failure) {
+                                workflow_write_smoke_check::append_validation_warning(
+                                    &mut tool_result.prompt_text,
+                                    &failure,
+                                    &workflow_tool_name,
+                                    &workflow_script_path_param,
+                                    &workflow_validate_only_param,
+                                );
+                            }
+                            result
                         }
                     };
                     let result = if interruptible {
@@ -687,6 +857,7 @@ impl SessionActor {
                         .await
                     };
                     let duration_ms = exec_start.elapsed().as_millis() as u64;
+                    let outcome = tool_output_span_outcome(&result);
                     let success = record_tool_span_outcome(tool_span_for_record, &result);
                     xai_grok_telemetry::unified_log::info(
                         "shell.tool.exec_done",
@@ -696,6 +867,7 @@ impl SessionActor {
                             "tool_call_id": prepared.call_id.as_str(),
                             "elapsed_ms": duration_ms,
                             "success": success,
+                            "outcome": outcome,
                         })),
                     );
                     (idx, result, duration_ms)
@@ -754,7 +926,13 @@ impl SessionActor {
                 Err(_) => None,
             };
             let tool_failed = match &result {
-                Ok(tool_result) => tool_result.output.is_error(),
+                Ok(tool_result) => {
+                    crate::session::telemetry::record_completed_tool_output(
+                        &tool_result.output,
+                        duration_ms,
+                    );
+                    tool_result.output.is_error()
+                }
                 Err(_) => true,
             };
             let tool_loop = match result {
@@ -1370,7 +1548,14 @@ impl SessionActor {
                 xai_grok_workspace::permission::AccessKind::WebSearch(q) => {
                     (xai_grok_telemetry::events::AccessKind::Web, q.clone())
                 }
+                xai_grok_workspace::permission::AccessKind::AgentMessage { subagent_id } => (
+                    xai_grok_telemetry::events::AccessKind::AgentMessage,
+                    subagent_id.clone(),
+                ),
+                _ => (xai_grok_telemetry::events::AccessKind::Other, String::new()),
             };
+            let canonical_permission_tool_name =
+                crate::session::telemetry::canonical_permission_tool_name(&access_kind);
             let subagent_session_id = if self.startup_hints.is_subagent {
                 Some(self.session_id_string())
             } else {
@@ -1385,7 +1570,7 @@ impl SessionActor {
             };
             xai_grok_telemetry::session_ctx::log_event(
                 xai_grok_telemetry::events::PermissionPrompted {
-                    tool_name: call.function.name.clone(),
+                    tool_name: canonical_permission_tool_name.clone(),
                     access_kind: telemetry_access_kind,
                     permission_mode: perm_mode,
                     subagent_session_id: subagent_session_id.clone(),
@@ -1464,7 +1649,7 @@ impl SessionActor {
             .in_scope(|| {});
             xai_grok_telemetry::session_ctx::log_event(
                 crate::session::telemetry::permission_decision_payload(
-                    call.function.name.clone(),
+                    canonical_permission_tool_name,
                     telemetry_access_kind,
                     &decision,
                     subagent_session_id.clone(),
@@ -1767,7 +1952,7 @@ impl SessionActor {
     /// back as a turn; abandon: leave plan mode and wait for the user.
     pub(super) async fn resume_plan_approval(
         self: Arc<Self>,
-        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+        completion_tx: mpsc::UnboundedSender<super::tasks_cancel::TurnCompletionMsg>,
     ) {
         if !self.plan_mode.lock().is_awaiting_plan_approval() {
             return;
@@ -1832,7 +2017,7 @@ impl SessionActor {
         self: Arc<Self>,
         text: String,
         mode: PromptMode,
-        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+        completion_tx: mpsc::UnboundedSender<super::tasks_cancel::TurnCompletionMsg>,
     ) {
         let prompt_id = format!("plan-resume-{}", chrono::Utc::now().timestamp_millis());
         let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
@@ -1862,7 +2047,10 @@ impl SessionActor {
         tool_call_input: ToolInput,
     ) -> Result<(String, acp::ToolKind, serde_json::Value), acp::Error> {
         #[allow(unused_mut)]
-        let mut raw_input = serde_json::to_value(&tool_call_input)?;
+        let mut raw_input = match &tool_call_input {
+            ToolInput::SendSubagentMessage(message) => serde_json::to_value(message)?,
+            _ => serde_json::to_value(&tool_call_input)?,
+        };
         let canonical_meta = self.stamp_tool_meta(None, wire_name, Some(&tool_call_input));
         let (title, kind, locations, content) = match tool_call_input {
             ToolInput::ListDir(list_dir) => (
@@ -2085,6 +2273,10 @@ impl SessionActor {
                     format!("Ask {} questions", ask.questions.len())
                 };
                 (title, acp::ToolKind::Other, vec![], vec![])
+            }
+            ToolInput::SendSubagentMessage(message) => {
+                let (title, kind) = active_agent_message_tool_call_display(&message);
+                (title, kind, vec![], vec![])
             }
             ToolInput::WebFetch(wf) => (
                 format!("Fetch: {}", wf.url),

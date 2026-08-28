@@ -94,6 +94,14 @@ pub enum QuestionFocus {
 /// Not `Clone`: `FeedbackTrace` owns its attachments' staged temp files.
 #[derive(Debug)]
 pub enum LocalQuestionKind {
+    /// Hard-modal card opened when a `UserPromptSubmit` hook blocks a prompt.
+    /// Carries the local queue row the blocked prompt was requeued into.
+    /// Esc, Ctrl+C, and dismissal are refused: the queue stays parked until
+    /// the user picks Edit, Resend, or Discard, translated into
+    /// [`crate::app::actions::Action::PromptBlockAnswered`].
+    PromptBlocked {
+        row_id: u64,
+    },
     /// Modal opened by `/fork` to resolve the worktree question.
     /// On submit, the selected option index plus the carried directive
     /// are translated into an
@@ -870,6 +878,15 @@ impl QuestionViewState {
     /// The freeform report stage of the `/feedback` card.
     pub fn is_feedback_report(&self) -> bool {
         matches!(self.local_kind, Some(LocalQuestionKind::Feedback))
+    }
+
+    /// The hard-modal blocked-prompt card: dismissal is refused, so the
+    /// footer must not advertise it.
+    pub fn is_prompt_blocked(&self) -> bool {
+        matches!(
+            self.local_kind,
+            Some(LocalQuestionKind::PromptBlocked { .. })
+        )
     }
 
     /// The trace-consent stage of the `/feedback` card.

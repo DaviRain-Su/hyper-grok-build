@@ -173,6 +173,7 @@ pub(crate) struct StatusResponse {
 ///
 /// Routes through [`WorkspaceOps`]. Eligibility checks still run in shell since
 /// they depend on agent-level config (client type, feature flags).
+#[tracing::instrument(name = "ext.code_nav", skip_all, fields(method = %args.method))]
 pub async fn handle(
     agent: &MvpAgent,
     ops: &xai_grok_workspace::WorkspaceOps,

@@ -322,9 +322,9 @@ async fn build_session_info_used_reflects_recorded_response() {
 /// bug: the catalog map is keyed by the config key (`"custom-catalog-id"`), which
 /// differs from the routing slug (`"test"`, the harness sampling model) that
 /// `build_session_info` reads from the sampling config. A direct `.get(slug)` would
-/// miss the entry and wrongly yield false. Proven on a NON-coding slug so the flag
-/// — not `is_coding_model_slug` — drives the value (the gate's coding-slug OR is
-/// covered by the `acp_types` / pager `format_session_info` tests).
+/// miss the entry and wrongly yield false. The flag is the sole control — the
+/// client keeps no built-in per-slug default — so this is the only thing that
+/// can turn checkpoint identity on.
 #[tokio::test(flavor = "current_thread")]
 async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
     use crate::agent::config::{ModelEntry, ModelInfo};

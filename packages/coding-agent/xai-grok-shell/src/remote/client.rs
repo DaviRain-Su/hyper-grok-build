@@ -1,4 +1,5 @@
 //! HTTP client for backend CRUD operations.
+use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
 use crate::auth::{GrokAuth, GrokComConfig};
 use crate::session::export::{ExportedMessage, ExportedMetadata, ExportedSession};
 use indexmap::IndexMap;
@@ -53,8 +54,8 @@ async fn add_bundle_fetch_headers(
     url: &str,
 ) -> reqwest::RequestBuilder {
     let resolved_auth = match auth_manager {
-        Some(am) => am.auth().await.ok(),
-        None => None,
+        Some(am) if ActiveAuthBackend::default().is_xai_authority() => am.auth().await.ok(),
+        _ => None,
     };
     let mut credentials = crate::util::grok_auth_credentials::GrokAuthCredentials::new(
         resolved_auth.as_ref().map(|auth| auth.key.clone()),
@@ -775,9 +776,11 @@ pub(crate) fn fetch_models_blocking(
             request = request.header("Authorization", format!("Bearer {}", api_key));
         }
         EndpointAuth::Session => {
-            let auth = auth.ok_or_else(|| {
-                BackendError::Auth("No auth credentials for cli-chat-proxy".into())
-            })?;
+            let auth = auth
+                .filter(|_| ActiveAuthBackend::default().is_xai_authority())
+                .ok_or_else(|| {
+                    BackendError::Auth("No auth credentials for cli-chat-proxy".into())
+                })?;
             request = request
                 .header("Authorization", format!("Bearer {}", &auth.key))
                 .header("X-XAI-Token-Auth", "xai-grok-cli")

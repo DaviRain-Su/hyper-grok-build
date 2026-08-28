@@ -624,7 +624,6 @@ async fn subagent_lifecycle_soak_bounds_threads_open_files_and_heap() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
-            let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
             // The soak measures registry churn, not admission: keep every
             // spawn unthrottled so cycle counts stay resource-bound.
             let config = CoordinatorConfig {
@@ -635,12 +634,17 @@ async fn subagent_lifecycle_soak_bounds_threads_open_files_and_heap() {
                 },
                 ..CoordinatorConfig::default()
             };
+            let (command_tx, command_rx) = SubagentCoordinator::<SoakRunner>::channel();
             let gate = Arc::new(tokio::sync::Semaphore::new(0));
             tokio::task::spawn_local(
-                SubagentCoordinator::new(command_rx, SoakRunner { gate: gate.clone() }, config)
-                    .run(),
+                SubagentCoordinator::from_channel(
+                    command_rx,
+                    SoakRunner { gate: gate.clone() },
+                    config,
+                )
+                .run(),
             );
-            let backend = ChannelBackend::new(command_tx);
+            let backend = ChannelBackend::from_coordinator(command_tx);
 
             let warmup_quiesced = warmup(&backend, bounds.warmup).await;
             // Drain the concurrent phase into the baseline; a failed drain marks

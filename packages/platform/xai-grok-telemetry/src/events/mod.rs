@@ -10,7 +10,9 @@ use serde::Serialize;
 use super::enums::PermissionMode;
 pub use super::enums::PrCreationSource;
 
+mod active_agent_message;
 mod permission_analytics;
+pub use active_agent_message::*;
 pub use permission_analytics::*;
 
 /// Binds a product event name to a struct. Implement via `telemetry_event!` below.
@@ -96,6 +98,7 @@ pub enum YoloTrigger {
 
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AccessKind {
     Read,
     Edit,
@@ -103,6 +106,8 @@ pub enum AccessKind {
     Grep,
     Mcp,
     Web,
+    AgentMessage,
+    Other,
 }
 
 /// Outcome of one CLI binary install/update attempt.
@@ -2433,6 +2438,12 @@ telemetry_event!(
 );
 telemetry_event!(SubagentLimitHit, "subagent_limit_hit");
 telemetry_event!(SubagentRateLimitWaited, "subagent_rate_limit_waited");
+telemetry_event!(
+    ActiveAgentMessageCompleted,
+    "active_agent_message_completed"
+);
+telemetry_event!(ActiveAgentMessageLimitHit, "active_agent_message_limit_hit");
+telemetry_event!(ActiveAgentMessageSettled, "active_agent_message_settled");
 telemetry_event!(WorkflowRunStarted, "workflow_run_started");
 telemetry_event!(WorkflowRunEnded, "workflow_run_ended");
 telemetry_event!(
@@ -2607,6 +2618,10 @@ telemetry_event!(ExternalOtelExportHealth, "external_otel_export_health");
 
 // Session lifecycle (structs in session_metrics)
 telemetry_event!(crate::session_metrics::SessionStarted, "session_started");
+telemetry_event!(
+    crate::session_metrics::SessionContextSnapshot,
+    "session_context_snapshot"
+);
 telemetry_event!(crate::session_metrics::Turn, "turn");
 telemetry_event!(
     crate::session_metrics::TurnCompletedLifecycle,
@@ -2668,6 +2683,7 @@ mod tests {
     fn event_fields_shadow_reserved_keys_only_on_the_allowlist() {
         const SOURCES: &[&str] = &[
             include_str!("mod.rs"),
+            include_str!("active_agent_message.rs"),
             include_str!("permission_analytics.rs"),
             include_str!("../session_metrics.rs"),
             include_str!("../memory_telemetry.rs"),
@@ -2765,6 +2781,7 @@ mod tests {
             ("SessionHarness", "session_id"),
             ("SessionLoad", "session_id"),
             ("SessionNew", "session_id"),
+            ("SessionContextSnapshot", "session_id"),
             ("SessionStarted", "session_id"),
             ("TraceUploadAttempted", "session_id"),
             ("TraceUploadAttempted", "turn_number"),

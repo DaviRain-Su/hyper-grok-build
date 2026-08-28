@@ -21,6 +21,17 @@ impl AgentView {
             .pending_prompts
             .iter()
             .position(|p| p.id == id)?;
+        // Removing the blocked row (or any row when no block is pending) is
+        // re-engagement; removing an unrelated row must not unpark the
+        // blocked front.
+        if self
+            .session
+            .blocked_prompt
+            .as_ref()
+            .is_none_or(|b| b.row_id == id)
+        {
+            self.release_hook_block_hold();
+        }
         // Deleting the row being edited discards the edit — and must exit
         // BEFORE the removal so a potential auto-hide pane switch can't hit
         // the editing lock (see queue_edit.rs ordering invariant).
@@ -228,22 +239,23 @@ impl AgentView {
 
     /// Whether bare Enter on the empty composer would actually send the TOP
     /// visible held row — the "Enter to send now" half of the inline hint.
-    /// Server rows always send now; a local top row only when prompt-like
-    /// (`force_interject_queue_row` refuses bash / client-expanded rows with
-    /// a toast, so advertising Enter for them would over-promise).
+    /// A server top row sends only when its wire-kind capabilities allow it;
+    /// a local top row only when prompt-like (`force_interject_queue_row`
+    /// refuses bash / client-expanded rows with a toast).
     pub(crate) fn held_queue_top_sendable(&self) -> bool {
         let running = self.session.current_prompt_id.as_deref();
         let send_now = self.expect_send_now_cancel.as_deref();
-        // Merge order: server rows render (and send) first.
-        if self.shared_queue.iter().any(|e| {
+        // Merge order: the first visible server row is the top row.
+        if let Some(top) = self.shared_queue.iter().find(|entry| {
             crate::views::queue_pane::visible_held_server_row(
-                &e.id,
+                &entry.id,
                 running,
                 send_now,
                 &self.send_now_painted_blocks,
             )
         }) {
-            return true;
+            return crate::views::queue_pane::ServerRowCapabilities::from_wire_kind(&top.kind)
+                .can_send_now();
         }
         self.session.pending_prompts.front().is_some_and(|p| {
             p.kind == crate::app::agent::QueueEntryKind::Prompt && p.wire_matches_display()
@@ -316,6 +328,23 @@ impl AgentView {
             .push_block(crate::scrollback::block::RenderBlock::SessionEvent(block));
     }
 
+    pub(in crate::app) fn server_row_capabilities(
+        &self,
+        row: &crate::views::queue_pane::QueueRowRef,
+    ) -> Option<crate::views::queue_pane::ServerRowCapabilities> {
+        use crate::views::queue_pane::QueueRowOrigin;
+        if row.origin != QueueRowOrigin::Server {
+            return Some(crate::views::queue_pane::ServerRowCapabilities::from_wire_kind("prompt"));
+        }
+        let server_id = row.server_id.as_deref()?;
+        self.shared_queue
+            .iter()
+            .find(|entry| entry.id == server_id)
+            .map(|entry| {
+                crate::views::queue_pane::ServerRowCapabilities::from_wire_kind(&entry.kind)
+            })
+    }
+
     /// `Some(is_prompt_like)` for a resolvable merged-queue row; `None` when it
     /// can't be resolved. Prompt-like rows may interject: plain prompts, plus
     /// raw skill slash rows (`/find-session args`) whose wire payload IS the
@@ -334,6 +363,9 @@ impl AgentView {
         if row.origin != QueueRowOrigin::Server {
             return None;
         }
+        if !self.server_row_capabilities(&row)?.can_send_now() {
+            return Some(false);
+        }
         let server_id = row.server_id?;
         let wire = self.shared_queue.iter().find(|e| e.id == server_id)?;
         Some(kind_from_wire(&wire.kind) == QueueEntryKind::Prompt)
@@ -347,7 +379,14 @@ impl AgentView {
         }
         let (is_server, row) = self.resolve_queue_row(id);
         if is_server {
-            // Server row: the agent promotes it to run next (`x.ai/queue/interject`); any kind may send now.
+            // Resolve capabilities before any optimistic park, paint, or action.
+            if let Some(row) = row.as_ref()
+                && !self
+                    .server_row_capabilities(row)
+                    .is_some_and(|capabilities| capabilities.can_send_now())
+            {
+                return InputOutcome::Unchanged;
+            }
             if let Some(row) = row.as_ref()
                 && let Some(server_id) = row.server_id.clone()
             {
@@ -531,6 +570,13 @@ impl AgentView {
 
             match event {
                 QueueEvent::DeleteSelected { id } => {
+                    if row.as_ref().is_some_and(|row| {
+                        !self
+                            .server_row_capabilities(row)
+                            .is_some_and(|capabilities| capabilities.can_delete())
+                    }) {
+                        return InputOutcome::Unchanged;
+                    }
                     if is_server {
                         // Optimistic remove; server rebroadcast is authoritative.
                         if let (Some(_sid), Some(row)) = (self.session.session_id.as_ref(), row)
@@ -551,10 +597,24 @@ impl AgentView {
                     self.remove_local_queue_row(id);
                 }
                 QueueEvent::EditSelected { id } => {
+                    if row.as_ref().is_some_and(|row| {
+                        !self
+                            .server_row_capabilities(row)
+                            .is_some_and(|capabilities| capabilities.can_edit())
+                    }) {
+                        return InputOutcome::Unchanged;
+                    }
                     // Entry into editing mode lives in `queue_edit.rs`.
                     self.enter_queue_edit(id, is_server, row);
                 }
                 QueueEvent::SwapUp { id } => {
+                    if row.as_ref().is_some_and(|row| {
+                        !self
+                            .server_row_capabilities(row)
+                            .is_some_and(|capabilities| capabilities.can_reorder())
+                    }) {
+                        return InputOutcome::Unchanged;
+                    }
                     if is_server {
                         if let Some(ordered_ids) = self.server_queue_reordered(id, true) {
                             return InputOutcome::Action(Action::QueueReorderShared {
@@ -566,6 +626,13 @@ impl AgentView {
                     self.session.swap_prompt_up(id);
                 }
                 QueueEvent::SwapDown { id } => {
+                    if row.as_ref().is_some_and(|row| {
+                        !self
+                            .server_row_capabilities(row)
+                            .is_some_and(|capabilities| capabilities.can_reorder())
+                    }) {
+                        return InputOutcome::Unchanged;
+                    }
                     if is_server {
                         if let Some(ordered_ids) = self.server_queue_reordered(id, false) {
                             return InputOutcome::Action(Action::QueueReorderShared {
@@ -577,7 +644,15 @@ impl AgentView {
                     self.session.swap_prompt_down(id);
                 }
                 QueueEvent::ForceInterject { id } => {
-                    // Same InterjectPrompt chord as the prompt; surface is the queue pane (not When::PromptFocused).
+                    if row.as_ref().is_some_and(|row| {
+                        !self
+                            .server_row_capabilities(row)
+                            .is_some_and(|capabilities| capabilities.can_send_now())
+                    }) {
+                        return InputOutcome::Unchanged;
+                    }
+                    // Same InterjectPrompt chord as the prompt; surface is the
+                    // queue pane (not When::PromptFocused).
                     crate::actions::log_shortcut_used(key, ActionId::InterjectPrompt, "queue");
                     return self.force_interject_queue_row(id);
                 }
@@ -636,7 +711,11 @@ impl AgentView {
     /// Reorder payload for `x.ai/queue/reorder`. Omit only running; include
     /// send-now in the list but do not swap past it (shell ranks missing ids last).
     fn server_queue_reordered(&self, selection_id: u64, up: bool) -> Option<Vec<String>> {
-        let server_id = self.queue.row_ref(selection_id)?.server_id?;
+        let row = self.queue.row_ref(selection_id)?;
+        if !self.server_row_capabilities(&row)?.can_reorder() {
+            return None;
+        }
+        let server_id = row.server_id?;
         let running = self.session.current_prompt_id.as_deref();
         let send_now = self.expect_send_now_cancel.as_deref();
         let all_ids: Vec<String> = self
@@ -645,15 +724,25 @@ impl AgentView {
             .filter(|e| Some(e.id.as_str()) != running)
             .map(|e| e.id.clone())
             .collect();
+        let can_reorder = |id: &str| {
+            self.shared_queue
+                .iter()
+                .find(|entry| entry.id == id)
+                .is_some_and(|entry| {
+                    crate::views::queue_pane::ServerRowCapabilities::from_wire_kind(&entry.kind)
+                        .can_reorder()
+                })
+        };
         let mut swappable: Vec<String> = all_ids
             .iter()
             .filter(|id| {
-                crate::views::queue_pane::visible_held_server_row(
-                    id,
-                    running,
-                    send_now,
-                    &self.send_now_painted_blocks,
-                )
+                can_reorder(id)
+                    && crate::views::queue_pane::visible_held_server_row(
+                        id,
+                        running,
+                        send_now,
+                        &self.send_now_painted_blocks,
+                    )
             })
             .cloned()
             .collect();
@@ -672,12 +761,14 @@ impl AgentView {
         let ordered: Vec<String> = all_ids
             .into_iter()
             .map(|id| {
-                if crate::views::queue_pane::visible_held_server_row(
-                    &id,
-                    running,
-                    send_now,
-                    &self.send_now_painted_blocks,
-                ) {
+                if can_reorder(&id)
+                    && crate::views::queue_pane::visible_held_server_row(
+                        &id,
+                        running,
+                        send_now,
+                        &self.send_now_painted_blocks,
+                    )
+                {
                     swap_iter
                         .next()
                         .expect("swappable count matches visible slots")
@@ -752,6 +843,23 @@ mod queue_edit_routing_tests {
             combined_texts: None,
             position,
         }
+    }
+
+    fn protected_parent_agent() -> AgentView {
+        let mut agent = make_running_agent();
+        agent.session.pending_prompts.clear();
+        agent.shared_queue = vec![QueueEntryWire {
+            id: "parent-message-msg-1".into(),
+            version: 7,
+            owner: None,
+            last_editor: None,
+            kind: "parent_agent_message".into(),
+            text: "parent status update".into(),
+            combined_texts: None,
+            position: 0,
+        }];
+        agent.sync_queue_pane();
+        agent
     }
 
     /// `visible_queue_is_empty` reflects the *merged* pane view, excluding the
@@ -1032,6 +1140,93 @@ mod queue_edit_routing_tests {
         }
         // Local interject removed it from the client-owned queue.
         assert!(agent.session.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn protected_parent_row_capabilities_block_direct_prompt_level_mutations() {
+        let mut agent = protected_parent_agent();
+        let id = agent.queue.entry_ids()[0];
+        let row = agent.queue.row_ref(id).expect("protected row");
+        let capabilities = agent
+            .server_row_capabilities(&row)
+            .expect("server capabilities");
+        assert!(!capabilities.can_edit());
+        assert!(!capabilities.can_delete());
+        assert!(!capabilities.can_reorder());
+        assert!(!capabilities.can_send_now());
+        agent.enter_queue_edit(id, true, Some(row));
+        assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+        assert!(agent.server_queue_reordered(id, true).is_none());
+        assert_eq!(agent.shared_queue.len(), 1);
+    }
+
+    #[test]
+    fn protected_parent_queue_pane_mutation_keys_emit_no_actions() {
+        let mut agent = protected_parent_agent();
+        let id = agent.queue.entry_ids()[0];
+        agent.queue.list_state.select_by_id(id);
+        let registry = non_vscode_registry();
+        for key in [
+            delete_key(),
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT),
+            force_interject_key(),
+        ] {
+            assert!(matches!(
+                agent.handle_queue_key(&key, &registry),
+                InputOutcome::Unchanged
+            ));
+        }
+        assert_eq!(agent.shared_queue.len(), 1);
+        assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+    }
+
+    #[test]
+    fn protected_parent_top_row_blocks_prompt_send_now_paths_without_optimism() {
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        for key in [enter, force_interject_key()] {
+            let mut agent = protected_parent_agent();
+            agent.active_pane = AgentPane::Prompt;
+            agent.queue.overlay.focused = false;
+            agent.prompt.set_text("");
+            agent
+                .optimistic_queue_ids
+                .insert("parent-message-msg-1".into());
+            let scrollback_len = agent.scrollback.len();
+
+            let outcome = agent.handle_prompt_key_for_test(&key);
+            assert!(
+                !matches!(
+                    outcome,
+                    InputOutcome::Action(Action::QueueInterjectShared { .. })
+                ),
+                "protected row emitted QueueInterjectShared for {key:?}: {outcome:?}"
+            );
+            assert!(agent.expect_send_now_cancel.is_none());
+            assert!(agent.send_now_awaiting_confirm.is_none());
+            assert!(agent.send_now_painted_blocks.is_empty());
+            assert_eq!(agent.scrollback.len(), scrollback_len);
+            assert!(!agent.is_self_originated_prompt("parent-message-msg-1"));
+            assert!(!agent.held_queue_top_sendable());
+        }
+    }
+
+    #[test]
+    fn ordinary_server_top_row_remains_prompt_send_now_capable() {
+        let mut agent = make_running_agent();
+        agent.session.pending_prompts.clear();
+        agent.sync_queue_pane();
+        assert!(agent.held_queue_top_sendable());
+        let outcome = agent.handle_prompt_key_for_test(&force_interject_key());
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::QueueInterjectShared {
+                ref id,
+                expected_version: 2,
+                new_text: None,
+            }) if id == "p1"
+        ));
     }
 
     /// A running agent whose only queued row is a local bash command.

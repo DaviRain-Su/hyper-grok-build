@@ -538,7 +538,7 @@ impl SessionActor {
 
         let model = match model_override {
             Some(m) => m.to_owned(),
-            None => "grok-build".to_owned(),
+            None => "grok-4.6".to_owned(),
         };
 
         let request = ConversationRequest {
@@ -550,87 +550,18 @@ impl SessionActor {
             ..Default::default()
         };
 
-        let request_id = xai_grok_sampler::RequestId::random();
-        let idle_timeout = std::time::Duration::from_secs(5);
-
-        let result = match sampling_client.api_backend() {
-            crate::sampling::ApiBackend::ChatCompletions => {
-                let (raw, meta) = sampling_client.conversation_stream(request).await.ok()?;
-                let events =
-                    xai_grok_sampler::stream_chat_completions(raw, meta, request_id, idle_timeout);
-                xai_grok_sampler::collect_response(events).await
-            }
-            crate::sampling::ApiBackend::Responses
-            | crate::sampling::ApiBackend::CodexResponses => {
-                let (raw, meta, doom_loop) = sampling_client
-                    .conversation_stream_responses(request)
-                    .await
-                    .ok()?;
-                let events = xai_grok_sampler::stream_responses(
-                    raw,
-                    meta,
-                    request_id,
-                    idle_timeout,
-                    doom_loop,
-                );
-                xai_grok_sampler::collect_response(events).await
-            }
-            crate::sampling::ApiBackend::Messages => {
-                let (raw, meta) = sampling_client
-                    .conversation_stream_messages(request)
-                    .await
-                    .ok()?;
-                let events = xai_grok_sampler::stream_messages(raw, meta, request_id, idle_timeout);
-                xai_grok_sampler::collect_response(events).await
-            }
-            crate::sampling::ApiBackend::GoogleGenerateContent => {
-                let (raw, identity) = sampling_client
-                    .conversation_stream_google(request)
-                    .await
-                    .ok()?;
-                let events = xai_grok_sampler::google::stream_google_generate_content(
-                    raw,
-                    request_id,
-                    identity,
-                    idle_timeout,
-                );
-                xai_grok_sampler::collect_response(events).await
-            }
-            crate::sampling::ApiBackend::BedrockConverseStream => {
-                let (raw, identity) = sampling_client
-                    .conversation_stream_bedrock(request)
-                    .await
-                    .ok()?;
-                let events = xai_grok_sampler::bedrock::stream_bedrock_converse(
-                    raw,
-                    request_id,
-                    identity,
-                    idle_timeout,
-                );
-                xai_grok_sampler::collect_response(events).await
-            }
-            crate::sampling::ApiBackend::PiMessages => {
-                let (raw, identity) = sampling_client
-                    .conversation_stream_pi_messages(request)
-                    .await
-                    .ok()?;
-                let events = xai_grok_sampler::pi_messages::stream_pi_messages(
-                    raw,
-                    request_id,
-                    identity,
-                    idle_timeout,
-                );
-                xai_grok_sampler::collect_response(events).await
-            }
-        };
-
-        match result {
-            Ok((response, _metrics)) => {
+        // Collect via the client so the LengthPolicy gate applies: a
+        // suggestion truncated at the 50-token cap must not become ghost text.
+        match sampling_client
+            .conversation_collect_with_idle_timeout(request, std::time::Duration::from_secs(5))
+            .await
+        {
+            Ok(response) => {
                 let text = response.assistant_text();
                 if text.is_empty() { None } else { Some(text) }
             }
             Err(e) => {
-                tracing::debug!(error = %e.message, "AI suggest inference failed");
+                tracing::debug!(error = %e, "AI suggest inference failed");
                 None
             }
         }
@@ -645,12 +576,12 @@ impl SessionActor {
     /// (`GROK_PROMPT_SUGGESTIONS_MODEL`) > `[models] prompt_suggestion`
     /// (config.toml) > remote `prompt_suggestion_model` (remote settings) >
     /// (config.toml) > remote `prompt_suggestion_model` (remote settings) >
-    /// [`prompt_suggest::DEFAULT_SUGGEST_MODEL`] (`grok-build-0.1`). Every
+    /// [`prompt_suggest::DEFAULT_SUGGEST_MODEL`] (`grok-4.6`). Every
     /// tier except env is catalog-guarded against this shell's own model
-    /// catalog — when the effective model is not sampleable here (e.g.
-    /// `grok-build-0.1` for OAuth users) the request is **skipped
-    /// entirely** instead of fired doomed. The session model is never used:
-    /// a per-turn background call must stay on the small model.
+    /// catalog — when the effective model is not sampleable here the
+    /// request is **skipped entirely** instead of fired doomed. The session
+    /// model is never used: a per-turn background call must stay on the
+    /// small model.
     /// Temperature, max_output_tokens, and
     /// reasoning_effort are left unset — mirrors [`Self::handle_recap`]: the
     /// proxy may inject provider defaults, a small token cap silently empties

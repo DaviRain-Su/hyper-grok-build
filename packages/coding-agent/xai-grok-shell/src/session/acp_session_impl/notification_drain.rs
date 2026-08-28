@@ -120,7 +120,7 @@ impl SessionActor {
 
     pub(super) async fn maybe_start_running_task(
         self: Arc<Self>,
-        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+        completion_tx: mpsc::UnboundedSender<super::tasks_cancel::TurnCompletionMsg>,
     ) {
         // Fast path under the lock: nothing to promote.
         let may_combine;
@@ -173,6 +173,26 @@ impl SessionActor {
         let mut state = self.state.lock().await;
         // Re-check after the await gap.
         if state.running_task.is_some() || state.pending_inputs.is_empty() {
+            return;
+        }
+
+        if state.hook_block_held() {
+            xai_grok_telemetry::unified_log::debug(
+                "shell.prompt.start_blocked",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({
+                    "reason": "hook_block_hold",
+                    "queue_depth": state.pending_inputs.len(),
+                })),
+            );
+            tracing::debug!(
+                target: "qtrace",
+                pid = std::process::id(),
+                event = "server_start_blocked",
+                queue_depth = state.pending_inputs.len(),
+                session = self.session_info.id.0.as_ref(),
+                "maybe_start_running_task blocked: queue held after a hook block",
+            );
             return;
         }
 
@@ -269,6 +289,7 @@ impl SessionActor {
         let (
             persist_ack,
             parsed_prompt_tx,
+            initial_child_prompt_ready,
             prompt_id,
             prompt_blocks,
             prompt_mode,
@@ -282,6 +303,7 @@ impl SessionActor {
             input_origin,
             running_display,
             tool_overrides_update,
+            traceparent,
         ) = {
             let Some(front) = state.pending_inputs.front_mut() else {
                 return;
@@ -290,6 +312,7 @@ impl SessionActor {
             (
                 front.persist_ack.take(),
                 front.parsed_prompt_tx.take(),
+                front.initial_child_prompt_ready.take(),
                 front.prompt_id.clone(),
                 front.prompt_blocks.clone(),
                 front.prompt_mode,
@@ -303,6 +326,7 @@ impl SessionActor {
                 front.input_origin.clone(),
                 running_display,
                 front.tool_overrides_update.take(),
+                front.traceparent.clone(),
             )
         };
         self.apply_tool_overrides_update(tool_overrides_update);
@@ -373,9 +397,13 @@ impl SessionActor {
                 json_schema,
                 persist_ack,
                 parsed_prompt_tx,
+                traceparent,
             },
             completion_tx,
         ));
+        if let Some(initial_child_prompt_ready) = initial_child_prompt_ready {
+            let _ = initial_child_prompt_ready.send(());
+        }
     }
 
     /// Flip on-disk `running` metas that the coordinator no longer holds so
@@ -436,7 +464,7 @@ impl SessionActor {
     /// single lock acquisition to avoid interleaving.
     pub(super) async fn maybe_drain_notifications(
         self: Arc<Self>,
-        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+        completion_tx: mpsc::UnboundedSender<super::tasks_cancel::TurnCompletionMsg>,
     ) {
         // Mid-turn tick: parent may still be Responding so the idle
         // hook never runs. Throttled so InjectNotification does not scan disk
@@ -719,9 +747,11 @@ impl SessionActor {
             respond_to,
             persist_ack: None,
             parsed_prompt_tx: None,
+            initial_child_prompt_ready: None,
             queue_meta: None,
             queue_mutation_policy: QueueMutationPolicy::hidden(),
             send_now: false,
+            traceparent: None,
         });
 
         tracing::info!(

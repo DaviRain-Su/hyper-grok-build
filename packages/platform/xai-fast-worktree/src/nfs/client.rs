@@ -90,6 +90,11 @@ impl NfsStatusView {
 }
 
 #[derive(Debug, Clone)]
+pub struct NfsDaemonStatus {
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct NfsAdopted {
     pub dest: PathBuf,
     pub mount_id: String,
@@ -211,19 +216,47 @@ impl NfsWorktreeClient {
                 declined: body.declined,
                 storage_full: body.storage_full,
                 unknown: false,
-                error: None,
                 mount: body.mount,
             }),
-            Ok(Response::Err(e)) => Ok(QuerySnapshot {
+            Ok(Response::Err(e)) if e.error.contains("unknown worktree_id") => Ok(QuerySnapshot {
                 phase: None,
                 declined: None,
                 storage_full: false,
-                unknown: e.error.contains("unknown worktree_id"),
-                error: Some(e.error),
+                unknown: true,
                 mount: None,
-            }
-            .normalized()),
+            }),
+            Ok(Response::Err(e)) => Err(NfsTryError::Other(anyhow!(e.error))),
             Err(e) => Err(NfsTryError::Other(e)),
+        }
+    }
+
+    pub fn cancel_worktree_create(&self, worktree_id: &str) -> Result<(), anyhow::Error> {
+        if !self.ping() {
+            anyhow::bail!("grove daemon unreachable");
+        }
+        let req = Request::CancelWorktreeCreate {
+            v: PROTOCOL_VERSION,
+            worktree_id: worktree_id.to_owned(),
+        };
+        match self.call(&req, REMOVE_RPC_TIMEOUT) {
+            Ok(Response::Ok(_)) => Ok(()),
+            Ok(Response::Err(e)) => Err(anyhow!(e.error)),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn cleanup_worktree_create(&self, worktree_id: &str) -> Result<(), anyhow::Error> {
+        if !self.ping() {
+            anyhow::bail!("grove daemon unreachable");
+        }
+        let req = Request::CleanupWorktreeCreate {
+            v: PROTOCOL_VERSION,
+            worktree_id: worktree_id.to_owned(),
+        };
+        match self.call(&req, REMOVE_RPC_TIMEOUT) {
+            Ok(Response::Ok(_)) => Ok(()),
+            Ok(Response::Err(e)) => Err(anyhow!(e.error)),
+            Err(e) => Err(e),
         }
     }
 
@@ -297,6 +330,24 @@ impl NfsWorktreeClient {
             Ok(Response::Ok(body)) => Ok(CleanArtifactsReply {
                 purged_entries: body.purged_entries.unwrap_or(0),
                 no_escapes: body.no_escapes,
+            }),
+            Ok(Response::Err(e)) => Err(anyhow!(e.error)),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn daemon_status(&self) -> Result<NfsDaemonStatus, anyhow::Error> {
+        let req = Request::Status {
+            v: PROTOCOL_VERSION,
+            dir: None,
+        };
+        match self.call(&req, self.ping_timeout.max(Duration::from_millis(250))) {
+            Ok(Response::Ok(body)) => Ok(NfsDaemonStatus {
+                capabilities: body
+                    .status
+                    .and_then(|status| status.get("capabilities").cloned())
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .unwrap_or_default(),
             }),
             Ok(Response::Err(e)) => Err(anyhow!(e.error)),
             Err(e) => Err(e),
@@ -386,6 +437,9 @@ impl NfsWorktreeClient {
             // the query timeout then InFlight because the socket still answers.
             return Ok(NfsCreateDecision::Fallback);
         }
+        if lower.contains("worktree create cancelled") {
+            return Ok(NfsCreateDecision::Fallback);
+        }
         // Daemon may have journaled before failing; poll rather than copy.
         tracing::warn!(error, "nfs create ErrBody; polling journal");
         self.poll_after_lost_reply(plan)
@@ -397,7 +451,12 @@ impl NfsWorktreeClient {
             match self.query_phase(&plan.worktree_id) {
                 Ok(snap) if snap.storage_full => return Err(NfsTryError::StorageFull),
                 Ok(snap) if snap.declined.is_some() => return Ok(NfsCreateDecision::Fallback),
-                Ok(snap) if snap.phase.as_deref() == Some("aborted") => {
+                Ok(snap)
+                    if matches!(
+                        snap.phase.as_deref(),
+                        Some("aborted" | "cancelled" | "cancelling")
+                    ) =>
+                {
                     return Ok(NfsCreateDecision::Fallback);
                 }
                 Ok(snap) if snap.phase.as_deref() == Some("committed") => {
@@ -507,21 +566,7 @@ pub struct QuerySnapshot {
     pub declined: Option<String>,
     pub storage_full: bool,
     pub unknown: bool,
-    pub error: Option<String>,
     pub mount: Option<MountInfo>,
-}
-
-impl QuerySnapshot {
-    fn normalized(mut self) -> Self {
-        if self
-            .error
-            .as_ref()
-            .is_some_and(|e| e.contains("unknown worktree_id"))
-        {
-            self.unknown = true;
-        }
-        self
-    }
 }
 
 /// `UnixStream::connect` has no deadline. Non-blocking connect + `poll` so a
@@ -702,6 +747,14 @@ enum Request {
         worktree_id: String,
     },
     QueryWorktreeCreate {
+        v: u32,
+        worktree_id: String,
+    },
+    CancelWorktreeCreate {
+        v: u32,
+        worktree_id: String,
+    },
+    CleanupWorktreeCreate {
         v: u32,
         worktree_id: String,
     },
@@ -1011,6 +1064,23 @@ mod tests {
             create_hold: Duration::from_millis(300),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn query_phase_errbody_is_error_except_unknown_id() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = tmp.path();
+        let sock = runtime.join("control.sock");
+        let script = Script {
+            query_replies: Arc::new(Mutex::new(vec![
+                r#"{"status":"err","data":{"v":1,"error":"daemon.db failed"}}"#.into(),
+            ])),
+            ..Script::default()
+        };
+        let _server = spawn_server(sock.clone(), script);
+        let client = NfsWorktreeClient::from_opts(&opts(&sock, runtime));
+        let error = client.query_phase("id").unwrap_err();
+        assert!(format!("{error:?}").contains("daemon.db failed"));
     }
 
     #[test]

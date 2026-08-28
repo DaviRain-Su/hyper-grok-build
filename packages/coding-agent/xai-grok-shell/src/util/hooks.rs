@@ -147,3 +147,181 @@ pub(crate) fn assemble_hooks(
         errors,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xai_grok_hooks::config::HookProvenance;
+    use xai_grok_hooks::event::HookEventName;
+
+    /// Write `content` as `<dir>/requirements.toml`.
+    fn write_requirements(dir: &Path, content: &str) {
+        std::fs::write(dir.join("requirements.toml"), content).unwrap();
+    }
+
+    /// A temp policy layer pinning hooks for `SessionStart`, `UserPromptSubmit`,
+    /// and `PreToolUse` flows through the real requirements read
+    /// (`hook_config_layers_at`) and the real assembly (`assemble_hooks`) and
+    /// registers all three with `Requirements` provenance — the provenance the
+    /// disable exemption keys on.
+    #[test]
+    fn requirements_layer_pins_hooks_with_requirements_provenance() {
+        let system_dir = tempfile::tempdir().unwrap();
+        write_requirements(
+            system_dir.path(),
+            r#"
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "/opt/policy/pin-session-start.sh"
+timeout = 5
+
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "/opt/policy/pin-prompt-submit.sh"
+timeout = 5
+
+[[hooks.PreToolUse]]
+matcher = "*"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/opt/policy/pin-pre-tool-use.sh"
+timeout = 5
+"#,
+        );
+
+        let layers = xai_grok_config::hook_config_layers_at(Some(system_dir.path()), None);
+        assert_eq!(layers.len(), 1, "one requirements layer expected");
+        assert_eq!(layers[0].provenance(), HookProvenance::Requirements);
+        assert_eq!(layers[0].source_name(), "requirements/system");
+
+        let compat = xai_grok_tools::types::compat::CompatConfig::default();
+        let (registry, errors) = assemble_hooks(&layers, None, &compat, false);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+
+        for (event, command) in [
+            (HookEventName::SessionStart, "pin-session-start.sh"),
+            (HookEventName::UserPromptSubmit, "pin-prompt-submit.sh"),
+            (HookEventName::PreToolUse, "pin-pre-tool-use.sh"),
+        ] {
+            let spec = registry
+                .hooks_for(event)
+                .iter()
+                .find(|s| {
+                    s.command_raw
+                        .as_deref()
+                        .is_some_and(|c| c.contains(command))
+                })
+                .unwrap_or_else(|| panic!("pinned {event} hook must register"));
+            assert_eq!(
+                spec.layer,
+                HookProvenance::Requirements,
+                "pinned {event} hook must carry requirements provenance"
+            );
+            assert!(
+                spec.is_managed_policy(),
+                "requirements provenance must classify as managed policy"
+            );
+            assert!(
+                spec.name.starts_with("requirements/system:"),
+                "provenance-prefixed name expected, got {}",
+                spec.name
+            );
+        }
+    }
+
+    /// A realistic enterprise policy hooks shape (command hooks with
+    /// `timeout: 5`; `PreToolUse` with `matcher: "*"` and two hooks in one
+    /// group; matcher-less lifecycle groups) parses and registers through
+    /// the real path. The two `PreToolUse` hooks are byte-identical, so both
+    /// parse but content dedup registers one effective hook (running the
+    /// same script twice per event is collapsed).
+    #[test]
+    fn enterprise_policy_hooks_shape_registers() {
+        let system_dir = tempfile::tempdir().unwrap();
+        write_requirements(
+            system_dir.path(),
+            r#"
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "policy/hooks/bin/lifecycle-audit.sh"
+timeout = 5
+
+[[hooks.PreToolUse]]
+matcher = "*"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "policy/hooks/bin/pretooluse-audit.sh"
+timeout = 5
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "policy/hooks/bin/pretooluse-audit.sh"
+timeout = 5
+
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "policy/hooks/bin/lifecycle-audit.sh"
+timeout = 5
+"#,
+        );
+
+        let layers = xai_grok_config::hook_config_layers_at(Some(system_dir.path()), None);
+        assert_eq!(layers.len(), 1);
+
+        // Parse level: the verbatim structure yields both PreToolUse handlers.
+        let (specs, errors) = xai_grok_hooks::config::parse_hooks_from_config_layers(&layers);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        let pre_specs: Vec<_> = specs
+            .iter()
+            .filter(|s| s.event == HookEventName::PreToolUse)
+            .collect();
+        assert_eq!(
+            pre_specs.len(),
+            2,
+            "the PreToolUse group's two hooks must both parse"
+        );
+        for spec in &pre_specs {
+            assert_eq!(spec.configured_matcher.as_deref(), Some("*"));
+            let matcher = spec.matcher.as_ref().expect("matcher '*' compiles");
+            assert!(
+                matcher.is_match("run_terminal_command") && matcher.is_match("Bash"),
+                "matcher '*' must match every tool"
+            );
+            assert_eq!(spec.timeout_ms, 5000, "timeout 5s converts to 5000ms");
+        }
+
+        // Registry level through the real assembly: all three events register
+        // with requirements provenance; the byte-identical PreToolUse
+        // duplicate collapses to one effective hook.
+        let compat = xai_grok_tools::types::compat::CompatConfig::default();
+        let (registry, errors) = assemble_hooks(&layers, None, &compat, false);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        for event in [
+            HookEventName::SessionStart,
+            HookEventName::UserPromptSubmit,
+            HookEventName::PreToolUse,
+        ] {
+            let policy_hooks: Vec<_> = registry
+                .hooks_for(event)
+                .iter()
+                .filter(|s| s.layer == HookProvenance::Requirements)
+                .collect();
+            assert!(
+                !policy_hooks.is_empty(),
+                "pinned {event} hook must register with requirements provenance"
+            );
+        }
+        assert_eq!(
+            registry
+                .hooks_for(HookEventName::PreToolUse)
+                .iter()
+                .filter(|s| s.layer == HookProvenance::Requirements)
+                .count(),
+            1,
+            "byte-identical duplicate collapses under content dedup"
+        );
+    }
+}

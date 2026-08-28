@@ -441,6 +441,7 @@ fn block_failed(block: &ToolCallBlock) -> bool {
         ToolCallBlock::Execute(b) => !b.is_success(),
         ToolCallBlock::Edit(b) => !b.is_success(),
         ToolCallBlock::UseTool(b) => !b.is_success(),
+        ToolCallBlock::SentMessage(b) => b.is_failure(),
         ToolCallBlock::Other(b) => !b.is_success(),
         ToolCallBlock::Lifecycle(_) => false,
     }

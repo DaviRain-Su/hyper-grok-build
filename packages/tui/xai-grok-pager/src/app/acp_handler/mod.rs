@@ -145,6 +145,17 @@ use subagent_activity::*;
 #[allow(unused_imports)]
 use workflow_ingest::*;
 
+fn is_replay_bash_execute(update: &acp::SessionUpdate) -> bool {
+    let acp::SessionUpdate::ToolCall(tc) = update else {
+        return false;
+    };
+    tc.meta
+        .as_ref()
+        .and_then(|m| m.get("bash_mode"))
+        .and_then(|v| v.as_bool())
+        == Some(true)
+}
+
 /// Handle an ACP notification (session update, permission request, etc.).
 ///
 /// Returns `true` if the active view was visually affected (needs redraw).
@@ -446,10 +457,29 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
 
                         let had_activity_before = agent.session.tracker.activity().is_some();
                         let update = notif.request.update;
+                        let (is_visible_kind, is_bash) = if meta.is_replay {
+                            (
+                                crate::acp::tracker::is_agent_output_update(&update),
+                                is_replay_bash_execute(&update),
+                            )
+                        } else {
+                            (false, false)
+                        };
                         let user_echo = matches!(update, acp::SessionUpdate::UserMessageChunk(_));
-                        agent
-                            .session
-                            .handle_update(update, &meta, &mut agent.scrollback);
+                        let changed =
+                            agent
+                                .session
+                                .handle_update(update, &meta, &mut agent.scrollback);
+                        if meta.is_replay
+                            && let Some(pid) = meta.prompt_id.as_ref()
+                        {
+                            if is_visible_kind && changed {
+                                agent.replayed_visible_prompts.insert(pid.clone());
+                            }
+                            if is_bash {
+                                agent.replayed_bash_prompts.insert(pid.clone());
+                            }
+                        }
                         // Skip user echo: shell broadcasts it before history commit.
                         if !user_echo
                             && !meta.is_replay

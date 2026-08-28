@@ -7,6 +7,16 @@ pub enum HookDecision {
     Deny { reason: String, hook_name: String },
 }
 
+/// The outcome of a `user_prompt_submit` gate dispatch. Deliberately not
+/// [`HookDecision`]: the prompt gate's wire vocabulary is `block` (`deny` is
+/// a tool-gate word and an error here), and `reason` is user-facing text,
+/// never model context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptDecision {
+    Allow,
+    Block { reason: String, hook_name: String },
+}
+
 /// Parsed output of one `Stop`/`SubagentStop` gate hook. The dispatcher
 /// aggregates these across hooks; `force_stop` overrides blocks.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

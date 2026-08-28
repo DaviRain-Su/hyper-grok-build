@@ -30,7 +30,7 @@ pub const PROMPT_SUGGESTIONS_MODEL_ENV: &str = "GROK_PROMPT_SUGGESTIONS_MODEL";
 /// (cheap + fast). The session model is never used: when this is absent
 /// from the catalog the request carries no model hint and the shell
 /// resolves (or skips) it — see [`resolve_model`].
-pub const PREFERRED_SUGGESTION_MODEL: &str = "grok-build-0.1";
+pub const PREFERRED_SUGGESTION_MODEL: &str = "grok-4.6";
 
 /// Controller for the predicted-next-prompt ghost text.
 #[derive(Debug, Default)]
@@ -178,10 +178,10 @@ pub fn suggestion_size(text: &str) -> (usize, usize) {
 }
 
 /// Resolve the client-side model hint sent with the suggestion request:
-/// env override > `grok-build-0.1` when the catalog offers it > `None`.
+/// env override > `grok-4.6` when the catalog offers it > `None`.
 ///
 /// The hint is one tier of the shell-side resolution (env > config.toml >
-/// remote settings > this hint > `grok-build-0.1` default): the shell
+/// remote settings > this hint > `grok-4.6` default): the shell
 /// catalog-guards the effective model and skips the request entirely when
 /// it is not sampleable — the session model is never used for suggestion
 /// calls.

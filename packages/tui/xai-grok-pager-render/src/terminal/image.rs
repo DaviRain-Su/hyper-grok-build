@@ -431,7 +431,7 @@ pub fn place_kitty_image_cropped(
 
 /// Build a Kitty escape sequence to delete a specific image by ID.
 pub fn clear_kitty_image(image_id: u32) -> String {
-    format!("\x1b_Ga=d,d=i,i={},q=2\x1b\\", image_id)
+    format!("\x1b_Ga=d,d=i,i={image_id},q=2\x1b\\")
 }
 
 // -------------------------------------------------------------------------
@@ -459,19 +459,12 @@ pub fn render_iterm2_image(image_data: &[u8], cols: u16, rows: u16) -> String {
 /// Build the full escape-sequence string to render image data at a cell
 /// position using the provided graphics protocol.
 ///
-/// For Kitty: transmits image data once (`a=t`) then places it (`a=p`). Pass
-/// `retransmit = false` on subsequent frames to emit only the placement escape
-/// (~50 bytes) instead of re-uploading the full image every redraw.
-///
-/// For iTerm2: always emits the full inline image escape (no separate transmit
-/// primitive). Callers should pass `retransmit = false` after the first frame
-/// to avoid re-decoding the same image every tick.
+/// Kitty always deletes id 1 (`d=i`) then transmits+displays (`a=T`). Warp
+/// ignores placement-id replace, so a later `a=p` would stack a ghost.
+/// Callers that see an unchanged committed placement must not call this —
+/// they return an empty keep instead of re-placing every frame.
 ///
 /// Returns `None` when no graphics protocol is available.
-///
-/// Pass `retransmit = false` on subsequent frames to skip the data upload
-/// (Kitty: place-only; iTerm2: no-op).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn build_overlay_image_escapes_for_protocol(
     protocol: GraphicsProtocol,
     image_data: &[u8],
@@ -479,7 +472,6 @@ pub(super) fn build_overlay_image_escapes_for_protocol(
     rows: u16,
     cell_x: u16,
     cell_y: u16,
-    retransmit: bool,
 ) -> Option<String> {
     if protocol == GraphicsProtocol::None {
         return None;
@@ -487,32 +479,18 @@ pub(super) fn build_overlay_image_escapes_for_protocol(
 
     let mut esc = String::new();
     // ANSI cursor positioning is 1-based.
-    esc.push_str(&format!("\x1b[{};{}H", cell_y + 1, cell_x + 1));
     match protocol {
         GraphicsProtocol::Kitty => {
-            if retransmit {
-                // Transmit once, then place — never use a=T (transmit+display)
-                // on every frame; that re-uploads the full image at ~10fps and
-                // balloons native GPU surface counts in long-lived sessions.
-                // Place-only frames do not need image bytes / format detection.
-                let format = kitty_format_from_bytes(image_data)?;
-                esc.push_str(&transmit_kitty_image(
-                    image_data,
-                    format,
-                    KITTY_PLACEMENT_ID,
-                ));
-            }
-            esc.push_str(&place_kitty_image(
-                KITTY_PLACEMENT_ID,
-                cols,
-                rows,
-                1, // above text (modal overlays)
+            let format = kitty_format_from_bytes(image_data)?;
+            esc.push_str(&clear_kitty_image(KITTY_PLACEMENT_ID));
+            esc.push_str(&format!("\x1b[{};{}H", cell_y + 1, cell_x + 1));
+            esc.push_str(&render_kitty_image_z(
+                image_data, format, cols, rows, 1, // above text (modal overlays)
             ));
         }
         GraphicsProtocol::ITerm2 => {
-            if retransmit {
-                esc.push_str(&render_iterm2_image(image_data, cols, rows));
-            }
+            esc.push_str(&format!("\x1b[{};{}H", cell_y + 1, cell_x + 1));
+            esc.push_str(&render_iterm2_image(image_data, cols, rows));
         }
         GraphicsProtocol::None => unreachable!(),
     }

@@ -561,6 +561,17 @@ impl ExtensionsTab {
 // Status filter
 // ---------------------------------------------------------------------------
 
+/// Group toggle direction for a collapsed hooks group. Pinned
+/// (managed-policy) hooks always report enabled, so only unpinned hooks
+/// drive the direction — and a group with no unpinned hooks reads enabled
+/// (everything in it always runs), never "off".
+pub(crate) fn hook_group_any_enabled<'a>(
+    hooks: impl Iterator<Item = &'a xai_hooks_plugins_types::HookInfo>,
+) -> bool {
+    let unpinned: Vec<_> = hooks.filter(|h| !h.pinned).collect();
+    unpinned.is_empty() || unpinned.iter().any(|h| !h.disabled)
+}
+
 /// Filter items by enabled/disabled status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StatusFilter {
@@ -1267,12 +1278,11 @@ fn selected_item_enabled_at(
                 TabDataState::Loaded(data) => {
                     let hook = data.hooks.get(idx)?;
                     if state.hooks_collapsed_groups.contains(&hook.source_dir) {
-                        Some(
+                        Some(hook_group_any_enabled(
                             data.hooks
                                 .iter()
-                                .filter(|h| h.source_dir == hook.source_dir)
-                                .any(|h| !h.disabled),
-                        )
+                                .filter(|h| h.source_dir == hook.source_dir),
+                        ))
                     } else {
                         Some(!hook.disabled)
                     }
@@ -2935,7 +2945,9 @@ pub fn render_extensions_modal(
                         let searching = !state.picker_state.query().is_empty();
                         let collapsed =
                             !searching && state.hooks_collapsed_groups.contains(source_dir);
-                        entry_labels.push(format!("{} ({} hooks)", label, indices.len()));
+                        let count = indices.len();
+                        let noun = if count == 1 { "hook" } else { "hooks" };
+                        entry_labels.push(format!("{label} ({count} {noun})"));
                         entry_right_labels.push(String::new());
                         entry_desc_lines.push(vec![]);
                         entry_summary_lines.push(vec![]);
@@ -2966,12 +2978,19 @@ pub fn render_extensions_modal(
                             entry_indent.push(1);
                             entry_data_indices.push(Some(hi));
                             entry_group_keys.push(None);
-                            entry_badge_text.push(if hook.disabled {
+                            // Pinned (managed-policy) hooks show their state
+                            // up front, so a refused Disable isn't the first
+                            // signal. A pinned hook never shows [disabled].
+                            entry_badge_text.push(if hook.pinned {
+                                "[policy]".into()
+                            } else if hook.disabled {
                                 "[disabled]".into()
                             } else {
                                 String::new()
                             });
-                            entry_badge_color.push(if hook.disabled {
+                            entry_badge_color.push(if hook.pinned {
+                                Some(theme.warning)
+                            } else if hook.disabled {
                                 Some(theme.accent_error)
                             } else {
                                 None
@@ -5836,7 +5855,31 @@ mod tests {
             timeout_ms: 10_000,
             source_dir: source_dir.to_string(),
             disabled,
+            pinned: false,
         }
+    }
+
+    /// Group direction: pinned hooks never drive it; a mixed group follows
+    /// its unpinned hooks; an all-pinned group reads enabled (everything in
+    /// it always runs).
+    #[test]
+    fn hook_group_direction_ignores_pinned_hooks() {
+        let mut pinned = make_hook("policy", "/etc/grok", false);
+        pinned.pinned = true;
+
+        // Mixed group, all unpinned disabled: direction is "enable" even
+        // though the pinned hook always reports enabled.
+        let disabled_user = make_hook("user", "/etc/grok", true);
+        assert!(!hook_group_any_enabled(
+            [&pinned, &disabled_user].into_iter()
+        ));
+
+        // Mixed group with an enabled unpinned hook: "disable".
+        let enabled_user = make_hook("user2", "/etc/grok", false);
+        assert!(hook_group_any_enabled([&pinned, &enabled_user].into_iter()));
+
+        // All-pinned group: reads enabled, never "off".
+        assert!(hook_group_any_enabled([&pinned].into_iter()));
     }
 
     #[test]

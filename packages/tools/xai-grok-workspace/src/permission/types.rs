@@ -195,8 +195,17 @@ impl ClientType {
             Self::Desktop => "desktop",
         }
     }
+    /// Whether a classifier Block can raise a permission prompt for this client.
+    /// Generic (headless / unidentified) cannot: a `Cancelled` prompt aborts the
+    /// turn, so its Block stays `PolicyDeny`. Every other variant — including any
+    /// added later — defaults to prompting. Which client type a session gets is
+    /// the manager's concern, not this pure predicate's.
+    pub const fn can_present_permission_prompt(self) -> bool {
+        !matches!(self, Self::Generic)
+    }
 }
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum AccessKind {
     Read(Option<String>),
     Grep {
@@ -214,6 +223,11 @@ pub enum AccessKind {
     },
     WebFetch(String),
     WebSearch(String),
+    /// Send content to an active subagent. Carries destination identity only;
+    /// model-authored message text never enters permission state or telemetry.
+    AgentMessage {
+        subagent_id: String,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -322,6 +336,9 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
             | ToolInput::KillTask(_)
             | ToolInput::Skill(_) => AccessKind::Read(None),
             ToolInput::Task(t) => AccessKind::Edit(format!("task:{}", t.subagent_type)),
+            ToolInput::SendSubagentMessage(message) => AccessKind::AgentMessage {
+                subagent_id: message.subagent_id.clone(),
+            },
             ToolInput::WebSearch(ws) => AccessKind::WebSearch(ws.query.clone()),
             ToolInput::SearchReplace(search_replace) => {
                 AccessKind::Edit(search_replace.file_path.to_string())
@@ -391,12 +408,20 @@ pub struct PermissionConfig {
     /// What to do when no rule or pre-decision resolves a tool call.
     #[serde(default)]
     pub prompt_policy: PromptPolicy,
+    /// Whether any settings layer explicitly set `permissions.defaultMode`.
+    /// `prompt_policy == Ask` alone cannot distinguish "nothing configured"
+    /// from an explicit `default` / `plan` / `acceptEdits` / invalid-value
+    /// fail-safe (all of which project to `Ask`), so mode-sensitive callers
+    /// (`apply_permission_mode_hint`) key on this provenance bit instead.
+    #[serde(default)]
+    pub default_mode_configured: bool,
 }
 impl PermissionConfig {
     pub fn new(rules: Vec<PermissionRule>) -> Self {
         Self {
             rules,
             prompt_policy: PromptPolicy::Ask,
+            default_mode_configured: false,
         }
     }
 }
@@ -412,6 +437,13 @@ pub enum PromptPolicy {
     /// Use the auto-mode classifier (`permissions.defaultMode: "auto"`).
     /// Seeded into the permission manager's auto flag at session start.
     Auto,
+    /// Resolve as allow without prompting. Not reachable from settings
+    /// `defaultMode`; set only at spawn time for headless sessions whose
+    /// client pre-declared an allow answer
+    /// (`startupHints.permissionMode: "alwaysAllow"`). Hard deny rules and
+    /// pre-prompt rejections still apply — this only replaces the prompt
+    /// itself, exactly like a connected client answering allow.
+    Allow,
 }
 /// A single permission rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -442,6 +474,7 @@ pub enum RuleAction {
 /// Tool filter for permission rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum ToolFilter {
     #[default]
     Any,
@@ -452,6 +485,8 @@ pub enum ToolFilter {
     Mcp,
     WebFetch,
     WebSearch,
+    #[serde(rename = "agent_message", alias = "agentmessage")]
+    AgentMessage,
 }
 /// Where a requirement/permission was loaded from (duplicated for claude_compat).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -509,6 +544,16 @@ pub struct Sourced<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn agent_message_tool_filter_serde_is_dedicated_and_unknown_is_rejected() {
+        let filter: ToolFilter = serde_json::from_str(r#""agent_message""#).unwrap();
+        assert_eq!(filter, ToolFilter::AgentMessage);
+        assert_eq!(
+            serde_json::to_string(&filter).unwrap(),
+            r#""agent_message""#
+        );
+        assert!(serde_json::from_str::<ToolFilter>(r#""future_tool""#).is_err());
+    }
     #[test]
     fn permission_event_subagent_fields_default_to_none() {
         let json = r#"{
@@ -681,6 +726,21 @@ mod tests {
             matches!(access, AccessKind::Bash(ref cmd) if cmd == "cargo test"),
             "Bash should produce AccessKind::Bash with the command, got {access:?}"
         );
+    }
+    #[test]
+    fn active_agent_message_maps_to_dedicated_access_without_text() {
+        use xai_grok_tools::implementations::grok_build::send_subagent_message::SendSubagentMessageInput;
+        use xai_grok_tools::types::ToolInput;
+        let text = "private follow-up";
+        let access = AccessKind::from(&ToolInput::SendSubagentMessage(SendSubagentMessageInput {
+            subagent_id: "sub-1".into(),
+            text: text.into(),
+        }));
+        let AccessKind::AgentMessage { subagent_id } = access else {
+            panic!("active agent messages must use dedicated access")
+        };
+        assert_eq!(subagent_id, "sub-1");
+        assert!(!subagent_id.contains(text));
     }
     #[test]
     fn use_tool_maps_to_mcp_tool_access() {

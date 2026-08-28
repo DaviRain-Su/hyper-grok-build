@@ -765,6 +765,59 @@ fn strip_empty_json_schema_enum_values_in_place(value: &mut serde_json::Value) {
 // ============================================================================
 
 /// A complete conversation request that can be sent to either API.
+/// Sampling policy for a response that stopped with `Length` (max_tokens
+/// truncation).
+///
+/// `Length` can arrive far below any client budget (e.g. an engine-side
+/// window clamp after a runaway generation); callers that can use partial
+/// output opt into `CompletePartial`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LengthPolicy {
+    /// Fail the attempt with `MaxTokensTruncation` (legacy behavior).
+    #[default]
+    Fail,
+    /// Complete with the partial response; empty-Length still fails.
+    CompletePartial,
+}
+
+/// Outcome of applying a [`LengthPolicy`] to a completed response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LengthVerdict {
+    /// The stop reason is not `Length`; the policy does not apply.
+    Pass,
+    /// A `Length` stop delivered with its partial content.
+    Salvage,
+    /// A `Length` stop the policy rejects (`MaxTokensTruncation`).
+    Fail,
+}
+
+impl LengthPolicy {
+    /// The fail-vs-salvage decision for a completed response, including the
+    /// `Length` stop-reason check. Pure; the sampler's `apply_length_policy`
+    /// wraps it with the error mapping and salvage breadcrumb so the actor
+    /// path (`drive_l2`) and the direct-collect path can never diverge.
+    ///
+    /// Two cases fail regardless of policy: empty Length (deterministic
+    /// under a fixed cap; the Empty resample family would retry-storm) and
+    /// Length carrying tool calls (the trailing call's arguments may be
+    /// truncated). Guarantees the invariant: a salvaged response has
+    /// visible content and no tool calls.
+    pub fn verdict(self, response: &ConversationResponse) -> LengthVerdict {
+        if response.stop_reason != Some(StopReason::Length) {
+            return LengthVerdict::Pass;
+        }
+        if self == LengthPolicy::CompletePartial
+            && response.empty_reason().is_none()
+            && response.tool_calls().is_empty()
+        {
+            LengthVerdict::Salvage
+        } else {
+            LengthVerdict::Fail
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, Default)]
 pub struct ConversationRequest {
     /// The conversation items (messages)
@@ -823,6 +876,8 @@ pub struct ConversationRequest {
     pub bedrock_request_metadata: indexmap::IndexMap<String, String>,
     /// Bedrock-only custom headers injected before signing; reserved auth/SigV4 headers are rejected.
     pub bedrock_headers: indexmap::IndexMap<String, String>,
+    /// What the sampler does when the response stops with `Length`.
+    pub length_policy: LengthPolicy,
 }
 
 /// OpenAI caps prompt-cache keys at 64 characters (Pi `clampOpenAIPromptCacheKey`).
@@ -1398,6 +1453,19 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::SubagentCompleted),
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
+    /// Create a model-authored message received from another agent.
+    pub fn agent_message(content: impl Into<String>) -> Self {
+        Self::User(UserItem {
+            content: vec![ContentPart::Text {
+                text: Arc::<str>::from(content.into()),
+            }],
+            synthetic_reason: Some(SyntheticReason::AgentMessage),
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,

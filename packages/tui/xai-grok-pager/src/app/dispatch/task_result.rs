@@ -244,6 +244,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
     if result.ends_startup() {
         app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Ok);
     }
+    if !matches!(
+        &result,
+        TaskResult::WorkspaceMembersUpserted { .. }
+            | TaskResult::WorkspaceMembersUpsertTaskFailed { .. }
+    ) {
+        crate::app::workspace_sync::request(app);
+    }
     match result {
         TaskResult::SessionCreated {
             agent_id,
@@ -498,6 +505,118 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.dashboard_local_sessions = sessions;
             app.dashboard_sessions_loading = false;
             vec![]
+        }
+        TaskResult::WorkspaceSnapshotLoaded { store, snapshot } => {
+            app.workspace_writes_disabled = !matches!(
+                store.schema_state(),
+                xai_grok_dashboard_store::SchemaState::Current
+            );
+            app.workspace_store = Some(store);
+            app.workspace_snapshot = Some(snapshot);
+            app.workspace_store_loading = false;
+            app.workspace_write_in_flight = false;
+            app.workspace_retry_metadata.clear();
+            app.workspace_failed_metadata.clear();
+            app.dashboard_sessions_loading = false;
+            vec![]
+        }
+        TaskResult::WorkspaceSnapshotFailed { error } => {
+            tracing::warn!(error = %error, "dashboard workspace load failed");
+            app.workspace_store_loading = false;
+            app.workspace_write_in_flight = false;
+            app.dashboard_sessions_loading = false;
+            app.show_toast(&format!("Could not load dashboard workspace: {error}"));
+            vec![]
+        }
+        TaskResult::WorkspaceMembersUpserted {
+            store,
+            snapshot,
+            failures,
+            attempted,
+        } => {
+            app.workspace_writes_disabled = !matches!(
+                store.schema_state(),
+                xai_grok_dashboard_store::SchemaState::Current
+            );
+            app.workspace_write_in_flight = false;
+            let snapshot = match snapshot {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    let db_path = store.path().to_path_buf();
+                    tracing::warn!(error = %error, "workspace snapshot after write failed");
+                    app.workspace_store = None;
+                    app.workspace_store_loading = true;
+                    app.workspace_sync_requested = true;
+                    app.show_toast("Dashboard workspace changed; refreshing");
+                    return vec![Effect::LoadWorkspaceSnapshot { db_path }];
+                }
+            };
+            app.workspace_store = Some(store);
+            app.workspace_snapshot = Some(snapshot);
+            let failed_ids: std::collections::HashSet<_> = failures
+                .iter()
+                .map(|failure| failure.session_id.clone())
+                .collect();
+            for member in &attempted {
+                if !failed_ids.contains(member.key.session_id.as_ref()) {
+                    app.workspace_retry_metadata.remove(&member.key.session_id);
+                    app.workspace_failed_metadata.remove(&member.key.session_id);
+                }
+            }
+            if !failures.is_empty() {
+                let failure = &failures[0];
+                tracing::warn!(
+                    failed = failures.len(),
+                    session_id = failure.session_id,
+                    error = failure.error,
+                    "dashboard workspace sync partially failed"
+                );
+                app.show_toast(&format!(
+                    "Could not sync {} dashboard session{}",
+                    failures.len(),
+                    if failures.len() == 1 { "" } else { "s" }
+                ));
+            }
+            if app.workspace_writes_disabled {
+                app.workspace_sync_requested = false;
+                app.show_toast("Dashboard workspace is read-only in this Grok version");
+            } else {
+                let mut request_retry = false;
+                for member in attempted {
+                    let Some(failure) = failures
+                        .iter()
+                        .find(|failure| failure.session_id == member.key.session_id.as_ref())
+                    else {
+                        continue;
+                    };
+                    let already_retried = app
+                        .workspace_retry_metadata
+                        .get(&member.key.session_id)
+                        .is_some_and(|metadata| metadata == &member.metadata);
+                    if failure.retryable && !already_retried {
+                        app.workspace_retry_metadata
+                            .insert(member.key.session_id.clone(), member.metadata.clone());
+                        app.workspace_failed_metadata.remove(&member.key.session_id);
+                        request_retry = true;
+                    } else {
+                        app.workspace_retry_metadata.remove(&member.key.session_id);
+                        app.workspace_failed_metadata
+                            .insert(member.key.session_id, member.metadata);
+                    }
+                }
+                if request_retry {
+                    app.workspace_sync_requested = true;
+                }
+            }
+            vec![]
+        }
+        TaskResult::WorkspaceMembersUpsertTaskFailed { db_path, error } => {
+            tracing::error!(error = %error, "dashboard workspace writer failed");
+            app.workspace_store = None;
+            app.workspace_write_in_flight = false;
+            app.workspace_store_loading = true;
+            app.show_toast("Dashboard workspace writer failed; reopening");
+            vec![Effect::LoadWorkspaceSnapshot { db_path }]
         }
         TaskResult::CardDetailLoaded {
             host,

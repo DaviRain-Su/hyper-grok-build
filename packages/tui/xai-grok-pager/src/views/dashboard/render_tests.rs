@@ -89,6 +89,57 @@ fn buf_to_text(buf: &Buffer) -> String {
     content
 }
 
+#[test]
+fn workspace_dashboard_renders_snapshot_member_without_delete_control() {
+    let area = Rect::new(0, 0, 100, 28);
+    let mut buf = Buffer::empty(area);
+    let mut state = DashboardState::new();
+    state.hovered_row = Some(DashboardRowId::Workspace {
+        session_id: "saved-session".to_owned(),
+    });
+    let mut agents = IndexMap::new();
+    let registry = crate::actions::ActionRegistry::defaults();
+    let snapshot = xai_grok_dashboard_store::WorkspaceSnapshot {
+        grouping: xai_grok_dashboard_store::Grouping::State,
+        members: vec![xai_grok_dashboard_store::Member {
+            session_id: xai_grok_dashboard_store::SessionId::new("saved-session").unwrap(),
+            kind: xai_grok_dashboard_store::MemberKind::Build,
+            origin: xai_grok_dashboard_store::MemberOrigin::Local,
+            cwd: Some("/tmp/saved".to_owned()),
+            title: Some("Saved workspace session".to_owned()),
+            model: Some("grok-test".to_owned()),
+            last_turn_summary: Some("Stored summary".to_owned()),
+            is_worktree: false,
+            last_change_unix_ms: 1_725_000_000_000,
+            pin_rank: None,
+            order_rank: None,
+        }],
+        data_version: 1,
+    };
+
+    let _ = render_dashboard(
+        &mut buf,
+        area,
+        &mut state,
+        &mut agents,
+        &registry,
+        None,
+        &[],
+        true,
+        Some(&snapshot),
+        false,
+        None,
+    );
+
+    let content = buf_to_text(&buf);
+    assert!(content.contains("Saved workspace session"));
+    assert!(content.contains("Stored summary"));
+    assert!(
+        state.row_delete_rects.is_empty(),
+        "workspace-only rows must not expose v1's permanent delete action"
+    );
+}
+
 /// edge cases 1+25: empty state with no agents renders
 /// the single hint line (never a fully blank screen).
 #[test]
@@ -134,6 +185,8 @@ fn render_dashboard_shows_roster_when_local_agents_empty() {
         &registry,
         None,
         &roster,
+        false,
+        None,
         false,
         None,
     );
@@ -185,6 +238,8 @@ fn render_dashboard_hover_shows_delete_x_only_for_settled_rows() {
             &registry,
             None,
             &roster,
+            false,
+            None,
             false,
             None,
         );
@@ -3091,6 +3146,8 @@ fn render_dashboard_paints_full_area_background() {
         &registry,
         None,
         &[],
+        false,
+        None,
         false,
         None,
     );

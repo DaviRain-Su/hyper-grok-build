@@ -77,6 +77,7 @@ impl StaticShellSnapshot {
                 .stderr(xai_tty_utils::null_stdio())
                 .kill_on_drop(true);
             crate::util::detach_command(&mut cmd);
+            xai_grok_sandbox::child_net::restrict_child_network(&mut cmd);
             cmd.envs(crate::util::pager_env());
             #[allow(clippy::disallowed_methods)] // probe killed on drop
             let mut child = cmd.spawn().ok()?;

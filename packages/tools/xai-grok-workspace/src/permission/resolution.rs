@@ -296,6 +296,63 @@ pub async fn resolve_permission_config_with_fallback(
         .map(|r| r.config)
 }
 
+/// Wire value a client sets in `startupHints.permissionMode` to pre-declare an
+/// allow answer for permission prompts (headless sessions with no client
+/// attached on agent-initiated turns).
+///
+/// **Trust model:** any authenticated client that can create or cold-load the
+/// session can stamp this — there is no separate "trusted stamper" tier. That
+/// is a deliberate equivalence: per ACP, `session/request_permission` answers
+/// are the client's to give and clients MAY auto-allow, so a stamping client
+/// is granted exactly what it could already achieve by staying connected and
+/// answering allow to every prompt. The difference the hint adds is
+/// disconnect-safety (agent-initiated turns keep resolving after the client
+/// hangs up), which is its whole purpose for headless sessions. It never
+/// weakens rule enforcement: deny rules and pre-prompt rejections are decided
+/// before the prompt gate, an org can kill it fleet-wide with the
+/// always-approve pin (`[ui] disable_bypass_permissions_mode`), and an
+/// explicitly configured `defaultMode` outranks it.
+pub const PERMISSION_MODE_ALWAYS_ALLOW: &str = "alwaysAllow";
+
+/// Apply a client-requested `startupHints.permissionMode` to the resolved
+/// session permission config. Only [`PERMISSION_MODE_ALWAYS_ALLOW`] is honored
+/// (see its trust-model note), and only when (a) always-approve is not pinned
+/// off by managed policy (`policy_block`) and (b) no settings layer explicitly
+/// configured `permissions.defaultMode` — keyed on
+/// [`PermissionConfig::default_mode_configured`], not on `prompt_policy`,
+/// because explicit `default` / `plan` / `acceptEdits` and invalid fail-safe
+/// modes all project to `Ask` and must not be upgraded. Returns whether the
+/// hint was applied.
+pub fn apply_permission_mode_hint(
+    config: &mut Option<PermissionConfig>,
+    requested: Option<&str>,
+    policy_block: Option<&'static str>,
+) -> bool {
+    let Some(mode) = requested else { return false };
+    if mode != PERMISSION_MODE_ALWAYS_ALLOW {
+        warn!(mode, "unrecognized startupHints.permissionMode ignored");
+        return false;
+    }
+    if let Some(reason) = policy_block {
+        warn!(
+            reason,
+            "startupHints.permissionMode=alwaysAllow ignored: always-approve disabled by managed policy"
+        );
+        return false;
+    }
+    let config = config.get_or_insert_with(|| PermissionConfig::new(Vec::new()));
+    if config.default_mode_configured {
+        warn!(
+            prompt_policy = ?config.prompt_policy,
+            "startupHints.permissionMode=alwaysAllow ignored: permissions.defaultMode is explicitly configured"
+        );
+        return false;
+    }
+    config.prompt_policy = PromptPolicy::Allow;
+    info!("session permission prompts resolve as allow (startupHints.permissionMode)");
+    true
+}
+
 /// Patterns of `Deny` rules that forbid *reading* a path — those on `Read`,
 /// `Grep`, or `Any` (the tools that surface file contents). Write-only denies
 /// (`Edit`/`Write`/`Bash`) and non-deny actions are excluded.
@@ -345,15 +402,13 @@ fn tag_with_source(
     }));
 }
 
-/// Whether an Allow rule is a blanket `--yolo` substitute the pin must drop: a
-/// catch-all on `Any` or a dangerous freeform dimension (Bash/MCP/WebFetch),
-/// detected via [`rule_is_catchall`]. Read/Edit/Grep are file-access only, so a
-/// catch-all on them is not a substitute and survives.
+/// Whether an Allow rule is a blanket `--yolo` substitute the pin must drop:
+/// a catch-all on `Any` or a freeform authority dimension
+/// (Bash/MCP/WebFetch/AgentMessage). Read/Edit/Grep catch-alls survive.
 pub fn is_catchall_allow(rule: &PermissionRule) -> bool {
     if rule.action != RuleAction::Allow {
         return false;
     }
-    // File-access tools (no command execution) are never `--yolo` substitutes.
     if matches!(
         rule.tool,
         ToolFilter::Read | ToolFilter::Edit | ToolFilter::Grep
@@ -498,9 +553,11 @@ async fn resolve_permissions_with_provenance_inner(
 
     let mut skipped = Vec::new();
     let mut prompt_policy = PromptPolicy::default();
+    let mut default_mode_configured = false;
 
     // Apply managed defaultMode synthetics + prompt policy (highest mode tier).
     if let Some(mode) = managed_mode {
+        default_mode_configured = true;
         prompt_policy = mode.effects().prompt_policy;
         let managed_path = managed
             .features
@@ -525,6 +582,7 @@ async fn resolve_permissions_with_provenance_inner(
         // User-tier prompt_policy only when managed did not set defaultMode.
         if managed_mode.is_none() {
             prompt_policy = config.prompt_policy;
+            default_mode_configured = config.default_mode_configured;
         }
         tag_with_source(
             &mut all_rules,
@@ -539,7 +597,14 @@ async fn resolve_permissions_with_provenance_inner(
 
     // Keep skip-only resolutions alive so the drop reaches `grok inspect`; zero
     // rules with Ask is a no-op for the evaluator, identical to the `None` arm.
-    if all_rules.is_empty() && prompt_policy == PromptPolicy::Ask && skipped.is_empty() {
+    // A rule-less explicit defaultMode (`default` / `plan`) must also survive:
+    // dropping it to `None` would erase `default_mode_configured` and let the
+    // alwaysAllow startup hint upgrade an explicitly configured mode.
+    if all_rules.is_empty()
+        && prompt_policy == PromptPolicy::Ask
+        && skipped.is_empty()
+        && !default_mode_configured
+    {
         return None;
     }
 
@@ -552,6 +617,7 @@ async fn resolve_permissions_with_provenance_inner(
         config: PermissionConfig {
             rules,
             prompt_policy,
+            default_mode_configured,
         },
         sources,
         skipped,
@@ -702,6 +768,7 @@ fn resolve_claude_settings_inner(
         PermissionConfig {
             rules: all_rules,
             prompt_policy,
+            default_mode_configured: applied_mode.is_some(),
         },
         all_skipped,
         source_path,

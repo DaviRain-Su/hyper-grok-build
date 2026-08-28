@@ -278,6 +278,7 @@ async fn try_resolve_git_root(
     }
     None
 }
+#[tracing::instrument(name = "ext.git", skip_all, fields(method = %args.method))]
 pub async fn handle(
     agent: &MvpAgent,
     ops: &xai_grok_workspace::WorkspaceOps,

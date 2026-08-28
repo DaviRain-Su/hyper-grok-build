@@ -81,6 +81,9 @@ impl AgentView {
             }
             if key.code == KeyCode::Esc || ctrl_c_empty {
                 self.exit_editing_mode();
+                if crate::app::turn_completion::reopen_blocked_card_if_held(self) {
+                    return Some(InputOutcome::Changed);
+                }
                 return Some(InputOutcome::Action(Action::DrainQueue));
             }
         }
@@ -111,9 +114,12 @@ impl AgentView {
                 self.show_toast("Editing a queued prompt: press Enter to save, Esc to discard");
                 return Some(false); // blocked, no modal armed
             }
-            // Clean edit — silently exit editing mode.
+            // Clean edit — silently exit editing mode. With a hook-block hold
+            // armed the card comes back (it stays on screen while the user
+            // works in the target pane).
             self.exit_editing_mode();
             self.active_pane = target;
+            crate::app::turn_completion::reopen_blocked_card_if_held(self);
             return Some(true);
         }
         None
@@ -140,6 +146,9 @@ impl AgentView {
                     if self.prompt.text().trim().is_empty() {
                         self.exit_editing_mode();
                         self.set_active_pane(pending_target, true);
+                        if crate::app::turn_completion::reopen_blocked_card_if_held(self) {
+                            return InputOutcome::Changed;
+                        }
                         if was_drain_blocked {
                             return InputOutcome::Action(Action::DrainQueue);
                         }
@@ -165,6 +174,9 @@ impl AgentView {
                     // Discard changes (revert to original), exit editing.
                     self.exit_editing_mode();
                     self.set_active_pane(pending_target, true);
+                    if crate::app::turn_completion::reopen_blocked_card_if_held(self) {
+                        return InputOutcome::Changed;
+                    }
                     if was_drain_blocked {
                         return InputOutcome::Action(Action::DrainQueue);
                     }
@@ -190,16 +202,21 @@ impl AgentView {
                         // Keep the hold until remove lands — release would re-kick promote of the row we are deleting.
                         self.exit_editing_mode_keeping_hold();
                         self.set_active_pane(pending_target, true);
+                        crate::app::turn_completion::reopen_blocked_card_if_held(self);
                         return InputOutcome::Action(Action::QueueRemoveShared {
                             id: server_id,
                             expected_version,
                         });
                     }
                     if let PromptMode::EditingQueued { id, .. } = self.prompt_mode {
-                        self.session.pending_prompts.retain(|p| p.id != id);
+                        // The shared remove path owns the scoped hold release.
+                        self.remove_local_queue_row(id);
                     }
                     self.exit_editing_mode();
                     self.set_active_pane(pending_target, true);
+                    if crate::app::turn_completion::reopen_blocked_card_if_held(self) {
+                        return InputOutcome::Changed;
+                    }
                     // If drain was blocked and we deleted the front,
                     // the next prompt (if any) should now drain.
                     if was_drain_blocked {
@@ -231,6 +248,19 @@ impl AgentView {
             && self.optimistic_queue_ids.contains(sid)
         {
             self.show_toast(STILL_QUEUEING_TOAST);
+            return;
+        }
+        if is_server
+            && let Some(server_id) = row.as_ref().and_then(|row| row.server_id.as_deref())
+            && !self.shared_queue.iter().any(|entry| entry.id == server_id)
+        {
+            self.show_toast("Queued prompt is no longer in the queue");
+            return;
+        }
+        if let Some(row) = row.as_ref()
+            && let Some(capabilities) = self.server_row_capabilities(row)
+            && !capabilities.can_edit()
+        {
             return;
         }
         type QueueEditEntryData = (
@@ -334,7 +364,7 @@ impl AgentView {
     ///
     /// Text that resolves to a pager builtin leaves through `Action::RunEditedQueuedCommand`
     /// instead, ignoring `drain`: dispatch runs the command and drains once it has settled the row.
-    fn save_edited_queued_row(
+    pub(in crate::app) fn save_edited_queued_row(
         &mut self,
         id: u64,
         server_id: Option<String>,
@@ -425,6 +455,19 @@ impl AgentView {
                 }
                 crate::prompt_images::drain_and_cleanup(&mut images);
                 self.exit_editing_mode();
+                // Saving the blocked row is the card's Edit resolution:
+                // release and resend it in place. Saving any other row must
+                // not unpark the blocked front — the card comes back.
+                if self
+                    .session
+                    .blocked_prompt
+                    .as_ref()
+                    .is_none_or(|b| b.row_id == id)
+                {
+                    self.release_hook_block_hold();
+                } else if crate::app::turn_completion::reopen_blocked_card_if_held(self) {
+                    return InputOutcome::Changed;
+                }
                 if drain {
                     InputOutcome::Action(Action::DrainQueue)
                 } else {
@@ -1692,6 +1735,19 @@ mod tests {
             server_id: None,
             kind: crate::app::agent::QueueEntryKind::Prompt,
         }
+    }
+
+    #[test]
+    fn exit_editing_mode_keeps_hook_block_hold() {
+        let mut agent = make_running_agent();
+        agent.session.hook_block_hold = true;
+        agent.prompt_mode = editing_lone_local();
+        agent.exit_editing_mode();
+        assert!(
+            agent.session.hook_block_hold,
+            "a plain edit exit resolves nothing: only saving or deleting the \
+             blocked row releases the hold"
+        );
     }
 
     /// `exit_editing_mode` clears a stray `EditConfirm` (unreachable in-tree

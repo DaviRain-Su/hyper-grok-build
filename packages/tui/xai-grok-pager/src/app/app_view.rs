@@ -792,6 +792,30 @@ pub struct AppView {
     pub dashboard_local_sessions: Vec<crate::app::roster::RosterEntry>,
     /// Whether the dashboard is currently loading local sessions (non-leader mode).
     pub dashboard_sessions_loading: bool,
+    /// The single SQLite workspace connection owned by this pager process.
+    /// Opened lazily only after dashboard v2 is entered.
+    pub workspace_store: Option<xai_grok_dashboard_store::WorkspaceStore>,
+    /// Initial workspace view read from [`Self::workspace_store`].
+    pub workspace_snapshot: Option<xai_grok_dashboard_store::WorkspaceSnapshot>,
+    /// Prevents duplicate open/snapshot effects while the first read is pending.
+    pub workspace_store_loading: bool,
+    /// Agent metadata changed after workspace initialization and needs a scan.
+    pub workspace_sync_requested: bool,
+    /// The single store handle is currently owned by an async write effect.
+    pub workspace_write_in_flight: bool,
+    /// A newer read-only schema was opened; suppress writes but keep reads.
+    pub workspace_writes_disabled: bool,
+    /// Exact metadata payloads that have consumed their one automatic retry.
+    pub workspace_retry_metadata: std::collections::HashMap<
+        xai_grok_dashboard_store::SessionId,
+        xai_grok_dashboard_store::MemberMetadata,
+    >,
+    /// Last metadata payloads that exhausted or cannot use their retry. An
+    /// identical payload stays suppressed until its agent metadata changes.
+    pub workspace_failed_metadata: std::collections::HashMap<
+        xai_grok_dashboard_store::SessionId,
+        xai_grok_dashboard_store::MemberMetadata,
+    >,
     /// Server-authoritative shared prompt queues, keyed by `sessionId`
     /// Reconciled from `x.ai/queue/changed` broadcasts so
     /// every client renders the same ordered queue (including prompts queued
@@ -1803,6 +1827,14 @@ impl AppView {
             leader_roster: Vec::new(),
             dashboard_local_sessions: Vec::new(),
             dashboard_sessions_loading: false,
+            workspace_store: None,
+            workspace_snapshot: None,
+            workspace_store_loading: false,
+            workspace_sync_requested: false,
+            workspace_write_in_flight: false,
+            workspace_writes_disabled: false,
+            workspace_retry_metadata: std::collections::HashMap::new(),
+            workspace_failed_metadata: std::collections::HashMap::new(),
             shared_prompt_queues: std::collections::HashMap::new(),
             optimistic_prompt_echoes: std::collections::HashMap::new(),
             pending_running_adoptions: std::collections::HashMap::new(),
@@ -5356,6 +5388,8 @@ impl AppView {
                                 registry,
                                 pending_hint,
                                 dashboard_roster,
+                                self.workspace_dashboard_enabled,
+                                self.workspace_snapshot.as_ref(),
                                 self.dashboard_sessions_loading,
                                 dash_upgrade_cta,
                             );

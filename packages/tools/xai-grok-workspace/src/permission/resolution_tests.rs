@@ -2631,14 +2631,18 @@ fn catchall_allow_detection() {
     }));
 }
 
-/// FIX 2: a bare/match-all Allow on a freeform-execution dimension
-/// (Bash / MCP / WebFetch) is a `--yolo` substitute — including the
-/// prefix-regime `?*`-class and bare `allow = ["Bash"]` ({Allow, Bash, None})
-/// that the `Any`-only detector missed. Scoped grants and file-access
-/// dimensions (Read/Edit/Grep) are NOT catch-alls.
+/// A bare/match-all Allow on a freeform authority dimension
+/// (Bash / MCP / WebFetch / AgentMessage) is a `--yolo` substitute — including
+/// the prefix-regime `?*`-class and bare `allow = ["Bash"]` ({Allow, Bash, None}).
+/// Scoped grants and file dimensions (Read/Edit/Grep) are not catch-alls.
 #[test]
 fn catchall_allow_covers_freeform_dimensions() {
-    for tool in [&ToolFilter::Bash, &ToolFilter::Mcp, &ToolFilter::WebFetch] {
+    for tool in [
+        &ToolFilter::Bash,
+        &ToolFilter::Mcp,
+        &ToolFilter::WebFetch,
+        &ToolFilter::AgentMessage,
+    ] {
         // Bare per-tool allow (pattern None) and match-all patterns.
         assert!(is_catchall_allow(&allow_tool(tool, None)), "{tool:?} bare");
         assert!(
@@ -3604,4 +3608,145 @@ async fn managed_config_toml_rules_resolve_as_non_admin_defaults() {
     }));
     assert!(!resolved.config.rules.iter().any(is_catchall_allow));
     assert!(resolved.skipped.iter().any(|s| s.reason == PIN));
+}
+
+/// `apply_permission_mode_hint`: honored only for `"alwaysAllow"`, with no
+/// pin, when no settings layer configured `defaultMode`; every explicitly
+/// configured mode — including ones that project to `Ask` — and the pin win.
+#[test]
+fn permission_mode_hint_apply_matrix() {
+    /// A config as the resolver produces it for an explicit `defaultMode`.
+    fn configured(policy: PromptPolicy) -> Option<PermissionConfig> {
+        let mut config = PermissionConfig::new(vec![]);
+        config.prompt_policy = policy;
+        config.default_mode_configured = true;
+        Some(config)
+    }
+
+    // No hint: no-op, config untouched.
+    let mut config: Option<PermissionConfig> = None;
+    assert!(!apply_permission_mode_hint(&mut config, None, None));
+    assert!(config.is_none());
+
+    // Unrecognized mode: ignored, no config synthesized.
+    assert!(!apply_permission_mode_hint(
+        &mut config,
+        Some("bypassPermissions"),
+        None
+    ));
+    assert!(config.is_none());
+
+    // Valid hint, no resolved config: synthesizes one with prompt_policy Allow.
+    assert!(apply_permission_mode_hint(
+        &mut config,
+        Some(PERMISSION_MODE_ALWAYS_ALLOW),
+        None
+    ));
+    assert_eq!(config.as_ref().unwrap().prompt_policy, PromptPolicy::Allow);
+
+    // Pin clamps the hint off.
+    let mut pinned: Option<PermissionConfig> = None;
+    assert!(!apply_permission_mode_hint(
+        &mut pinned,
+        Some(PERMISSION_MODE_ALWAYS_ALLOW),
+        Some("pinned off"),
+    ));
+    assert!(pinned.is_none());
+
+    // Configured dontAsk (Deny) outranks the hint.
+    let mut deny = configured(PromptPolicy::Deny);
+    assert!(!apply_permission_mode_hint(
+        &mut deny,
+        Some(PERMISSION_MODE_ALWAYS_ALLOW),
+        None
+    ));
+    assert_eq!(deny.as_ref().unwrap().prompt_policy, PromptPolicy::Deny);
+
+    // Configured auto (Auto) outranks the hint.
+    let mut auto = configured(PromptPolicy::Auto);
+    assert!(!apply_permission_mode_hint(
+        &mut auto,
+        Some(PERMISSION_MODE_ALWAYS_ALLOW),
+        None
+    ));
+    assert_eq!(auto.as_ref().unwrap().prompt_policy, PromptPolicy::Auto);
+
+    // Explicit default / plan / acceptEdits / invalid fail-safe all project to
+    // Ask but ARE configured modes: the provenance bit must refuse the upgrade.
+    let mut explicit_default = configured(PromptPolicy::Ask);
+    assert!(!apply_permission_mode_hint(
+        &mut explicit_default,
+        Some(PERMISSION_MODE_ALWAYS_ALLOW),
+        None
+    ));
+    assert_eq!(
+        explicit_default.as_ref().unwrap().prompt_policy,
+        PromptPolicy::Ask
+    );
+
+    // Rules without any configured defaultMode upgrade to Allow.
+    let mut ask = Some(PermissionConfig::new(vec![]));
+    assert!(apply_permission_mode_hint(
+        &mut ask,
+        Some(PERMISSION_MODE_ALWAYS_ALLOW),
+        None
+    ));
+    assert_eq!(ask.as_ref().unwrap().prompt_policy, PromptPolicy::Allow);
+}
+
+/// The resolver stamps `default_mode_configured` for an explicit user-tier
+/// `defaultMode` even when it projects to `Ask` (e.g. `"default"`), so the
+/// alwaysAllow hint cannot override an explicit operator choice — including
+/// the rule-less mode-only case, which must survive the outer resolver's
+/// empty-config drop instead of degrading to `None` (an unconfigured look).
+///
+/// Sync + `block_on` so `ENV_LOCK` is not held across `.await` (clippy
+/// `await_holding_lock`), same as the untrusted-project tests above.
+#[test]
+fn explicit_default_mode_blocks_permission_mode_hint() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    // (settings json, label) — with companion rules and mode-only.
+    let cases = [
+        (
+            r#"{"permissions": {"defaultMode": "default", "allow": ["Bash(git status)"]}}"#,
+            "defaultMode with rules",
+        ),
+        (
+            r#"{"permissions": {"defaultMode": "default"}}"#,
+            "rule-less defaultMode",
+        ),
+    ];
+    for (settings, label) in cases {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_dir = tmp.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(claude_dir.join("settings.json"), settings).unwrap();
+        let _home = EnvVarGuard::set("HOME", tmp.path());
+        let _grok_home = EnvVarGuard::set("GROK_HOME", &tmp.path().join(".grok"));
+        let _marker = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
+
+        let resolved = rt
+            .block_on(resolve_permissions_with_provenance_inner(
+                tmp.path(),
+                inputs(None),
+            ))
+            .unwrap_or_else(|| panic!("{label}: explicit defaultMode must resolve, not drop"));
+        assert!(resolved.config.default_mode_configured, "{label}");
+        assert_eq!(resolved.config.prompt_policy, PromptPolicy::Ask, "{label}");
+
+        let mut config = Some(resolved.config);
+        assert!(
+            !apply_permission_mode_hint(&mut config, Some(PERMISSION_MODE_ALWAYS_ALLOW), None),
+            "{label}: hint must be refused"
+        );
+        assert_eq!(
+            config.as_ref().unwrap().prompt_policy,
+            PromptPolicy::Ask,
+            "{label}"
+        );
+    }
 }

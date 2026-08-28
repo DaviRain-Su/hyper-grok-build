@@ -27,7 +27,7 @@ Many third-party rows only appear after you set a platform key (`/providers …`
 ### CLI Flag
 
 ```bash
-grok -p "Hello" -m grok-build
+grok -p "Hello" -m grok-4.6
 ```
 
 ### Slash Command
@@ -35,13 +35,13 @@ grok -p "Hello" -m grok-build
 In the TUI, switch models during a session:
 
 ```
-/model grok-build
+/model grok-4.6
 ```
 
 Or use the alias:
 
 ```
-/m grok-build
+/m grok-4.6
 ```
 
 ### Model Picker (Ctrl+M)
@@ -201,11 +201,11 @@ You can override specific fields of built-in models without redefining everythin
 
 ```toml
 # Override only the API key for a default model
-[model.grok-build]
+[model.grok-4.6]
 api_key = "my-api-key"
 
 # Override temperature and add a custom API key
-[model.grok-build]
+[model.grok-4.6]
 temperature = 0.5
 api_key = "sk-custom"
 ```
@@ -375,7 +375,7 @@ grok
 models_base_url = "https://api.acme.com/v1"
 
 # Override only the API key for a specific model
-[model.grok-build]
+[model.grok-4.6]
 api_key = "my-api-key"
 ```
 
@@ -455,9 +455,9 @@ auth_token_ttl = 3600
 default = "company-grok"
 
 [model.company-grok]
-model = "grok-build"
+model = "grok-4.6"
 base_url = "https://grok-proxy.acme.com/"
-name = "Grok Build Latest (Proxy)"
+name = "Grok 4.6 (Proxy)"
 context_window = 128000
 
 [features]

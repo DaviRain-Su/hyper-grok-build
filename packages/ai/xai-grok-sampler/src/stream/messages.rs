@@ -444,13 +444,13 @@ pub fn stream_messages<'a>(
                             StopReason::Stop
                         }
                         messages::StopReason::ModelContextWindowExceeded => {
-                            // Output-side overflow on a successful stream: stays in the
-                            // max_tokens truncation class — compact-on-error recovery needs
+                            // Output-side overflow on a successful stream: maps to the
+                            // Length stop class — compact-on-error recovery needs
                             // an Api error carrying model metadata plus a prompt-side
                             // overflow, neither of which exists here.
                             tracing::warn!(
                                 wire_stop_reason = "model_context_window_exceeded",
-                                "context window hit mid-generation; surfacing as max_tokens truncation"
+                                "context window hit mid-generation; mapping to the Length stop class"
                             );
                             StopReason::Length
                         }
@@ -518,13 +518,9 @@ pub fn stream_messages<'a>(
             }
         }
 
-        if final_stop_reason == Some(StopReason::Length) {
-            yield SamplingEvent::Failed {
-                request_id: request_id.clone(),
-                error: SamplingErrorInfo::from(&SamplingError::MaxTokensTruncation),
-            };
-            return;
-        }
+        // A `Length` stop is NOT failed here: the transform completes with
+        // `stop_reason=Length` and `drive_l2` decides fail-vs-salvage per the
+        // request's `LengthPolicy`.
 
         // ── Build the final response ─────────────────────────────────
         let model_id = final_model.unwrap_or_default();
@@ -545,7 +541,13 @@ pub fn stream_messages<'a>(
             None
         };
 
-        let stop_reason = if !assistant_tool_calls.is_empty() {
+        let stop_reason = if final_stop_reason == Some(StopReason::Length) {
+            // Length wins even over completed tool_use blocks: the provider
+            // closes a block it cut mid-stream, so the trailing call's
+            // arguments may be silently truncated. `drive_l2` never salvages
+            // a Length response carrying tool calls.
+            final_stop_reason
+        } else if !assistant_tool_calls.is_empty() {
             // Completed tool_use blocks win even over Refusal: the calls are
             // real model output the agent loop must resolve.
             Some(StopReason::ToolCalls)

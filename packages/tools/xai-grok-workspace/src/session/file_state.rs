@@ -612,6 +612,7 @@ impl FileStateTracker {
     ///
     /// The caller provides the explicit `prompt_index` so that end_prompt works
     /// even when begin_prompt was never received (e.g. RPC failure in proxy mode).
+    #[tracing::instrument(name = "session.end_prompt", skip_all, fields(prompt_index = prompt_index))]
     pub async fn end_prompt(&self, fs: &AsyncFsWrapper, prompt_index: usize) {
         // Clear internal current-prompt tracking.
         {

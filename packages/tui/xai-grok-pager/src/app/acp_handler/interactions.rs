@@ -194,6 +194,13 @@ pub(crate) fn handle_ask_user_question(
                         "/doctor fix was cancelled because another question opened.".to_owned(),
                     ));
                 }
+                // The hold and the requeued front row survive the displaced
+                // card, so the queue stays parked; only the card is lost.
+                LocalQuestionKind::PromptBlocked { .. } => {
+                    agent.scrollback.push_block(RenderBlock::system(
+                        "The blocked-prompt card was replaced by another question. Your prompt is still held at the front of the queue.".to_owned(),
+                    ));
+                }
                 kind => {
                     // The trace-consent and doctor-fix arms above own their
                     // variants; their labels here are graceful fallbacks.
@@ -208,6 +215,9 @@ pub(crate) fn handle_ask_user_question(
                             "/feedback"
                         }
                         LocalQuestionKind::DoctorFix { .. } => "/doctor fix",
+                        // Owned by the dedicated arm above; label kept for
+                        // exhaustiveness.
+                        LocalQuestionKind::PromptBlocked { .. } => "blocked prompt",
                     };
                     agent.scrollback.push_block(RenderBlock::system(format!(
                         "{cmd} cancelled because another question opened."

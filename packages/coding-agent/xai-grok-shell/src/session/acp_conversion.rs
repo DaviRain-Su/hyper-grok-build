@@ -561,6 +561,24 @@ pub(crate) fn acp_tool_update(
                     .raw_output(raw_output_json(output, rewriter)),
             ))
         }
+        ToolOutput::SendSubagentMessage(send) => {
+            use xai_grok_tools::implementations::grok_build::send_subagent_message::SendSubagentMessageDisposition;
+
+            let status = match send.disposition() {
+                SendSubagentMessageDisposition::Accepted
+                | SendSubagentMessageDisposition::Unconfirmed => acp::ToolCallStatus::Completed,
+                SendSubagentMessageDisposition::Rejected => acp::ToolCallStatus::Failed,
+            };
+            Some(acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(Arc::from(tool_call_id)),
+                acp::ToolCallUpdateFields::new()
+                    .status(Some(status))
+                    .content(Some(vec![acp::ToolCallContent::from(
+                        acp::ContentBlock::Text(acp::TextContent::new(send.to_string())),
+                    )]))
+                    .raw_output(raw_output_json(output, rewriter)),
+            ))
+        }
         ToolOutput::AskUserQuestion(ask) => {
             let message = match ask {
                 xai_grok_tools::types::output::AskUserQuestionOutput::UserAnswered { message } => {
@@ -751,6 +769,52 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use xai_grok_tools::types::output::*;
+
+    #[test]
+    fn test_acp_tool_update_send_subagent_message_outcomes_are_terminal() {
+        use xai_grok_tools::implementations::grok_build::send_subagent_message::SendSubagentMessageOutput::*;
+
+        for (send, expected_status) in [
+            (
+                Accepted {
+                    message_id: "m-1".into(),
+                },
+                acp::ToolCallStatus::Completed,
+            ),
+            (NotFoundOrNotOwned, acp::ToolCallStatus::Failed),
+            (NotActiveOrFinalizing, acp::ToolCallStatus::Failed),
+            (Saturated { max_in_flight: 8 }, acp::ToolCallStatus::Failed),
+            (AdmissionUncertain, acp::ToolCallStatus::Completed),
+            (NotAcceptedBeforeDeadline, acp::ToolCallStatus::Failed),
+            (Unsupported, acp::ToolCallStatus::Failed),
+            (
+                Limit {
+                    max_bytes: 8,
+                    observed_bytes: 9,
+                },
+                acp::ToolCallStatus::Failed,
+            ),
+            (ChannelClosed, acp::ToolCallStatus::Failed),
+        ] {
+            let expected_text = send.to_string();
+            let output = ToolOutput::SendSubagentMessage(send);
+            let update = acp_tool_update(&output, "call-message", None, None).expect("update");
+            assert_eq!(update.fields.status, Some(expected_status));
+            assert_eq!(update.fields.raw_output, serde_json::to_value(&output).ok());
+            let Some(acp::ToolCallContent::Content(acp::Content {
+                content: acp::ContentBlock::Text(text),
+                ..
+            })) = update
+                .fields
+                .content
+                .as_deref()
+                .and_then(|content| content.first())
+            else {
+                panic!("expected text content");
+            };
+            assert_eq!(text.text, expected_text);
+        }
+    }
 
     #[test]
     fn test_acp_tool_update_read_file_success() {

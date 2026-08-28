@@ -32,6 +32,8 @@ Use this table (or `scripts/upstream-path-rewrite.py`) when merging upstream pat
 | `crates/common/xai-grok-compaction` | `packages/agent/xai-grok-compaction` | `agent` |
 | `crates/codegen/xai-grok-config` | `packages/coding-agent/xai-grok-config` | `coding-agent` |
 | `crates/codegen/xai-grok-config-types` | `packages/coding-agent/xai-grok-config-types` | `coding-agent` |
+| `crates/codegen/xai-dirs` | `packages/platform/xai-dirs` | `platform` |
+| `crates/codegen/xai-grok-dashboard-store` | `packages/platform/xai-grok-dashboard-store` | `platform` |
 | `crates/codegen/xai-grok-dashboard` | `packages/coding-agent/xai-grok-dashboard` | `coding-agent` |
 | `crates/codegen/xai-grok-diag-server` | `packages/tools/xai-grok-diag-server` | `tools` |
 | `crates/codegen/xai-grok-env` | `packages/platform/xai-grok-env` | `platform` |

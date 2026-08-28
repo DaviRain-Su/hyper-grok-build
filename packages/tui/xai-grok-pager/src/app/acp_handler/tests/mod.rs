@@ -39,6 +39,8 @@ pub(super) fn make_session(session_id: Option<&str>) -> AgentSession {
         available_commands_generation: 0,
         available_tools: None,
         model_switch_pending: false,
+        hook_block_hold: false,
+        blocked_prompt: None,
         user_model_preference: None,
         deferred_model_switch: None,
         bg_tasks: std::collections::BTreeMap::new(),
@@ -945,6 +947,7 @@ pub(super) fn prompt_complete_ext_with_prompt_id(
                 agent_result: None,
                 cancel_trigger: None,
                 cancellation_category: None,
+                cancellation_context: None,
                 meta: None,
             },
         )
@@ -983,6 +986,104 @@ pub(super) fn make_viewer_chunk_with_turn_start(
         response_tx: tx,
     })
 }
+/// Same as [`make_viewer_chunk_with_turn_start`] but stamped `isReplay`.
+pub(super) fn make_replay_chunk_with_turn_start(
+    session_id: &str,
+    prompt_id: &str,
+    start_ms_ago: i64,
+) -> AcpClientMessage {
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let turn_start_ms = chrono::Utc::now().timestamp_millis() - start_ms_ago;
+    let request = acp::SessionNotification::new(
+            acp::SessionId::new(session_id),
+            acp::SessionUpdate::AgentMessageChunk(
+                acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new("replayed chunk")),
+                ),
+            ),
+        )
+        .meta(
+            serde_json::json!({
+                "promptId": prompt_id,
+                "isReplay": true,
+                "turnStartMs": turn_start_ms,
+            })
+                .as_object()
+                .cloned(),
+        );
+    AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+        request,
+        response_tx: tx,
+    })
+}
+/// Replayed TodoWrite — tracker suppresses it (`changed == false`).
+pub(super) fn send_replay_suppressed_tool_call(
+    app: &mut AppView,
+    session_id: &str,
+    prompt_id: &str,
+) {
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    handle(
+        AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+            request: acp::SessionNotification::new(
+                    acp::SessionId::new(session_id),
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(acp::ToolCallId::new("todo-1"), "TodoWrite")
+                            .kind(acp::ToolKind::Other)
+                            .status(acp::ToolCallStatus::Completed),
+                    ),
+                )
+                .meta(
+                    serde_json::json!({
+                        "promptId": prompt_id,
+                        "isReplay": true,
+                    })
+                        .as_object()
+                        .cloned(),
+                ),
+            response_tx: tx,
+        }),
+        app,
+    );
+}
+/// Replayed direct-bash execute (`bash_mode` on the tool-call `_meta`).
+pub(super) fn send_replay_bash_tool_call(
+    app: &mut AppView,
+    session_id: &str,
+    prompt_id: &str,
+) {
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    handle(
+        AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+            request: acp::SessionNotification::new(
+                    acp::SessionId::new(session_id),
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(
+                                acp::ToolCallId::new("bash-mode-1"),
+                                "Execute `ls`",
+                            )
+                            .kind(acp::ToolKind::Execute)
+                            .status(acp::ToolCallStatus::Completed)
+                            .meta(
+                                serde_json::json!({ "bash_mode": true })
+                                    .as_object()
+                                    .cloned(),
+                            ),
+                    ),
+                )
+                .meta(
+                    serde_json::json!({
+                        "promptId": prompt_id,
+                        "isReplay": true,
+                    })
+                        .as_object()
+                        .cloned(),
+                ),
+            response_tx: tx,
+        }),
+        app,
+    );
+}
 /// Build a durable `TurnCompleted` update on the `x.ai/session/update` rail,
 /// optionally stamped `isReplay`. Built through the typed `SessionNotification`
 /// so the wire shape can't drift from what the dispatch parses.
@@ -999,8 +1100,40 @@ pub(super) fn xai_turn_completed_notif(
             stop_reason: stop_reason.into(),
             agent_result: None,
             usage: None,
+            elapsed_ms: None,
         },
         meta: Some(serde_json::json!({ "isReplay": is_replay })),
+    };
+    acp::ExtNotification::new(
+        "x.ai/session/update",
+        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+    )
+}
+/// Replay `TurnCompleted` with optional elapsed, agent_result, and extra `_meta`.
+pub(super) fn xai_turn_completed_replay(
+    session_id: &str,
+    prompt_id: &str,
+    stop_reason: &str,
+    elapsed_ms: Option<u64>,
+    agent_result: Option<&str>,
+    extra_meta: serde_json::Value,
+) -> acp::ExtNotification {
+    let mut meta = serde_json::json!({ "isReplay": true });
+    if let Some(obj) = extra_meta.as_object() {
+        for (k, v) in obj {
+            meta[k] = v.clone();
+        }
+    }
+    let payload = SessionNotification {
+        session_id: acp::SessionId::new(session_id),
+        update: XaiSessionUpdate::TurnCompleted {
+            prompt_id: prompt_id.into(),
+            stop_reason: stop_reason.into(),
+            agent_result: agent_result.map(str::to_string),
+            usage: None,
+            elapsed_ms,
+        },
+        meta: Some(meta),
     };
     acp::ExtNotification::new(
         "x.ai/session/update",
@@ -1021,6 +1154,7 @@ pub(super) fn xai_turn_completed_notif_with_cancel_trigger(
             stop_reason: stop_reason.into(),
             agent_result: None,
             usage: None,
+            elapsed_ms: None,
         },
         meta: Some(
             serde_json::json!({
@@ -1052,6 +1186,7 @@ pub(super) fn xai_wake_turn_completed_notif(
             stop_reason: "end_turn".into(),
             agent_result: None,
             usage: None,
+            elapsed_ms: None,
         },
         meta: Some(meta),
     };

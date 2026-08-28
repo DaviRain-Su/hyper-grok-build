@@ -12,6 +12,16 @@ static NEXT_OWNER_ID: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
     static OWNER: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static PLACEMENT: std::cell::Cell<Option<LastPlacement>> = const { std::cell::Cell::new(None) };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LastPlacement {
+    owner_id: u64,
+    cols: u16,
+    rows: u16,
+    x: u16,
+    y: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,9 +34,26 @@ pub(crate) enum Ownership {
 pub struct Escapes {
     bytes: String,
     ownership: Ownership,
+    placement: Option<LastPlacement>,
 }
 
 impl Escapes {
+    fn paint(bytes: String, owner_id: u64, placement: LastPlacement) -> Self {
+        Self {
+            bytes,
+            ownership: Ownership::Static(owner_id),
+            placement: Some(placement),
+        }
+    }
+
+    fn keep(owner_id: u64, placement: LastPlacement) -> Self {
+        Self {
+            bytes: String::new(),
+            ownership: Ownership::Static(owner_id),
+            placement: Some(placement),
+        }
+    }
+
     pub fn as_str(&self) -> &str {
         &self.bytes
     }
@@ -36,7 +63,7 @@ impl Escapes {
     }
 
     pub fn commit(self) -> String {
-        commit(self.ownership);
+        commit(self.ownership, self.placement);
         self.bytes
     }
 }
@@ -45,6 +72,7 @@ impl Escapes {
 pub struct PostFlush {
     bytes: String,
     ownership: Option<Ownership>,
+    placement: Option<LastPlacement>,
 }
 
 impl PostFlush {
@@ -52,6 +80,7 @@ impl PostFlush {
         Self {
             bytes,
             ownership: None,
+            placement: None,
         }
     }
 
@@ -59,6 +88,7 @@ impl PostFlush {
         self.bytes.push_str(&other.bytes);
         if let Some(ownership) = other.ownership {
             self.ownership = Some(ownership);
+            self.placement = other.placement;
         }
     }
 
@@ -73,7 +103,7 @@ impl PostFlush {
     pub fn write_to(self, writer: &mut impl Write) -> io::Result<()> {
         writer.write_all(self.bytes.as_bytes())?;
         if let Some(ownership) = self.ownership {
-            commit(ownership);
+            commit(ownership, self.placement);
         }
         Ok(())
     }
@@ -84,6 +114,7 @@ impl From<Escapes> for PostFlush {
         Self {
             bytes: escapes.bytes,
             ownership: Some(escapes.ownership),
+            placement: escapes.placement,
         }
     }
 }
@@ -94,12 +125,27 @@ pub(crate) fn next_owner_id() -> u64 {
 
 pub fn reset_owner() {
     OWNER.with(|owner| owner.set(None));
+    PLACEMENT.with(|placement| placement.set(None));
 }
 
-fn commit(ownership: Ownership) {
+fn current_owner() -> Option<u64> {
+    OWNER.with(|owner| owner.get())
+}
+
+fn current_placement() -> Option<LastPlacement> {
+    PLACEMENT.with(|placement| placement.get())
+}
+
+fn commit(ownership: Ownership, placement: Option<LastPlacement>) {
     OWNER.with(|owner| {
         owner.set(match ownership {
             Ownership::Static(id) => Some(id),
+            Ownership::Clear => None,
+        });
+    });
+    PLACEMENT.with(|slot| {
+        slot.set(match ownership {
+            Ownership::Static(_) => placement,
             Ownership::Clear => None,
         });
     });
@@ -115,14 +161,20 @@ pub(crate) fn static_image_for_protocol(
     cell_y: u16,
     owner_id: u64,
 ) -> Option<Escapes> {
-    let retransmit = OWNER.with(|owner| owner.get() != Some(owner_id));
-    let bytes = build_overlay_image_escapes_for_protocol(
-        protocol, image_data, cols, rows, cell_x, cell_y, retransmit,
-    )?;
-    Some(Escapes {
-        bytes,
-        ownership: Ownership::Static(owner_id),
-    })
+    let placement = LastPlacement {
+        owner_id,
+        cols,
+        rows,
+        x: cell_x,
+        y: cell_y,
+    };
+    if current_owner() == Some(owner_id) && current_placement() == Some(placement) {
+        // Prompt treats None as "clear ID 1". Empty Some keeps the pixels.
+        return Some(Escapes::keep(owner_id, placement));
+    }
+    let bytes =
+        build_overlay_image_escapes_for_protocol(protocol, image_data, cols, rows, cell_x, cell_y)?;
+    Some(Escapes::paint(bytes, owner_id, placement))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -159,11 +211,11 @@ pub fn volatile_image(
         rows,
         cell_x,
         cell_y,
-        true,
     )?;
     Some(Escapes {
         bytes,
         ownership: Ownership::Clear,
+        placement: None,
     })
 }
 
@@ -199,6 +251,7 @@ pub fn clear_kitty() -> Escapes {
     Escapes {
         bytes: clear_kitty_image(KITTY_PLACEMENT_ID),
         ownership: Ownership::Clear,
+        placement: None,
     }
 }
 
@@ -223,15 +276,46 @@ mod tests {
         [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']
     }
 
+    fn is_transmit(esc: &Escapes) -> bool {
+        esc.as_str().contains("a=T")
+    }
+
+    fn is_delete_then_transmit(esc: &Escapes) -> bool {
+        let s = esc.as_str();
+        s.contains("a=d,d=i") && s.contains("a=T") && !s.contains("a=p")
+    }
+
     #[test]
     fn static_owner_reuses_consecutive_frames_after_commit() {
         let _guard = set_protocol_for_test(GraphicsProtocol::Kitty);
         reset_owner();
         let first = static_image(&png(), 20, 10, 0, 0, 11).unwrap();
-        assert!(first.as_str().contains("a=t"));
+        assert!(is_delete_then_transmit(&first));
         let _ = first.commit();
         let second = static_image(&png(), 20, 10, 0, 0, 11).unwrap();
-        assert!(!second.as_str().contains("a=t"));
+        assert!(
+            second.as_str().is_empty(),
+            "unchanged geometry must not re-place: {}",
+            second.as_str()
+        );
+    }
+
+    #[test]
+    fn geometry_change_deletes_and_retransmits() {
+        let _guard = set_protocol_for_test(GraphicsProtocol::Kitty);
+        reset_owner();
+        let _ = static_image(&png(), 20, 10, 0, 0, 11).unwrap().commit();
+        let moved = static_image(&png(), 24, 12, 4, 2, 11).unwrap();
+        assert!(is_delete_then_transmit(&moved));
+    }
+
+    #[test]
+    fn same_owner_new_position_deletes_and_retransmits() {
+        let _guard = set_protocol_for_test(GraphicsProtocol::Kitty);
+        reset_owner();
+        let _ = static_image(&png(), 20, 10, 5, 5, 11).unwrap().commit();
+        let modal = static_image(&png(), 20, 10, 8, 2, 11).unwrap();
+        assert!(is_delete_then_transmit(&modal));
     }
 
     #[test]
@@ -241,7 +325,7 @@ mod tests {
         let _ = static_image(&png(), 20, 10, 0, 0, 11).unwrap().commit();
         let _discarded = clear().unwrap();
         let next = static_image(&png(), 20, 10, 0, 0, 11).unwrap();
-        assert!(!next.as_str().contains("a=t"));
+        assert!(next.as_str().is_empty());
     }
 
     #[test]
@@ -251,7 +335,7 @@ mod tests {
         let _ = static_image(&png(), 20, 10, 0, 0, 11).unwrap().commit();
         let _discarded = static_image(&png(), 20, 10, 0, 0, 12).unwrap();
         let next = static_image(&png(), 20, 10, 0, 0, 11).unwrap();
-        assert!(!next.as_str().contains("a=t"));
+        assert!(next.as_str().is_empty());
     }
 
     #[test]
@@ -274,7 +358,7 @@ mod tests {
         let clear = PostFlush::from(clear().unwrap());
         assert!(clear.write_to(&mut FailingWriter).is_err());
         let next = static_image(&png(), 20, 10, 0, 0, 11).unwrap();
-        assert!(!next.as_str().contains("a=t"));
+        assert!(next.as_str().is_empty());
     }
 
     #[test]
@@ -283,19 +367,13 @@ mod tests {
         reset_owner();
         let _ = static_image(&png(), 20, 10, 0, 0, 11).unwrap().commit();
         let _ = clear().unwrap().commit();
-        assert!(
-            static_image(&png(), 20, 10, 0, 0, 11)
-                .unwrap()
-                .as_str()
-                .contains("a=t")
-        );
+        assert!(is_transmit(
+            &static_image(&png(), 20, 10, 0, 0, 11).unwrap()
+        ));
         let _ = static_image(&png(), 20, 10, 0, 0, 11).unwrap().commit();
         let _ = volatile_image(&png(), 20, 10, 0, 0).unwrap().commit();
-        assert!(
-            static_image(&png(), 20, 10, 0, 0, 11)
-                .unwrap()
-                .as_str()
-                .contains("a=t")
-        );
+        assert!(is_transmit(
+            &static_image(&png(), 20, 10, 0, 0, 11).unwrap()
+        ));
     }
 }

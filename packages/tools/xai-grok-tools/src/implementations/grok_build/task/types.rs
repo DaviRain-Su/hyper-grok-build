@@ -29,6 +29,11 @@ use xai_tool_types::{
 
 use crate::register_resource;
 
+pub use super::active_message::{
+    ActiveAgentMessage, ActiveAgentMessageDelivery, ActiveAgentMessageOutcome,
+    ActiveAgentMessageRequest, MAX_ACTIVE_AGENT_MESSAGE_BYTES, SubagentActiveMessageRequest,
+};
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum SubagentOwner {
     #[default]
@@ -941,6 +946,7 @@ pub struct SubagentDescribeRequest {
 pub enum SubagentEvent {
     Spawn(SubagentSpawnRequest),
     Query(SubagentQueryRequest),
+    SendActiveMessage(SubagentActiveMessageRequest),
     Cancel(SubagentCancelRequest),
     ListActive(SubagentListActiveRequest),
     ListRunning(SubagentListRunningRequest),
@@ -975,6 +981,18 @@ pub enum SubagentEvent {
 #[derive(Clone, Educe)]
 #[educe(Debug)]
 pub struct SubagentEventSender(#[educe(Debug(ignore))] pub mpsc::UnboundedSender<SubagentEvent>);
+
+impl SubagentEventSender {
+    pub fn send(&self, event: SubagentEvent) -> Result<(), mpsc::error::SendError<SubagentEvent>> {
+        self.0.send(event)
+    }
+}
+
+impl From<mpsc::UnboundedSender<SubagentEvent>> for SubagentEventSender {
+    fn from(tx: mpsc::UnboundedSender<SubagentEvent>) -> Self {
+        Self(tx)
+    }
+}
 
 register_resource!("grok_build", "SubagentEventSender", SubagentEventSender);
 
@@ -1703,7 +1721,6 @@ mod tests {
 
         let (respond_to, mut response_rx) = oneshot::channel();
         sender
-            .0
             .send(super::SubagentEvent::Completions(
                 super::SubagentCompletionsRequest {
                     parent_session_id: None,
@@ -1732,10 +1749,8 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel::<super::SubagentEvent>();
         let sender = super::SubagentEventSender(tx);
         let cloned = sender.clone();
-        // Both clones should be able to send
         let (respond_to, _) = tokio::sync::oneshot::channel();
         cloned
-            .0
             .send(super::SubagentEvent::Completions(
                 super::SubagentCompletionsRequest {
                     parent_session_id: None,

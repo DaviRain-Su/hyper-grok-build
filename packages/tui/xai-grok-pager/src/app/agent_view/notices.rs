@@ -226,6 +226,14 @@ impl AgentView {
         self.sticky_toast = msg.map(|m| crate::glyphs::sanitize_toast_message(m).into_owned());
     }
 
+    /// Release the hook-block queue hold (see `hook_block_hold`).
+    /// Also drops the blocked-prompt context: with the hold gone there is no
+    /// card left to reopen.
+    pub(in crate::app) fn release_hook_block_hold(&mut self) {
+        self.session.hook_block_hold = false;
+        self.session.blocked_prompt = None;
+    }
+
     /// Propagate sticky status to this view and every nested subagent view.
     pub fn set_sticky_toast_recursive(&mut self, msg: Option<&str>) {
         self.set_sticky_toast(msg);

@@ -22,8 +22,7 @@ use agent_client_protocol as acp;
 use tokio::sync::mpsc;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 pub(crate) use xai_grok_tools::implementations::grok_build::task::coordinator::{
-    self, ChildCompletion, ChildControl, ChildRunOutput, LocalBoxFuture, StartedChild,
-    SubagentProgress,
+    self, ChildCompletion, ChildRunOutput, StartedChild,
 };
 use xai_grok_tools::implementations::grok_build::task::types::{SubagentRequest, SubagentResult};
 /// Floor keeps the pool responsive when `available_parallelism` is tiny.
@@ -70,6 +69,12 @@ struct ShellChildRunner {
     agent_ref: LocalRef<MvpAgent>,
     /// Owned: panics are logged, coordinator teardown aborts stragglers.
     presentations: std::cell::RefCell<Vec<tokio_util::task::AbortOnDropHandle<()>>>,
+}
+pub(crate) fn subagent_coordinator_channel() -> (
+    xai_grok_tools::implementations::grok_build::task::backend::SubagentCoordinatorSender,
+    coordinator::SubagentCoordinatorReceiver,
+) {
+    coordinator::SubagentCoordinator::<ShellChildRunner>::channel()
 }
 /// Resumes worker panics into the coordinator's `catch_unwind`
 /// (`finish_panicked_child`); the handle aborts on drop.
@@ -286,9 +291,7 @@ fn log_limit_notice(notice: coordinator::SubagentLimitNotice) {
 /// state (the event receiver + concurrency limits) it feeds in.
 pub(crate) fn spawn_subagent_coordinator(
     agent_ref: LocalRef<MvpAgent>,
-    rx: mpsc::UnboundedReceiver<
-        xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
-    >,
+    rx: coordinator::SubagentCoordinatorReceiver,
     limits: xai_grok_tools::implementations::grok_build::task::admission::SubagentLimits,
 ) {
     let runner = ShellChildRunner {
@@ -307,7 +310,9 @@ pub(crate) fn spawn_subagent_coordinator(
         buffer_completions: true,
         buffered_completion_output_cap: None,
     };
-    tokio::task::spawn_local(coordinator::SubagentCoordinator::new(rx, runner, config).run());
+    tokio::task::spawn_local(
+        coordinator::SubagentCoordinator::from_channel(rx, runner, config).run(),
+    );
 }
 /// Whether this completion will inject an auto-wake prompt; decided (and
 /// the reservation taken) on the coordinator thread in `on_completed`.
@@ -477,6 +482,7 @@ pub(crate) fn inject_subagent_completed_prompt(params: InjectParams) {
             admission: None,
             tool_overrides_update: None,
             respond_to,
+            prompt_admitted: None,
             persist_ack: None,
             parsed_prompt_tx: None,
         })

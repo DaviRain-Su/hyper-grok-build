@@ -104,7 +104,7 @@ mod tests {
             !crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, 71)
                 .unwrap()
                 .as_str()
-                .contains("a=t"),
+                .contains("a=T"),
             "constructing welcome output must not commit its clear"
         );
 
@@ -114,7 +114,7 @@ mod tests {
             crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, 71)
                 .unwrap()
                 .as_str()
-                .contains("a=t"),
+                .contains("a=T"),
             "writing welcome output must commit its clear"
         );
     }

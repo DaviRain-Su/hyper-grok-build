@@ -760,30 +760,15 @@ impl WorkspaceShared {
         self.auth_provider.as_ref()
     }
     /// Parse the opaque [`server_metadata`](Self::server_metadata) blob into
-    /// the typed subset the workspace needs (currently `sandbox_id`);
-    /// unknown/missing fields default cleanly. A present-but-malformed blob is
-    /// logged and salvaged field-by-field (a bad sibling field must not
-    /// silently drop `sandbox_id` from every environment artifact).
+    /// the typed subset the workspace needs (currently `sandbox_id`).
+    /// [`WorkspaceServerMetadata::from_metadata`](crate::config::WorkspaceServerMetadata::from_metadata)
+    /// salvages every well-known key independently, so a wrong-typed sibling
+    /// cannot drop `sandbox_id` from the environment artifacts.
     pub(crate) fn server_metadata_typed(&self) -> crate::config::WorkspaceServerMetadata {
-        let Some(v) = self.server_metadata.as_ref() else {
-            return Default::default();
-        };
-        match serde_json::from_value(v.clone()) {
-            Ok(typed) => typed,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "workspace: malformed server_metadata; salvaging sandbox_id field-wise"
-                );
-                crate::config::WorkspaceServerMetadata {
-                    sandbox_id: v
-                        .get("sandbox_id")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned),
-                    ..Default::default()
-                }
-            }
-        }
+        self.server_metadata
+            .as_ref()
+            .map(crate::config::WorkspaceServerMetadata::from_metadata)
+            .unwrap_or_default()
     }
     pub fn default_tool_config(&self) -> &ToolServerConfig {
         &self.default_tool_config

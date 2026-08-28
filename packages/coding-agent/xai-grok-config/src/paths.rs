@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-pub use xai_grok_home::{default_grok_home, grok_home, user_grok_home};
+pub use xai_dirs::{default_grok_home, grok_home, user_grok_home};
 
 #[cfg(target_os = "macos")]
 const CLAUDE_MANAGED_SETTINGS_PATH: &str =

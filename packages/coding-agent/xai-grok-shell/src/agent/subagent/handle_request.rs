@@ -1,11 +1,20 @@
 use super::attempt_runner::{
-    OneTurnAttemptInput, OneTurnAttemptOutcome, OneTurnTraceCapture, OneTurnUsageInput,
-    capture_and_fold_one_turn_usage, run_one_turn_attempt,
+    InitialChildPromptReadiness, OneTurnAttemptInput, OneTurnAttemptOutcome, OneTurnTraceCapture,
+    OneTurnUsageInput, capture_and_fold_one_turn_usage, run_one_turn_attempt,
+    wait_initial_child_prompt_readiness,
+};
+use super::prompt_turn_receipt::{
+    ACTIVE_MESSAGE_RECEIPT_CAPACITY, AdmissionSettlement, FinalPromptTurnReceipt,
+    PromptTurnReceiptDisposition, PromptTurnReceiptDrain, PromptTurnReceiptOutcome,
 };
 use super::*;
 use crate::upload::trace::PromptMetadataParams;
 use xai_grok_sampling_types::ReasoningEffort;
+use xai_grok_telemetry::region::Parent;
+use xai_grok_telemetry::subagent_spawn::{SubagentSpawnPhase, phase_region};
+use xai_grok_telemetry::{instrument_task, region};
 use xai_grok_tools::implementations::{grok_build, opencode};
+const INITIAL_PROMPT_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Budget for the pre-completion child transcript flush (replay buffer +
 /// persistence to disk). Mirrors the workflow-shutdown persistence bound.
 const CHILD_COMPLETION_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -47,10 +56,10 @@ pub(crate) async fn run_shell_child(
     } = run;
     let start = std::time::Instant::now();
     let spawn_timer = xai_grok_telemetry::subagent_spawn::SubagentSpawnTimer::new_shared();
-    use xai_grok_telemetry::subagent_spawn::SubagentSpawnPhase;
     if let Some(queued) = queued_for {
         spawn_timer.record(SubagentSpawnPhase::QueueWait, queued);
     }
+    let spawn_prepare_span = phase_region(SubagentSpawnPhase::SpawnPrepare);
     let mut completion_data = ShellCompletionData::from_context(&ctx);
     if request.owner.is_workflow() && cancel_token.is_cancelled() {
         return child_run_output(
@@ -395,7 +404,11 @@ pub(crate) async fn run_shell_child(
         let subagent_id = request.id.clone();
         let creation_mode: xai_fast_worktree::CreationMode = ctx.worktree_type.into();
         let btrfs_delegate = crate::session::worktree::btrfs_delegate_from_env();
-        match tokio::task::spawn_blocking(move || {
+        let worktree_create_span = region!(
+            "subagent_spawn.worktree_create",
+            Parent::Explicit(spawn_prepare_span.span())
+        );
+        let created = match tokio::task::spawn_blocking(move || {
             let mut builder = xai_fast_worktree::WorktreeBuilder::new(&source_clone, &dest)
                 .working_tree_mode(xai_fast_worktree::WorkingTreeMode::PreserveWorkingTree)
                 .creation_mode(creation_mode)
@@ -462,7 +475,9 @@ pub(crate) async fn run_shell_child(
                 );
                 return child_run_output(failure_result(&request, &msg), completion_data, None);
             }
-        }
+        };
+        worktree_create_span.close();
+        created
     } else {
         None
     };
@@ -743,9 +758,14 @@ pub(crate) async fn run_shell_child(
         let bucket = bucket_url.clone();
         let method = upload_method.clone();
         let auth_for_spawn = ctx.auth_manager.clone();
-        tokio::spawn(async move {
-            upload_subagent_metadata(&gcs_meta, &bucket, method, auth_for_spawn).await;
-        });
+        tokio::spawn(instrument_task!(
+            debug,
+            "subagent.metadata_upload",
+            Parent::Root,
+            async move {
+                upload_subagent_metadata(&gcs_meta, &bucket, method, auth_for_spawn).await;
+            }
+        ));
     }
     let gcs_upload_ctx = GcsUploadContext {
         bucket_url: ctx.gcs_bucket_url.clone(),
@@ -1035,14 +1055,22 @@ pub(crate) async fn run_shell_child(
             }
         }
     }
-    let agent_mcp_servers: Vec<_> = if !agent_owned_mcp_servers_allowed(is_plugin_agent) {
-        if !definition.mcp_servers.is_empty() {
-            tracing::warn!(
-                agent = %definition.name,
-                plugin = ?definition.plugin_name,
-                "ignoring mcpServers on plugin agent (not supported for security)"
-            );
-        }
+    let agent_mcp_servers: Vec<_> = if definition.mcp_servers.is_empty() {
+        vec![]
+    } else if is_plugin_agent {
+        tracing::warn!(
+            agent = %definition.name,
+            plugin = ?definition.plugin_name,
+            "ignoring mcpServers on plugin agent (not supported for security)"
+        );
+        vec![]
+    } else if !crate::agent::folder_trust::agent_inline_hooks_allowed(definition.scope, || {
+        crate::agent::folder_trust::project_scope_allowed(&ctx.parent_cwd)
+    }) {
+        tracing::warn!(
+            agent = %definition.name,
+            "ignoring mcpServers on untrusted project agent (folder not trusted; re-run with --trust)"
+        );
         vec![]
     } else {
         definition
@@ -1170,6 +1198,9 @@ pub(crate) async fn run_shell_child(
         });
     crate::waterfall::mark(&request.id, crate::waterfall::stage::SESSION_SPAWN);
     spawn_timer.record(SubagentSpawnPhase::SpawnPrepare, start.elapsed());
+    spawn_prepare_span.close();
+    let session_bootstrap_span = phase_region(SubagentSpawnPhase::SessionBootstrap);
+    let spawn_phase_parent = session_bootstrap_span.span().clone();
     let bootstrap_started_at = std::time::Instant::now();
     let pins = ctx.compaction_pins_for_child(&definition.user_message_template);
     let spawn_result = session::spawn_session_on_thread(
@@ -1279,6 +1310,7 @@ pub(crate) async fn run_shell_child(
         ctx.video_gen_config.clone(),
         ctx.app_builder_deployer_config.clone(),
         ctx.write_file_enabled,
+        false,
         ctx.goal_enabled,
         ctx.background_workflows_enabled,
         true,
@@ -1324,7 +1356,10 @@ pub(crate) async fn run_shell_child(
             None
         },
         false,
-        Some(spawn_timer.clone()),
+        Some(xai_grok_telemetry::subagent_spawn::SpawnPhaseContext {
+            timer: spawn_timer.clone(),
+            parent: spawn_phase_parent,
+        }),
         Some(ctx.subagent_sampling_semaphore.clone()),
     )
     .await;
@@ -1333,6 +1368,7 @@ pub(crate) async fn run_shell_child(
         SubagentSpawnPhase::SessionBootstrap,
         bootstrap_started_at.elapsed(),
     );
+    session_bootstrap_span.close();
     let session_ready_at = std::time::Instant::now();
     let (child_handle, mut permission_rx, _system_prompt, child_thread) = match spawn_result {
         Ok(r) => r,
@@ -1349,31 +1385,79 @@ pub(crate) async fn run_shell_child(
             return child_run_output(result, completion_data, None);
         }
     };
-    let promoted = reporter
-        .started(StartedChild {
-            child_session_id: child_session_id.0.to_string(),
-            persona: effective_runtime.persona.clone(),
-            resumed_from: request.resume_from.clone(),
-            child_cwd: tracker_child_cwd,
-            worktree_path: worktree_path
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned()),
-            effective_model_id: tracker_model_id.clone(),
-            definition_background,
-            control: ShellChildRuntime {
-                child_handle: child_handle.clone(),
-                _child_thread: child_thread,
-            },
-        })
-        .await;
-    if !promoted {
+    let ready_to_first_turn_span = phase_region(SubagentSpawnPhase::ReadyToFirstTurn);
+    let (receipt_sink, receipt_stream) = mpsc::channel(ACTIVE_MESSAGE_RECEIPT_CAPACITY);
+    let receipt_drain = PromptTurnReceiptDrain::start(
+        receipt_stream,
+        child_handle.cmd_tx.clone(),
+        cancel_token.clone(),
+    );
+    let (prompt_admitted, prompt_admitted_rx) = oneshot::channel();
+    let mut attempt = Box::pin(run_one_turn_attempt(OneTurnAttemptInput {
+        child_handle: &child_handle,
+        request: &request,
+        worktree_path: worktree_path.as_deref(),
+        task_prompt_text: &task_prompt_text,
+        inherited_tool_overrides: ctx.inherited_tool_overrides.clone(),
+        gcs_bucket_url: ctx.gcs_bucket_url.as_deref(),
+        gcs_upload_method: ctx.gcs_upload_method.as_ref(),
+        cancel_token: cancel_token.clone(),
+        child_run_started_at: start,
+        prompt_admitted,
+    }));
+    let readiness = wait_initial_child_prompt_readiness(
+        cancel_token.cancelled(),
+        prompt_admitted_rx,
+        &mut attempt,
+        INITIAL_PROMPT_ADMISSION_TIMEOUT,
+    )
+    .await;
+    let unpromoted_disposition = readiness.unpromoted_disposition();
+    let mut completed_before_ack = None;
+    let promoted = match readiness {
+        InitialChildPromptReadiness::Admitted => {
+            reporter
+                .started(StartedChild {
+                    child_session_id: child_session_id.0.to_string(),
+                    persona: effective_runtime.persona.clone(),
+                    resumed_from: request.resume_from.clone(),
+                    child_cwd: tracker_child_cwd,
+                    worktree_path: worktree_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    effective_model_id: tracker_model_id.clone(),
+                    definition_background,
+                    control: ShellChildRuntime {
+                        child_cmd_tx: child_handle.cmd_tx.clone(),
+                        child_signals: child_handle.signals_handle.clone(),
+                        _child_thread: None,
+                        receipt_sink,
+                        active_message_parent_session_id: ctx.parent_session_id.clone(),
+                        active_message_parent_prompt_index: ctx
+                            .active_message_parent_prompt_index
+                            .clone(),
+                    },
+                })
+                .await
+        }
+        InitialChildPromptReadiness::AttemptCompleted(outcome) => {
+            drop(receipt_sink);
+            completed_before_ack = Some(outcome);
+            false
+        }
+        InitialChildPromptReadiness::Cancelled | InitialChildPromptReadiness::TimedOut => {
+            drop(receipt_sink);
+            false
+        }
+    };
+    if !promoted && completed_before_ack.is_none() {
         if let Some(bus) = ctx.agent_bus.as_ref() {
             bus.bus().mark_gone(&request.id);
         }
-        ctx.workspace_ops
-            .end_local_session(child_session_id.0.as_ref());
-        let result = cancel_pending_shell_child(
+        ready_to_first_turn_span.close();        let result = cancel_pending_shell_child(
             &child_handle.cmd_tx,
+            child_thread,
+            &ctx.workspace_ops,
             &subagent_id,
             &child_session_id,
             &subagent_meta_dir,
@@ -1381,10 +1465,13 @@ pub(crate) async fn run_shell_child(
             worktree_freshly_created,
             start.elapsed().as_millis() as u64,
             &gcs_upload_ctx,
+            UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT,
+            unpromoted_disposition,
         )
         .await;
         return child_run_output(result, completion_data, None);
     }
+    let _child_thread = child_thread;
     let _progress_publisher = spawn_progress_publisher(
         child_handle.signals_handle.clone(),
         gateway.clone(),
@@ -1399,22 +1486,15 @@ pub(crate) async fn run_shell_child(
         SubagentSpawnPhase::ReadyToFirstTurn,
         session_ready_at.elapsed(),
     );
-    let attempt = run_one_turn_attempt(OneTurnAttemptInput {
-        child_handle: &child_handle,
-        request: &request,
-        worktree_path: worktree_path.as_deref(),
-        task_prompt_text: &task_prompt_text,
-        inherited_tool_overrides: ctx.inherited_tool_overrides.clone(),
-        gcs_bucket_url: ctx.gcs_bucket_url.as_deref(),
-        gcs_upload_method: ctx.gcs_upload_method.as_ref(),
-        cancel_token: cancel_token.clone(),
-        child_run_started_at: start,
-    })
-    .await;
+    ready_to_first_turn_span.close();
+    let attempt = match completed_before_ack {
+        Some(outcome) => outcome,
+        None => attempt.as_mut().await,
+    };
     let OneTurnAttemptOutcome {
         mut result,
         trace,
-        cancellation_may_hide_usage,
+        mut cancellation_may_hide_usage,
     } = attempt;
     let OneTurnTraceCapture {
         before_copy_rx,
@@ -1422,6 +1502,145 @@ pub(crate) async fn run_shell_child(
         turn_started_at,
         turn_token_totals,
     } = trace;
+    let admission = if promoted && !reporter.finalizing().await {
+        AdmissionSettlement::Uncertain
+    } else {
+        AdmissionSettlement::Settled
+    };
+    let receipt_settlement = receipt_drain.settle(admission).await;
+    let receipt_disposition = receipt_settlement.disposition;
+    let mut final_prompt_id = child_prompt_id;
+    let mut final_turn_tokens = turn_token_totals;
+    let mut final_receipt = None;
+    let mut final_receipt_telemetry = None;
+    let mut is_final_receipt_closed = false;
+    if let Some(FinalPromptTurnReceipt {
+        prompt_id,
+        outcome,
+        telemetry,
+    }) = receipt_settlement.final_receipt
+    {
+        final_prompt_id = prompt_id;
+        final_receipt_telemetry = Some(telemetry);
+        match outcome {
+            PromptTurnReceiptOutcome::Settled(receipt) => {
+                is_final_receipt_closed = receipt.is_err();
+                final_receipt = Some(*receipt);
+            }
+            PromptTurnReceiptOutcome::TimedOut => {
+                result.success = false;
+                result.cancelled = true;
+                result.error = Some("Subagent receipt settlement timed out".to_string());
+                result.output_usage_incomplete = true;
+                cancellation_may_hide_usage = true;
+            }
+        }
+    }
+    if let Some(Ok(Ok(crate::session::commands::PromptTurnOk {
+        turn_snapshot: Some(snapshot),
+        ..
+    }))) = final_receipt.as_ref()
+    {
+        final_turn_tokens = Some((
+            snapshot.turn_input_tokens,
+            snapshot.turn_cached_input_tokens,
+            snapshot.turn_output_tokens,
+        ));
+    }
+    let final_text = if final_receipt.is_some() {
+        child_handle
+            .chat_state_handle
+            .get_last_assistant_text_in_turn()
+            .await
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    match receipt_disposition {
+        PromptTurnReceiptDisposition::Completed => {
+            if let Some(receipt) = final_receipt {
+                let empty_summary = String::new;
+                let max_turns_summary = |_| String::new();
+                let folded = super::prompt_turn_result::reduce_prompt_turn_result(
+                    super::prompt_turn_result::PromptTurnResultInput {
+                        result,
+                        turn_result: receipt,
+                        mode: super::prompt_turn_result::PromptTurnResultMode::ParentFollowup,
+                        final_text,
+                        was_cancelled: cancel_token.is_cancelled(),
+                        summaries: super::prompt_turn_result::PromptTurnResultSummaries {
+                            success: &empty_summary,
+                            max_turns: &max_turns_summary,
+                            cancelled: &empty_summary,
+                        },
+                        result_tokens: 0,
+                    },
+                );
+                result = folded.result;
+                cancellation_may_hide_usage |= folded.cancellation_may_hide_usage;
+            }
+        }
+        PromptTurnReceiptDisposition::Cancelled => {
+            result.success = false;
+            result.cancelled = true;
+            result.error = Some("Subagent was cancelled".to_string());
+            result.output = Arc::from(final_text);
+            result.output_usage_incomplete = true;
+            cancellation_may_hide_usage = true;
+        }
+        PromptTurnReceiptDisposition::AdmissionUncertain => {
+            result.success = false;
+            result.cancelled = true;
+            result.error = Some("Active-message admission could not be proven settled".to_string());
+            result.output = Arc::from(final_text);
+            result.output_usage_incomplete = true;
+            cancellation_may_hide_usage = true;
+        }
+        PromptTurnReceiptDisposition::TimedOut => {
+            result.success = false;
+            result.cancelled = true;
+            result.error = Some("Subagent receipt settlement timed out".to_string());
+            result.output = Arc::from(final_text);
+            result.output_usage_incomplete = true;
+            cancellation_may_hide_usage = true;
+        }
+    }
+    let settlement_status = match receipt_disposition {
+        PromptTurnReceiptDisposition::Completed => {
+            crate::session::telemetry::classify_completed_settlement(
+                crate::session::telemetry::ActiveAgentMessageCompletedSettlement {
+                    is_result_success: result.success,
+                    is_result_cancelled: result.cancelled,
+                    is_final_receipt_closed,
+                },
+            )
+        }
+        PromptTurnReceiptDisposition::Cancelled => {
+            crate::session::telemetry::ActiveAgentMessageSettlementStatus::Cancelled
+        }
+        PromptTurnReceiptDisposition::AdmissionUncertain => {
+            crate::session::telemetry::ActiveAgentMessageSettlementStatus::AdmissionUncertain
+        }
+        PromptTurnReceiptDisposition::TimedOut => {
+            crate::session::telemetry::ActiveAgentMessageSettlementStatus::TimedOut
+        }
+    };
+    crate::session::telemetry::record_settlement(final_receipt_telemetry, settlement_status).await;
+    let trace_token_totals = child_handle
+        .chat_state_handle
+        .try_get_session_usage()
+        .await
+        .ok()
+        .map(|usage| usage.totals);
+    result.tokens_used = trace_token_totals
+        .as_ref()
+        .map(xai_chat_state::UsageTotals::total_tokens)
+        .unwrap_or(0);
+    let (tool_calls, turns) = signals_snapshot_counts(&child_handle).await;
+    result.tool_calls = tool_calls;
+    result.turns = turns;
+    result.duration_ms = start.elapsed().as_millis() as u64;
+    // Fork: backfill a structured termination reason the child did not send.
     if result.termination_reason.is_none() {
         if result
             .error
@@ -1463,7 +1682,7 @@ pub(crate) async fn run_shell_child(
         };
         let streaming_partial = crate::upload::turn::take_streaming_partial(
             &child_handle.cmd_tx,
-            child_prompt_id.clone(),
+            final_prompt_id.clone(),
             result.success,
             gcs_upload_ctx.model_id.clone(),
         )
@@ -1525,7 +1744,7 @@ pub(crate) async fn run_shell_child(
             schema_version: GCS_SCHEMA_VERSION.to_string(),
             session_id: child_session_id.0.to_string(),
             turn_number: 0,
-            request_id: child_prompt_id.clone(),
+            request_id: final_prompt_id.clone(),
             turn_started_at: turn_started_at.clone(),
             user_id: subagent_auth.as_ref().map(|a| a.user_id.clone()),
             user_email: subagent_auth.as_ref().and_then(|a| a.email.clone()),
@@ -1555,13 +1774,15 @@ pub(crate) async fn run_shell_child(
             .or_else(|| gcs_upload_ctx.model_id.clone());
         let turn_result_meta = TurnResultMetadata {
             schema_version: "1",
-            request_id: child_prompt_id,
+            request_id: final_prompt_id,
             completed: result.success,
             stop_reason: None,
-            total_tokens: None,
-            input_tokens: turn_token_totals.map(|t| t.0),
-            cached_input_tokens: turn_token_totals.map(|t| t.1),
-            output_tokens: turn_token_totals.map(|t| t.2),
+            total_tokens: trace_token_totals
+                .as_ref()
+                .map(xai_chat_state::UsageTotals::total_tokens),
+            input_tokens: final_turn_tokens.map(|tokens| tokens.0),
+            cached_input_tokens: final_turn_tokens.map(|tokens| tokens.1),
+            output_tokens: final_turn_tokens.map(|tokens| tokens.2),
             error: result.error.clone(),
             finished_at: chrono::Utc::now().to_rfc3339(),
             signals: None,
@@ -1871,6 +2092,7 @@ impl Disposal {
 ///
 /// The other removal path, `cancel_pending_shell_child`, skips all of this:
 /// there the child never ran, so the directory is the one the checkout made.
+#[tracing::instrument(skip_all)]
 pub(crate) async fn dispose_worktree_after_completion(
     worktree: &std::path::Path,
     source_repo: &std::path::Path,
@@ -1900,6 +2122,7 @@ pub(crate) async fn dispose_worktree_after_completion(
     let checked_path = worktree.to_path_buf();
     let checked_source_repo = source_repo.to_path_buf();
     let checked_snapshot = snapshot_ref.clone();
+    let reclaim_span = region!("worktree.reclaim_check", Parent::Inherit);
     let reclaim = tokio::task::spawn_blocking(move || {
         xai_fast_worktree::reclaimable_after_snapshot(
             &checked_path,
@@ -1908,6 +2131,7 @@ pub(crate) async fn dispose_worktree_after_completion(
         )
     })
     .await;
+    reclaim_span.close();
     match reclaim {
         Ok(xai_fast_worktree::Reclaim::Now { .. }) => {}
         Ok(xai_fast_worktree::Reclaim::Keep(reason)) => {

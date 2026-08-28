@@ -587,21 +587,25 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
             ) {
                 // Logical text; drag columns are visual and remapped on copy
                 // via `logical_slice_for_visual_cols`.
+                let boundary = cached_boundaries.get(block_line_idx);
+                let selectable_cols =
+                    crate::scrollback::types::visual_selectable_cols(line).unwrap_or(cols);
                 let resolved_line = ResolvedSelectableLine {
                     entry_idx: logical_idx,
                     range_id,
                     block_line_idx,
                     screen_y,
                     screen_x: entry_row_layout.content.x,
-                    // Visual span so the hit box matches the reordered cells
-                    // even when a non-selectable suffix shifts the region.
-                    selectable_cols: crate::scrollback::types::visual_selectable_cols(line)
-                        .unwrap_or(cols),
+                    // A boundary may expose one otherwise blank terminal cell as
+                    // an input anchor; no content is painted or copied there.
+                    selectable_cols: boundary.map_or(selectable_cols.clone(), |boundary| {
+                        boundary.anchored_cols(selectable_cols)
+                    }),
                     text: derive_selection_text(line),
                     painted_region: Some(crate::scrollback::types::painted_selectable_region(line)),
                     joiner_to_previous: line.joiner.clone(),
                 };
-                if let Some(boundary) = cached_boundaries.get(block_line_idx) {
+                if let Some(boundary) = boundary {
                     selection_boundaries.push(&resolved_line, Arc::clone(boundary));
                 }
                 result.selection_model.push_line(resolved_line);

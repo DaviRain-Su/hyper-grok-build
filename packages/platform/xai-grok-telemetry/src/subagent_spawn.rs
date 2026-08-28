@@ -31,6 +31,37 @@ pub enum SubagentSpawnPhase {
     ReadyToFirstTurn,
 }
 
+/// A phase region parented contextually.
+pub fn phase_region(phase: SubagentSpawnPhase) -> crate::region::Region {
+    crate::region::Region::from_span(phase_span(phase))
+}
+
+/// A phase region parented under an explicit span, for phases recorded on
+/// the session thread where the spawning task's context cannot reach.
+pub fn phase_region_under(
+    phase: SubagentSpawnPhase,
+    parent: &tracing::Span,
+) -> crate::region::Region {
+    crate::region::Region::from_span(phase_span_under(phase, parent))
+}
+
+crate::startup::span_table!(fn phase_span, fn phase_span_under(SubagentSpawnPhase) {
+    QueueWait => "subagent_spawn.queue_wait",
+    SpawnPrepare => "subagent_spawn.spawn_prepare",
+    SessionBootstrap => "subagent_spawn.session_bootstrap",
+    AgentBuild => "subagent_spawn.agent_build",
+    ToolSetup => "subagent_spawn.tool_setup",
+    ReadyToFirstTurn => "subagent_spawn.ready_to_first_turn",
+});
+
+/// The per-spawn profiling context a subagent spawn threads onto the session
+/// thread: the phase recorder and the span the thread-side phases parent
+/// under. Absent for top-level sessions, which record no phases.
+pub struct SpawnPhaseContext {
+    pub timer: SharedSubagentSpawnTimer,
+    pub parent: tracing::Span,
+}
+
 /// Per-spawn phase recorder: cheap `Arc` handle, a fixed handful of mutex
 /// pushes per spawn regardless of telemetry mode (sink gating is at emission).
 #[derive(Debug, Default)]

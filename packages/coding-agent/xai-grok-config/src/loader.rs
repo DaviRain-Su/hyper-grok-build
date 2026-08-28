@@ -171,12 +171,14 @@ pub fn managed_config_layers_at(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookProvenance {
-    /// `/etc/grok/managed_config.toml`.
+    /// `/etc/grok/managed_config.toml` (root-owned).
     SystemManaged,
-    /// `$GROK_HOME/managed_config.toml` (server-synced).
+    /// `$GROK_HOME/managed_config.toml` (server-synced, user-writable).
     Managed,
-    /// `requirements.toml` (user or system tier).
+    /// System-tier `requirements.toml` (root-owned, e.g. `/etc/grok`).
     Requirements,
+    /// `$GROK_HOME/requirements.toml` (user-writable).
+    UserRequirements,
     /// `$GROK_HOME/config.toml`.
     User,
     /// A JSON hook file (the hooks directory, a vendor settings file, or a
@@ -200,12 +202,44 @@ impl Default for HookProvenance {
 }
 
 impl HookProvenance {
+    /// Root-owned admin policy tiers. Hooks from these tiers cannot be
+    /// disabled or skipped by the user; every disable path must consult this
+    /// predicate rather than re-derive the rule from names or paths.
+    /// `$GROK_HOME` tiers (`Managed`, `UserRequirements`) never qualify: the
+    /// user owns that directory and can rewrite or repoint it, so exempting
+    /// them would let any file the user edits grant itself the exemption.
+    pub fn is_managed_policy(self) -> bool {
+        matches!(self, Self::SystemManaged | Self::Requirements)
+    }
+
+    /// Authority rank for duplicate resolution: when byte-identical hooks
+    /// arrive from several tiers, the highest-ranked copy keeps its
+    /// provenance — and with it the no-disable rule and the pinned
+    /// timeout/env. Root-owned tiers outrank `$GROK_HOME` tiers.
+    ///
+    /// Deliberately NOT the config-merge precedence (where user overrides
+    /// managed): merge precedence answers "whose VALUE wins", this answers
+    /// "whose copy of one identical hook is authoritative" — ownership, not
+    /// recency.
+    pub fn authority_rank(self) -> u8 {
+        match self {
+            Self::SystemManaged => 6,
+            Self::Requirements => 5,
+            Self::Managed => 4,
+            Self::UserRequirements => 3,
+            Self::User => 2,
+            Self::File | Self::Plugin => 1,
+            Self::Unknown => 0,
+        }
+    }
+
     /// The snake_case wire string (matches the derived serde representation).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SystemManaged => "system_managed",
             Self::Managed => "managed",
             Self::Requirements => "requirements",
+            Self::UserRequirements => "user_requirements",
             Self::User => "user",
             Self::File => "file",
             Self::Plugin => "plugin",
@@ -224,6 +258,7 @@ impl std::str::FromStr for HookProvenance {
             "system_managed" => Self::SystemManaged,
             "managed" => Self::Managed,
             "requirements" => Self::Requirements,
+            "user_requirements" => Self::UserRequirements,
             "user" => Self::User,
             "file" => Self::File,
             "plugin" => Self::Plugin,
@@ -290,6 +325,35 @@ pub fn hook_config_layers() -> Vec<HookConfigLayer> {
     hook_config_layers_at(system_config_dir().as_deref(), user_grok_home().as_deref())
 }
 
+/// Warn when a policy-tier hooks file is a symlink or not root-owned — the
+/// no-disable exemption assumes admin ownership of the system dir.
+#[cfg(unix)]
+fn warn_unless_root_owned(path: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => tracing::warn!(
+            path = %path.display(),
+            "policy-tier hooks file is a symlink; its hooks cannot be disabled — ensure the target is admin-controlled"
+        ),
+        Ok(meta) if meta.uid() != 0 => tracing::warn!(
+            path = %path.display(),
+            uid = meta.uid(),
+            "policy-tier hooks file is not root-owned; its hooks cannot be disabled — enforcement assumes admin ownership"
+        ),
+        // Root-owned but group/world-writable is the sneakier misconfig:
+        // any local user can edit the "non-disableable" policy.
+        Ok(meta) if meta.mode() & 0o022 != 0 => tracing::warn!(
+            path = %path.display(),
+            mode = format!("{:o}", meta.mode() & 0o777),
+            "policy-tier hooks file is group- or world-writable; its hooks cannot be disabled — restrict write access to root"
+        ),
+        _ => {}
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_unless_root_owned(_path: &Path) {}
+
 /// [`hook_config_layers`] with explicit directories, for tests.
 pub fn hook_config_layers_at(
     system_dir: Option<&Path>,
@@ -306,8 +370,9 @@ pub fn hook_config_layers_at(
 
     // Highest config authority first, matching `effective_config_base` precedence
     // (requirements > user > managed > system_managed; user overrides managed in
-    // this model). Order only affects which label a byte-identical duplicate keeps
-    // under first-wins dedup; every distinct hook runs regardless.
+    // this model). Byte-identical duplicates resolve by
+    // `HookProvenance::authority_rank` regardless of this order; every
+    // distinct hook runs regardless.
     let specs = [
         LayerSpec {
             dir: system_dir,
@@ -318,7 +383,7 @@ pub fn hook_config_layers_at(
         LayerSpec {
             dir: user_home,
             filename: REQUIREMENTS_FILENAME,
-            provenance: HookProvenance::Requirements,
+            provenance: HookProvenance::UserRequirements,
             source_name: "requirements/user",
         },
         LayerSpec {
@@ -354,6 +419,13 @@ pub fn hook_config_layers_at(
         };
         if !path.is_file() {
             continue;
+        }
+        // The no-disable exemption rests on OS ownership; a misconfigured
+        // system dir would silently mint non-disableable hooks, so make it
+        // loud. Classification is unchanged (a root-owned deployment is the
+        // documented requirement, not something we can verify portably).
+        if provenance.is_managed_policy() {
+            warn_unless_root_owned(&path);
         }
         // No `$VAR` expansion: a literal `${VAR}` must reach the hook runner, which
         // does the single expansion (expanding here would double-expand).
@@ -531,6 +603,25 @@ mod tests {
             .as_str()
             .unwrap();
         assert_eq!(cmd, "${HOME}/u.sh");
+    }
+
+    /// The security-critical half of the tier split: the user-writable
+    /// `$GROK_HOME/requirements.toml` stamps `UserRequirements` (never the
+    /// exempt `Requirements`), so a file the user owns cannot grant itself
+    /// the no-disable exemption.
+    #[test]
+    fn user_requirements_layer_is_not_managed_policy() {
+        let user_home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user_home.path().join("requirements.toml"),
+            "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"x.sh\"\n",
+        )
+        .unwrap();
+        let layers = hook_config_layers_at(None, Some(user_home.path()));
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].provenance(), HookProvenance::UserRequirements);
+        assert_eq!(layers[0].source_name(), "requirements/user");
+        assert!(!layers[0].provenance().is_managed_policy());
     }
 
     #[test]

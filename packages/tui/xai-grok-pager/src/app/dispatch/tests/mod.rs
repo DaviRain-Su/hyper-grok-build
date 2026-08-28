@@ -60,7 +60,9 @@ use super::task_result::dispatch_task_result;
 use super::*;
 use crate::acp::model_state::ModelState;
 use crate::acp::tracker::AcpUpdateTracker;
-use crate::app::actions::{Action, Effect, SubagentKillOutcome, SwitchModelError, TaskResult};
+use crate::app::actions::{
+    Action, Effect, SubagentKillOutcome, SwitchModelError, TaskResult, WorkspaceMemberUpsertFailure,
+};
 use crate::app::agent::{AgentId, AgentSession, AgentState};
 use crate::app::agent_view::{ActivePane, AgentView, PromptMode};
 use crate::app::app_view::{
@@ -290,6 +292,14 @@ fn test_app() -> AppView {
         leader_roster: Vec::new(),
         dashboard_local_sessions: Vec::new(),
         dashboard_sessions_loading: false,
+        workspace_store: None,
+        workspace_snapshot: None,
+        workspace_store_loading: false,
+        workspace_sync_requested: false,
+        workspace_write_in_flight: false,
+        workspace_writes_disabled: false,
+        workspace_retry_metadata: std::collections::HashMap::new(),
+        workspace_failed_metadata: std::collections::HashMap::new(),
         shared_prompt_queues: std::collections::HashMap::new(),
         optimistic_prompt_echoes: std::collections::HashMap::new(),
         pending_running_adoptions: std::collections::HashMap::new(),
@@ -351,6 +361,8 @@ fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSessio
         available_commands_generation: 0,
         available_tools: None,
         model_switch_pending: false,
+        hook_block_hold: false,
+        blocked_prompt: None,
         user_model_preference: None,
         deferred_model_switch: app.deferred_model_switch_from_cli(),
         bg_tasks: std::collections::BTreeMap::new(),
@@ -539,6 +551,7 @@ fn arm_reconcile_with_meta(
             agent_result: None,
             cancel_trigger: cancel_trigger.map(str::to_string),
             cancellation_category: cancellation_category.map(str::to_string),
+            cancellation_context: None,
             received_at: std::time::Instant::now() - age,
         });
 }
@@ -616,6 +629,8 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
             available_commands_generation: 0,
             available_tools: None,
             model_switch_pending: false,
+            hook_block_hold: false,
+            blocked_prompt: None,
             user_model_preference: None,
             deferred_model_switch: None,
             bg_tasks: std::collections::BTreeMap::new(),
@@ -638,6 +653,25 @@ pub(super) fn three_agent_app() -> AppView {
     insert_placeholder_agent(&mut app, AgentId(1));
     insert_placeholder_agent(&mut app, AgentId(2));
     app
+}
+#[test]
+fn local_slash_command_keeps_hook_block_hold() {
+    let mut app = test_app_with_agent();
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .hook_block_hold = true;
+    let _ = dispatch_send_prompt_inner(&mut app, "/help".into(), true, false, false);
+    assert!(
+        app.agents.get(&AgentId(0)).unwrap().session.hook_block_hold,
+        "a local-UI slash command is not re-engagement and must keep the hold"
+    );
+    let _ = dispatch_send_prompt_inner(&mut app, "a real prompt".into(), true, false, false);
+    assert!(
+        !app.agents.get(&AgentId(0)).unwrap().session.hook_block_hold,
+        "a plain prompt submission releases the hold"
+    );
 }
 use crate::slash::commands::fork::ForkArgs;
 fn fork_args(worktree_override: Option<bool>, directive: Option<&str>) -> ForkArgs {
@@ -761,6 +795,8 @@ fn two_agent_app_with_bg_task() -> AppView {
             available_commands_generation: 0,
             available_tools: None,
             model_switch_pending: false,
+            hook_block_hold: false,
+            blocked_prompt: None,
             user_model_preference: None,
             deferred_model_switch: None,
             bg_tasks: std::collections::BTreeMap::new(),
@@ -995,16 +1031,25 @@ fn dashboard_row_order(app: &AppView) -> Vec<crate::views::dashboard::DashboardR
     } else {
         &app.dashboard_local_sessions
     };
-    let rows = crate::views::dashboard::build_rows_with_roster(
-        &app.agents,
-        &d.pinned,
-        &d.reorder,
-        None,
-        d.grouping,
-        &d.filter,
-        home,
-        roster,
-    );
+    let rows = if app.workspace_dashboard_enabled {
+        app.workspace_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                crate::views::dashboard::build_rows_with_workspace(&app.agents, snapshot, home)
+            })
+            .unwrap_or_default()
+    } else {
+        crate::views::dashboard::build_rows_with_roster(
+            &app.agents,
+            &d.pinned,
+            &d.reorder,
+            None,
+            d.grouping,
+            &d.filter,
+            home,
+            roster,
+        )
+    };
     crate::views::dashboard::render::focusables(
         &rows,
         d.grouping,

@@ -701,13 +701,15 @@ impl ToolHarnessInner {
         }
     }
 
-    async fn refresh_remote_tools(&self) -> Result<Vec<ToolDescription>, ClientError> {
+    async fn refresh_remote_tools(
+        &self,
+    ) -> Result<xai_tool_protocol::ToolsListResult, ClientError> {
         let borrow = self.borrow.as_ref().ok_or_else(|| {
             ClientError::InvalidConfig("local-only harness has no server connection".to_owned())
         })?;
-        let tools = list_remote_tools(borrow.connection().as_ref(), &self.session).await?;
-        self.remote_tools.store(Arc::new(tools.clone()));
-        Ok(tools)
+        let result = list_remote_tools(borrow.connection().as_ref(), &self.session).await?;
+        self.remote_tools.store(Arc::new(result.tools.clone()));
+        Ok(result)
     }
 
     /// Wins `begin_teardown` then runs cleanup. Idempotent. Synchronous so
@@ -734,7 +736,7 @@ const TOOLS_LIST_TIMEOUT: Duration = Duration::from_secs(30);
 async fn list_remote_tools(
     connection: &HubConnection,
     session: &SessionId,
-) -> Result<Vec<ToolDescription>, ClientError> {
+) -> Result<xai_tool_protocol::ToolsListResult, ClientError> {
     let request_id = connection.try_alloc_request_id()?;
     let params = xai_tool_protocol::ToolsListParams {
         session_id: session.clone(),
@@ -752,9 +754,7 @@ async fn list_remote_tools(
         .await?;
     match resp.outcome {
         ResponseOutcome::Result(value) => {
-            let result: xai_tool_protocol::ToolsListResult =
-                serde_json::from_value(value).map_err(|e| ClientError::Serde(e.to_string()))?;
-            Ok(result.tools)
+            serde_json::from_value(value).map_err(|e| ClientError::Serde(e.to_string()))
         }
         ResponseOutcome::Error(err) => Err(ClientError::from_jsonrpc_error(err)),
     }
@@ -1682,9 +1682,11 @@ impl ToolHarness {
     }
 
     /// Query the server for remote tool descriptions via `tools.list` RPC
-    /// and store the result in the in-memory cache. Returns the
-    /// discovered tools.
-    pub async fn query_remote_tools(&self) -> Result<Vec<ToolDescription>, ClientError> {
+    /// and store the result in the in-memory cache. Returns the full
+    /// list payload, including workspace-boundness.
+    pub async fn query_remote_tools(
+        &self,
+    ) -> Result<xai_tool_protocol::ToolsListResult, ClientError> {
         self.inner.refresh_remote_tools().await
     }
 
@@ -1725,9 +1727,9 @@ impl ToolHarness {
                         };
                         drop(inner);
                         match list_remote_tools(connection.as_ref(), &session).await {
-                            Ok(tools) => {
+                            Ok(result) => {
                                 if let Some(inner) = weak.upgrade() {
-                                    inner.remote_tools.store(Arc::new(tools));
+                                    inner.remote_tools.store(Arc::new(result.tools));
                                 }
                             }
                             Err(e) => {
@@ -3056,7 +3058,6 @@ mod tests {
     use axum::Router;
     use axum::extract::WebSocketUpgrade;
     use axum::extract::ws::{Message, WebSocket};
-    use axum::response::IntoResponse;
     use axum::routing::get;
     use serde_json::json;
     use tokio::net::TcpListener;
@@ -3065,23 +3066,35 @@ mod tests {
     use crate::pool::HubConnectionPool;
 
     async fn spawn_discovery_mock_hub() -> SocketAddr {
-        let app = Router::new().route("/v1/tools", get(discovery_ws_upgrade));
+        spawn_tools_list_mock_hub(json!({ "tools": [] })).await
+    }
+
+    async fn spawn_tools_list_mock_hub(list_result: Value) -> SocketAddr {
+        let list_result = Arc::new(list_result);
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind ephemeral");
         let addr = listener.local_addr().expect("local addr");
         tokio::spawn(async move {
+            let app = Router::new().route(
+                "/v1/tools",
+                get({
+                    let list_result = Arc::clone(&list_result);
+                    move |ws: WebSocketUpgrade| {
+                        let list_result = Arc::clone(&list_result);
+                        async move {
+                            ws.on_upgrade(move |socket| list_handle_socket(socket, list_result))
+                        }
+                    }
+                }),
+            );
             let _ = axum::serve(listener, app.into_make_service()).await;
         });
         tokio::task::yield_now().await;
         addr
     }
 
-    async fn discovery_ws_upgrade(ws: WebSocketUpgrade) -> impl IntoResponse {
-        ws.on_upgrade(discovery_handle_socket)
-    }
-
-    async fn discovery_handle_socket(mut socket: WebSocket) {
+    async fn list_handle_socket(mut socket: WebSocket, list_result: Arc<Value>) {
         let _ = socket.recv().await;
         let ack = json!({
             "connection_id": "discovery-mock",
@@ -3104,7 +3117,11 @@ mod tests {
                     let _ = socket.send(Message::Text(resp.to_string().into())).await;
                 }
                 "tools.list" => {
-                    let resp = json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": [] } });
+                    let resp = json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": list_result.as_ref(),
+                    });
                     let _ = socket.send(Message::Text(resp.to_string().into())).await;
                 }
                 _ => {}
@@ -3139,6 +3156,45 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         panic!("timed out waiting for: {label}");
+    }
+
+    #[tokio::test]
+    async fn query_remote_tools_keeps_omitted_workspace_bound() {
+        let (harness, _pool, _conn) = build_connected_harness("list-bound-flag").await;
+        let listed = harness
+            .query_remote_tools()
+            .await
+            .expect("tools.list must succeed");
+        assert_eq!(listed.workspace_bound, None);
+        assert!(listed.tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_remote_tools_preserves_workspace_bound_from_wire() {
+        for bound in [true, false] {
+            let addr = spawn_tools_list_mock_hub(json!({
+                "tools": [{"name": "listed", "description": "d"}],
+                "workspace_bound": bound,
+            }))
+            .await;
+            let url = Url::parse(&format!("ws://{addr}/v1/tools")).expect("valid url");
+            let pool = HubConnectionPool::new();
+            let harness = ToolHarnessBuilder::default()
+                .pool(pool)
+                .url(url)
+                .auth(AuthCredential::bearer("ignored"))
+                .session(SessionId::new(format!("list-bound-{bound}")).expect("valid"))
+                .build()
+                .await
+                .expect("build harness");
+            let listed = harness
+                .query_remote_tools()
+                .await
+                .expect("tools.list must succeed");
+            assert_eq!(listed.workspace_bound, Some(bound));
+            assert_eq!(listed.tools.len(), 1);
+            assert_eq!(listed.tools[0].name, "listed");
+        }
     }
 
     #[tokio::test]

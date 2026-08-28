@@ -1799,9 +1799,15 @@ never removes or replaces another layer's block. Each hook's `/hooks-list` name 
 prefixed with the layer it came from (for example `managed:` or
 `requirements/user:`).
 
-Config-layer hooks are convenience distribution, not an enforcement boundary: on
-an unmanaged device a user can still edit these files. Tamper-resistant,
-admin-enforced hooks are tracked separately.
+Hooks from the **root-owned** layers (a system-dir `requirements.toml` such as
+`/etc/grok/requirements.toml`, or `/etc/grok/managed_config.toml`) are enforced:
+they cannot be disabled from the hooks modal, the enable/disable APIs, or the
+`disabled-hooks` file, and a byte-identical copy in a lower layer cannot take
+over their provenance. Enforcement relies on OS file ownership — deploy these
+files root-owned (or via MDM); there is no signature verification. Hooks in
+`$GROK_HOME` layers (`requirements.toml`, `managed_config.toml`, `config.toml`)
+remain convenience distribution, not an enforcement boundary: the user owns
+that directory and can edit or repoint it.
 
 ---
 

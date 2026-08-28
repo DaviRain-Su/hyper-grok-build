@@ -579,6 +579,9 @@ pub(crate) struct PendingTurnEnd {
     /// the "blocked by a hook" marker over "cancelled by user"). `None` on
     /// older shells or plain user cancels.
     pub cancellation_category: Option<String>,
+    /// `_meta.cancellationContext` from the broadcast (hook name, reason for
+    /// the blocked-prompt card). `None` on older shells / non-hook cancels.
+    pub cancellation_context: Option<serde_json::Value>,
     /// `_meta.cancelTrigger` from the broadcast (`"send_now"` marks a
     /// cancel-and-send whose "Turn cancelled" marker is suppressed). `None`
     /// on older shells / non-cancel ends.
@@ -907,6 +910,12 @@ pub struct AgentView {
     /// turn that already ended (otherwise the viewer re-strands on "Waiting…").
     /// Reset at the start of every load so it never leaks across loads.
     pub(crate) replayed_terminal_prompts: HashSet<String>,
+    /// Prompt ids that produced visible agent output during THIS replay window.
+    /// `output_since_last_finish` ignores `is_replay` chunks, so wake-marker
+    /// suppress uses this set instead.
+    pub(crate) replayed_visible_prompts: HashSet<String>,
+    /// Prompt ids whose replayed execute block carried `bash_mode` (direct bash).
+    pub(crate) replayed_bash_prompts: HashSet<String>,
     /// Wake prompt id whose failure marker already rendered — a re-delivered
     /// errored wake terminal must not stack a second "Turn failed" row (the
     /// output-epoch dedupe only covers chatty closes; failures bypass it).
@@ -1834,6 +1843,16 @@ fn translate_local_submit(
         return InputOutcome::Changed;
     };
     match kind {
+        LocalQuestionKind::PromptBlocked { row_id } => {
+            use crate::app::actions::PromptBlockChoice;
+            let choice = match *idx {
+                0 => PromptBlockChoice::Edit,
+                1 => PromptBlockChoice::Resend,
+                2 => PromptBlockChoice::Discard,
+                _ => return InputOutcome::Changed,
+            };
+            InputOutcome::Action(Action::PromptBlockAnswered { row_id, choice })
+        }
         LocalQuestionKind::Fork { directive } => {
             let Some((worktree, persist_mode)) = worktree_choice_from_index(*idx) else {
                 return InputOutcome::Changed;
@@ -2704,6 +2723,8 @@ pub(crate) mod test_fixtures {
             available_commands_generation: 0,
             available_tools: None,
             model_switch_pending: false,
+            hook_block_hold: false,
+            blocked_prompt: None,
             user_model_preference: None,
             deferred_model_switch: None,
             bg_tasks: std::collections::BTreeMap::new(),
@@ -2767,6 +2788,8 @@ pub(crate) mod test_fixtures {
                 available_commands_generation: 0,
                 available_tools: None,
                 model_switch_pending: false,
+                hook_block_hold: false,
+                blocked_prompt: None,
                 user_model_preference: None,
                 deferred_model_switch: None,
                 bg_tasks: std::collections::BTreeMap::new(),
@@ -3588,6 +3611,8 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             available_commands_generation: 0,
             available_tools: None,
             model_switch_pending: false,
+            hook_block_hold: false,
+            blocked_prompt: None,
             user_model_preference: None,
             deferred_model_switch: None,
             bg_tasks: std::collections::BTreeMap::new(),

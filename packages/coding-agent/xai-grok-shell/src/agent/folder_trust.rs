@@ -184,15 +184,13 @@ pub(crate) fn detected_config_kinds(cwd: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Whether an agent's inline `hooks:` block may be appended to the live hook
-/// registry. A PROJECT/cwd-discovered agent's inline hooks are repo-controlled
-/// code-exec (and a project agent can SHADOW a built-in subagent, e.g. `explore`),
-/// so they require folder trust; user/bundled/built-in agents (not cwd-sourced)
-/// always keep theirs. `trusted` is evaluated LAZILY so non-project agents skip
-/// the (filesystem-walking) trust verdict entirely. SINGLE definition shared by
-/// the primary-session and subagent append sites (and the test) so they cannot
-/// drift. The primary site passes its already-computed `hooks_trusted` verdict;
-/// the subagent site passes `project_scope_allowed(parent_cwd)`.
+/// Project agents require folder trust; user/bundled/built-in agents always
+/// pass. Shared by primary-session hook append (`agent_ops.rs`), subagent
+/// hook append (`handle_request.rs`), and subagent owned `mcpServers` spawn
+/// (`handle_request.rs`). Plugin deny is call-site-only, before this
+/// predicate. `trusted` is evaluated lazily so non-project agents skip the
+/// filesystem-walking trust verdict. Primary-session passes its already-
+/// computed `hooks_trusted`; subagent sites pass `project_scope_allowed(parent_cwd)`.
 pub(crate) fn agent_inline_hooks_allowed(
     scope: xai_grok_agent::config::AgentScope,
     trusted: impl FnOnce() -> bool,

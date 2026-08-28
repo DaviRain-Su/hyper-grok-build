@@ -299,6 +299,14 @@ pub(crate) fn test_app() -> AppView {
         leader_roster: Vec::new(),
         dashboard_local_sessions: Vec::new(),
         dashboard_sessions_loading: false,
+        workspace_store: None,
+        workspace_snapshot: None,
+        workspace_store_loading: false,
+        workspace_sync_requested: false,
+        workspace_write_in_flight: false,
+        workspace_writes_disabled: false,
+        workspace_retry_metadata: std::collections::HashMap::new(),
+        workspace_failed_metadata: std::collections::HashMap::new(),
         shared_prompt_queues: std::collections::HashMap::new(),
         optimistic_prompt_echoes: std::collections::HashMap::new(),
         pending_running_adoptions: std::collections::HashMap::new(),
@@ -352,6 +360,8 @@ pub(crate) fn test_app_with_agent() -> AppView {
             available_commands_generation: 0,
             available_tools: None,
             model_switch_pending: false,
+            hook_block_hold: false,
+            blocked_prompt: None,
             user_model_preference: None,
             deferred_model_switch: None,
             bg_tasks: std::collections::BTreeMap::new(),
@@ -545,6 +555,8 @@ fn idle_child_view(app: &AppView, id_n: usize, sid: &str) -> Box<AgentView> {
         available_commands_generation: 0,
         available_tools: None,
         model_switch_pending: false,
+        hook_block_hold: false,
+        blocked_prompt: None,
         user_model_preference: None,
         deferred_model_switch: None,
         bg_tasks: std::collections::BTreeMap::new(),
@@ -1308,6 +1320,7 @@ fn needs_animation_gates_pending_turn_end_reconcile() {
             agent_result: None,
             cancel_trigger: None,
             cancellation_category: None,
+            cancellation_context: None,
             received_at: std::time::Instant::now()
                 - (TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1)),
         });
@@ -4671,7 +4684,7 @@ fn dashboard_stale_clears_skip_attached_popup_agent() {
     for _ in 0..2 {
         assert!(AppView::dashboard_stale_image_clears(&mut app.agents, Some(id)).is_none());
         let popup = crate::terminal::overlay::static_image(&png, 20, 10, 0, 0, 7).unwrap();
-        assert!(!popup.as_str().contains("a=t"));
+        assert!(popup.as_str().is_empty());
         let _ = popup.commit();
     }
     let agent = app.agents.get(&id).unwrap();
@@ -4707,14 +4720,14 @@ fn dashboard_too_small_popup_clears_shared_overlay_slot() {
         !crate::terminal::overlay::static_image(&png, 20, 10, 0, 0, 8)
             .unwrap()
             .as_str()
-            .contains("a=t")
+            .contains("a=T")
     );
     clear.write_to(&mut Vec::new()).unwrap();
     assert!(
         crate::terminal::overlay::static_image(&png, 20, 10, 0, 0, 8)
             .unwrap()
             .as_str()
-            .contains("a=t")
+            .contains("a=T")
     );
 }
 #[test]

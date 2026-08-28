@@ -110,6 +110,8 @@ impl crate::types::tool_metadata::ToolMetadata for SchedulerCreateTool {
             format!(
                 r#"Create a scheduled task that runs a prompt on a recurring interval, or update an existing one in place.
 
+Use this tool when a user asks you to loop, repeat, or schedule a prompt or a task.
+
 Set fire_immediately: true to also fire once on creation; by default the first run waits for the interval.
 
 To change an existing task, pass its task_id: provided fields replace old values, omitted ones are unchanged, and the schedule keeps its phase. An unknown id errors.
