@@ -4,6 +4,39 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.12-r1] — 2026-08-30
+
+### Added
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `bc7f02ed`
+  (monorepo `SOURCE_REV` `d5a0335…`, ~40 upstream changes). Highlights:
+  transient sampler failures retry instead of killing the turn with fleet
+  observability for turn-level retries, `Length`-truncated turns execute
+  completed tool calls instead of failing, split `max_prompt_tokens` /
+  `max_time_limit` incomplete reasons carry `raw_stop_reason`, PreToolUse
+  hooks parse `additionalContext` (defer) and `ask` prompts the user,
+  SessionStart hook config.toml sandbox-escape fix, real compaction errors
+  surfaced, MCP OAuth off the session spawn path, MCP servers start without
+  a batch cap, scheduler preserves full task UUIDs and stops completed
+  recurring tasks, worktree identity stamped/healed on summaries, durable
+  acked flushes, install download ships compressed (zstd/gzip), images
+  clamped to 2000px even when re-encode doesn't shrink bytes, and the gboom
+  game extracted into a standalone crate.
+
+### Changed
+- Release workflow uploads a retry artifact action
+  (`.github/actions/upload-artifact-retry`) and folds the fork reconcile
+  from the force-updated `origin/dev`.
+
+### Fixed
+- **Fork adaptation post-merge** — restored fork-only manifests and modules
+  across packages (agent request builder, subagent resolution, sampler
+  responses/retry policy wiring, shell session/auth/remote, pager `input/`
+  + `search/` modules, voice, NFS worktree hardening, foreign sessions);
+  re-ported fork-only behavior the merge dropped (transient retry field,
+  wasm/scheme pre-tool gate, quota-stall idle escalation, relocation
+  NotFound tolerance, goal-evidence diff header pin); deflaked the
+  `drain_at_safe_point` steer tests via `serial`.
+
 ## [1.0.11-r1] — 2026-08-28
 
 ### Added

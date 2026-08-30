@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager-bin"
-version = "1.0.10-r2"
+version = "1.0.12-r1"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
