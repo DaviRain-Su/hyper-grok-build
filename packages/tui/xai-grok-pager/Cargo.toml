@@ -18,7 +18,7 @@ xai-prompt-queue = { workspace = true }
 xai-grok-pager-render = { path = "../xai-grok-pager-render" }
 
 # The /gboom easter-egg game (extracted)
-xai-grok-gboom = { path = "../xai-grok-gboom" }
+xai-grok-gboom = { path = "../../tools/xai-grok-gboom" }
 
 # Diff hunk construction (extracted)
 xai-grok-pager-diff = { path = "../xai-grok-pager-diff" }
@@ -89,12 +89,12 @@ xai-ratatui-textarea = { workspace = true }
 xai-ratatui-inline = { workspace = true }
 
 # Update
-xai-grok-update = { path = "../xai-grok-update" }
+xai-grok-update = { path = "../../coding-agent/xai-grok-update" }
 
 # ACP
 agent-client-protocol = { workspace = true }
 xai-acp-lib = { workspace = true }
-xai-file-utils = { path = "../xai-file-utils" }
+xai-file-utils = { path = "../../platform/xai-file-utils" }
 # Crash-recovery registry of open TUI sessions.
 xai-grok-active-sessions = { workspace = true }
 xai-grok-config = { workspace = true }
@@ -104,7 +104,7 @@ xai-grok-dashboard-store = { workspace = true }
 # macOS/Windows it links cpal; on Linux it compiles a subprocess-recorder
 # backend instead, so cpal -> alsa-sys never reaches the static musl binary
 # (cpal is target-gated to non-Linux inside xai-grok-voice).
-xai-grok-voice = { path = "../xai-grok-voice", default-features = false, features = ["audio"] }
+xai-grok-voice = { path = "../../ai/xai-grok-voice", default-features = false, features = ["audio"] }
 xai-grok-shell = { workspace = true }
 # The status-line contract: the config the user writes and the payload the
 # agent sends. A leaf crate rather than the agent's, so the client reads it
@@ -115,19 +115,19 @@ xai-grok-workspace = { workspace = true }
 xai-grok-foreign-sessions = { workspace = true }
 xai-token-estimation = { workspace = true }
 xai-grok-telemetry = { workspace = true }
-xai-fast-worktree = { path = "../xai-fast-worktree", features = ["metadata"] }
+xai-fast-worktree = { path = "../../platform/xai-fast-worktree", features = ["metadata"] }
 backon = { workspace = true }
 chrono = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-grok-agent = { workspace = true }
-xai-grok-plugin-marketplace = { path = "../xai-grok-plugin-marketplace" }
+xai-grok-plugin-marketplace = { path = "../../extensions/xai-grok-plugin-marketplace" }
 # Blocked-card copy: `hook_display_name` lives next to the hook-name grammar.
-xai-grok-hooks = { path = "../xai-grok-hooks" }
-xai-hooks-plugins-types = { path = "../xai-hooks-plugins-types" }
+xai-grok-hooks = { path = "../../coding-agent/xai-grok-hooks" }
+xai-hooks-plugins-types = { path = "../../coding-agent/xai-hooks-plugins-types" }
 walkdir = { workspace = true }
-xai-grok-sandbox = { path = "../xai-grok-sandbox", default-features = false }
+xai-grok-sandbox = { path = "../../tools/xai-grok-sandbox", default-features = false }
 
 # Base64 encoding for image data
 base64 = { workspace = true }
@@ -152,7 +152,7 @@ urlencoding = { workspace = true }
 url = { workspace = true }
 
 # Crash diagnostics
-xai-crash-handler = { path = "../xai-crash-handler" }
+xai-crash-handler = { path = "../../platform/xai-crash-handler" }
 
 # Non-poisoning mutex for signal handler (active-sessions crash recovery).
 parking_lot.workspace = true
@@ -180,7 +180,7 @@ windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 # The fixture that builds a `[ui.status_line]` section field by field.
 xai-grok-status-line = { workspace = true, features = ["test-support"] }
 xai-grok-pager-render = { path = "../xai-grok-pager-render", features = ["test-support"] }
-xai-grok-gboom = { path = "../xai-grok-gboom", features = ["test-support"] }
+xai-grok-gboom = { path = "../../tools/xai-grok-gboom", features = ["test-support"] }
 xai-grok-shell = { workspace = true, features = ["test-support"] }
 pretty_assertions = { workspace = true }
 insta = { workspace = true }

@@ -17,9 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 # The pager library (all application logic + the public API main.rs drives).
-xai-grok-pager = { path = "../xai-grok-pager" }
+xai-grok-pager = { path = "../../tui/xai-grok-pager" }
 # Optional scrollback-native render mode, wired in via the fn-pointer seam.
-xai-grok-pager-minimal = { path = "../xai-grok-pager-minimal" }
+xai-grok-pager-minimal = { path = "../../tui/xai-grok-pager-minimal" }
 
 # Agent runtime + leader/stdio/headless entry points.
 xai-grok-shell = { workspace = true }
@@ -27,7 +27,7 @@ xai-grok-update = { path = "../xai-grok-update" }
 xai-grok-version = { workspace = true }
 xai-grok-telemetry = { workspace = true }
 xai-grok-workspace = { workspace = true }
-xai-crash-handler = { path = "../xai-crash-handler" }
+xai-crash-handler = { path = "../../platform/xai-crash-handler" }
 xai-acp-lib = { workspace = true }
 
 # Async runtime + misc.
@@ -51,7 +51,7 @@ xai-tty-utils = { workspace = true }
 # `collect_crashed()` for the startup crash notice.
 xai-grok-active-sessions = { workspace = true }
 xai-grok-config = { workspace = true }
-xai-grok-sandbox = { path = "../xai-grok-sandbox", default-features = false }
+xai-grok-sandbox = { path = "../../tools/xai-grok-sandbox", default-features = false }
 xai-grok-extra-ca = { workspace = true }
 
 # Binary hardening: compile-time string + control-flow obfuscation.

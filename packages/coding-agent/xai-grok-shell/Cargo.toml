@@ -124,43 +124,43 @@ jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 sha2 = { workspace = true }
 rand = { workspace = true }
 strum = { workspace = true }
-xai-fast-worktree = { path = "../xai-fast-worktree", features = ["metadata"] }
+xai-fast-worktree = { path = "../../platform/xai-fast-worktree", features = ["metadata"] }
 
 tonic = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
-xai-grok-paths = { path = "../xai-grok-paths" }
+xai-grok-paths = { path = "../../platform/xai-grok-paths" }
 xai-grok-shell-base = { workspace = true }
 xai-grok-shell-session-support = { workspace = true }
 xai-grok-shell-terminal = { workspace = true }
 xai-grok-shared = { workspace = true }
 xai-grok-status-line = { workspace = true }
-xai-tracing-macros = { path = "../xai-tracing-macros" }
-xai-fsnotify = { path = "../xai-fsnotify" }
-xai-codebase-graph = { path = "../xai-codebase-graph" }
-xai-hunk-tracker = { path = "../xai-hunk-tracker" }
+xai-tracing-macros = { path = "../../platform/xai-tracing-macros" }
+xai-fsnotify = { path = "../../platform/xai-fsnotify" }
+xai-codebase-graph = { path = "../../platform/xai-codebase-graph" }
+xai-hunk-tracker = { path = "../../platform/xai-hunk-tracker" }
 xai-agent-lifecycle = { workspace = true }
 xai-interjection-core = { workspace = true }
 xai-message-delivery-core = { workspace = true }
-xai-grok-sandbox = { path = "../xai-grok-sandbox", default-features = false }
-xai-chat-state = { path = "../xai-chat-state" }
+xai-grok-sandbox = { path = "../../tools/xai-grok-sandbox", default-features = false }
+xai-chat-state = { path = "../../agent/xai-chat-state" }
 # Segment markdown rendering + the `compaction/` store path convention.
 xai-compaction-transcript = { workspace = true }
-xai-grok-compaction = { path = "../../common/xai-grok-compaction" }
+xai-grok-compaction = { path = "../../agent/xai-grok-compaction" }
 xai-grok-extra-ca = { workspace = true }
-xai-grok-sampler = { path = "../xai-grok-sampler" }
+xai-grok-sampler = { path = "../../ai/xai-grok-sampler" }
 # Session FTS search; owns this crate's only rusqlite/bundled-SQLite use.
 xai-grok-session-search = { workspace = true }
 xai-token-estimation = { workspace = true }
-xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
-xai-grok-tools = { path = "../xai-grok-tools" }
+xai-grok-sampling-types = { path = "../../ai/xai-grok-sampling-types" }
+xai-grok-tools = { path = "../../tools/xai-grok-tools" }
 xai-tty-utils = { workspace = true }
-xai-workflow = { path = "../xai-workflow" }
+xai-workflow = { path = "../../agent/xai-workflow" }
 xai-system-power = { workspace = true }
 xai-grok-workspace = { workspace = true }
 # Backs the compatibility-only `xai_grok_shell::foreign_sessions` re-export.
 xai-grok-foreign-sessions = { workspace = true }
-xai-grok-subagent-resolution = { path = "../xai-grok-subagent-resolution" }
-xai-grok-agent = { path = "../xai-grok-agent" }
+xai-grok-subagent-resolution = { path = "../../agent/xai-grok-subagent-resolution" }
+xai-grok-agent = { path = "../../agent/xai-grok-agent" }
 xai-grok-bundle = { workspace = true }
 xai-grok-config = { workspace = true }
 xai-grok-config-types = { workspace = true }
@@ -168,8 +168,8 @@ xai-dirs = { workspace = true }
 xai-grok-memory = { workspace = true }
 xai-grok-hooks = { path = "../xai-grok-hooks" }
 xai-hooks-plugins-types = { path = "../xai-hooks-plugins-types" }
-xai-grok-plugin-marketplace = { path = "../xai-grok-plugin-marketplace" }
-xai-file-utils = { path = "../xai-file-utils" }
+xai-grok-plugin-marketplace = { path = "../../extensions/xai-grok-plugin-marketplace" }
+xai-file-utils = { path = "../../platform/xai-file-utils" }
 xai-grok-session-events = { workspace = true }
 xai-grok-auth = { workspace = true, features = ["middleware"] }
 xai-grok-telemetry = { workspace = true }

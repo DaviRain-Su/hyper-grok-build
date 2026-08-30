@@ -28,13 +28,13 @@ xai-grok-shell = { workspace = true }
 xai-grok-telemetry = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-grok-version = { workspace = true }
-flate2 = { workspace = true }
 zstd = { workspace = true }
-
 # Community updater dependencies are optional so official/default builds keep
 # their existing updater graph and behavior unchanged.
-dunce = { workspace = true, optional = true }
+# (flate2 is always on: the pager-install download ships compressed, and
+# community-build's `dep:flate2` gate reuses the same optional dep.)
 flate2 = { workspace = true, optional = true }
+dunce = { workspace = true, optional = true }
 fs2 = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
@@ -44,7 +44,7 @@ zip = { version = "3", default-features = false, features = ["deflate-flate2"], 
 libc = { workspace = true }
 
 [features]
-default = []
+default = ["dep:flate2"]
 community-build = ["dep:dunce", "dep:flate2", "dep:fs2", "dep:sha2", "dep:tar", "dep:zip"]
 # Test-only install failpoints for transactional rollback coverage. Never enable
 # in release/distribution builds.
